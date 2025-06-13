@@ -8,8 +8,7 @@ from scipy.io import loadmat
 from fd3d import fd3d
 from nuclear import nuclear
 from pseudoDiag import pseudoDiag
-#from pseudoNL import pseudoNL
-from pseudoNL_new import *
+from pseudoNL import pseudoNL
 from exc_nspn import exc_nspn
 from nelectrons import nelectrons
 from first_filt import first_filt
