@@ -8,7 +8,7 @@ from scipy.io import loadmat
 from fd3d import fd3d
 from nuclear import nuclear
 from pseudoDiag import pseudoDiag
-from pseudoNL import pseudoNL
+from pseudoNL_new import pseudoNL
 from exc_nspn import exc_nspn
 from nelectrons import nelectrons
 from first_filt import first_filt
@@ -32,9 +32,9 @@ import msecant1
 # W      = set of wave functions.
 
 # Defaut Technical Parameters
-fd_order = 2            # order of finite difference scheme {8}
+fd_order = 8            # order of finite difference scheme {8}
 maxits   = 40           # max SCF iterations                {40}
-tol      = 1.e-04       # tolerance for SCF iteration.      {1.e-03}
+tol      = 1.e-06       # tolerance for SCF iteration.      {1.e-03}
 Fermi_temp  =  500.0    # Smear out fermi level             {500.0}
 
 # Global variables
@@ -511,7 +511,7 @@ for at in Atoms:
 # Compute the non-local part of the pseudopotential
 print(' Working.....setting up nonlocal part of ionic potential...')
 start_time = time.time()
-vnl = pseudoNL_optimized(Domain, Atoms, elem, N_elements)
+vnl = pseudoNL(Domain, Atoms, elem, N_elements)
 pseudoNL_time = time.time() - start_time
 print(pseudoNL_time)
 # print(vnl)
