@@ -1,6 +1,6 @@
 import numpy as np
 import scipy.sparse as sp
-from splineData_new import splineData
+from splineData import splineData
 from preProcess import preProcess
 from fspline import fspline
 from fsplevalIO import fsplevalIO
