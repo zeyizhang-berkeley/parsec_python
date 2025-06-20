@@ -1,5 +1,4 @@
 import numpy as np
-from numba import njit
 
 def trid(a, d, c, r):
     """
@@ -27,26 +26,6 @@ def trid(a, d, c, r):
 
     # Back substitution
     r[n - 1] = r[n - 1] / d[n - 1]
-    for j in range(n - 2, -1, -1):
-        r[j] = (r[j] - c[j] * r[j + 1]) / d[j]
-
-    return r
-
-@njit
-def trid_numba(a, d, c, r):
-    """
-    Solve a tridiagonal system A * x = r, optimized with Numba.
-    """
-    n = len(d)
-
-    # Forward elimination
-    for k in range(1, n):
-        piv = a[k] / d[k - 1]
-        d[k] -= piv * c[k - 1]
-        r[k] -= piv * r[k - 1]
-
-    # Back substitution
-    r[n - 1] /= d[n - 1]
     for j in range(n - 2, -1, -1):
         r[j] = (r[j] - c[j] * r[j + 1]) / d[j]
 
