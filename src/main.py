@@ -7,7 +7,6 @@ import scipy.sparse.linalg as spla
 from scipy.io import loadmat
 from fd3d import fd3d
 from nuclear import nuclear
-from pseudoDiag import pseudoDiag
 from pseudoNL_new import pseudoNL
 from exc_nspn import exc_nspn
 from nelectrons import nelectrons
@@ -168,7 +167,41 @@ def manual_input_species(elem):
         print('Error: Invalid input detected. Use default Z_charge = 0')
         Z_charge = 0
 
-    return Atoms, n_atom, Z_charge
+    # ADD DENSITY METHOD CHOICE HERE
+    print('\n ********************** ')
+    print(' DENSITY INITIALIZATION METHOD')
+    print(' ********************* ')
+    print('------------------------')
+
+    method_choice = 0
+    while method_choice not in [1, 2]:
+        try:
+            print('Choose density initialization method:')
+            print('1. Superposition of atomic densities (traditional)')
+            print('2. Machine learning predicted density (.npy file)')
+            method_choice = int(input('Enter your choice (1 or 2): '))
+        except ValueError:
+            print('Please enter 1 or 2')
+
+    if method_choice == 1:
+        density_method = 'atomic'
+        ml_file_path = None
+    else:
+        density_method = 'ml' # Get ML density file path
+        ml_file_path = input('Enter path to ML density .npy file: ')
+
+        # Check if file exists
+        if not os.path.exists(ml_file_path):
+            print(f'Warning: File {ml_file_path} not found!')
+            use_anyway = input('Continue anyway? (y/n): ').lower()
+            if use_anyway != 'y':
+                print('Switching to atomic density method...')
+                density_method = 'atomic'
+                ml_file_path = None
+
+    # for Drew: Add manual input for doing CDFT? return a bool variable?(at least for a simple test, can add other options)
+
+    return Atoms, n_atom, Z_charge, density_method, ml_file_path
 
 
 def load_atomic_data_from_file():
@@ -249,6 +282,8 @@ def get_atoms(elem):
     Atoms = []
     n_atom = []
     Z_charge = 0.0
+    density_method = "atomic"
+    ml_file_path = None
     while (in_data != 1) and (in_data != 2):
         try:
             in_data = int(input('Input data mode: 1 for manual, 2 for file: '))
@@ -257,7 +292,7 @@ def get_atoms(elem):
 
     # Case 1: Manual input
     if in_data == 1:
-        Atoms, n_atom, Z_charge = manual_input_species(elem)
+        Atoms, n_atom, Z_charge, density_method, ml_file_path = manual_input_species(elem)
         if n_atom is None:
             return None
     # Case 2: File input
@@ -267,12 +302,14 @@ def get_atoms(elem):
         if n_atom is None:
             return None
 
-    return Atoms, n_atom, Z_charge
+    return Atoms, n_atom, Z_charge, density_method, ml_file_path
 
 
 # Usage example:
 # Assuming elem is a pandas DataFrame loaded with element data from 'elements_new.csv'
-Atoms, n_atom, Z_charge = get_atoms(elem)
+Atoms, n_atom, Z_charge, density_method, ml_file_path = get_atoms(elem)
+# Keep a raw copy of the original coordinates for ML shifting
+Atoms_raw = [ { 'typ': atom['typ'], 'coord': atom['coord'].copy() } for atom in Atoms ]
 # print(Atoms,n_atom,Z_charge)
 if Atoms is not None:
     print(f"Successfully loaded {len(Atoms)} atomic species.")
@@ -384,6 +421,16 @@ def estimate_radius_and_grid(Atoms, elem, N_elements, h):
 
     return Domain, N_types
 
+def recenter_atoms(Atoms):
+    all_coords = np.vstack([atom['coord'] for atom in Atoms])
+    center = np.mean(all_coords, axis=0)
+    for atom in Atoms:
+        atom['coord'] -= center
+    return Atoms
+
+# Recenter Domain atoms for grid generation, but preserve raw for ML
+Atoms = recenter_atoms(Atoms)
+
 # Call the function
 Domain, N_types = estimate_radius_and_grid(Atoms, elem, N_elements, h)
 # if Domain:
@@ -483,7 +530,26 @@ print(Enuc_time)
 # Step 1: Calculate initial charge density and potentials
 print(' Working.....setting up diagonal part of ionic potential...')
 start_time = time.time()
-rho0, hpot0, Ppot = pseudoDiag(Domain, Atoms, elem, N_elements)
+
+if density_method == 'atomic':
+    print('Using traditional atomic superposition method...')
+    from pseudoDiag import pseudoDiag
+    rho0, hpot0, Ppot = pseudoDiag(Domain, Atoms, elem, N_elements)
+else: # ML method
+    print(f'Using ML-predicted density from: {ml_file_path}')
+
+    from pseudoDiag_ML4Den import pseudoDiag_ML4Den
+
+    PRE = []
+    if CG_prec:
+        print('Calling ilu0 ...')
+        # Perform an incomplete LU decomposition
+        # spilu() from scipy can be used similarly to MATLAB's luinc
+        PRE = spla.spilu(A) # PRE will be the equivalent of MATLAB's LU structure
+        print('done.')
+        # Call ML-based initialization
+        rho0, hpot0, Ppot = pseudoDiag_ML4Den( Domain, Atoms_raw, elem, N_elements, ml_file_path, A, CG_prec, PRE )
+
 pseudoDiag_time = time.time() - start_time
 print(pseudoDiag_time)
 #print("hpot0: ", hpot0.shape)
