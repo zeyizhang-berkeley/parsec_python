@@ -1,12 +1,13 @@
 import numpy as np
 # from scipy.interpolate import RegularGridInterpolator # for linear interpolation
-from scipy.ndimage import map_coordinates
+# from scipy.ndimage import map_coordinates
 from splineData import splineData
 from preProcess import preProcess
 from fspline import fspline
 #import logging
 from fsplevalIO import fsplevalIO
 from pcg import pcg # Added pcg import
+import matplotlib.pyplot as plt
 
 def pseudoDiag_ML4Den(Domain, Atoms, elem, N_elements, density_file_path, A, CG_prec=False, PRE=None):
     """
@@ -30,6 +31,8 @@ def pseudoDiag_ML4Den(Domain, Atoms, elem, N_elements, density_file_path, A, CG_
     OPTIMIZATIONLEVEL = 0
     enableMexFilesTest = 0
 
+    print("Atoms", Atoms)
+
     # Extract domain information
     nx, ny, nz = Domain['nx'], Domain['ny'], Domain['nz']
     h = Domain['h']
@@ -39,7 +42,13 @@ def pseudoDiag_ML4Den(Domain, Atoms, elem, N_elements, density_file_path, A, CG_
     # Initialize output arrays
     rho0 = np.zeros(n) # Flattened for compatibility with SCF loop
     pot = np.zeros(n)
-    hpot0 = np.zeros(n)
+    #hpot0 = np.zeros(n)
+
+    # center atoms to the domain origin
+    all_xyz = np.vstack([Atoms[t]['coord'] for t in range(len(Atoms))])
+    geom_center = all_xyz.mean(axis=0)
+    for t in range(len(Atoms)):
+        Atoms[t]['coord'] = Atoms[t]['coord'] - geom_center  # still in Bohr
 
     # ==========================================
     # 1. PSEUDOPOTENTIAL CALCULATION (UNCHANGED FROM ATOMIC APPROACH)
@@ -56,7 +65,6 @@ def pseudoDiag_ML4Den(Domain, Atoms, elem, N_elements, density_file_path, A, CG_
         typ = Atoms[at_typ]['typ']
         xyz = Atoms[at_typ]['coord']
         natoms = xyz.shape[0]
-
         # Look for matching element data in the elem DataFrame
         for i in range(N_elements):
             if typ == elem['Element'].iloc[i]:
@@ -71,36 +79,103 @@ def pseudoDiag_ML4Den(Domain, Atoms, elem, N_elements, density_file_path, A, CG_
                 break
 
         # Localizing variables and initializing arrays
-        # i_charge = data_list.index('charge')
+        i_charge = data_list.index('charge')
         i_pot_S = data_list.index('pot_S')
-        # i_hartree = data_list.index('hartree')
+        #i_hartree = data_list.index('hartree')
 
         atom_data = AtomFuncData[index]['data']
-        # x_charg = atom_data[:, 0]
-        # y_charg = atom_data[:, i_charge]
+        x_charg = atom_data[:, 0]
+        y_charg = atom_data[:, i_charge]
         x_pot_s = atom_data[:, 0]
         y_pot_s = atom_data[:, i_pot_S]
-        # x_vhart = atom_data[:, 0]
-        # y_vhart = atom_data[:, i_hartree]
+        #x_vhart = atom_data[:, 0]
+        #y_vhart = atom_data[:, i_hartree]
+
+        # x_charg: shape (M,), non-uniform radii in Bohr
+        # y_charg: shape (M,), assumed f(r) = 4πρ(r) in Bohr units
+
+        r = x_charg.astype(float)
+        f = y_charg.astype(float)
+
+        # sanity: ensure strictly increasing
+        # (preProcess usually fixes this, but double-check)
+        order = np.argsort(r)
+        r = r[order]
+        f = f[order]
+        assert np.all(np.diff(r) > 0), "x_charg must be strictly increasing"
+
+        dr = np.diff(r)
+        fi = f[:-1]
+        fj = f[1:]
+        ri2 = r[:-1] ** 2
+        rj2 = r[1:] ** 2
+
+        # trapezoid on non-uniform grid for N = ∫ f(r) r^2 dr
+        N_est = np.sum(0.5 * (fi * ri2 + fj * rj2) * dr)
+        print("[radial CSV] N_est (should match valence) =", float(N_est))
+
+        plt.figure(figsize=(7, 4))
+        plt.plot(x_charg, y_charg, 'o-', markersize=1, label=f'Atom type {typ} (charge)')
+        plt.xlabel("r (Bohr)")
+        plt.ylabel("charge density (raw units)")
+        plt.title("Raw charge vs radius from .mat")
+        plt.legend()
+        plt.tight_layout()
+        plt.show()
+
+        print("[atomic] y_charge sum =", float(y_charg.sum()),
+              " min =", float(y_charg.min()),
+              " max =", float(y_charg.max()))
 
         # Pre-processing the data
-        # I = preProcess(y_charg)
-        # x_charg, y_charg = x_charg[I], y_charg[I]
+        I = preProcess(y_charg)
+        x_charg, y_charg = x_charg[I], y_charg[I]
 
         I = preProcess(y_pot_s)
         x_pot_s, y_pot_s = x_pot_s[I], y_pot_s[I]
 
-        # I = preProcess(y_vhart)
-        # x_vhart, y_vhart = x_vhart[I], y_vhart[I]
+        #I = preProcess(y_vhart)
+        #x_vhart, y_vhart = x_vhart[I], y_vhart[I]
 
         # Calculating the splines
-        # z_chg, c_chg, d_chg = fspline(x_charg, y_charg)
+        z_chg, c_chg, d_chg = fspline(x_charg, y_charg)
         z_p_s, c_p_s, d_p_s = fspline(x_pot_s, y_pot_s)
-        # z_vht, c_vht, d_vht = fspline(x_vhart, y_vhart)
+        #z_vht, c_vht, d_vht = fspline(x_vhart, y_vhart)
+
+        # 6 Å in Bohr
+        rmax_bohr = 6.3 * 1.889726
+
+        # dense evaluation from 0 → 6 Å
+        r_plot = np.linspace(0.0, rmax_bohr, 800)  # 800 points is plenty
+
+        # evaluate spline
+        y_spline = np.empty_like(r_plot)
+        j = 0
+        for t, rp in enumerate(r_plot):
+            # clamp into valid spline domain
+            if rp < x_charg[0]:
+                rp = x_charg[0]
+            elif rp > x_charg[-1]:
+                rp = x_charg[-1]
+            y_spline[t], j = fsplevalIO(z_chg, c_chg, d_chg, x_charg, rp, j)
+
+        # raw data within 6 Å only
+        mask = x_charg <= rmax_bohr
+
+        plt.figure(figsize=(7.2, 4.2))
+        plt.plot(x_charg[mask] / 1.889726, y_charg[mask], 'o', ms=2.0, label=f'{typ}: raw')
+        plt.plot(r_plot / 1.889726, y_spline, '-', lw=1.5, label=f'{typ}: spline')
+        plt.xlabel('r (Å)')
+        plt.ylabel('f(r) = 4πρ(r)')
+        plt.title('Charge radial data (0–6 Å)')
+        plt.legend()
+        plt.tight_layout()
+        plt.show()
 
         # Atom-specific computations (loop through the grid points)
         for at in range(natoms):
             indx = 0
+
             # Adjust coordinates to the grid
             k = np.arange(nz)
             dz = (k * h - rad - xyz[at, 2]) ** 2
@@ -115,13 +190,13 @@ def pseudoDiag_ML4Den(Domain, Atoms, elem, N_elements, density_file_path, A, CG_
 
                     # Initialize arrays for potentials and charge
                     ppot = np.zeros(nx)
-                    # rrho = np.zeros(nx)
-                    # hpot00 = np.zeros(nx)
+                    rrho = np.zeros(nx)
+                    #hpot00 = np.zeros(nx)
 
                     # Initialization of intervals
-                    # j_ch = 0
+                    j_ch = 0
                     j_p_s = 0
-                    # j_vht = 0
+                    #j_vht = 0
 
                     # Check if optimization is enabled
                     if OPTIMIZATIONLEVEL != 0:
@@ -138,13 +213,13 @@ def pseudoDiag_ML4Den(Domain, Atoms, elem, N_elements, density_file_path, A, CG_
                             iPlusOne = i_idx + 1
                             # Evaluate the splines
                             ppot[i_idx], j_p_s = fsplevalIO(z_p_s, c_p_s, d_p_s, x_pot_s, r1[i_idx], j_p_s)
-                            # rrho[i_idx], j_ch = fsplevalIO(z_chg, c_chg, d_chg, x_charg, r1[i_idx], j_ch)
-                            # hpot00[i_idx], j_vht = fsplevalIO(z_vht, c_vht, d_vht, x_vhart, r1[i_idx], j_vht)
-                            ppot[iPlusOne], j_p_s = fsplevalIO(z_p_s, c_p_s, d_p_s, x_pot_s, r1[iPlusOne], j_p_s)
-                            # rrho[iPlusOne], j_ch = fsplevalIO(z_chg, c_chg, d_chg, x_charg, r1[iPlusOne], j_ch)
-                            # hpot00[iPlusOne], j_vht = fsplevalIO(z_vht, c_vht, d_vht, x_vhart, r1[iPlusOne], j_vht)
-                        # done atom-specific calculations - now compute potentials, charge.
+                            rrho[i_idx], j_ch = fsplevalIO(z_chg, c_chg, d_chg, x_charg, r1[i_idx], j_ch)
+                            #hpot00[i_idx], j_vht = fsplevalIO(z_vht, c_vht, d_vht, x_vhart, r1[i_idx], j_vht)
 
+                            ppot[iPlusOne], j_p_s = fsplevalIO(z_p_s, c_p_s, d_p_s, x_pot_s, r1[iPlusOne], j_p_s)
+                            rrho[iPlusOne], j_ch = fsplevalIO(z_chg, c_chg, d_chg, x_charg, r1[iPlusOne], j_ch)
+                            #hpot00[iPlusOne], j_vht = fsplevalIO(z_vht, c_vht, d_vht, x_vhart, r1[iPlusOne], j_vht)
+                        # done atom-specific calculations - now compute potentials, charge.
                     if enableMexFilesTest == 1:
                         ValueError("case not implemented: PsuedoDiagLoops")
                         # TODO: switch to C++ code to compare the performance?
@@ -156,31 +231,63 @@ def pseudoDiag_ML4Den(Domain, Atoms, elem, N_elements, density_file_path, A, CG_
                         #
                         # # Check for discrepancies
                         # if (np.any(np.abs(ppot2 - ppot) > 1e-6) or
-                        # np.any(np.abs(rrho2 - rrho) > 1e-6) or
-                        # np.any(np.abs(hpot002 - hpot00) > 1e-6)):
-                        # # Prepare the stack trace
-                        # current_frame = inspect.currentframe()
-                        # stack_trace = inspect.getouterframes(current_frame)
+                        #         np.any(np.abs(rrho2 - rrho) > 1e-6) or
+                        #         np.any(np.abs(hpot002 - hpot00) > 1e-6)):
+                        #     # Prepare the stack trace
+                        #     current_frame = inspect.currentframe()
+                        #     stack_trace = inspect.getouterframes(current_frame)
                         #
-                        # # Raise custom exception with details
-                        # exception = MexFileDiscrepancyError(
-                            # message="Mex file discrepancy for PsuedoDiagLoops",
-                            # identifier=None, # You can add an identifier if necessary
-                            # stack=[frame.function for frame in stack_trace] # Extract function names from the stack
-                        # )
-                        # logError(exception)
-                        # raise exception # Optionally raise the error after logging
+                        #     # Raise custom exception with details
+                        #     exception = MexFileDiscrepancyError(
+                        #         message="Mex file discrepancy for PsuedoDiagLoops",
+                        #         identifier=None,  # You can add an identifier if necessary
+                        #         stack=[frame.function for frame in stack_trace]  # Extract function names from the stack
+                        #     )
+                        #     logError(exception)
+                        #     raise exception  # Optionally raise the error after logging
 
-                    # #rrho = np.maximum(0, rrho * (h ** 3) / (4 * np.pi))
+                    rrho = np.maximum(0, rrho * (h ** 3) / (4 * np.pi))
                     indx_end = indx + nx
 
                     pot[indx:indx_end] += ppot
-                    # rho0[indx:indx_end] += rrho
-                    # hpot0[indx:indx_end] += hpot00
-
+                    rho0[indx:indx_end] += rrho
+                    #hpot0[indx:indx_end] += hpot00
                     indx = indx_end
 
+    # --- Zero check: atomic rho0 ---
+    print("[atomic] rho0 sum =", float(rho0.sum()),
+          " min =", float(rho0.min()),
+          " max =", float(rho0.max()),
+          " any_nonzero =", bool(np.any(rho0 != 0)))
 
+    # --- Plot atomic-superposition density along x (mid y,z) using rho0, then reset rho0 ---
+    try:
+        rho_atomic = rho0.reshape(nx, ny, nz)
+
+        # mid-plane line
+        mid_j = ny // 2
+        mid_k = nz // 2
+        line_atomic = rho_atomic[:, mid_j, mid_k]  # e/Bohr^3 (after rrho scaling)
+
+        # real x coordinates on the target grid (Bohr), origin at 0
+        x_atomic = np.linspace(-rad, rad, nx)
+
+        plt.figure(figsize=(7.5, 4))
+        plt.plot(x_atomic, line_atomic, label='Atomic superposition (mid y,z)')
+        plt.xlabel('x (Bohr)')
+        plt.ylabel('density (e/Bohr^3)')
+        plt.title('Atomic-superposition density along x (before ML)')
+        plt.legend()
+        plt.tight_layout()
+        plt.show()
+
+        # keep for later comparison plot (after ML interpolation)
+        atomic_xline_for_plot = line_atomic.copy()
+    except Exception as _e:
+        print('[WARN] plotting atomic rho0 failed:', _e)
+
+    # IMPORTANT: clear rho0 so ML path can overwrite it cleanly
+    rho0.fill(0.0)
 
     # ========================================== #
     # 2. READ AND INTERPOLATE ML-PREDICTED 3D DENSITY
@@ -189,29 +296,72 @@ def pseudoDiag_ML4Den(Domain, Atoms, elem, N_elements, density_file_path, A, CG_
     print("Loading ML-predicted density from:", density_file_path)
 
     # Load the ML-predicted 3D density from .npy file
-    density_3d = np.load(density_file_path)
+    density_ang3 = np.load(density_file_path)
+
+    A0_ANG = 0.529177210903  # 1 Bohr = 0.529177210903 Å
 
     # 1. Get grid shape from ML density
-    nx_file, ny_file, nz_file = density_3d.shape
+    nx_ml, ny_ml, nz_ml = density_ang3.shape
+    Ngrid_ml = nx_ml * ny_ml * nz_ml
+    print("Number of X grid points:", nx_ml)
+    print("Number of Y grid points:", ny_ml)
+    print("Number of Z grid points:", nz_ml)
+    print("Number of grid points:", Ngrid_ml)
+    # Set your cube edge in Å by hand:
+    box_length_ml_ang = 10.0
+    grid_spacing_ml = float(box_length_ml_ang) / float(nx_ml)
 
-    # 2. Set box length (in Bohr)
-    box_length_bohr = 10 * 0.755890 # = 7.5589 Bohr
+    # Grid volume in Å^3
+    dV_ang3 = float(grid_spacing_ml) ** 3
+
+    # Cell volume in Å^3
+    Vcell_ang3 = float(box_length_ml_ang) ** 3
+
+    # test .npy data
+    NELECT_expected = Z_sum
+    #test_raw = density_3d.sum()  # ≈ NELECT if arr is RAW (ρ * Vcell)
+    test_dens = density_ang3.sum() * dV_ang3  # ≈ NELECT if arr is density (1/Å^3)
+
+    #print("test_raw :", test_raw)
+    print("test_dens:", test_dens)
+    print("NELECT   :", NELECT_expected)
+
+    # RAW -> density in 1/Å^3  (VASP: n(r) = data / (Ngrid * Vcell))
+    # density_ang = density_3d.astype(np.float64) / (Ngrid * Vcell_ang3)
+    # 1/Å^3 -> 1/Bohr^3   (multiply by a0^3)
+    density_bohr3 = density_ang3 * ( A0_ANG ** 3 )
+
+    # 2.Build the file grid (in Bohr) to match your code’s units
+    box_length_ml_bohr = float(box_length_ml_ang) / A0_ANG
 
     # ✅ 3. Compute atomic center (in Bohr)
-    geom_center = np.mean(np.array([atom['coord'] for atom in Atoms]), axis=0)
+    # Collect coords, force each into shape (3,)
+    coords = [np.asarray(atom['coord'], dtype=float).reshape(3, ) for atom in Atoms]
+
+    # Stack into (N_atoms, 3) and take mean along atoms → (3,)
+    geom_center = np.mean(np.stack(coords, axis=0), axis=0)
+
+    # Reshape into a (3,1) column vector
+    geom_center = geom_center.reshape(3, 1)
+
+    print("geom_center shape:", geom_center.shape)  # should be (3, 1)
+    print("geom_center:\n", geom_center)
 
     # ✅ 4. Create and shift ML grid
-    x_file = np.linspace(0, box_length_bohr, nx_file)
-    y_file = np.linspace(0, box_length_bohr, ny_file)
-    z_file = np.linspace(0, box_length_bohr, nz_file)
+    x_ml = np.linspace(0.0, box_length_ml_bohr, nx_ml)
+    print("x_ml shape:", x_ml.shape)
+    y_ml = np.linspace(0.0, box_length_ml_bohr, ny_ml)
+    print("y_ml shape:", y_ml.shape)
+    z_ml = np.linspace(0.0, box_length_ml_bohr, nz_ml)
+    print("z_ml shape:", z_ml.shape)
 
-    x_file -= geom_center[0]
-    y_file -= geom_center[1]
-    z_file -= geom_center[2]
+    x_ml -= geom_center[0]
+    y_ml -= geom_center[1]
+    z_ml -= geom_center[2]
 
     # ✅ 5. Now print the correct range
     print("Target grid min/max:")
-    print(f"ML X grid: {x_file.min():.2f} → {x_file.max():.2f}")
+    print(f"ML X grid: {x_ml.min():.2f} → {x_ml.max():.2f}")
 
     # # Create the linear interpolator
     # density_interpolator = RegularGridInterpolator(
@@ -221,74 +371,103 @@ def pseudoDiag_ML4Den(Domain, Atoms, elem, N_elements, density_file_path, A, CG_
     #   fill_value=0.0
     # )
 
-    # Create coordinate arrays for your target grid
-    x_target = np.linspace(-rad, rad, nx)
-    y_target = np.linspace(-rad, rad, ny)
-    z_target = np.linspace(-rad, rad, nz)
-    print(f"X: {x_target.min():.2f} → {x_target.max():.2f}")
+    # No longer use interpolation
+    # # Create coordinate arrays for your target grid
+    # print("rad: ", rad)
+    # print("nx, ny, nz:", nx, ny, nz)
+    # print("h: ", h)
+    # x_target = np.linspace(-rad, rad, nx)
+    # y_target = np.linspace(-rad, rad, ny)
+    # z_target = np.linspace(-rad, rad, nz)
+    # print(f"X: {x_target.min():.2f} → {x_target.max():.2f}")
+    #
+    # # Create meshgrid for interpolation
+    # X_target, Y_target, Z_target = np.meshgrid(x_target, y_target, z_target, indexing='ij')
+    # target_points = np.stack([X_target.ravel(), Y_target.ravel(), Z_target.ravel()], axis=-1)
+    #
+    # # Interpolate ML density to target grid and flatten
+    # print("Interpolating ML density to target grid...")
+    #
+    # # rho0_interpolated = density_interpolator(target_points)
+    #
+    # # Compute spacing of ML grid
+    # dx = x_ml[1] - x_ml[0]
+    # dy = y_ml[1] - y_ml[0]
+    # dz = z_ml[1] - z_ml[0]
+    #
+    # # Convert target physical coordinates → ML grid index coordinates
+    # Z_idx = (Z_target.ravel() - z_ml[0]) / dz
+    # Y_idx = (Y_target.ravel() - y_ml[0]) / dy
+    # X_idx = (X_target.ravel() - x_ml[0]) / dx
+    #
+    # coords_idx = np.vstack([X_idx, Y_idx, Z_idx]) # shape: (3, N)
+    #
+    # # Perform cubic spline interpolation
+    # rho0_interpolated = map_coordinates(
+    #     density_bohr3,
+    #     coords_idx,
+    #     order=3, # Cubic spline
+    #     mode='constant',
+    #     cval=0.0
+    # )
 
-    # Create meshgrid for interpolation
-    X_target, Y_target, Z_target = np.meshgrid(x_target, y_target, z_target, indexing='ij')
-    target_points = np.stack([X_target.ravel(), Y_target.ravel(), Z_target.ravel()], axis=-1)
+    mid_y, mid_z = density_bohr3.shape[1] // 2, density_bohr3.shape[2] // 2
+    line_raw = density_bohr3[:, mid_y, mid_z]
 
-    # Interpolate ML density to target grid and flatten
-    print("Interpolating ML density to target grid...")
+    plt.figure()
+    plt.plot(x_ml, line_raw, marker='o')
+    plt.title("Raw ML density along x (mid y,z)")
+    plt.xlabel('x (Bohr)')
+    plt.ylabel("density (e/bohr^3)")
+    plt.show()
 
-    # rho0_interpolated = density_interpolator(target_points)
+    # line_interp = rho0_interpolated.reshape(nx, ny, nz)[:, ny // 2, nz // 2]
+    #
+    # plt.figure()
+    # plt.plot(x_ml, density_bohr3[:, mid_y, mid_z], 'o', label="Raw")
+    # plt.plot(x_target, line_interp, 'o', label="Interpolated")
+    # plt.title("Comparison: raw vs interpolated density along x")
+    # plt.xlabel("x (Bohr)")
+    # plt.ylabel("density (e/Bohr^3)")
+    # plt.legend()
+    # plt.show()
 
-    # Compute spacing of ML grid
-    dx = x_file[1] - x_file[0]
-    dy = y_file[1] - y_file[0]
-    dz = z_file[1] - z_file[0]
+    # rho0 = (rho0_interpolated * (h**3)).reshape(n)
 
-    # Convert target physical coordinates → ML grid index coordinates
-    Z_idx = (Z_target.ravel() - z_file[0]) / dz
-    Y_idx = (Y_target.ravel() - y_file[0]) / dy
-    X_idx = (X_target.ravel() - x_file[0]) / dx
+    # print(f"▶ max density after spline interpolation: {rho0_interpolated.max():.6f}")
 
-    coords_idx = np.vstack([Z_idx, Y_idx, X_idx]) # shape: (3, N)
-
-    # Perform cubic spline interpolation
-    rho0_interpolated = map_coordinates(
-        density_3d,
-        coords_idx,
-        order=3, # Cubic spline
-        mode='constant',
-        cval=0.0
-    )
-
-    rho0 = rho0_interpolated.reshape(n)
-
-    print(f"▶ max density after spline interpolation: {rho0_interpolated.max():.6f}")
-
-    idx = np.unravel_index(np.argmax(rho0), rho0.shape)
-    print("Density peak index:", idx)
-    print("Peak location (Bohr):", x_target[idx[0]], y_target[idx[1]], z_target[idx[2]])
+    # idx = np.unravel_index(np.argmax(rho0), rho0.shape)
+    # print("Density peak index:", idx)
+    # print("Peak location (Bohr):", x_target[idx[0]], y_target[idx[1]], z_target[idx[2]])
 
     # assume rho0 is your raw interpolated array, and h is your DFT grid spacing
     # and Z_sum is your total number of electrons
 
-    # 1. Integration on DFT grid BEFORE any unit conversion or clipping
-    electron_count_raw = np.sum(rho0) * h ** 3
-    print(f"▶ raw interpolated ML density integrates to {electron_count_raw:.6f} e⁻")
-
-    # ==========================================
-    # UNIT CONVERSION: Å³ → bohr³
-    # ==========================================
-    BOHR_TO_ANGSTROM = 0.529177210903
-    ANGSTROM3_TO_BOHR3 = 1.0 / (BOHR_TO_ANGSTROM ** 3)
-
-    print(f"ML density before unit conversion: min={np.min(rho0):.6f}, max={np.max(rho0):.6f} electrons/Å³")
-
-    # Convert from electrons/Å³ to electrons/bohr³
-    rho0 = rho0 * ANGSTROM3_TO_BOHR3
-
-    print(f"ML density after unit conversion: min={np.min(rho0):.6f}, max={np.max(rho0):.6f} electrons/bohr³")
-    print(f"Conversion factor: {ANGSTROM3_TO_BOHR3:.6f}")
+    # # 1. Integration on DFT grid BEFORE any unit conversion or clipping
+    # electron_count_raw = np.sum(rho0) * h ** 3
+    # print(f"▶ raw interpolated ML density integrates to {electron_count_raw:.6f} e⁻")
+    #
+    # # ==========================================
+    # # UNIT CONVERSION: Å³ → bohr³
+    # # ==========================================
+    # BOHR_TO_ANGSTROM = 0.529177210903
+    # ANGSTROM3_TO_BOHR3 = 1.0 / (BOHR_TO_ANGSTROM ** 3)
+    #
+    # print(f"ML density before unit conversion: min={np.min(rho0):.6f}, max={np.max(rho0):.6f} electrons/Å³")
+    #
+    # # Convert from electrons/Å³ to electrons/bohr³
+    # rho0 = rho0 * ANGSTROM3_TO_BOHR3
+    #
+    # print(f"ML density after unit conversion: min={np.min(rho0):.6f}, max={np.max(rho0):.6f} electrons/bohr³")
+    # print(f"Conversion factor: {ANGSTROM3_TO_BOHR3:.6f}")
 
     # 2. After any unit conversion (e.g. Å³→bohr³), but BEFORE normalization
     # (only if you actually convert; if you commented it out, skip this)
-    electron_count_conv = np.sum(rho0) * h ** 3
+
+    # use the ml data directly
+    rho0 = (density_bohr3 * (h**3)).reshape(n)
+
+    electron_count_conv = np.sum(rho0)
     print(f"▶ post-conversion (if applied) integrates to {electron_count_conv:.6f} e⁻")
 
     # ==========================================
@@ -308,17 +487,18 @@ def pseudoDiag_ML4Den(Domain, Atoms, elem, N_elements, density_file_path, A, CG_
     print(f"ML density statistics: min={np.min(rho0):.6f}, max={np.max(rho0):.6f}, mean={np.mean(rho0):.6f}")
 
     # Normalize rho0
-    # rho0_sum = np.sum(rho0)
-    # rho0 = Z_sum * rho0 / rho0_sum
-    # correct normalization:
-    vol = h ** 3
-    int_rho = np.sum(rho0) * vol # electrons
-    rho0 *= (Z_sum / int_rho)
+    rho0_sum = np.sum(rho0)
+    print("rho0_sum:", rho0_sum)
+    rho0 = Z_sum * rho0 / rho0_sum
+    # # correct normalization:
+    # vol = h ** 3
+    # int_rho = np.sum(rho0) # electrons
+    # rho0 *= (Z_sum / int_rho)
     print(f"ML density statistics: min={np.min(rho0):.6f}, max={np.max(rho0):.6f}, mean={np.mean(rho0):.6f}")
 
     # 3. After your normalization step
     # (i.e. after rho0 = Z_sum * rho0 / rho0_sum)
-    electron_count_norm = np.sum(rho0) * h ** 3
+    electron_count_norm = np.sum(rho0)
     print(f"▶ after normalization integrates to {electron_count_norm:.6f} e⁻ (should be {Z_sum})")
 
     # ==========================================

@@ -4,6 +4,7 @@ from preProcess import preProcess
 from fspline import fspline
 import logging
 from fsplevalIO import fsplevalIO
+import matplotlib.pyplot as plt
 
 # Set up logging to a file (or console)
 logging.basicConfig(level=logging.ERROR, filename='error_log.txt', filemode='a',
@@ -104,6 +105,42 @@ def pseudoDiag(Domain, Atoms, elem, N_elements):
         x_vhart = atom_data[:, 0]
         y_vhart = atom_data[:, i_hartree]
 
+        # x_charg: shape (M,), non-uniform radii in Bohr
+        # y_charg: shape (M,), assumed f(r) = 4πρ(r) in Bohr units
+
+        r = x_charg.astype(float)
+        f = y_charg.astype(float)
+
+        # sanity: ensure strictly increasing
+        # (preProcess usually fixes this, but double-check)
+        order = np.argsort(r)
+        r = r[order];
+        f = f[order]
+        assert np.all(np.diff(r) > 0), "x_charg must be strictly increasing"
+
+        dr = np.diff(r)
+        fi = f[:-1];
+        fj = f[1:]
+        ri2 = r[:-1] ** 2;
+        rj2 = r[1:] ** 2
+
+        # trapezoid on non-uniform grid for N = ∫ f(r) r^2 dr
+        N_est = np.sum(0.5 * (fi * ri2 + fj * rj2) * dr)
+        print("[radial CSV] N_est (should match valence) =", float(N_est))
+
+        plt.figure(figsize=(7, 4))
+        plt.plot(x_charg, y_charg, 'o-', markersize=1, label=f'Atom type {typ} (charge)')
+        plt.xlabel("r (Bohr)")
+        plt.ylabel("charge density (raw units)")
+        plt.title("Raw charge vs radius from .mat")
+        plt.legend()
+        plt.tight_layout()
+        plt.show()
+
+        print("[atomic] y_charge sum =", float(y_charg.sum()),
+              " min =", float(y_charg.min()),
+              " max =", float(y_charg.max()))
+
         # Pre-processing the data
         I = preProcess(y_charg)
         x_charg, y_charg = x_charg[I], y_charg[I]
@@ -118,6 +155,36 @@ def pseudoDiag(Domain, Atoms, elem, N_elements):
         z_chg, c_chg, d_chg = fspline(x_charg, y_charg)
         z_p_s, c_p_s, d_p_s = fspline(x_pot_s, y_pot_s)
         z_vht, c_vht, d_vht = fspline(x_vhart, y_vhart)
+
+        # 6 Å in Bohr
+        rmax_bohr = 6.3 * 1.889726
+
+        # dense evaluation from 0 → 6 Å
+        r_plot = np.linspace(0.0, rmax_bohr, 800)  # 800 points is plenty
+
+        # evaluate spline
+        y_spline = np.empty_like(r_plot)
+        j = 0
+        for t, rp in enumerate(r_plot):
+            # clamp into valid spline domain
+            if rp < x_charg[0]:
+                rp = x_charg[0]
+            elif rp > x_charg[-1]:
+                rp = x_charg[-1]
+            y_spline[t], j = fsplevalIO(z_chg, c_chg, d_chg, x_charg, rp, j)
+
+        # raw data within 6 Å only
+        mask = x_charg <= rmax_bohr
+
+        plt.figure(figsize=(7.2, 4.2))
+        plt.plot(x_charg[mask] / 1.889726, y_charg[mask], 'o', ms=2.0, label=f'{typ}: raw')
+        plt.plot(r_plot / 1.889726, y_spline, '-', lw=1.5, label=f'{typ}: spline')
+        plt.xlabel('r (Å)')
+        plt.ylabel('f(r) = 4πρ(r)')
+        plt.title('Charge radial data (0–6 Å)')
+        plt.legend()
+        plt.tight_layout()
+        plt.show()
 
         # Atom-specific computations (loop through the grid points)
         for at in range(natoms):
@@ -201,8 +268,49 @@ def pseudoDiag(Domain, Atoms, elem, N_elements):
                     hpot0[indx:indx_end] += hpot00
                     indx = indx_end
 
+        # --- Zero check: atomic rho0 ---
+    print("[atomic] rho0 sum =", float(rho0.sum()),
+          " min =", float(rho0.min()),
+          " max =", float(rho0.max()),
+          " any_nonzero =", bool(np.any(rho0 != 0)))
+
+    # divide by h**3 and multiply 4*pi
+    rrho_raw = ( rho0 / (h**3) ) * (4 * np.pi)
+
+    print("[atomic] rho0 sum =", float(rrho_raw.sum()),
+          " min =", float(rrho_raw.min()),
+          " max =", float(rrho_raw.max()))
+
     # Normalize rho0
     rho0_sum = np.sum(rho0)
     rho0 = Z_sum * rho0 / rho0_sum
+    print("[atomic] rho0 sum =", np.sum(rho0))
+
+    # --- Plot atomic-superposition density along x (mid y,z) using rho0, then reset rho0 ---
+    try:
+        rho_ang = rho0 / (h**3)
+        rho_atomic = rho_ang.reshape(nx, ny, nz)
+
+        # mid-plane line
+        mid_j = ny // 2
+        mid_k = nz // 2
+        line_atomic = rho_atomic[:, mid_j, mid_k]  # e/Bohr^3 (after rrho scaling)
+
+        # real x coordinates on the target grid (Bohr), origin at 0
+        x_atomic = np.linspace(-rad, rad, nx)
+
+        plt.figure(figsize=(7.5, 4))
+        plt.plot(x_atomic, line_atomic, label='Atomic superposition (mid y,z)')
+        plt.xlabel('x (Bohr)')
+        plt.ylabel('density (e/Bohr^3)')
+        plt.title('Atomic-superposition density along x (before ML)')
+        plt.legend()
+        plt.tight_layout()
+        plt.show()
+
+        # keep for later comparison plot (after ML interpolation)
+        atomic_xline_for_plot = line_atomic.copy()
+    except Exception as _e:
+        print('[WARN] plotting atomic rho0 failed:', _e)
 
     return rho0, hpot0, pot

@@ -308,6 +308,9 @@ def get_atoms(elem):
 # Usage example:
 # Assuming elem is a pandas DataFrame loaded with element data from 'elements_new.csv'
 Atoms, n_atom, Z_charge, density_method, ml_file_path = get_atoms(elem)
+print('Atoms', Atoms)
+print('n_atom', n_atom)
+print('Z_charge', Z_charge)
 # Keep a raw copy of the original coordinates for ML shifting
 Atoms_raw = [ { 'typ': atom['typ'], 'coord': atom['coord'].copy() } for atom in Atoms ]
 # print(Atoms,n_atom,Z_charge)
@@ -317,7 +320,7 @@ else:
     print("No atoms loaded, exiting RSDFT")
 
 
-def calculate_grid_spacing(Atoms, elem, N_elements, n_atom, Z_charge):
+def calculate_grid_spacing(Atoms, elem, N_elements, n_atom, Z_charge, ml_file_path):
     """
     Calculate the smallest grid spacing hmin and the number of eigenvalues (nev).
 
@@ -336,18 +339,36 @@ def calculate_grid_spacing(Atoms, elem, N_elements, n_atom, Z_charge):
     zelec = 0.0
     hmin = 100.0  # Large initial value to find the minimum grid spacing
 
-    # Iterate over the types of atoms
-    for at_typ in range(N_types):
-        typ = Atoms[at_typ]['typ']  # Get the atomic symbol
+    if ml_file_path is not None: # use grids from ml method
+        density_ang3 = np.load(ml_file_path)
+        A0_ANG = 0.529177210903  # 1 Bohr = 0.529177210903 Å
+        nx_ml, ny_ml, nz_ml = density_ang3.shape
+        box_length_ml_ang = 10.0
+        grid_spacing_ml = float(box_length_ml_ang) / float(nx_ml)
+        hmin = grid_spacing_ml / A0_ANG
 
-        # Look for matching element data in the elem DataFrame
-        for i in range(N_elements):
-            if typ == elem['Element'].iloc[i]:
-                Z = elem['Z'].iloc[i] * n_atom[at_typ]  # Number of electrons for this species
-                h = elem['h'].iloc[i]  # getting grid spacing
-                if h < hmin:
-                    hmin = h  # Update hmin if a smaller grid spacing is found
-                zelec += Z  # Add the electrons from this species
+        for at_typ in range(N_types):
+            typ = Atoms[at_typ]['typ']  # Get the atomic symbol
+
+            # Look for matching element data in the elem DataFrame
+            for i in range(N_elements):
+                if typ == elem['Element'].iloc[i]:
+                    Z = elem['Z'].iloc[i] * n_atom[at_typ]  # Number of electrons for this species
+                    zelec += Z  # Add the electrons from this species
+
+    if ml_file_path is None: # use default grids for atoms
+        # Iterate over the types of atoms
+        for at_typ in range(N_types):
+            typ = Atoms[at_typ]['typ']  # Get the atomic symbol
+
+            # Look for matching element data in the elem DataFrame
+            for i in range(N_elements):
+                if typ == elem['Element'].iloc[i]:
+                    Z = elem['Z'].iloc[i] * n_atom[at_typ]  # Number of electrons for this species
+                    h = elem['h'].iloc[i]  # getting grid spacing
+                    if h < hmin:
+                        hmin = h  # Update hmin if a smaller grid spacing is found
+                    zelec += Z  # Add the electrons from this species
 
     # Check for valid electron count
     ztest = zelec - Z_charge
@@ -361,14 +382,14 @@ def calculate_grid_spacing(Atoms, elem, N_elements, n_atom, Z_charge):
 
     return h, nev, zelec, ztest
 
-h, nev, zelec, ztest = calculate_grid_spacing(Atoms, elem, N_elements, n_atom, Z_charge)
+h, nev, zelec, ztest = calculate_grid_spacing(Atoms, elem, N_elements, n_atom, Z_charge, ml_file_path)
 
 # if h is not None and nev is not None:
 #     print(f"Smallest grid spacing (h): {h}")
 #     print(f"Number of eigenvalues (nev): {nev}")
 
 
-def estimate_radius_and_grid(Atoms, elem, N_elements, h):
+def estimate_radius_and_grid(Atoms, elem, N_elements, h, ml_file_path):
     """
     Estimate the spherical radius and calculate grid sizes based on atom positions.
 
@@ -384,37 +405,52 @@ def estimate_radius_and_grid(Atoms, elem, N_elements, h):
     rmax = 0.0  # Initialize max radius
     natoms = 0.0  # Initialize number of atoms
     rsize = 0.0  # Initialize radius size
+    sph_rad = 0.0
+    nx = 0.0
+    ny = 0.0
+    nz = 0.0
     N_types = len(Atoms)  # Number of atomic species
 
-    # Iterate over the types of atoms
-    for at_typ in range(N_types):
-        typ = Atoms[at_typ]['typ']  # Get the atomic symbol
-        xyz = Atoms[at_typ]['coord']
-        natoms = xyz.shape[0]  # Number of atoms of this type
-        # Find the corresponding element in elem
-        index = None
-        for i in range(N_elements):
-            if typ == elem['Element'].iloc[i]:
-                # Retrieve atomic size/ radius
-                rsize = elem['r'].iloc[i]
+    if ml_file_path is not None:  # use radius from ml method
+        density_ang3 = np.load(ml_file_path)
+        A0_ANG = 0.529177210903  # 1 Bohr = 0.529177210903 Å
+        nx_ml, ny_ml, nz_ml = density_ang3.shape
+        nx = nx_ml
+        ny = ny_ml
+        nz = nz_ml
+        box_length_ml_ang = 10.0
+        sph_rad = box_length_ml_ang / A0_ANG
 
-        # Scan all points to find the atom most removed from the domain center
-        for at1 in range(natoms):
-            xx, yy, zz = xyz[at1, 0], xyz[at1, 1], xyz[at1, 2]  # Coordinates of atom
-            rdis = np.sqrt(xx ** 2 + yy ** 2 + zz ** 2)  # Distance from the origin
-            rs = rdis + rsize  # Radius including the atomic size
+    if ml_file_path is None:  # use radius from default atoms
+        # Iterate over the types of atoms
+        for at_typ in range(N_types):
+            typ = Atoms[at_typ]['typ']  # Get the atomic symbol
+            xyz = Atoms[at_typ]['coord']
+            natoms = xyz.shape[0]  # Number of atoms of this type
+            # Find the corresponding element in elem
+            index = None
+            for i in range(N_elements):
+                if typ == elem['Element'].iloc[i]:
+                    # Retrieve atomic size/ radius
+                    rsize = elem['r'].iloc[i]
 
-            if rs > rmax:
-                rmax = rs  # Update the maximum radius
+            # Scan all points to find the atom most removed from the domain center
+            for at1 in range(natoms):
+                xx, yy, zz = xyz[at1, 0], xyz[at1, 1], xyz[at1, 2]  # Coordinates of atom
+                rdis = np.sqrt(xx ** 2 + yy ** 2 + zz ** 2)  # Distance from the origin
+                rs = rdis + rsize  # Radius including the atomic size
 
-    sph_rad = rmax  # Spherical radius based on the most distant atom
+                if rs > rmax:
+                    rmax = rs  # Update the maximum radius
 
-    # Grid size calculations
-    nx = int(2 * sph_rad / h) + 1  # Ensure nx is odd to make adjustments later
-    nx = 2 * ((nx + 1) // 2)  # Ensure nx is even
-    sph_rad = 0.5 * h * (nx - 1)  # Adjust the spherical radius based on the grid
-    ny = nx
-    nz = nx
+        sph_rad = rmax  # Spherical radius based on the most distant atom
+
+        # Grid size calculations
+        nx = int(2 * sph_rad / h) + 1  # Ensure nx is odd to make adjustments later
+        nx = 2 * ((nx + 1) // 2)  # Ensure nx is even
+        sph_rad = 0.5 * h * (nx - 1)  # Adjust the spherical radius based on the grid
+        ny = nx
+        nz = nx
 
     # Create the Domain dictionary
     Domain = {'radius': sph_rad, 'nx': nx, 'ny': ny, 'nz': nz, 'h': h}
@@ -430,9 +466,10 @@ def recenter_atoms(Atoms):
 
 # Recenter Domain atoms for grid generation, but preserve raw for ML
 Atoms = recenter_atoms(Atoms)
+print("recenter atoms", Atoms)
 
 # Call the function
-Domain, N_types = estimate_radius_and_grid(Atoms, elem, N_elements, h)
+Domain, N_types = estimate_radius_and_grid(Atoms, elem, N_elements, h, ml_file_path)
 # if Domain:
 #     print(f"Domain: {Domain}")
 
@@ -547,8 +584,10 @@ else: # ML method
         # spilu() from scipy can be used similarly to MATLAB's luinc
         PRE = spla.spilu(A) # PRE will be the equivalent of MATLAB's LU structure
         print('done.')
-        # Call ML-based initialization
-        rho0, hpot0, Ppot = pseudoDiag_ML4Den( Domain, Atoms_raw, elem, N_elements, ml_file_path, A, CG_prec, PRE )
+
+    # Call ML-based initialization
+    print('Atoms_raw', Atoms_raw)
+    rho0, hpot0, Ppot = pseudoDiag_ML4Den( Domain, Atoms_raw, elem, N_elements, ml_file_path, A, CG_prec, PRE )
 
 pseudoDiag_time = time.time() - start_time
 print(pseudoDiag_time)
