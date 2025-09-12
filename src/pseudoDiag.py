@@ -114,14 +114,14 @@ def pseudoDiag(Domain, Atoms, elem, N_elements):
         # sanity: ensure strictly increasing
         # (preProcess usually fixes this, but double-check)
         order = np.argsort(r)
-        r = r[order];
+        r = r[order]
         f = f[order]
         assert np.all(np.diff(r) > 0), "x_charg must be strictly increasing"
 
         dr = np.diff(r)
-        fi = f[:-1];
+        fi = f[:-1]
         fj = f[1:]
-        ri2 = r[:-1] ** 2;
+        ri2 = r[:-1] ** 2
         rj2 = r[1:] ** 2
 
         # trapezoid on non-uniform grid for N = ∫ f(r) r^2 dr
@@ -268,7 +268,7 @@ def pseudoDiag(Domain, Atoms, elem, N_elements):
                     hpot0[indx:indx_end] += hpot00
                     indx = indx_end
 
-        # --- Zero check: atomic rho0 ---
+    # --- Zero check: atomic rho0 ---
     print("[atomic] rho0 sum =", float(rho0.sum()),
           " min =", float(rho0.min()),
           " max =", float(rho0.max()),
@@ -287,30 +287,116 @@ def pseudoDiag(Domain, Atoms, elem, N_elements):
     print("[atomic] rho0 sum =", np.sum(rho0))
 
     # --- Plot atomic-superposition density along x (mid y,z) using rho0, then reset rho0 ---
-    try:
-        rho_ang = rho0 / (h**3)
-        rho_atomic = rho_ang.reshape(nx, ny, nz)
+    # Plot e/bohr^3
+    rho_bohr3 = rho0 / (h ** 3)
+    rho_bohr3_3d = rho_bohr3.reshape(nx, ny, nz)
 
-        # mid-plane line
-        mid_j = ny // 2
-        mid_k = nz // 2
-        line_atomic = rho_atomic[:, mid_j, mid_k]  # e/Bohr^3 (after rrho scaling)
+    hpot0_3d = hpot0.reshape(nx, ny, nz)
 
-        # real x coordinates on the target grid (Bohr), origin at 0
-        x_atomic = np.linspace(-rad, rad, nx)
+    pot_3d = pot.reshape(nx, ny, nz)
 
-        plt.figure(figsize=(7.5, 4))
-        plt.plot(x_atomic, line_atomic, label='Atomic superposition (mid y,z)')
-        plt.xlabel('x (Bohr)')
-        plt.ylabel('density (e/Bohr^3)')
-        plt.title('Atomic-superposition density along x (before ML)')
-        plt.legend()
-        plt.tight_layout()
-        plt.show()
+    # mid-plane line
+    mid_x = nx // 2
+    mid_y = ny // 2
+    mid_z = nz // 2
 
-        # keep for later comparison plot (after ML interpolation)
-        atomic_xline_for_plot = line_atomic.copy()
-    except Exception as _e:
-        print('[WARN] plotting atomic rho0 failed:', _e)
+    line_rho0_x = rho_bohr3_3d[:, mid_y, mid_z]  # e/Bohr^3 (after rrho scaling)
+    line_rho0_y = rho_bohr3_3d[mid_x, :, mid_z]
+    line_rho0_z = rho_bohr3_3d[mid_x, mid_y, :]
+
+    line_hpot0_x = hpot0_3d[:, mid_y, mid_z]
+    line_hpot0_y = hpot0_3d[:, mid_y, mid_z]
+    line_hpot0_z = hpot0_3d[:, mid_y, mid_z]
+
+    line_pot_x = pot_3d[:, mid_y, mid_z]
+    line_pot_y = pot_3d[:, mid_y, mid_z]
+    line_pot_z = pot_3d[:, mid_y, mid_z]
+
+    # real x coordinates on the target grid (Bohr), origin at 0
+    x = np.linspace(0, 2 * rad, nx)
+    y = np.linspace(0, 2 * rad, ny)
+    z = np.linspace(0, 2 * rad, nz)
+
+    plt.figure(figsize=(7.5, 4))
+    plt.plot(x, line_rho0_x, label='Atomic superposition (mid y,z)')
+    plt.xlabel('x (Bohr)')
+    plt.ylabel('density (e/bohr^3)')
+    plt.title('Atomic-superposition density along x (before ML)')
+    plt.legend()
+    plt.tight_layout()
+    plt.show()
+
+    plt.figure(figsize=(7.5, 4))
+    plt.plot(y, line_rho0_y, label='Atomic superposition (mid x,z)')
+    plt.xlabel('y (Bohr)')
+    plt.ylabel('density (e/bohr^3)')
+    plt.title('Atomic-superposition density along y (before ML)')
+    plt.legend()
+    plt.tight_layout()
+    plt.show()
+
+    plt.figure(figsize=(7.5, 4))
+    plt.plot(z, line_rho0_z, label='Atomic superposition (mid x,y)')
+    plt.xlabel('z (Bohr)')
+    plt.ylabel('density (e/bohr^3)')
+    plt.title('Atomic-superposition density along z (before ML)')
+    plt.legend()
+    plt.tight_layout()
+    plt.show()
+
+    # plot hpot0
+    plt.figure(figsize=(7.5, 4))
+    plt.plot(x, line_hpot0_x, label='Atomic superposition (mid y,z)')
+    plt.xlabel('x (Bohr)')
+    plt.ylabel('atomic unit')
+    plt.title('Atomic-superposition hartree pot along x (before ML)')
+    plt.legend()
+    plt.tight_layout()
+    plt.show()
+
+    plt.figure(figsize=(7.5, 4))
+    plt.plot(y, line_hpot0_y, label='Atomic superposition (mid x,z)')
+    plt.xlabel('y (Bohr)')
+    plt.ylabel('atomic unit')
+    plt.title('Atomic-superposition hartree pot along y (before ML)')
+    plt.legend()
+    plt.tight_layout()
+    plt.show()
+
+    plt.figure(figsize=(7.5, 4))
+    plt.plot(z, line_hpot0_z, label='Atomic superposition (mid x,y)')
+    plt.xlabel('z (Bohr)')
+    plt.ylabel('atomic unit')
+    plt.title('Atomic-superposition hartree pot along z (before ML)')
+    plt.legend()
+    plt.tight_layout()
+    plt.show()
+
+    plt.figure(figsize=(7.5, 4))
+    plt.plot(x, line_pot_x, label='Atomic superposition (mid y,z)')
+    plt.xlabel('x (Bohr)')
+    plt.ylabel('atomic unit')
+    plt.title('Atomic-superposition pot along x (before ML)')
+    plt.legend()
+    plt.tight_layout()
+    plt.show()
+
+    plt.figure(figsize=(7.5, 4))
+    plt.plot(y, line_pot_y, label='Atomic superposition (mid x,z)')
+    plt.xlabel('y (Bohr)')
+    plt.ylabel('atomic unit')
+    plt.title('Atomic-superposition pot along y (before ML)')
+    plt.legend()
+    plt.tight_layout()
+    plt.show()
+
+    plt.figure(figsize=(7.5, 4))
+    plt.plot(z, line_pot_z, label='Atomic superposition (mid x,y)')
+    plt.xlabel('z (Bohr)')
+    plt.ylabel('atomic unit')
+    plt.title('Atomic-superposition pot along z (before ML)')
+    plt.legend()
+    plt.tight_layout()
+    plt.show()
 
     return rho0, hpot0, pot

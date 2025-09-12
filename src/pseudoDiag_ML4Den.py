@@ -32,6 +32,7 @@ def pseudoDiag_ML4Den(Domain, Atoms, elem, N_elements, density_file_path, A, CG_
     enableMexFilesTest = 0
 
     print("Atoms", Atoms)
+    print("Domain", Domain)
 
     # Extract domain information
     nx, ny, nz = Domain['nx'], Domain['ny'], Domain['nz']
@@ -42,13 +43,7 @@ def pseudoDiag_ML4Den(Domain, Atoms, elem, N_elements, density_file_path, A, CG_
     # Initialize output arrays
     rho0 = np.zeros(n) # Flattened for compatibility with SCF loop
     pot = np.zeros(n)
-    #hpot0 = np.zeros(n)
-
-    # center atoms to the domain origin
-    all_xyz = np.vstack([Atoms[t]['coord'] for t in range(len(Atoms))])
-    geom_center = all_xyz.mean(axis=0)
-    for t in range(len(Atoms)):
-        Atoms[t]['coord'] = Atoms[t]['coord'] - geom_center  # still in Bohr
+    hpot0 = np.zeros(n)
 
     # ==========================================
     # 1. PSEUDOPOTENTIAL CALCULATION (UNCHANGED FROM ATOMIC APPROACH)
@@ -81,15 +76,15 @@ def pseudoDiag_ML4Den(Domain, Atoms, elem, N_elements, density_file_path, A, CG_
         # Localizing variables and initializing arrays
         i_charge = data_list.index('charge')
         i_pot_S = data_list.index('pot_S')
-        #i_hartree = data_list.index('hartree')
+        i_hartree = data_list.index('hartree')
 
         atom_data = AtomFuncData[index]['data']
         x_charg = atom_data[:, 0]
         y_charg = atom_data[:, i_charge]
         x_pot_s = atom_data[:, 0]
         y_pot_s = atom_data[:, i_pot_S]
-        #x_vhart = atom_data[:, 0]
-        #y_vhart = atom_data[:, i_hartree]
+        x_vhart = atom_data[:, 0]
+        y_vhart = atom_data[:, i_hartree]
 
         # x_charg: shape (M,), non-uniform radii in Bohr
         # y_charg: shape (M,), assumed f(r) = 4πρ(r) in Bohr units
@@ -134,13 +129,13 @@ def pseudoDiag_ML4Den(Domain, Atoms, elem, N_elements, density_file_path, A, CG_
         I = preProcess(y_pot_s)
         x_pot_s, y_pot_s = x_pot_s[I], y_pot_s[I]
 
-        #I = preProcess(y_vhart)
-        #x_vhart, y_vhart = x_vhart[I], y_vhart[I]
+        I = preProcess(y_vhart)
+        x_vhart, y_vhart = x_vhart[I], y_vhart[I]
 
         # Calculating the splines
         z_chg, c_chg, d_chg = fspline(x_charg, y_charg)
         z_p_s, c_p_s, d_p_s = fspline(x_pot_s, y_pot_s)
-        #z_vht, c_vht, d_vht = fspline(x_vhart, y_vhart)
+        z_vht, c_vht, d_vht = fspline(x_vhart, y_vhart)
 
         # 6 Å in Bohr
         rmax_bohr = 6.3 * 1.889726
@@ -178,25 +173,25 @@ def pseudoDiag_ML4Den(Domain, Atoms, elem, N_elements, density_file_path, A, CG_
 
             # Adjust coordinates to the grid
             k = np.arange(nz)
-            dz = (k * h - rad - xyz[at, 2]) ** 2
+            dz = (k * h - xyz[at, 2]) ** 2
 
             for k_idx in range(nz):
                 j = np.arange(ny)
-                dy = dz[k_idx] + (j * h - rad - xyz[at, 1]) ** 2
+                dy = dz[k_idx] + (j * h - xyz[at, 1]) ** 2
 
                 for j_idx in range(ny):
                     i = np.arange(nx)
-                    r1 = np.sqrt(dy[j_idx] + (i * h - rad - xyz[at, 0]) ** 2)
+                    r1 = np.sqrt(dy[j_idx] + (i * h - xyz[at, 0]) ** 2)
 
                     # Initialize arrays for potentials and charge
                     ppot = np.zeros(nx)
                     rrho = np.zeros(nx)
-                    #hpot00 = np.zeros(nx)
+                    hpot00 = np.zeros(nx)
 
                     # Initialization of intervals
                     j_ch = 0
                     j_p_s = 0
-                    #j_vht = 0
+                    j_vht = 0
 
                     # Check if optimization is enabled
                     if OPTIMIZATIONLEVEL != 0:
@@ -214,11 +209,11 @@ def pseudoDiag_ML4Den(Domain, Atoms, elem, N_elements, density_file_path, A, CG_
                             # Evaluate the splines
                             ppot[i_idx], j_p_s = fsplevalIO(z_p_s, c_p_s, d_p_s, x_pot_s, r1[i_idx], j_p_s)
                             rrho[i_idx], j_ch = fsplevalIO(z_chg, c_chg, d_chg, x_charg, r1[i_idx], j_ch)
-                            #hpot00[i_idx], j_vht = fsplevalIO(z_vht, c_vht, d_vht, x_vhart, r1[i_idx], j_vht)
+                            hpot00[i_idx], j_vht = fsplevalIO(z_vht, c_vht, d_vht, x_vhart, r1[i_idx], j_vht)
 
                             ppot[iPlusOne], j_p_s = fsplevalIO(z_p_s, c_p_s, d_p_s, x_pot_s, r1[iPlusOne], j_p_s)
                             rrho[iPlusOne], j_ch = fsplevalIO(z_chg, c_chg, d_chg, x_charg, r1[iPlusOne], j_ch)
-                            #hpot00[iPlusOne], j_vht = fsplevalIO(z_vht, c_vht, d_vht, x_vhart, r1[iPlusOne], j_vht)
+                            hpot00[iPlusOne], j_vht = fsplevalIO(z_vht, c_vht, d_vht, x_vhart, r1[iPlusOne], j_vht)
                         # done atom-specific calculations - now compute potentials, charge.
                     if enableMexFilesTest == 1:
                         ValueError("case not implemented: PsuedoDiagLoops")
@@ -251,7 +246,7 @@ def pseudoDiag_ML4Den(Domain, Atoms, elem, N_elements, density_file_path, A, CG_
 
                     pot[indx:indx_end] += ppot
                     rho0[indx:indx_end] += rrho
-                    #hpot0[indx:indx_end] += hpot00
+                    hpot0[indx:indx_end] += hpot00
                     indx = indx_end
 
     # --- Zero check: atomic rho0 ---
@@ -260,34 +255,122 @@ def pseudoDiag_ML4Den(Domain, Atoms, elem, N_elements, density_file_path, A, CG_
           " max =", float(rho0.max()),
           " any_nonzero =", bool(np.any(rho0 != 0)))
 
-    # --- Plot atomic-superposition density along x (mid y,z) using rho0, then reset rho0 ---
-    try:
-        rho_atomic = rho0.reshape(nx, ny, nz)
+    #--- Plot atomic-superposition density along x (mid y,z) using rho0, then reset rho0 ---
+    # Plot e/grid
+    rho0_3d = rho0.reshape(nx, ny, nz)
+    hpot0_3d = hpot0.reshape(nx, ny, nz)
+    pot_3d = pot.reshape(nx, ny, nz)
 
-        # mid-plane line
-        mid_j = ny // 2
-        mid_k = nz // 2
-        line_atomic = rho_atomic[:, mid_j, mid_k]  # e/Bohr^3 (after rrho scaling)
+    # mid-plane line
+    mid_x = nx // 2
+    mid_y = ny // 2
+    mid_z = nz // 2
+    line_hpot0_x = hpot0_3d[:, mid_y, mid_z]
+    line_hpot0_y = hpot0_3d[:, mid_y, mid_z]
+    line_hpot0_z = hpot0_3d[:, mid_y, mid_z]
+    line_pot_x = pot_3d[:, mid_y, mid_z]
+    line_pot_y = pot_3d[:, mid_y, mid_z]
+    line_pot_z = pot_3d[:, mid_y, mid_z]
 
-        # real x coordinates on the target grid (Bohr), origin at 0
-        x_atomic = np.linspace(-rad, rad, nx)
+    # real x coordinates on the target grid (Bohr), origin at 0
+    x = np.linspace(0, 2 * rad, nx)
+    y = np.linspace(0, 2 * rad, ny)
+    z = np.linspace(0, 2 * rad, nz)
 
-        plt.figure(figsize=(7.5, 4))
-        plt.plot(x_atomic, line_atomic, label='Atomic superposition (mid y,z)')
-        plt.xlabel('x (Bohr)')
-        plt.ylabel('density (e/Bohr^3)')
-        plt.title('Atomic-superposition density along x (before ML)')
-        plt.legend()
-        plt.tight_layout()
-        plt.show()
+    # plot hpot0
+    plt.figure(figsize=(7.5, 4))
+    plt.plot(x, line_hpot0_x, label='Atomic superposition (mid y,z)')
+    plt.xlabel('x (Bohr)')
+    plt.ylabel('atomic unit')
+    plt.title('Atomic-superposition hartree pot along x (before ML)')
+    plt.legend()
+    plt.tight_layout()
+    plt.show()
 
-        # keep for later comparison plot (after ML interpolation)
-        atomic_xline_for_plot = line_atomic.copy()
-    except Exception as _e:
-        print('[WARN] plotting atomic rho0 failed:', _e)
+    plt.figure(figsize=(7.5, 4))
+    plt.plot(y, line_hpot0_y, label='Atomic superposition (mid x,z)')
+    plt.xlabel('y (Bohr)')
+    plt.ylabel('atomic unit')
+    plt.title('Atomic-superposition hartree pot along y (before ML)')
+    plt.legend()
+    plt.tight_layout()
+    plt.show()
+
+    plt.figure(figsize=(7.5, 4))
+    plt.plot(z, line_hpot0_z, label='Atomic superposition (mid x,y)')
+    plt.xlabel('z (Bohr)')
+    plt.ylabel('atomic unit')
+    plt.title('Atomic-superposition hartree pot along z (before ML)')
+    plt.legend()
+    plt.tight_layout()
+    plt.show()
+
+    plt.figure(figsize=(7.5, 4))
+    plt.plot(x, line_pot_x, label='Atomic superposition (mid y,z)')
+    plt.xlabel('x (Bohr)')
+    plt.ylabel('atomic unit')
+    plt.title('Atomic-superposition pot along x (before ML)')
+    plt.legend()
+    plt.tight_layout()
+    plt.show()
+
+    plt.figure(figsize=(7.5, 4))
+    plt.plot(y, line_pot_y, label='Atomic superposition (mid x,z)')
+    plt.xlabel('y (Bohr)')
+    plt.ylabel('atomic unit')
+    plt.title('Atomic-superposition pot along y (before ML)')
+    plt.legend()
+    plt.tight_layout()
+    plt.show()
+
+    plt.figure(figsize=(7.5, 4))
+    plt.plot(z, line_pot_z, label='Atomic superposition (mid x,y)')
+    plt.xlabel('z (Bohr)')
+    plt.ylabel('atomic unit')
+    plt.title('Atomic-superposition pot along z (before ML)')
+    plt.legend()
+    plt.tight_layout()
+    plt.show()
+
+    # Plot e/bohr^3
+    rho_bohr3 = rho0 / (h**3)
+    rho_bohr3_3d = rho_bohr3.reshape(nx, ny, nz)
+
+    # mid-plane line
+    line_rho0_x = rho_bohr3_3d[:, mid_y, mid_z]  # e/Bohr^3 (after rrho scaling)
+    line_rho0_y = rho_bohr3_3d[mid_x, :, mid_z]
+    line_rho0_z = rho_bohr3_3d[mid_x, mid_y, :]
+
+    plt.figure(figsize=(7.5, 4))
+    plt.plot(x, line_rho0_x, label='Atomic superposition (mid y,z)')
+    plt.xlabel('x (Bohr)')
+    plt.ylabel('density (e/bohr^3)')
+    plt.title('Atomic-superposition density along x (before ML)')
+    plt.legend()
+    plt.tight_layout()
+    plt.show()
+
+    plt.figure(figsize=(7.5, 4))
+    plt.plot(y, line_rho0_y, label='Atomic superposition (mid x,z)')
+    plt.xlabel('y (Bohr)')
+    plt.ylabel('density (e/bohr^3)')
+    plt.title('Atomic-superposition density along y (before ML)')
+    plt.legend()
+    plt.tight_layout()
+    plt.show()
+
+    plt.figure(figsize=(7.5, 4))
+    plt.plot(z, line_rho0_z, label='Atomic superposition (mid x,y)')
+    plt.xlabel('z (Bohr)')
+    plt.ylabel('density (e/bohr^3)')
+    plt.title('Atomic-superposition density along z (before ML)')
+    plt.legend()
+    plt.tight_layout()
+    plt.show()
 
     # IMPORTANT: clear rho0 so ML path can overwrite it cleanly
     rho0.fill(0.0)
+    #hpot0.fill(0.0)
 
     # ========================================== #
     # 2. READ AND INTERPOLATE ML-PREDICTED 3D DENSITY
@@ -330,139 +413,33 @@ def pseudoDiag_ML4Den(Domain, Atoms, elem, N_elements, density_file_path, A, CG_
     # density_ang = density_3d.astype(np.float64) / (Ngrid * Vcell_ang3)
     # 1/Å^3 -> 1/Bohr^3   (multiply by a0^3)
     density_bohr3 = density_ang3 * ( A0_ANG ** 3 )
+    # density_bohr3 = density_bohr3 / 2.0
 
-    # 2.Build the file grid (in Bohr) to match your code’s units
-    box_length_ml_bohr = float(box_length_ml_ang) / A0_ANG
-
-    # ✅ 3. Compute atomic center (in Bohr)
-    # Collect coords, force each into shape (3,)
-    coords = [np.asarray(atom['coord'], dtype=float).reshape(3, ) for atom in Atoms]
-
-    # Stack into (N_atoms, 3) and take mean along atoms → (3,)
-    geom_center = np.mean(np.stack(coords, axis=0), axis=0)
-
-    # Reshape into a (3,1) column vector
-    geom_center = geom_center.reshape(3, 1)
-
-    print("geom_center shape:", geom_center.shape)  # should be (3, 1)
-    print("geom_center:\n", geom_center)
-
-    # ✅ 4. Create and shift ML grid
-    x_ml = np.linspace(0.0, box_length_ml_bohr, nx_ml)
-    print("x_ml shape:", x_ml.shape)
-    y_ml = np.linspace(0.0, box_length_ml_bohr, ny_ml)
-    print("y_ml shape:", y_ml.shape)
-    z_ml = np.linspace(0.0, box_length_ml_bohr, nz_ml)
-    print("z_ml shape:", z_ml.shape)
-
-    x_ml -= geom_center[0]
-    y_ml -= geom_center[1]
-    z_ml -= geom_center[2]
-
-    # ✅ 5. Now print the correct range
-    print("Target grid min/max:")
-    print(f"ML X grid: {x_ml.min():.2f} → {x_ml.max():.2f}")
-
-    # # Create the linear interpolator
-    # density_interpolator = RegularGridInterpolator(
-    #   (z_file, y_file, x_file),
-    #   density_3d, # method='linear',
-    #   bounds_error=False,
-    #   fill_value=0.0
-    # )
-
-    # No longer use interpolation
-    # # Create coordinate arrays for your target grid
-    # print("rad: ", rad)
-    # print("nx, ny, nz:", nx, ny, nz)
-    # print("h: ", h)
-    # x_target = np.linspace(-rad, rad, nx)
-    # y_target = np.linspace(-rad, rad, ny)
-    # z_target = np.linspace(-rad, rad, nz)
-    # print(f"X: {x_target.min():.2f} → {x_target.max():.2f}")
-    #
-    # # Create meshgrid for interpolation
-    # X_target, Y_target, Z_target = np.meshgrid(x_target, y_target, z_target, indexing='ij')
-    # target_points = np.stack([X_target.ravel(), Y_target.ravel(), Z_target.ravel()], axis=-1)
-    #
-    # # Interpolate ML density to target grid and flatten
-    # print("Interpolating ML density to target grid...")
-    #
-    # # rho0_interpolated = density_interpolator(target_points)
-    #
-    # # Compute spacing of ML grid
-    # dx = x_ml[1] - x_ml[0]
-    # dy = y_ml[1] - y_ml[0]
-    # dz = z_ml[1] - z_ml[0]
-    #
-    # # Convert target physical coordinates → ML grid index coordinates
-    # Z_idx = (Z_target.ravel() - z_ml[0]) / dz
-    # Y_idx = (Y_target.ravel() - y_ml[0]) / dy
-    # X_idx = (X_target.ravel() - x_ml[0]) / dx
-    #
-    # coords_idx = np.vstack([X_idx, Y_idx, Z_idx]) # shape: (3, N)
-    #
-    # # Perform cubic spline interpolation
-    # rho0_interpolated = map_coordinates(
-    #     density_bohr3,
-    #     coords_idx,
-    #     order=3, # Cubic spline
-    #     mode='constant',
-    #     cval=0.0
-    # )
-
-    mid_y, mid_z = density_bohr3.shape[1] // 2, density_bohr3.shape[2] // 2
-    line_raw = density_bohr3[:, mid_y, mid_z]
+    mid_x, mid_y, mid_z = density_bohr3.shape[0] // 2, density_bohr3.shape[1] // 2, density_bohr3.shape[2] // 2
+    line_ml_x = density_bohr3[:, mid_y, mid_z]
+    line_ml_y = density_bohr3[mid_x, :, mid_z]
+    line_ml_z = density_bohr3[mid_x, mid_y, :]
 
     plt.figure()
-    plt.plot(x_ml, line_raw, marker='o')
+    plt.plot(x, line_ml_x, marker='o')
     plt.title("Raw ML density along x (mid y,z)")
     plt.xlabel('x (Bohr)')
     plt.ylabel("density (e/bohr^3)")
     plt.show()
 
-    # line_interp = rho0_interpolated.reshape(nx, ny, nz)[:, ny // 2, nz // 2]
-    #
-    # plt.figure()
-    # plt.plot(x_ml, density_bohr3[:, mid_y, mid_z], 'o', label="Raw")
-    # plt.plot(x_target, line_interp, 'o', label="Interpolated")
-    # plt.title("Comparison: raw vs interpolated density along x")
-    # plt.xlabel("x (Bohr)")
-    # plt.ylabel("density (e/Bohr^3)")
-    # plt.legend()
-    # plt.show()
+    plt.figure()
+    plt.plot(y, line_ml_y, marker='o')
+    plt.title("Raw ML density along y (mid x,z)")
+    plt.xlabel('y (Bohr)')
+    plt.ylabel("density (e/bohr^3)")
+    plt.show()
 
-    # rho0 = (rho0_interpolated * (h**3)).reshape(n)
-
-    # print(f"▶ max density after spline interpolation: {rho0_interpolated.max():.6f}")
-
-    # idx = np.unravel_index(np.argmax(rho0), rho0.shape)
-    # print("Density peak index:", idx)
-    # print("Peak location (Bohr):", x_target[idx[0]], y_target[idx[1]], z_target[idx[2]])
-
-    # assume rho0 is your raw interpolated array, and h is your DFT grid spacing
-    # and Z_sum is your total number of electrons
-
-    # # 1. Integration on DFT grid BEFORE any unit conversion or clipping
-    # electron_count_raw = np.sum(rho0) * h ** 3
-    # print(f"▶ raw interpolated ML density integrates to {electron_count_raw:.6f} e⁻")
-    #
-    # # ==========================================
-    # # UNIT CONVERSION: Å³ → bohr³
-    # # ==========================================
-    # BOHR_TO_ANGSTROM = 0.529177210903
-    # ANGSTROM3_TO_BOHR3 = 1.0 / (BOHR_TO_ANGSTROM ** 3)
-    #
-    # print(f"ML density before unit conversion: min={np.min(rho0):.6f}, max={np.max(rho0):.6f} electrons/Å³")
-    #
-    # # Convert from electrons/Å³ to electrons/bohr³
-    # rho0 = rho0 * ANGSTROM3_TO_BOHR3
-    #
-    # print(f"ML density after unit conversion: min={np.min(rho0):.6f}, max={np.max(rho0):.6f} electrons/bohr³")
-    # print(f"Conversion factor: {ANGSTROM3_TO_BOHR3:.6f}")
-
-    # 2. After any unit conversion (e.g. Å³→bohr³), but BEFORE normalization
-    # (only if you actually convert; if you commented it out, skip this)
+    plt.figure()
+    plt.plot(z, line_ml_z, marker='o')
+    plt.title("Raw ML density along z (mid x,y)")
+    plt.xlabel('z (Bohr)')
+    plt.ylabel("density (e/bohr^3)")
+    plt.show()
 
     # use the ml data directly
     rho0 = (density_bohr3 * (h**3)).reshape(n)
@@ -510,18 +487,50 @@ def pseudoDiag_ML4Den(Domain, Atoms, elem, N_elements, density_file_path, A, CG_
     # 4. Check extremes & noise
     print(f"▶ ML density min/max before clipping: {rho0.min():.3e}, {rho0.max():.3e}")
 
-    # Calculate Hartree potential using the same method as in SCF loop
-    # For initial guess, we calculate the Hartree potential of the ML density
-    hrhs = (4 * np.pi / h ** 3) * rho0
-    # Solve Poisson equation for Hartree potential
-    if CG_prec and PRE is not None:
-        print("Using preconditioned CG for Hartree potential")
-        hpot0, _ = pcg(A, hrhs, np.zeros(n), 200, 1e-4, PRE, 'precLU')
-    else:
-        print("Using standard CG for Hartree potential")
-        hpot0, _ = pcg(A, hrhs, np.zeros(n), 200, 1e-4)
+    # # Calculate Hartree potential using the same method as in SCF loop
+    # # For initial guess, we calculate the Hartree potential of the ML density
+    # hrhs = (4 * np.pi / h ** 3) * rho0
+    # # Solve Poisson equation for Hartree potential
+    # if CG_prec and PRE is not None:
+    #     print("Using preconditioned CG for Hartree potential")
+    #     hpot0, _ = pcg(A, hrhs, np.zeros(n), 200, 1e-4, PRE, 'precLU')
+    # else:
+    #     print("Using standard CG for Hartree potential")
+    #     hpot0, _ = pcg(A, hrhs, np.zeros(n), 200, 1e-4)
+    #
+    # print(f"Hartree potential statistics: min={np.min(hpot0):.6f}, max={np.max(hpot0):.6f}")
 
-    print(f"Hartree potential statistics: min={np.min(hpot0):.6f}, max={np.max(hpot0):.6f}")
+    # hpot0_3d = hpot0.reshape(nx, ny, nz)
+    # line_hpot0_x = hpot0_3d[:, mid_y, mid_z]
+    # line_hpot0_y = hpot0_3d[mid_x, :, mid_z]
+    # line_hpot0_z = hpot0_3d[mid_x, mid_y, :]
+    # # plot hpot0
+    # plt.figure(figsize=(7.5, 4))
+    # plt.plot(x, line_hpot0_x, label='Atomic superposition (mid y,z)')
+    # plt.xlabel('x (Bohr)')
+    # plt.ylabel('atomic unit')
+    # plt.title('ML hartree pot along x')
+    # plt.legend()
+    # plt.tight_layout()
+    # plt.show()
+    #
+    # plt.figure(figsize=(7.5, 4))
+    # plt.plot(y, line_hpot0_y, label='Atomic superposition (mid x,z)')
+    # plt.xlabel('y (Bohr)')
+    # plt.ylabel('atomic unit')
+    # plt.title('ML hartree pot along y')
+    # plt.legend()
+    # plt.tight_layout()
+    # plt.show()
+    #
+    # plt.figure(figsize=(7.5, 4))
+    # plt.plot(z, line_hpot0_z, label='Atomic superposition (mid x,y)')
+    # plt.xlabel('z (Bohr)')
+    # plt.ylabel('atomic unit')
+    # plt.title('ML hartree pot along z')
+    # plt.legend()
+    # plt.tight_layout()
+    # plt.show()
 
     print("pseudoDiag_ML4Den completed successfully")
 

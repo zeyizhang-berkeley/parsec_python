@@ -7,7 +7,8 @@ import scipy.sparse.linalg as spla
 from scipy.io import loadmat
 from fd3d import fd3d
 from nuclear import nuclear
-from pseudoNL_new import pseudoNL
+from pseudoNL import pseudoNL
+from pseudoNL_ML4Den import pseudoNL_ML4Den
 from exc_nspn import exc_nspn
 from nelectrons import nelectrons
 from first_filt import first_filt
@@ -17,6 +18,7 @@ from chsubsp import chsubsp
 from occupations import occupations
 from pcg import pcg
 import msecant1
+import matplotlib.pyplot as plt
 
 # Variables and definitions
 # A      = sparse matrix representing the discretization of the Laplacian
@@ -419,7 +421,7 @@ def estimate_radius_and_grid(Atoms, elem, N_elements, h, ml_file_path):
         ny = ny_ml
         nz = nz_ml
         box_length_ml_ang = 10.0
-        sph_rad = box_length_ml_ang / A0_ANG
+        sph_rad = ( box_length_ml_ang / 2 ) / A0_ANG
 
     if ml_file_path is None:  # use radius from default atoms
         # Iterate over the types of atoms
@@ -616,13 +618,33 @@ for at in Atoms:
 # Compute the non-local part of the pseudopotential
 print(' Working.....setting up nonlocal part of ionic potential...')
 start_time = time.time()
-vnl = pseudoNL(Domain, Atoms, elem, N_elements)
+if density_method == 'atomic':
+    print('Using atomic superposition method...')
+    vnl = pseudoNL(Domain, Atoms, elem, N_elements)
+else:
+    print(f'Using ML-predicted density from: {ml_file_path}')
+    vnl = pseudoNL_ML4Den(Domain, Atoms_raw, elem, N_elements)
+
 pseudoNL_time = time.time() - start_time
 print(pseudoNL_time)
 # print(vnl)
 
 # Set h from the Domain object
 h = Domain['h']
+rad = Domain['radius']
+if density_method == 'atomic':
+    x = np.linspace(-rad, rad, nx)
+    y = np.linspace(-rad, rad, ny)
+    z = np.linspace(-rad, rad, nz)
+else:
+    x = np.linspace(0, 2 * rad, nx)
+    y = np.linspace(0, 2 * rad, ny)
+    z = np.linspace(0, 2 * rad, nz)
+
+# mid-plane line
+mid_x = nx // 2
+mid_y = ny // 2
+mid_z = nz // 2
 
 # Screening from Gaussian density
 # Transposing and dividing by h^3 as per the original MATLAB code
@@ -638,6 +660,39 @@ print(exc_time)
 
 # Transpose the result back to match the original code's xcpot = XCpot'
 xcpot = np.transpose(XCpot)
+
+xcpot_3d = xcpot.reshape(nx, ny, nz)
+# mid-plane line
+line_xcpot_x = xcpot_3d[:, mid_y, mid_z]
+line_xcpot_y = xcpot_3d[mid_x, :, mid_z]
+line_xcpot_z = xcpot_3d[mid_x, mid_y, :]
+
+plt.figure(figsize=(7.5, 4))
+plt.plot(x, line_xcpot_x, label='converged (mid y,z)')
+plt.xlabel('x (Bohr)')
+plt.ylabel('density (e/bohr^3)')
+plt.title('converged xcpot along x')
+plt.legend()
+plt.tight_layout()
+plt.show()
+
+plt.figure(figsize=(7.5, 4))
+plt.plot(y, line_xcpot_y, label='converged (mid x,z)')
+plt.xlabel('y (Bohr)')
+plt.ylabel('density (e/bohr^3)')
+plt.title('converged xcpot along y')
+plt.legend()
+plt.tight_layout()
+plt.show()
+
+plt.figure(figsize=(7.5, 4))
+plt.plot(z, line_xcpot_z, label='converged (mid x,y)')
+plt.xlabel('z (Bohr)')
+plt.ylabel('density (e/bohr^3)')
+plt.title('converged xcpot along z')
+plt.legend()
+plt.tight_layout()
+plt.show()
 
 #Calculate the number of electrons
 Nelec = nelectrons(Atoms, elem, N_elements)
@@ -808,6 +863,74 @@ else:
     print(" CONVERGED SOLUTION!! ")
     print("**************************")
     print("         ")
+
+# Plot e/bohr^3
+rho_bohr3 = rho / (h**3)
+rho_3d = rho_bohr3.reshape(nx, ny, nz)
+Hpot_3d = Hpot.reshape(nx, ny, nz)
+# mid-plane line
+line_den_x = rho_3d[:, mid_y, mid_z]
+line_den_y = rho_3d[mid_x, :, mid_z]
+line_den_z = rho_3d[mid_x, mid_y, :]
+
+plt.figure(figsize=(7.5, 4))
+plt.plot(x, line_den_x, label='converged (mid y,z)')
+plt.xlabel('x (Bohr)')
+plt.ylabel('density (e/bohr^3)')
+plt.title('converged density along x')
+plt.legend()
+plt.tight_layout()
+plt.show()
+
+plt.figure(figsize=(7.5, 4))
+plt.plot(y, line_den_y, label='converged (mid x,z)')
+plt.xlabel('y (Bohr)')
+plt.ylabel('density (e/bohr^3)')
+plt.title('converged density along y')
+plt.legend()
+plt.tight_layout()
+plt.show()
+
+plt.figure(figsize=(7.5, 4))
+plt.plot(z, line_den_z, label='converged (mid x,y)')
+plt.xlabel('z (Bohr)')
+plt.ylabel('density (e/bohr^3)')
+plt.title('converged density along z')
+plt.legend()
+plt.tight_layout()
+plt.show()
+
+line_Hpot_x = Hpot_3d[:, mid_y, mid_z]
+line_Hpot_y = Hpot_3d[mid_x, :, mid_z]
+line_Hpot_z = Hpot_3d[mid_z, mid_y, :]
+# plot hpot0
+plt.figure(figsize=(7.5, 4))
+plt.plot(x, line_Hpot_x, label='converged (mid y,z)')
+plt.xlabel('x (Bohr)')
+plt.ylabel('unknown unit')
+plt.title('converged hartree pot along x')
+plt.legend()
+plt.tight_layout()
+plt.show()
+
+plt.figure(figsize=(7.5, 4))
+plt.plot(y, line_Hpot_y, label='converged (mid x,z)')
+plt.xlabel('y (Bohr)')
+plt.ylabel('unknown unit')
+plt.title('converged hartree pot along y')
+plt.legend()
+plt.tight_layout()
+plt.show()
+
+plt.figure(figsize=(7.5, 4))
+plt.plot(z, line_Hpot_z, label='converged (mid x,y)')
+plt.xlabel('z (Bohr)')
+plt.ylabel('unknown unit')
+plt.title('converged hartree pot along z')
+plt.legend()
+plt.tight_layout()
+plt.show()
+
 
 # Print Eigenvalues and Occupations
 print("   State  Eigenvalue [Ry]     Eigenvalue [eV]  Occupation ")
