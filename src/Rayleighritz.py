@@ -1,5 +1,4 @@
-import numpy as np
-
+import cupy as cp
 # TODO: C++ version
 def Rayleighritz(Vin, W, n):
     """
@@ -15,18 +14,9 @@ def Rayleighritz(Vin, W, n):
     Returns:
     G (ndarray): Output matrix G of size (n, n).
     """
-    # Ensure Vin and W are numpy arrays
-    Vin = np.asarray(Vin)
-    W = np.asarray(W)
 
-    # Initialize the output matrix G with zeros
-    G = np.zeros((n, n))
 
     # Calculate G = W^T * Vin
-    for j in range(n):
-        for i in range(j + 1):
-            # Compute the dot product for G[i, j] and G[j, i]
-            G[i, j] = np.dot(Vin[:, i], W[:, j])
-            G[j, i] = G[i, j]  # Symmetric matrix
+    G = W.T @ Vin
+    return 0.5 * (G + G.T)
 
-    return G

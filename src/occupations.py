@@ -1,4 +1,4 @@
-import numpy as np
+import cupy as cp
 from FermiDirac import FermiDirac
 
 
@@ -20,12 +20,12 @@ def occupations(lam, Temp, Nelec, tol):
     # Initialize variables
     its = 0
     maxits = 200
-
+    lam = cp.asarray(lam, dtype=cp.float32)
     # Set up initial values for bisection
-    a = np.min(lam) - 1
+    a = cp.min(lam) - 1.0
     fa, _ = FermiDirac(lam, a, Temp, Nelec)
-    lmax = int(np.ceil(Nelec / 2)) + 1
-    b = lam[lmax - 1] + 1
+    lmax = int(cp.ceil(Nelec / 2).item()) + 1
+    b = lam[lmax - 1] + 1.0
     fb, _ = FermiDirac(lam, b, Temp, Nelec)
 
     # Midpoint for the bisection algorithm
@@ -33,12 +33,12 @@ def occupations(lam, Temp, Nelec, tol):
     fc, occup = FermiDirac(lam, c, Temp, Nelec)
 
     # Calculate error: sum of occupation numbers should match `Nelec`
-    error = 2 * np.sum(occup) - Nelec
+    error = 2 * cp.sum(occup) - Nelec
 
     # If `fa * fb > tol`, return default occupation values
     if fa * fb > tol:
         c = b
-        occup = np.ones(lmax)
+        occup = cp.ones(lmax, dtype=cp.float32)
         print('In bisect - fa*fb > 0')
         return c, occup
 
@@ -47,7 +47,7 @@ def occupations(lam, Temp, Nelec, tol):
         its += 1
         c = (b + a) / 2
         fc, occup = FermiDirac(lam, c, Temp, Nelec)
-        error = 2 * np.sum(occup) - Nelec
+        error = 2 * cp.sum(occup) - Nelec
 
         # Update interval for bisection
         if fc * fb < 0:

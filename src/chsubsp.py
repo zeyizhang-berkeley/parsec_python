@@ -1,5 +1,5 @@
-import numpy as np
-from scipy.linalg import qr, eigh
+import cupy as cp
+from cupy.linalg import qr, eigh
 #from numpy.linalg import eigh
 from lanczosForChsubsp import lanczosForChsubsp
 from ch_filter import ch_filter
@@ -22,22 +22,23 @@ def chsubsp(deg, nev, H):
     """
 
     # Set initial parameters
+    H = cp.asarray(H, dtype=cp.float32)
     Lanc_steps = max(3 * nev, 450)
     Energ_tol = 0.05
     Max_out_iter = 30
     n = H.shape[0]
 
     # call Lanczos with Lanc_steps steps for getting the upper interval bound
-    W, ritzv, upperb = lanczosForChsubsp(H, nev, np.random.randn(n, 1), Lanc_steps)
+    W, ritzv, upperb = lanczosForChsubsp(H, nev, cp.random.randn(n, 1, dtype = cp.float32), Lanc_steps)
 
     # use previous eigenvalues for lower bound
-    tr0 = np.sum(ritzv)
-
+    tr0 = cp.sum(ritzv)
+    ritzv = cp.asarray(ritzv, dtype = cp.float32)
     # Outer iteration loop
     for it in range(Max_out_iter):
         # Use the smallest eigenvalue estimate for scaling
-        lam1 = np.min(ritzv)
-        lowerb = np.max(ritzv)
+        lam1 = cp.min(ritzv)
+        lowerb = cp.max(ritzv)
         if lowerb > upperb:
             raise ValueError("Bounds are incorrect: lower bound is greater than upper bound")
 
@@ -47,28 +48,31 @@ def chsubsp(deg, nev, H):
         # Rayleigh-ritz projection
         # orthonormalize the basis, should be replaced with better method for real computations
         # Orthonormalize the basis using QR decomposition
-        W, R = qr(W, mode='economic')
-
+        W, _ = qr(W, mode='reduced')
+        #changed from economic to reduced bc cp 
         # Compute Rayleigh-Ritz projection matrix G = W'*H*W
         Vin = H @ W
-        n = Vin.shape[0]
+        #n = Vin.shape[0]
         n2 = Vin.shape[1]
 
         if OPTIMIZATIONLEVEL != 0:
             G = Rayleighritz(Vin, W, n2)
         else:
+            G = W.T @ Vin
+            G = (G + G.T) * 0.5
+#im not tryna compute on loops, 
             # Manually compute G if optimization is disabled
-            G = np.zeros((n2, n2))
-            for j in range(n2):
-                for i in range(j + 1):
-                    G[i, j] = np.dot(Vin[:, i], W[:, j])
-                    G[j, i] = G[i, j]  # G is symmetric
+           # G = cp.zeros((n2, n2))
+            #for j in range(n2):
+            #    for i in range(j + 1):
+            #        G[i, j] = np.dot(Vin[:, i], W[:, j])
+            #        G[j, i] = G[i, j]  # G is symmetric
 
             # Optional validation with Mex file comparison
-            if enableMexFilesTest == 1:
-                G2 = Rayleighritz(Vin, W, n2)
-                if np.any(abs(G - G2) > 1e-6):
-                    ValueError("Mex file discrepancy for Rayleighritz.c")
+  #          if enableMexFilesTest == 1:
+   #             G2 = Rayleighritz(Vin, W, n2)
+     #           if np.any(abs(G - G2) > 1e-6):
+     #               ValueError("Mex file discrepancy for Rayleighritz.c")
 
         # Compute the eigenvalues and eigenvectors of G
         ritzv, Q = eigh(G)
@@ -77,8 +81,8 @@ def chsubsp(deg, nev, H):
         W = W @ Q
 
         # Check for convergence based on the sum of eigenvalues
-        tr1 = np.sum(ritzv[:nev])
-        if np.abs(tr1 - tr0) < Energ_tol * np.abs(tr1):
+        tr1 = cp.sum(ritzv[:nev])
+        if cp.abs(tr1 - tr0) < Energ_tol * cp.abs(tr1):
             break
 
         tr0 = tr1

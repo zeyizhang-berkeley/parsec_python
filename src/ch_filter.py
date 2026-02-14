@@ -1,7 +1,7 @@
 
-OPTIMIZATIONLEVEL = 0
-enableMexFilesTest = 0
-def ch_filter(A, x, deg, lam1, low, high, optimization_level=0, enable_mex_files_test=False):
+#OPTIMIZATIONLEVEL = 0
+#enableMexFilesTest = 0
+def ch_filter(A, x, deg, lam1, low, high):
     """
     Python translation of the MATLAB `ch_filter` function.
     Applies the Chebyshev filter to a given vector `x` using matrix `A`.
@@ -74,11 +74,10 @@ def ch_filter(A, x, deg, lam1, low, high, optimization_level=0, enable_mex_files
     #     else:
     y = (A @ x - c * x) * (sigma1 / e)
 
-    twoDividedbysigma1 = 2 / sigma1
-    inverseOfe = 1 / e
-
+    twoDividedbysigma1 = 2.0 / sigma1
+    inverseOfe = 1.0 / e
     for i in range(2, deg + 1):
-        sigma_new = 1 / (twoDividedbysigma1 - sigma)
+        sigma_new = 1.0 / (twoDividedbysigma1 - sigma)
         t1 = 2 * sigma_new * inverseOfe
         t2 = sigma * sigma_new
         ynew = (A @ y - c * y) * t1 - t2 * x

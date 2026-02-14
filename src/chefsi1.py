@@ -1,69 +1,63 @@
-import numpy as np
-from scipy.linalg import qr, eigh
+import cupy as cp
+from cupy.linalg import qr, eigh
+import cupyx.scipy.sparse as cpsparse
+import scipy.sparse as sps
+
 from Rayleighritz import Rayleighritz
 from lanczosForChefsi1 import lanczosForChefsi1
 from ch_filter import ch_filter
 
+
 OPTIMIZATIONLEVEL = 0
 enableMexFilesTest = 0
+
+
+def _to_gpu_matrix(H):
+    """Convert H to CuPy dense or CuPy sparse (CSR) format."""
+    if isinstance(H, cp.ndarray):
+        return H.astype(cp.float32, copy=False), "dense"
+    elif sps.issparse(H):
+        return cpsparse.csr_matrix(H.astype("float32")), "sparse"
+    elif isinstance(H, cpsparse.spmatrix):
+        return H.astype(cp.float32, copy=False), "sparse"
+    else:
+        raise TypeError("H must be CuPy array or SciPy/CuPy sparse matrix")
+
+
 def chefsi1(Vin, ritzv, deg, nev, H):
     """
-    Python translation of the MATLAB `chefsi1` function.
-
-    Parameters:
-    Vin (ndarray): Initial basis vector matrix.
-    ritzv (ndarray): Array containing previous Ritz values.
-    deg (int): Polynomial degree.
-    nev (int): Number of occupied states.
-    H (ndarray): Hamiltonian matrix.
-
-    Returns:
-    W (ndarray): Filtered eigenvector matrix.
-    ritzv (ndarray): Updated Ritz values.
+    GPU-accelerated CheFSI (Chebyshev Filtered Subspace Iteration)
+    using CuPy + cuBLAS/cuSPARSE.
     """
     n, n2 = Vin.shape
-    G = np.zeros((n2, n2))
     if nev >= n2:
-        raise ValueError('Vin should have more than nev columns')
+        raise ValueError("Vin should have more than nev columns")
 
-    # call Lanczos with nev = 6 and m=6 to get the upper interval bound
-    upperb = lanczosForChefsi1(H, 6, np.random.randn(n, 1), 6, 0.0)
+    H, mode = _to_gpu_matrix(H)
 
-    # Use max of previous eigenvalues for lower bound
-    lowerb = np.max(ritzv)
-
-    # Use the smallest eigenvalue estimate for scaling
-    lam1 = np.min(ritzv)
-
+    # --- Compute spectral bounds ---
+    upperb = lanczosForChefsi1(H, 6, cp.random.randn(n, 1, dtype=cp.float32), 6, 0.0)
+    lowerb = cp.max(ritzv)
+    lam1 = cp.min(ritzv)
     if lowerb > upperb:
-        raise ValueError('Bounds are incorrect')
+        raise ValueError("Invalid spectral bounds (lower > upper)")
 
-    # Apply Chebyshev filter to the basis vectors
+    # --- Apply Chebyshev filter (should use GPU ch_filter) ---
     W = ch_filter(H, Vin, deg, lam1, lowerb, upperb)
 
-    # Orthonormalize the basis using QR decomposition
-    W, R = qr(W, mode='economic')
+    # --- QR orthonormalization (GPU) ---
+    W, _ = qr(W, mode="reduced")
 
-    # Rayleigh-Ritz projection: compute G = W.T @ H @ W
-    Vin = H @ W
+    # --- Rayleigh-Ritz projection ---
+    Vin_proj = H @ W  # cuBLAS/cuSPARSE
     if OPTIMIZATIONLEVEL != 0:
-        G = Rayleighritz(Vin, W, n2)
+        G = Rayleighritz(Vin_proj, W, n2)
     else:
-        for j in range(n2):
-            for i in range(j + 1):
-                G[i, j] = np.dot(Vin[:, i], W[:, j])
-                G[j, i] = G[i, j]
-        # TODO: compare performance between c++ and matlab
-        # if enableMexFilesTest == 1:
-        #     G2 = Rayleighritz(Vin, W, n2)
-        #     if (any(abs(G - G2) > 0.000001)):
-        #         exception = struct('message', 'Mex file descreptency for Rayleighritz.c', 'identifier', [], 'stack', {mfilename('fullpath') 'filler'});
-        #         logError(exception)
+        G = W.T @ Vin_proj
+        G = (G + G.T) / 2  # enforce symmetry
 
-    # Diagonalize the Rayleigh-Ritz matrix G
+    # --- Small eigen-decomposition (GPU) ---
     ritzv, Q = eigh(G)
-
-    # Update the basis W and Ritz values
     W = W @ Q
 
     return W, ritzv

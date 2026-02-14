@@ -1,5 +1,6 @@
 import numpy as np
 import scipy.sparse as sp
+import cupy as cp
 from splineData import splineData
 from preProcess import preProcess
 from fspline import fspline
@@ -172,16 +173,24 @@ def pseudoNL(Domain, Atoms, elem, N_elements):
             # - Therefore, ulmspx2 is computed first, then ulmspx1 is calculated by dividing ulmspx2 by / xint.
             # This approach reduces the number of individual calculations and performs them more efficiently.
 
-            ulmspx = np.array(xx) / np.array(dd) * np.array(wavpp) * np.array(vspp)
-            ulmspy = np.array(yy) / np.array(dd) * np.array(wavpp) * np.array(vspp)
-            ulmspz = np.array(zz) / np.array(dd) * np.array(wavpp) * np.array(vspp)
+            xx_gpu = cp.asarray(xx)
+            yy_gpu = cp.asarray(yy)
+            zz_gpu = cp.asarray(zz)
+            dd_gpu = cp.asarray(dd)
+            wavpp_gpu = cp.asarray(wavpp)
+            vspp_gpu = cp.asarray(vspp)
+
+            fac = wavpp_gpu * vspp_gpu / dd_gpu
+            ulmspx = xx_gpu * fac
+            ulmspy = yy_gpu * fac
+            ulmspz = zz_gpu * fac
 
             # Well, should all be real here
-            xmatrix = np.outer(ulmspx, ulmspx) / xint
-            ymatrix = np.outer(ulmspy, ulmspy) / xint
-            zmatrix = np.outer(ulmspz, ulmspz) / xint
+            xmatrix = cp.outer(ulmspx, ulmspx) / xint
+            ymatrix = cp.outer(ulmspy, ulmspy) / xint
+            zmatrix = cp.outer(ulmspz, ulmspz) / xint
 
-            total = xmatrix + ymatrix + zmatrix
+            total_gpu = xmatrix + ymatrix + zmatrix
 
             for i in range(indx):
                 vnll[i * indx:(i + 1) * indx, 0] = nn[i]

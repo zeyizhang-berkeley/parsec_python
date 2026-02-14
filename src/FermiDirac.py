@@ -1,29 +1,28 @@
-import numpy as np
+import cupy as cp
 
 def FermiDirac(lam, EF, Temp, Nelec):
     """
-    Python translation of the MATLAB `FermiDirac` function.
-    Evaluates the Fermi-Dirac distribution for the given eigenvalues.
+    GPU-accelerated Fermi-Dirac distribution using CuPy.
 
     Parameters:
-    lam (ndarray): Array of eigenvalues.
+    lam (cp.ndarray): Eigenvalues (GPU array).
     EF (float): Fermi level.
     Temp (float): Temperature in energy units.
     Nelec (float): Total number of electrons.
 
     Returns:
-    fe (float): Error related to the sum of occupation numbers and Nelec.
-    occup (ndarray): Occupation numbers for each eigenvalue.
+    fe (float): Deviation from expected electron count.
+    occup (cp.ndarray): Occupation numbers on GPU.
     """
     # Constants
-    kT = Temp * 6.33327186e-06  # Scaling temperature
-    spin = 1  # Spin factor; adjust as needed
+    kT = Temp * 6.33327186e-06
+    spin = 1  # spin factor
 
-    # Calculate the occupation numbers using the Fermi-Dirac formula
-    t = 1 + np.exp((lam - EF) / kT)
+    # Fermi–Dirac distribution
+    t = 1 + cp.exp((lam - EF) / kT)
     occup = spin / t
 
-    # Compute the deviation from the expected number of electrons
-    fe = np.sum(occup) - Nelec / 2
+    # Electron count deviation
+    fe = cp.sum(occup) - Nelec / 2
 
     return fe, occup

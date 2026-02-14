@@ -1,6 +1,7 @@
 import os
 import numpy as np
 import pandas as pd
+import cupy as cp 
 import scipy.sparse as sp
 import time
 import scipy.sparse.linalg as spla
@@ -764,7 +765,6 @@ while err > tol and its <= maxits:
     elif its == 1 and diagmeth == 3:
         print('Calling first_filt...')
         W, lam = first_filt(nev + 15, B, poldeg)
-
     else:
         print('Calling chebsf...')
         W, lam = chefsi1(W, lam, poldeg * degreeAdaptiveModifier, nev, B)

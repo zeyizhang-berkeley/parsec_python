@@ -209,11 +209,8 @@ def lanczos(B, nev, v, m, tol, *args):
             G = Rayleighritz(Vin, W, mev)
         else:
             # Construct the Rayleigh quotient matrix manually
-            G = np.zeros((mev, mev))
-            for j in range(mev):
-                for i in range(j + 1):
-                    G[i, j] = np.dot(Vin[:, i], W[:, j])
-                    G[j, i] = G[i, j]  # G is symmetric
+            G = W.T @ Vin
+            G = (G + G.T) * 0.5
 
             # Test against compiled implementation if enabled
             if enableMexFilesTest == 1:

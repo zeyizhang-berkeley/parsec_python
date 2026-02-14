@@ -1,111 +1,85 @@
-import numpy as np
-from scipy.linalg import eigh
+import cupy as cp
+from cupy.linalg import norm, eigh
+import cupyx.scipy.sparse as cpsparse
+import scipy.sparse as sps
 
 enableMexFilesTest = 0
+
+
+def _to_gpu_matrix(B):
+    """Convert B to dense or sparse CuPy matrix."""
+    if isinstance(B, cp.ndarray):
+        return B.astype(cp.float32), "dense"
+    elif sps.issparse(B):
+        return cpsparse.csr_matrix(B.astype("float32")), "sparse"
+    elif isinstance(B, cpsparse.spmatrix):
+        return B.astype(cp.float32), "sparse"
+    else:
+        raise TypeError("B must be CuPy array or SciPy/CuPy sparse matrix")
+
+
 def lanczosForChefsi1(B, nev, v, m, tol=1e-6, reorth=False):
     """
-    Python translation of the MATLAB `lanczosForChefsi1` function.
-    Estimates the upper bound of eigenvalues using Lanczos iterations.
-
-    Parameters:
-    B (ndarray): The matrix to perform Lanczos on.
-    nev (int): Number of desired eigenvalues.
-    v (ndarray): Initial vector.
-    m (int): Number of Lanczos steps.
-    tol (float): Tolerance for convergence.
-    reorth (bool): Whether to perform full reorthogonalization.
-
-    Returns:
-    float: Estimated upper bound for the eigenvalues.
+    GPU version of the Lanczos iteration used in CheFSI.
+    Estimates an upper bound of eigenvalues.
     """
-    bound = 0
+    B, mode = _to_gpu_matrix(B)
 
     n = B.shape[0]
-    v = v / np.linalg.norm(v)
-    #print("v:", v.shape)
+    v = cp.asarray(v, dtype=cp.float32)
+    v = v / norm(v)
+
     v1 = v
-    v0 = np.zeros((n,1))
+    v0 = cp.zeros_like(v)
     k = 0
-    bet = 0
+    bet = 0.0
     ll = 0
 
-    # Pre-allocate memory
-    VV = []
     if reorth:
-        VV = np.zeros((n, m))
+        VV = cp.zeros((n, m), dtype=cp.float32)
+    else:
+        VV = None
 
-    Tmat = np.zeros((m + 1, m + 1))
-    tr = np.zeros(m)
+    Tmat = cp.zeros((m + 1, m + 1), dtype=cp.float32)
+    tr = cp.zeros(m, dtype=cp.float32)
+    bound = 0.0
 
-    # Main Lanczos loop
     while k < m:
         k += 1
-
         if reorth:
-            VV[:, k - 1] = v1
+            VV[:, k - 1] = v1[:, 0]
 
-        # Lanczos iteration
-        #print("B shape: ", B.shape)
-        #print("v1: ", v1.shape)
-        #print("v0: ", v0.shape)
-        #print("bet", bet)
+        # Lanczos step
         v = B @ v1 - bet * v0
-        #print("v: ", v.shape)
+        alp = cp.dot(v1.T, v).item()
+        v -= alp * v1
 
-        # TODO: compare performance between c++ and matlab
-        # if enableMexFilesTest == 1:
-        #     v2 = BTimesv1MinusbetTimesv0(B, v0, v1, bet, findFirstColumnWithNonZeroElement(B))
-        #     if (any(abs(v - v2) > 0.000001))
-        #         exception = struct('message', 'Mex file descreptency for BTimesv1MinusbetTimesv0', 'identifier', [],
-        #                            'stack', {mfilename('fullpath')
-        #         'filler'})
-        #         logError(exception)
-
-        alp = (np.dot(v1.T, v).item()).real
-        #print("alp: ", alp)
-
-        if enableMexFilesTest == 0:
-            v -= alp * v1  # Equivalent to: v = v - alp * v1
-        # else:
-        # TODO: compare performance between c++ and matlab
-
-        #     vTemp = v - alp * v1
-        #     vTemp2 = vMinusalpTimesv1(v, v1, alp)
-        #     v = vTemp
-        #     if (any(abs(vTemp - vTemp2) > 0.000001))
-        #         exception = struct('message', 'Mex file descreptency for vMinusalpTimesv1', 'identifier', [], 'stack',
-        #                            {mfilename('fullpath')
-        #         'filler'})
-        #         logError(exception)
-
-        # Reorthogonalization if required
         if reorth:
             t = VV[:, :k].T @ v
             v -= VV[:, :k] @ t
 
-        # Normalize and store new vector
-        bet = np.linalg.norm(v)
+        bet = norm(v)
+        if bet < tol:
+            break
+
         v0 = v1
         v1 = v / bet
 
-        # Update the tridiagonal matrix
+        # update tridiagonal T matrix
         Tmat[k - 1, k - 1] = alp
         Tmat[k, k - 1] = bet
         Tmat[k - 1, k] = bet
 
-        # Convergence testing
+        # periodic convergence check
         NTest = min(5 * nev, m)
         if (k >= NTest and k % 10 == 0) or k == m:
-            rr, _ = eigh(Tmat[:k, :k])  # Calculate eigenvalues of Tmat
-
-            # upper bound used by chef_si -- not used otherwise.
-            bound = max(np.abs(rr)) + bet
-            tr1 = np.sum(rr[:nev])
+            rr, _ = eigh(Tmat[:k, :k])
+            bound = cp.max(cp.abs(rr)) + bet
+            tr1 = cp.sum(rr[:nev])
             ll += 1
             tr[ll - 1] = tr1
 
-            # Check convergence based on sum of eigenvalues
-            if ll > 1 and np.abs(tr[ll - 1] - tr[ll - 2]) < tol * tr[ll - 2]:
+            if ll > 1 and cp.abs(tr[ll - 1] - tr[ll - 2]) < tol * tr[ll - 2]:
                 break
 
     return bound

@@ -1,5 +1,5 @@
-import numpy as np
-from scipy.linalg import qr, eigh
+import cupy as cp
+from cupy.linalg import qr, eigh
 from Rayleighritz import Rayleighritz
 
 OPTIMIZATIONLEVEL = 0
@@ -9,14 +9,14 @@ def lanczosForChsubsp(B, nev, v, m):
     Perform the Lanczos algorithm for eigenvalue computation.
 
     Args:
-        B (np.ndarray): Input matrix.
+        B (cp.ndarray): Icput matrix.
         nev (int): Number of desired eigenvalues.
-        v (np.ndarray): Initial vector.
+        v (cp.ndarray): Initial vector.
         m (int): Number of Lanczos steps.
 
     Returns:
-        W (np.ndarray): Matrix of approximate eigenvectors.
-        lam (np.ndarray): Approximate eigenvalues.
+        W (cp.ndarray): Matrix of approximate eigenvectors.
+        lam (cp.ndarray): Approximate eigenvalues.
         bound (float): An upper bound for the eigenvalues.
     """
 
@@ -24,48 +24,42 @@ def lanczosForChsubsp(B, nev, v, m):
     tol = 1e-5
 
     # Enable or disable convergence testing based on matrix size
-    if B.shape[0] > 35000:
-        enableConvergenceTest = 0
-    else:
-        enableConvergenceTest = 1
-
+    enableConvergenceTest = 0 if B.shape[0] > 35000 else 1
+    B = cp.asarray(B, dtype=cp.float32)
+    v = cp.asarray(v, dtype=cp.float32)
     # Matrix dimensions and normalization of the initial vector
     n = B.shape[0]
-    v = v / np.linalg.norm(v)
+    v = v / cp.linalg.norm(v)
     v1 = v
-    v0 = np.zeros(n)
+    v0 = cp.zeros(n, dtype=cp.float32)
+    #ZEROES ARE A GPU KILLER ALWAYS INIT FLOAT32
     k = 0
     bet = 0
     ll = 0
 
     # Pre-allocating arrays
-    Tmat = np.zeros((m + 1, m + 1))
+    Tmat = cp.zeros((m + 1, m + 1), dtype=cp.float32)
     tr = []
     rr = []
     X1 = []
     #indx = []
     bound = 0.0
-    VV = np.zeros((n, m))
-    if OPTIMIZATIONLEVEL != 0:
-        ValueError("not implemented yet!")
-        # # Using a custom memory allocation (placeholder for actual implementation)
-        # rr, X1, indx, k, bound = lanWhileLoopForChsubsp(m, v0, v1, B, reorth, nev, VV, Tmat)
-    else:
-        while k < m:
-            k += 1
-            VV[:, k - 1] = v1
+    VV = cp.zeros((n, m), dtype=cp.float32)
 
-            v = B @ v1 - bet * v0
+    while k < m:
+        k += 1
+        VV[:, k - 1] = v1
+
+        v = B @ v1 - bet * v0
             # if enableMexFilesTest == 1:
             #     v2 = BTimesv1MinusbetTimesv0(B, v0, v1, bet, findFirstColumnWithNonZeroElement(B))
             #     if np.any(np.abs(v - v2) > 1e-6):
             #         ValueError("Mex file discrepancy for BTimesv1MinusbetTimesv0")
 
             # Calculate alpha
-            alp = np.dot(v1, v)
+        alp = cp.dot(v1, v)
 
-            if enableMexFilesTest == 0:
-                v = v - alp * v1
+        v = v - alp * v1
             # else:
             #     vTemp = v - alp * v1
             #     vTemp2 = vMinusalpTimesv1(v, v1, alp)
@@ -74,41 +68,34 @@ def lanczosForChsubsp(B, nev, v, m):
             #         ValueError("Mex file discrepancy for vMinusalpTimesv1")
 
             # Reorthogonalization, if needed
-            if reorth:
-                subVV = VV[:, :k]
-                v = v - subVV @ (subVV.T @ v)
+        if reorth:
+            subVV = VV[:, :k]
+            v = v - subVV @ (subVV.T @ v)
 
             # Normalize the vector and update variables
-            bet = np.linalg.norm(v)
-            v0 = v1
-            inverseOfbet = 1.0 / bet
-            v1 = v * inverseOfbet
+        bet = cp.linalg.norm(v)
+        v0 = v1
+        v1 = v / bet
 
             # Update Tmat
-            Tmat[k - 1, k - 1] = alp
-            Tmat[k, k - 1] = bet
-            Tmat[k - 1, k] = bet
+        Tmat[k - 1, k - 1] = alp
+        Tmat[k, k - 1] = bet
+        Tmat[k - 1, k] = bet
 
-            NTest = min(8 * nev, m)
+        NTest = min(8 * nev, m)
 
-            if enableConvergenceTest and (((k >= NTest) and (k % 10 == 0)) or k == m):
-                if k != m:
-                    rr = eigh(Tmat[:k, :k])
-                else:
-                    rr, X1 = eigh(Tmat[:k, :k])
-
-                bound = np.max(np.abs(rr)) + bet
-                tr1 = np.sum(rr[:nev])
-                ll += 1
-                tr[ll - 1] = tr1
-
-            # Convergence criterion
-            if enableConvergenceTest and (ll > 1 and (np.abs(tr[ll - 1] - tr[ll - 2]) < tol * tr[ll - 2])):
-                rr, X1 = eigh(Tmat[:k, :k])
-                break
-
-        if enableConvergenceTest == 0:
+        if enableConvergenceTest and (((k >= NTest) and (k % 10 == 0)) or k == m):
             rr, X1 = eigh(Tmat[:k, :k])
+            bound = cp.max(cp.abs(rr)) + bet
+            tr1 = cp.sum(rr[:nev])
+            tr.append(tr1)
+            ll += 1
+            # Convergence criterion
+        if enableConvergenceTest and (ll > 1 and (cp.abs(tr[ll - 1] - tr[ll - 2]) < tol * tr[ll - 2])):
+            rr, X1 = cp.linalg.eigh(Tmat[:k, :k])
+            break
+
+    rr, X1 = cp.linalg.eigh(Tmat[:k, :k])
 
     del Tmat
     del v
@@ -130,7 +117,7 @@ def lanczosForChsubsp(B, nev, v, m):
         counter = 0
         # TODO: check corresponding matlab code, maybe wrong?
         while counter < len(rrCopy) - 1:
-            rrCopy = np.delete(rrCopy, np.where(np.abs(rrCopy[counter] - rrCopy[counter+1:]) < 1e-5)[0] + counter + 1)
+            rrCopy = cp.delete(rrCopy, cp.where(cp.abs(rrCopy[counter] - rrCopy[counter+1:]) < 1e-5)[0] + counter + 1)
             counter += 1
 
         mevMultiplier = min(1.8 ** (len(rr) / len(rrCopy)), 3.2)
@@ -144,28 +131,19 @@ def lanczosForChsubsp(B, nev, v, m):
         del VV  # Clean up memory
 
         # Orthogonalize W using QR decomposition
-        W, G, _ = qr(W, mode='economic')
+        W, G, _ = cp.linalg.qr(W, mode='reduced')
 
         # Calculate the Rayleigh-Ritz matrix G
         Vin = B @ W
         if OPTIMIZATIONLEVEL != 0:
             G = Rayleighritz(Vin, W, mev)
         else:
-            G = np.zeros((mev, mev))
-            for j in range(mev):
-                for i in range(j + 1):
-                    G[i, j] = np.dot(Vin[:, i], W[:, j])
-                    G[j, i] = G[i, j]
+            G = W.T @ Vin
+            G = (G + G.T) * 0.5
 
-            if enableMexFilesTest == 1:
-                G2 = Rayleighritz(Vin, W, mev)
-                if np.any(abs(G - G2) > 1e-6):
-                    ValueError("Mex file discrepancy for Rayleighritz.c")
-
-        rr, X1 = eigh(G)
+        rr, X1 = cp.linalg.eigh(G)
         lam = rr[:nev]
-        Y = X1[:, :nev]
-        W = W @ Y
+        W = W @ X1[:, :nev]
 
     return W, lam, bound
 

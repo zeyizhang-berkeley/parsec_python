@@ -1,4 +1,5 @@
 import numpy as np
+import cupy as cp
 from splineData import splineData
 from preProcess import preProcess
 from fspline import fspline
@@ -15,7 +16,6 @@ class MexFileDiscrepancyError(Exception):
     """
     Custom exception class to replicate MATLAB's struct-style error reporting.
     """
-
     def __init__(self, message, identifier=None, stack=None):
         super().__init__(message)
         self.message = message
@@ -199,8 +199,9 @@ def pseudoDiag(Domain, Atoms, elem, N_elements):
                 dy = dz[k_idx] + (j * h - rad - xyz[at, 1]) ** 2
 
                 for j_idx in range(ny):
-                    i = np.arange(nx)
-                    r1 = np.sqrt(dy[j_idx] + (i * h - rad - xyz[at, 0]) ** 2)
+                    i_gpu = cp.arange(nx)
+                    r1_gpu = cp.sqrt(dy[j_idx] + (i_gpu * h - rad - xyz[at, 0]) ** 2)
+                    r1 = r1_gpu.get()   # back to NumPy for spline eval
 
                     # Initialize arrays for potentials and charge
                     ppot = np.zeros(nx)
