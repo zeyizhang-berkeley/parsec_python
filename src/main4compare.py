@@ -1,6 +1,5 @@
 import json
 import os
-import sys
 import numpy as np
 import pandas as pd
 import scipy.sparse as sp
@@ -10,7 +9,7 @@ from scipy.io import loadmat
 from Laplacian.fd3d import fd3d
 from Laplacian.nuclear import nuclear
 from V_ion.pseudoNL_original import pseudoNL
-from V_ion.pseudoNL_original_ML4Den import pseudoNL_ML4Den
+from V_ion.pseudoNL_ML4Den import pseudoNL_ML4Den
 from V_xc.exc_nspn import exc_nspn
 from V_ion.nelectrons import nelectrons
 from Eigensolvers.first_filt import first_filt
@@ -37,9 +36,8 @@ import matplotlib.pyplot as plt
 # Defaut Technical Parameters
 fd_order = 8            # order of finite difference scheme {8}
 maxits   = 40           # max SCF iterations                {40}
-tol      = 2.e-04       # tolerance for SCF iteration.      {2.e-04}
+tol      = 1.e-05       # tolerance for SCF iteration.      {1.e-03}
 Fermi_temp  =  500.0    # Smear out fermi level             {500.0}
-save_wfn = 0            # Write wavefunction file          {0}
 A0_ANG = 0.529177210903  # 1 Bohr in Angstrom
 last_input_file_path = None
 
@@ -89,7 +87,6 @@ DEFAULT_SETTINGS = {
     'maxits': maxits,
     'tol': tol,
     'Fermi_temp': Fermi_temp,
-    'save_wfn': save_wfn,
     'CG_prec': CG_prec,
     'poldeg': poldeg,
     'diagmeth': diagmeth,
@@ -105,7 +102,7 @@ def apply_settings_from_dict(settings_overrides):
     if not settings_overrides:
         return {}
 
-    global fd_order, maxits, tol, Fermi_temp, save_wfn, CG_prec, poldeg, diagmeth, adaptiveScheme
+    global fd_order, maxits, tol, Fermi_temp, CG_prec, poldeg, diagmeth, adaptiveScheme
 
     applied = {}
     def _parse_tol(val):
@@ -118,27 +115,12 @@ def apply_settings_from_dict(settings_overrides):
             return 10 ** (-int(round(fval)))
         return fval
 
-    def _parse_bool(val):
-        if isinstance(val, bool):
-            return int(val)
-        if isinstance(val, (int, float)):
-            return 1 if val else 0
-        if isinstance(val, str):
-            raw = val.strip().lower()
-            if raw in ['1', 'true', 'yes', 'y', 'on']:
-                return 1
-            if raw in ['0', 'false', 'no', 'n', 'off']:
-                return 0
-        raise ValueError("invalid boolean value")
-
     mapping = {
         'fd_order': ('fd_order', int),
         'maxits': ('maxits', int),
         'tol': ('tol', _parse_tol),
         'Fermi_temp': ('Fermi_temp', float),
         'fermi_temp': ('Fermi_temp', float),
-        'save_wfn': ('save_wfn', _parse_bool),
-        'write_wfn': ('save_wfn', _parse_bool),
         'CG_prec': ('CG_prec', int),
         'cg_prec': ('CG_prec', int),
         'poldeg': ('poldeg', int),
@@ -159,8 +141,6 @@ def apply_settings_from_dict(settings_overrides):
                     tol = new_value
                 elif target == 'Fermi_temp':
                     Fermi_temp = new_value
-                elif target == 'save_wfn':
-                    save_wfn = new_value
                 elif target == 'CG_prec':
                     CG_prec = new_value
                 elif target == 'poldeg':
@@ -249,7 +229,7 @@ def element_exists(typ, elem):
     return typ in elem['Element'].values  # Assuming elem is a pandas DataFrame
 
 # Main function to get all the settings for RSDFT (manual or file)
-def get_atoms(elem, input_file_path=None):
+def get_atoms(elem):
     global last_input_file_path
     # Ask the user for input mode
     print(' ********************** ')
@@ -266,15 +246,11 @@ def get_atoms(elem, input_file_path=None):
     ml_file_path = None
     settings_overrides = {}
 
-    if input_file_path:
-        in_data = 2
-        print(f'Loading input file: {input_file_path}')
-    else:
-        while (in_data != 1) and (in_data != 2):
-            try:
-                in_data = int(input('Input data mode: 1 for manual, 2 for file: '))
-            except ValueError:
-                print('Please enter 1 or 2')
+    while (in_data != 1) and (in_data != 2):
+        try:
+            in_data = int(input('Input data mode: 1 for manual, 2 for file: '))
+        except ValueError:
+            print('Please enter 1 or 2')
 
     # Case 1: Manual input
     if in_data == 1:
@@ -286,12 +262,12 @@ def get_atoms(elem, input_file_path=None):
         
     # Case 2: File input
     elif in_data == 2:
-        Atoms, n_atom, Z_charge, density_method, ml_file_path, settings_overrides = load_atomic_data_from_file(input_file_path)
+        Atoms, n_atom, Z_charge, density_method, ml_file_path, settings_overrides = load_atomic_data_from_file()
         if n_atom is None or Atoms is None:
             return None, None, None, None, None, {}
 
     # Normalize density settings
-    if density_method not in ['sad', 'ml', 'sad_ml_grid']:
+    if density_method not in ['sad', 'ml']:
         density_method = 'sad'
 
     return Atoms, n_atom, Z_charge, density_method, ml_file_path, settings_overrides
@@ -372,7 +348,7 @@ def manual_input_species(elem):
     while method_choice not in [1, 2]:
         try:
             print('Choose density initialization method:')
-            print('1. Superposition of atomic densities (SAD)')
+            print('1. Superposition of atomic densities (traditional) but still use the ML grids')
             print('2. Machine learning predicted density (.npy file)')
             method_choice = int(input('Enter your choice (1 or 2): '))
         except ValueError:
@@ -380,7 +356,7 @@ def manual_input_species(elem):
 
     if method_choice == 1:
         density_method = 'sad'
-        ml_file_path = None
+        ml_file_path = input('Enter path to ML density .npy file: ')
     else:
         density_method = 'ml' # Get ML density file path
         ml_file_path = input('Enter path to ML density .npy file: ')
@@ -390,7 +366,7 @@ def manual_input_species(elem):
     return Atoms, n_atom, Z_charge, density_method, ml_file_path
 
 
-def load_atomic_data_from_file(file_name=None):
+def load_atomic_data_from_file():
     """
     Handles file input for atomic species and optional solver/settings overrides.
     Supported formats:
@@ -400,10 +376,7 @@ def load_atomic_data_from_file(file_name=None):
       - .in/ .inp : custom format with $system and $settings blocks
     """
     global last_input_file_path
-    if file_name is None:
-        file_name = input('What is the name of the file to load from?: ').strip()
-    else:
-        file_name = str(file_name).strip()
+    file_name = input('What is the name of the file to load from?: ').strip()
     last_input_file_path = None
 
     # Check if the file name is too short
@@ -636,7 +609,7 @@ def load_atomic_data_from_file(file_name=None):
             density_method = density_method.lower()
         else:
             density_method = 'sad'
-        if density_method not in ['sad', 'ml', 'sad_ml_grid']:
+        if density_method not in ['sad', 'ml']:
             density_method = 'sad'
 
         ml_file_path = data.get('ml_file_path') or data.get('density_file')
@@ -713,8 +686,7 @@ def AtomsInMoleculeToAtomsConverter(AtomsInMolecule):
 
 # Usage example:
 # Assuming elem is a pandas DataFrame loaded with element data from 'elements_new.csv'
-cli_input_path = sys.argv[1] if len(sys.argv) > 1 else None
-Atoms, n_atom, Z_charge, density_method, ml_file_path, settings_overrides = get_atoms(elem, cli_input_path)
+Atoms, n_atom, Z_charge, density_method, ml_file_path, settings_overrides = get_atoms(elem)
 if not Atoms:
     raise SystemExit('No atoms loaded, exiting RSDFT')
 
@@ -724,114 +696,38 @@ print('Z_charge', Z_charge)
 
 # Apply unit conversion before using overrides
 settings_overrides = settings_overrides or {}
-grid_npy_path = settings_overrides.pop('grid_npy_path', None) or settings_overrides.pop('grid_npy', None)
-grid_poscar_path = settings_overrides.pop('grid_poscar_path', None) or settings_overrides.pop('grid_poscar', None)
 
 def has_diagmeth_override(overrides):
     """Check whether the user supplied a diagonalization method override."""
     return any(str(k).lower() == 'diagmeth' for k in (overrides or {}))
 
-def resolve_optional_path(raw_path, label):
-    """Return an absolute path if it exists, else None."""
-    if not raw_path:
+
+def resolve_ml_density_path(ml_path):
+    """Return an absolute path to the ML density file if it exists, else None."""
+    if not ml_path:
         return None
 
-    raw_path = os.path.expanduser(raw_path)
+    ml_path = os.path.expanduser(ml_path)
     candidates = []
-    if os.path.isabs(raw_path):
-        candidates.append(raw_path)
+    if os.path.isabs(ml_path):
+        candidates.append(ml_path)
     else:
-        candidates.append(os.path.abspath(raw_path))
+        candidates.append(os.path.abspath(ml_path))
         base_dir = os.path.dirname(os.path.abspath(__file__))
-        candidates.append(os.path.join(base_dir, raw_path))
+        candidates.append(os.path.join(base_dir, ml_path))
         if last_input_file_path:
-            candidates.append(os.path.join(os.path.dirname(last_input_file_path), raw_path))
+            candidates.append(os.path.join(os.path.dirname(last_input_file_path), ml_path))
 
     for path in candidates:
         if os.path.exists(path):
             return path
 
-    print(f'Warning: {label} {raw_path} not found. Tried: {candidates}')
+    print(f'Warning: ML density file {ml_path} not found. Tried: {candidates}')
     return None
 
-
-def resolve_ml_density_path(ml_path):
-    """Return an absolute path to the ML density file if it exists, else None."""
-    return resolve_optional_path(ml_path, 'ML density file')
-
 ml_file_path = resolve_ml_density_path(ml_file_path)
-grid_npy_path = resolve_optional_path(grid_npy_path, 'Grid npy file')
-grid_poscar_path = resolve_optional_path(grid_poscar_path, 'Grid POSCAR file')
-
-if density_method in ['ml', 'sad_ml_grid'] and ml_file_path is None:
-    raise SystemExit('Density method requires ML .npy file but no ml_file_path was provided or found. '
-                     'Use the GUI generator to select a .npy file or add ml_file_path to the input file.')
-
-def read_poscar_cube_length(poscar_path):
-    """Return the average lattice length from a POSCAR file in Angstrom."""
-    with open(poscar_path, 'r') as f:
-        raw_lines = [line.strip() for line in f if line.strip()]
-
-    if len(raw_lines) < 5:
-        raise ValueError('Incomplete POSCAR file for grid size.')
-
-    scale = float(raw_lines[1].split()[0])
-    lattice = []
-    for i in range(2, 5):
-        parts = raw_lines[i].split()
-        if len(parts) < 3:
-            raise ValueError(f'Invalid lattice vector line: "{raw_lines[i]}"')
-        lattice.append([
-            float(parts[0]) * scale,
-            float(parts[1]) * scale,
-            float(parts[2]) * scale,
-        ])
-
-    lengths = [np.sqrt(vec[0] ** 2 + vec[1] ** 2 + vec[2] ** 2) for vec in lattice]
-    if not lengths:
-        raise ValueError('Could not determine lattice size from POSCAR.')
-
-    return sum(lengths) / 3.0
-
-
-def load_grid_data_from_files(grid_npy, grid_poscar):
-    """Load grid shape from .npy and derive h/radius from POSCAR (Angstrom -> Bohr)."""
-    density = np.load(grid_npy, mmap_mode='r')
-    if density.ndim != 3:
-        raise ValueError('Grid .npy file must be a 3D array.')
-
-    nx, ny, nz = density.shape
-    if nx <= 0 or ny <= 0 or nz <= 0:
-        raise ValueError('Invalid grid shape in .npy file.')
-
-    cube_length_ang = read_poscar_cube_length(grid_poscar)
-    h_ang = cube_length_ang / float(nx)
-    radius_ang = cube_length_ang / 2.0
-
-    return {
-        'nx': nx,
-        'ny': ny,
-        'nz': nz,
-        'h': h_ang / A0_ANG,
-        'radius': radius_ang / A0_ANG,
-    }
-
-grid_mode = 'default'
-if density_method in ['ml', 'sad_ml_grid']:
-    grid_mode = 'ml'
-
-if grid_mode == 'ml':
-    if grid_npy_path is None:
-        grid_npy_path = ml_file_path
-    if grid_npy_path is None:
-        raise SystemExit('Grid .npy file is required to set grid structure.')
-    if grid_poscar_path is None:
-        raise SystemExit('Grid POSCAR file is required to set grid structure.')
-
-    grid_data = load_grid_data_from_files(grid_npy_path, grid_poscar_path)
-else:
-    grid_data = None
-
+if ml_file_path is None:
+    raise SystemExit('ML density file is required to set grid spacing and domain; please provide a valid .npy path.')
 
 def convert_units_to_bohr(Atoms, settings_overrides):
     """Convert coordinates and certain overrides to Bohr based on 'unit'."""
@@ -872,13 +768,23 @@ def convert_units_to_bohr(Atoms, settings_overrides):
 Atoms, settings_overrides, unit_used = convert_units_to_bohr(Atoms, settings_overrides)
 
 # If using ML initialization and no explicit override, prefer diagmeth=2 (chsubsp)
-if (density_method in ['ml', 'sad_ml_grid']) and (not has_diagmeth_override(settings_overrides)):
+if (density_method == 'ml') and (not has_diagmeth_override(settings_overrides)):
     diagmeth = 2
 
 # Apply any solver overrides provided via manual input or file
 apply_settings_from_dict(settings_overrides)
 
-# Output file name will be determined after the domain is built (needs h/radius).
+# Determine output file name based on input file (if provided)
+method_tag = str(density_method).lower() if density_method else 'sad'
+if method_tag not in ['sad', 'ml']:
+    method_tag = 'sad'
+
+method_suffix = f"{method_tag}_diagmeth{diagmeth}"
+output_file = f'./rsdft_parameter_{method_suffix}.out'
+if last_input_file_path:
+    base = os.path.splitext(os.path.basename(last_input_file_path))[0]
+    out_dir = os.path.dirname(last_input_file_path) or '.'
+    output_file = os.path.join(out_dir, f'{base}_{method_suffix}.out')
 
 # Keep a raw copy of the original coordinates for ML shifting
 # Atoms_raw = [ { 'typ': atom['typ'], 'coord': atom['coord'].copy() } for atom in Atoms ]
@@ -886,8 +792,7 @@ apply_settings_from_dict(settings_overrides)
 print(f"Successfully loaded {len(Atoms)} atomic species.")
 
 
-def calculate_grid_spacing(Atoms, elem, N_elements, n_atom, Z_charge, h_override=None, nev_override=None,
-                           grid_mode='default', grid_data=None):
+def calculate_grid_spacing(Atoms, elem, N_elements, n_atom, Z_charge, ml_file_path, h_override=None, nev_override=None):
     """
     Calculate the smallest grid spacing hmin and the number of eigenvalues (nev).
 
@@ -898,8 +803,6 @@ def calculate_grid_spacing(Atoms, elem, N_elements, n_atom, Z_charge, h_override
     Z_charge (float): Charge state of the system.
     h_override (float, optional): User-specified grid spacing.
     nev_override (int, optional): User-specified number of eigenvalues.
-    grid_mode (str, optional): 'default' (atomic grid) or 'ml' (grid from files).
-    grid_data (dict, optional): Precomputed grid data when using ML grid.
 
     Returns:
     hmin (float): Smallest grid spacing.
@@ -910,12 +813,17 @@ def calculate_grid_spacing(Atoms, elem, N_elements, n_atom, Z_charge, h_override
     zelec = 0.0
     hmin = 100.0  # Large initial value to find the minimum grid spacing
 
-    if grid_mode == 'ml':
-        if grid_data is None:
-            raise SystemExit('Grid data is required to determine grid spacing.')
-        hmin = grid_data['h']
+    if ml_file_path is None or not os.path.exists(ml_file_path):
+        raise SystemExit('ML density file is required to determine grid spacing.')
 
-    # Iterate over the types of atoms to compute electron count (and hmin for default grid)
+    # Always use the ML grid spacing for consistency across SAD and ML densities
+    density_ang3 = np.load(ml_file_path)
+    A0_ANG = 0.529177210903  # 1 Bohr = 0.529177210903 Å
+    nx_ml, ny_ml, nz_ml = density_ang3.shape
+    box_length_ml_ang = 10.0
+    grid_spacing_ml = float(box_length_ml_ang) / float(nx_ml)
+    hmin = grid_spacing_ml / A0_ANG
+
     for at_typ in range(N_types):
         typ = Atoms[at_typ]['typ']  # Get the atomic symbol
 
@@ -923,10 +831,6 @@ def calculate_grid_spacing(Atoms, elem, N_elements, n_atom, Z_charge, h_override
         for i in range(N_elements):
             if typ == elem['Element'].iloc[i]:
                 Z = elem['Z'].iloc[i] * n_atom[at_typ]  # Number of electrons for this species
-                if grid_mode != 'ml':
-                    h = elem['h'].iloc[i]  # getting grid spacing
-                    if h < hmin:
-                        hmin = h  # Update hmin if a smaller grid spacing is found
                 zelec += Z  # Add the electrons from this species
 
     # Check for valid electron count
@@ -936,19 +840,14 @@ def calculate_grid_spacing(Atoms, elem, N_elements, n_atom, Z_charge, h_override
         return None, None, None, None
 
     # Calculate the smallest grid spacing and number of eigenvalues
-    if grid_mode == 'ml':
-        if h_override is not None:
-            print('Warning: grid spacing override ignored when using ML grid.')
-        h = hmin
-    else:
-        if h_override is not None:
-            try:
-                h = float(h_override)
-            except (TypeError, ValueError):
-                print('Warning: invalid grid spacing override, using auto value.')
-                h = hmin
-        else:
+    if h_override is not None:
+        try:
+            h = float(h_override)
+        except (TypeError, ValueError):
+            print('Warning: invalid grid spacing override, using auto value.')
             h = hmin
+    else:
+        h = hmin
 
     if nev_override is not None:
         try:
@@ -966,11 +865,8 @@ h_override = settings_overrides.get('grid_spacing', settings_overrides.get('h'))
 radius_override = settings_overrides.get('sphere_radius', settings_overrides.get('radius'))
 
 h, nev, zelec, ztest = calculate_grid_spacing(
-    Atoms, elem, N_elements, n_atom, Z_charge,
-    h_override=h_override,
-    nev_override=nev_override,
-    grid_mode=grid_mode,
-    grid_data=grid_data
+    Atoms, elem, N_elements, n_atom, Z_charge, ml_file_path,
+    h_override=h_override, nev_override=nev_override
 )
 
 if h is None or nev is None:
@@ -981,7 +877,7 @@ if h is not None and nev is not None:
     print(f"Number of eigenvalues (nev): {nev}")
 
 
-def estimate_radius_and_grid(Atoms, elem, N_elements, h, radius_override=None, grid_mode='default', grid_data=None):
+def estimate_radius_and_grid(Atoms, elem, N_elements, h, ml_file_path, radius_override=None):
     """
     Estimate the spherical radius and calculate grid sizes based on atom positions.
 
@@ -990,8 +886,6 @@ def estimate_radius_and_grid(Atoms, elem, N_elements, h, radius_override=None, g
     elem (pd.DataFrame): DataFrame containing element information (including atomic size).
     h (float): Grid spacing (smallest h from previous calculations).
     radius_override (float, optional): User-specified spherical radius.
-    grid_mode (str, optional): 'default' (atomic grid) or 'ml' (grid from files).
-    grid_data (dict, optional): Precomputed grid data when using ML grid.
 
     Returns:
     Domain (dict): A dictionary containing grid size information and the spherical radius.
@@ -1006,52 +900,18 @@ def estimate_radius_and_grid(Atoms, elem, N_elements, h, radius_override=None, g
     nz = 0.0
     N_types = len(Atoms)  # Number of atomic species
 
-    if grid_mode == 'ml':
-        if grid_data is None:
-            raise SystemExit('Grid data is required to determine domain radius and grid.')
-        if radius_override is not None:
-            print('Warning: radius override ignored when using ML grid.')
+    if ml_file_path is None or not os.path.exists(ml_file_path):
+        raise SystemExit('ML density file is required to determine domain radius and grid.')
 
-        Domain = {
-            'radius': grid_data['radius'],
-            'nx': grid_data['nx'],
-            'ny': grid_data['ny'],
-            'nz': grid_data['nz'],
-            'h': h,
-        }
-        return Domain, N_types
-
-    # use radius from default atoms
-    if grid_mode == 'default':
-        # Iterate over the types of atoms
-        for at_typ in range(N_types):
-            typ = Atoms[at_typ]['typ']  # Get the atomic symbol
-            xyz = Atoms[at_typ]['coord']
-            natoms = xyz.shape[0]  # Number of atoms of this type
-            # Find the corresponding element in elem
-            index = None
-            for i in range(N_elements):
-                if typ == elem['Element'].iloc[i]:
-                    # Retrieve atomic size/ radius
-                    rsize = elem['r'].iloc[i]
-
-            # Scan all points to find the atom most removed from the domain center
-            for at1 in range(natoms):
-                xx, yy, zz = xyz[at1, 0], xyz[at1, 1], xyz[at1, 2]  # Coordinates of atom
-                rdis = np.sqrt(xx ** 2 + yy ** 2 + zz ** 2)  # Distance from the origin
-                rs = rdis + rsize  # Radius including the atomic size
-
-                if rs > rmax:
-                    rmax = rs  # Update the maximum radius
-
-        sph_rad = rmax  # Spherical radius based on the most distant atom
-
-        # Grid size calculations
-        nx = int(2 * sph_rad / h) + 1  # Ensure nx is odd to make adjustments later
-        nx = 2 * ((nx + 1) // 2)  # Ensure nx is even
-        sph_rad = 0.5 * h * (nx - 1)  # Adjust the spherical radius based on the grid
-        ny = nx
-        nz = nx
+    # Always use the ML grid size and implied box for the domain
+    density_ang3 = np.load(ml_file_path)
+    A0_ANG = 0.529177210903  # 1 Bohr = 0.529177210903 Å
+    nx_ml, ny_ml, nz_ml = density_ang3.shape
+    nx = nx_ml
+    ny = ny_ml
+    nz = nz_ml
+    box_length_ml_ang = 10.0
+    sph_rad = ( box_length_ml_ang / 2 ) / A0_ANG
 
     if radius_override is not None:
         try:
@@ -1069,122 +929,22 @@ def estimate_radius_and_grid(Atoms, elem, N_elements, h, radius_override=None, g
 
     return Domain, N_types
 
-# Zeyi: No need for recenter for now
-def recenter_atoms(Atoms):
-    all_coords = np.vstack([atom['coord'] for atom in Atoms])
-    center = np.mean(all_coords, axis=0)
-    for atom in Atoms:
-        atom['coord'] -= center
-    return Atoms
+# def recenter_atoms(Atoms):
+#     all_coords = np.vstack([atom['coord'] for atom in Atoms])
+#     center = np.mean(all_coords, axis=0)
+#     for atom in Atoms:
+#         atom['coord'] -= center
+#     return Atoms
 
-# Recenter Domain atoms for grid generation only for default SAD grids
-if density_method == 'sad' and grid_mode == 'default':
-    Atoms = recenter_atoms(Atoms)
-    print("recenter atoms", Atoms)
+# # Recenter Domain atoms for grid generation only for SAD; ML keeps original coords to match density file
+# if density_method == 'sad':
+#     Atoms = recenter_atoms(Atoms)
+#     print("recenter atoms", Atoms)
 
 # Call the function
-Domain, N_types = estimate_radius_and_grid(
-    Atoms,
-    elem,
-    N_elements,
-    h,
-    radius_override=radius_override,
-    grid_mode=grid_mode,
-    grid_data=grid_data,
-)
+Domain, N_types = estimate_radius_and_grid(Atoms, elem, N_elements, h, ml_file_path, radius_override=radius_override)
 if Domain:
     print(f"Domain: {Domain}")
-
-
-def build_formula_from_atoms(Atoms, n_atom, elem):
-    counts = {}
-    for atom, count in zip(Atoms, n_atom):
-        symbol = str(atom['typ']).strip()
-        counts[symbol] = counts.get(symbol, 0) + int(count)
-
-    if not counts:
-        return "system"
-
-    order_map = {elem['Element'].iloc[i]: i for i in range(len(elem))}
-
-    def sort_key(sym):
-        return (order_map.get(sym, 10 ** 9), sym)
-
-    pieces = []
-    for symbol in sorted(counts.keys(), key=sort_key):
-        count = counts[symbol]
-        pieces.append(f"{symbol}{count}" if count != 1 else symbol)
-    return "".join(pieces)
-
-
-def format_value_for_filename(value):
-    formatted = f"{value:.6f}".rstrip("0").rstrip(".")
-    if formatted == "":
-        formatted = "0"
-    return formatted.replace(".", "p")
-
-
-def density_method_tag(method):
-    if method == "sad_ml_grid":
-        return "sadwithml"
-    return method
-
-
-def build_default_output_basename(Atoms, n_atom, elem, density_method, diagmeth, radius_bohr, h_bohr):
-    formula = build_formula_from_atoms(Atoms, n_atom, elem)
-    method = density_method_tag(str(density_method).lower() if density_method else "sad")
-    radius_ang = radius_bohr * A0_ANG
-    h_ang = h_bohr * A0_ANG
-
-    radius_str = format_value_for_filename(radius_ang)
-    h_str = format_value_for_filename(h_ang)
-    return f"{formula}_{method}_diagmeth{diagmeth}_{radius_str}A_{h_str}A"
-
-
-if last_input_file_path:
-    base = os.path.splitext(os.path.basename(last_input_file_path))[0]
-    out_dir = os.path.dirname(last_input_file_path) or '.'
-    output_file = os.path.join(out_dir, f"{base}.out")
-else:
-    base = build_default_output_basename(Atoms, n_atom, elem, density_method, diagmeth, Domain["radius"], Domain["h"])
-    output_file = os.path.join(".", f"{base}.out")
-wfn_file = f"{os.path.splitext(output_file)[0]}_wfn.dat"
-initial_density_base = f"{os.path.splitext(output_file)[0]}_init_rho"
-converged_density_base = f"{os.path.splitext(output_file)[0]}_conv_rho"
-
-
-def save_density_variants(density_grid, domain, base_path):
-    if density_grid is None:
-        return
-    flat = np.asarray(density_grid).reshape(-1)
-    nx = int(domain.get("nx", 0))
-    ny = int(domain.get("ny", 0))
-    nz = int(domain.get("nz", 0))
-    expected = nx * ny * nz
-    if expected <= 0 or flat.size != expected:
-        print(f"Warning: density size {flat.size} does not match grid {expected}, skipping {base_path}")
-        return
-    h = float(domain.get("h", 0.0))
-    if h <= 0:
-        print(f"Warning: invalid grid spacing {h}, skipping {base_path}")
-        return
-
-    density_grid_3d = flat.reshape((nx, ny, nz), order='F')
-    density_bohr3_3d = density_grid_3d / (h ** 3)
-    density_ang3_3d = density_bohr3_3d / (A0_ANG ** 3)
-
-    np.save(f"{base_path}_grid.npy", density_grid_3d)
-    np.save(f"{base_path}_bohr3.npy", density_bohr3_3d)
-    np.save(f"{base_path}.npy", density_ang3_3d)
-
-    electron_grid = float(density_grid_3d.sum())
-    electron_bohr3 = float(density_bohr3_3d.sum() * (h ** 3))
-    h_ang = h * A0_ANG
-    electron_ang3 = float(density_ang3_3d.sum() * (h_ang ** 3))
-    print(
-        f"Saved density variants for {os.path.basename(base_path)}: "
-        f"Ne(grid)={electron_grid:.6f}, Ne(bohr^3)={electron_bohr3:.6f}, Ne(ang^3)={electron_ang3:.6f}"
-    )
 
 
 def write_rsdft_parameter_output(filename, nev, Atoms, n_atom, Domain, h, poldeg, fd_order, bohr_to_ang=A0_ANG):
@@ -1282,21 +1042,12 @@ print(' Enuc time', Enuc_time)
 print(' Working.....setting up diagonal part of ionic potential...')
 start_time = time.time()
 
-diag_info = None
 if density_method == 'sad':
     print('Using SAD method...')
     from V_ion.pseudoDiag import pseudoDiag
-    rho0, hpot0, Ppot, diag_info = pseudoDiag(
-        Domain, Atoms, elem, N_elements, return_info=True
-    )
-elif density_method == 'sad_ml_grid':
-    print(f'Using SAD density on ML grid from: {grid_npy_path}')
-    from V_ion.pseudoDiag_MLgrid import pseudoDiag_MLgrid
-    rho0, hpot0, Ppot, diag_info = pseudoDiag_MLgrid(
-        Domain, Atoms, elem, N_elements, return_info=True
-    )
-else:
-    print(f'Using ML grid/density file: {ml_file_path}')
+    rho0, hpot0, Ppot = pseudoDiag(Domain, Atoms, elem, N_elements)
+else: # ML method
+    print(f'Using ML-predicted density from: {ml_file_path}')
 
     from V_ion.pseudoDiag_ML4Den_poisson import pseudoDiag_ML4Den
 
@@ -1310,44 +1061,16 @@ else:
 
     # Call ML-based initialization
     # print('Atoms_raw', Atoms_raw)
-    rho0, hpot0, Ppot, diag_info = pseudoDiag_ML4Den(
-        Domain, Atoms, elem, N_elements, ml_file_path, A, CG_prec, PRE, return_info=True
-    )
+    rho0, hpot0, Ppot = pseudoDiag_ML4Den( Domain, Atoms, elem, N_elements, ml_file_path, A, CG_prec, PRE )
 
 pseudoDiag_time = time.time() - start_time
 print(' pseudoDiag time: ', pseudoDiag_time)
-
-if diag_info is not None:
-    with open(output_file, 'a') as fid:
-        fid.write(' --------------------------------------------------\n')
-        fid.write(' Initial density electron count\n')
-        if diag_info.get('electron_count_initial') is not None:
-            fid.write(
-                f" Initial density integrates to :     "
-                f"{diag_info['electron_count_initial']:.6f} e-\n"
-            )
-        if diag_info.get('electron_count_normalized') is not None:
-            if diag_info.get('electron_target') is not None:
-                fid.write(
-                    f" Normalized density integrates to:  "
-                    f"{diag_info['electron_count_normalized']:.6f} e- "
-                    f"(target {diag_info['electron_target']:.6f})\n"
-                )
-            else:
-                fid.write(
-                    f" Normalized density integrates to:  "
-                    f"{diag_info['electron_count_normalized']:.6f} e-\n"
-                )
-        fid.write(' --------------------------------------------------\n')
 
 # Step 2: Renormalize if the charge state is not neutral
 if Z_charge != 0:
     scaling_factor = ztest / zelec
     rho0 *= scaling_factor
     hpot0 *= scaling_factor
-
-# Save initial density in grid, Bohr^-3, and Angstrom^-3 formats
-save_density_variants(rho0, Domain, initial_density_base)
 
 # Step 3: Calculate Hartree energy (in eV)
 hpsum0 = np.sum(rho0 * hpot0) * Ry
@@ -1368,12 +1091,8 @@ start_time = time.time()
 if density_method == 'sad':
     print('Using SAD method...')
     vnl = pseudoNL(Domain, Atoms, elem, N_elements)
-elif density_method == 'sad_ml_grid':
-    print(f'Using SAD density on ML grid from: {grid_npy_path}')
-    from V_ion.pseudoNL_original_MLgrid import pseudoNL_MLgrid
-    vnl = pseudoNL_MLgrid(Domain, Atoms, elem, N_elements)
 else:
-    print(f'Using ML grid/density file: {ml_file_path}')
+    print(f'Using ML-predicted density from: {ml_file_path}')
     vnl = pseudoNL_ML4Den(Domain, Atoms, elem, N_elements)
 
 pseudoNL_time = time.time() - start_time
@@ -1393,9 +1112,6 @@ start_time = time.time()
 XCpot, exc = exc_nspn(Domain, rhoxc, output_file)
 exc_time = time.time() - start_time
 print(' exc time: ', exc_time)
-
-with open(output_file, 'a') as fid:
-    fid.write(f" Initial Exchange-corr. energy (eV) = {exc * Ry:10.5f}  \n")
 
 # Transpose the result back to match the original code's xcpot = XCpot'
 xcpot = np.transpose(XCpot)
@@ -1453,26 +1169,21 @@ while err > tol and its <= maxits:
     # Diagonalization method defined
     start_time = time.time()
 
-    diag_label = "unknown"
     if diagmeth == 1 or (its == 1 and diagmeth == 0):
         print('Calling lanczos...')
-        diag_label = "lanczos"
         v = np.random.randn(n, 1)
         W, lam = lanczos(B, nev + 15, v, nev + (500 * mAdaptiveModifier), 1e-5)
 
     elif its == 1 and diagmeth == 2:
         print('Calling chsubsp...')
-        diag_label = "chsubsp"
         W, lam = chsubsp(poldeg * degreeAdaptiveModifier, nev + 15, B)
 
     elif its == 1 and diagmeth == 3:
         print('Calling first_filt...')
-        diag_label = "first_filt"
         W, lam = first_filt(nev + 15, B, poldeg)
 
     else:
         print('Calling chebsf...')
-        diag_label = "chebsf"
         W, lam = chefsi1(W, lam, poldeg * degreeAdaptiveModifier, nev, B)
 
     diag_time = time.time() - start_time
@@ -1480,7 +1191,6 @@ while err > tol and its <= maxits:
     # Print results to file
     with open(output_file, 'a') as fid:
         fid.write(f'\n\n SCF iter # {its}  ... \n')
-        fid.write(f'Diagonalization method :\t{diag_label} (diagmeth={diagmeth})\n')
         fid.write(f'Diagonalization time [sec] :\t{diag_time}\n\n')
 
     # Get occupation factors and Fermi level
@@ -1488,11 +1198,11 @@ while err > tol and its <= maxits:
 
     # Print eigenvalues and occupations
     with open(output_file, 'a') as fid:
-        fid.write('   State  Eigenvalue [Ry]     Eigenvalue [eV]  Occupation\n\n')
+        fid.write('   State  Eigenvalue [Ry]     Eigenvalue [eV]\n\n')
     for i in range(nev):
         eig = lam[i] * 2 * Ry
         ry = eig / Ry
-        occ = 2 * occup[i]
+        occ = occup[i]
         with open(output_file, 'a') as fid:
             fid.write(f'{i + 1:5d}   {ry:15.10f}   {eig:18.10f}  {occ:5.2f}\n')
 
@@ -1508,16 +1218,12 @@ while err > tol and its <= maxits:
     # Trigger timer for Hartree potential calculation
     start_time = time.time()
 
-    hart_tol = 1e-5
-    hart_prec_label = "precLU" if CG_prec else "no prec"
-    with open(output_file, 'a') as fid:
-        fid.write(f'Hartree CG tol :\t{hart_tol:.1e} ({hart_prec_label})\n')
     if CG_prec:
-        print(f"with CG_prec (Hartree CG tol = {hart_tol:.1e})")
-        Hpot, _ = pcg(A, hrhs, Hpot, 200, hart_tol, PRE, 'precLU')  # Preconditioned CG
+        print("with CG_prec")
+        Hpot, _ = pcg(A, hrhs, Hpot, 200, 1e-6, PRE, 'precLU')  # Preconditioned CG
     else:
-        print(f"no CG_prec (Hartree CG tol = {hart_tol:.1e})")
-        Hpot, _ = pcg(A, hrhs, Hpot, 200, hart_tol)  # Standard CG
+        print("no CG_prec")
+        Hpot, _ = pcg(A, hrhs, Hpot, 200, 1e-6)  # Standard CG
 
     #print("new Hpot:", Hpot.shape)
     hart_time = time.time() - start_time
@@ -1596,9 +1302,6 @@ else:
     print("**************************")
     print("         ")
 
-# Save converged density in grid, Bohr^-3, and Angstrom^-3 formats
-save_density_variants(rho * (Domain['h'] ** 3), Domain, converged_density_base)
-
 
 # Print Eigenvalues and Occupations
 print("   State  Eigenvalue [Ry]     Eigenvalue [eV]  Occupation ")
@@ -1655,36 +1358,35 @@ print(f" Electronic energy/atom  = {E_total/n_atoms:10.5f}  eV   = {E_total0/n_a
 # Free memory (reset persistent variables in the mixer)
 reset_mixer()
 
-if save_wfn:
-    # Output Results to Binary File
-    with open(wfn_file, "wb") as wfnid:
-        little_big_test = 26
-        wfnid.write(np.array(little_big_test, dtype=np.uint32).tobytes())
+# Output Results to Binary File
+with open("./wfn.dat", "wb") as wfnid:
+    little_big_test = 26
+    wfnid.write(np.array(little_big_test, dtype=np.uint32).tobytes())
 
-        wfnid.write(np.array(Domain['radius'], dtype=np.float64).tobytes())
-        wfnid.write(np.array(Domain['h'], dtype=np.float64).tobytes())
+    wfnid.write(np.array(Domain['radius'], dtype=np.float64).tobytes())
+    wfnid.write(np.array(Domain['h'], dtype=np.float64).tobytes())
 
-        pot_length = len(pot)
-        wfnid.write(np.array(pot_length, dtype=np.uint32).tobytes())
-        wfnid.write(np.array(pot, dtype=np.float64).tobytes())
+    pot_length = len(pot)
+    wfnid.write(np.array(pot_length, dtype=np.uint32).tobytes())
+    wfnid.write(np.array(pot, dtype=np.float64).tobytes())
 
-        rho_length = len(rho)
-        wfnid.write(np.array(rho_length, dtype=np.uint32).tobytes())
-        wfnid.write(np.array(rho, dtype=np.float64).tobytes())
+    rho_length = len(rho)
+    wfnid.write(np.array(rho_length, dtype=np.uint32).tobytes())
+    wfnid.write(np.array(rho, dtype=np.float64).tobytes())
 
-        w_length = len(W)
-        wfnid.write(np.array(w_length, dtype=np.uint32).tobytes())
-        wfnid.write(np.array(nev, dtype=np.uint32).tobytes())
-        for i in range(nev):
-            wfnid.write(np.array(W[:, i], dtype=np.float64).tobytes())
+    w_length = len(W)
+    wfnid.write(np.array(w_length, dtype=np.uint32).tobytes())
+    wfnid.write(np.array(nev, dtype=np.uint32).tobytes())
+    for i in range(nev):
+        wfnid.write(np.array(W[:, i], dtype=np.float64).tobytes())
 
-        # Write the atomic structure in `wfn.dat`
-        wfnid.write(np.array(N_types, dtype=np.uint32).tobytes())
-        for atom in Atoms:
-            xyz = atom['coord']
-            wfnid.write(np.array(len(xyz), dtype=np.uint32).tobytes())
-            for j in range(len(xyz)):
-                wfnid.write(np.array(xyz[j, :], dtype=np.float64).tobytes())
+    # Write the atomic structure in `wfn.dat`
+    wfnid.write(np.array(N_types, dtype=np.uint32).tobytes())
+    for atom in Atoms:
+        xyz = atom['coord']
+        wfnid.write(np.array(len(xyz), dtype=np.uint32).tobytes())
+        for j in range(len(xyz)):
+            wfnid.write(np.array(xyz[j, :], dtype=np.float64).tobytes())
 
 # Close output file
 fid.close()
