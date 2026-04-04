@@ -188,5 +188,5 @@ def get_mixer(reset=False):
 
 
 def mixer_step(x1, f1, reset=False):
-    """Convenience function matching MATLAB calling convention."""
+    """Convenience function."""
     return get_mixer(reset=reset).mixer(x1, f1)
