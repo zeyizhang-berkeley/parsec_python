@@ -169,7 +169,6 @@ def lanczos(B, nev, v, m, tol, *args):
 
         # Remove near-duplicate eigenvalues
         rrCopy = np.array(rrCopy)
-        #TODO: check corresponding matlab code, maybe wrong?
         while counter < len(rrCopy) - 1:
             rrCopy = np.delete(rrCopy, np.where(np.abs(rrCopy[counter] - rrCopy[counter+1:]) < 1e-5)[0] + counter + 1)
             counter += 1

@@ -16,7 +16,7 @@ def ch_filter(A, x, deg, lam1, low, high):
     sigma1 = e / (lam1 - c)
     sigma = sigma1
 
-    # TODO: compare performance between c++ and matlab and implement C++ version
+    # TODO: compare performance between c++ and python
     # If MEX file testing is enabled, log discrepancies
     # if enableMexFilesTest==1:
     #     # Degree 1 Chebyshev term

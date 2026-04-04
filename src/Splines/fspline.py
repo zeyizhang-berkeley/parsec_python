@@ -4,7 +4,6 @@ from .trid import trid
 
 def fspline(xi, yi):
     """
-    Python translation of the MATLAB `fspline` function.
     Computes the cubic spline coefficients.
 
     Parameters:
@@ -36,7 +35,7 @@ def fspline(xi, yi):
     # Solve the tridiagonal system
     z = trid(L, D, U, r)
 
-    # Set the end values to 0 as per the original MATLAB code
+    # Set the end values to 0
     z = np.concatenate([[0], z, [0]])
 
     # Calculate the cubic spline coefficients

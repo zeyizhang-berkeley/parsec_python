@@ -133,7 +133,6 @@ def lanczosForChsubsp(B, nev, v, m):
 
         # Find the number of unique eigenvalues
         counter = 0
-        # TODO: check corresponding matlab code, maybe wrong?
         while counter < len(rrCopy) - 1:
             rrCopy = cp.delete(rrCopy, cp.where(cp.abs(rrCopy[counter] - rrCopy[counter+1:]) < 1e-5)[0] + counter + 1)
             counter += 1

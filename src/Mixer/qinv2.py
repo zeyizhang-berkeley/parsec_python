@@ -41,7 +41,7 @@ def qinv(A, tol=np.finfo(float).eps):
 
     # Construct the inverse of the upper triangular matrix R(1:r,1:r)
     S = np.zeros((r, r))
-    for j in range(r - 1, -1, -1):  # Loop from r-1 down to 0 (MATLAB's r:-1:1)
+    for j in range(r - 1, -1, -1):  # Loop from r-1 down to 0
         S[j, j] = 1 / R[j, j]
         for i in range(j - 1, -1, -1):  # Loop from j-1 down to 0
             t = 0

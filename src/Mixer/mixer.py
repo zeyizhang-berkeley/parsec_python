@@ -1,13 +1,13 @@
 """
-Mixer dispatcher module - Python equivalent of MATLAB mixer.m
+Mixer dispatcher module
 
 This module provides the mixing interface for SCF iterations.
 Default mixer is msecant1 (Type-I multi-secant method).
 
-Usage (matches MATLAB):
+Usage:
     from Mixer.mixer import mixer, reset_mixer
     
-    # Before SCF loop (equivalent to MATLAB's "clear mixer"):
+    # Before SCF loop:
     reset_mixer()
     
     # Inside SCF loop:
@@ -33,10 +33,10 @@ except ImportError:
     simplemix = None
 
 
-# Global mixer instances (equivalent to MATLAB persistent variables)
+# Global mixer instances
 _mixers = {}
 
-# Default mixer name (change this to switch mixer, like in MATLAB)
+# Default mixer name
 _default_mixer = "msecant1"
 
 
@@ -58,7 +58,7 @@ def _get_instance(name):
 
 def reset_mixer(name=None):
     """
-    Reset mixer state - equivalent to MATLAB's "clear mixer".
+    Reset mixer state.
     
     Call this once before the SCF loop to clear persistent variables.
     If name is None, resets the default mixer.
@@ -78,7 +78,7 @@ def reset_mixer(name=None):
 
 def mixer(x1, f1, name=None):
     """
-    Mixer function - Python equivalent of MATLAB mixer.m
+    Mixer function
     
     [x_new, m] = mixer(x1, f1)
     

@@ -216,7 +216,7 @@ def _prune_empty(overrides_dict: dict[str, Any] | None) -> dict[str, Any]:
 
 
 def atoms_in_molecule_to_atoms_converter(atoms_in_molecule):
-    """Convert the MATLAB ``AtomsInMolecule`` structure into Python atoms/n_atom."""
+    """Convert the ``AtomsInMolecule`` structure into Python atoms/n_atom."""
     atoms: list[dict[str, Any]] = []
     n_atom: list[int] = []
 

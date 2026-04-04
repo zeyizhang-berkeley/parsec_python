@@ -1461,8 +1461,7 @@ else:
     if CG_prec:
         print('Calling ilu0 ...')
         # Perform an incomplete LU decomposition
-        # spilu() from scipy can be used similarly to MATLAB's luinc
-        PRE = spla.spilu(A) # PRE will be the equivalent of MATLAB's LU structure
+        PRE = spla.spilu(A)
         print('done.')
 
     # Call ML-based initialization
@@ -1577,11 +1576,10 @@ PRE = []
 if CG_prec:
     print('Calling ilu0 ...')
     # Perform an incomplete LU decomposition
-    # spilu() from scipy can be used similarly to MATLAB's luinc
-    PRE = spla.spilu(A)  # PRE will be the equivalent of MATLAB's LU structure
+    PRE = spla.spilu(A)
     print('done.')
 
-# Clear persistent variables in mixer (equivalent to MATLAB's "clear mixer")
+# Clear persistent variables in mixer
 reset_mixer()
 
 # SCF LOOP starts here

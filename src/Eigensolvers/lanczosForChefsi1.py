@@ -40,7 +40,7 @@ def lanczosForChefsi1(B, nev, v, m, tol):
 
         v = B @ v1 - bet * v0
 
-        # TODO: compare performance between c++ and matlab
+        # TODO: compare performance between c++ and python
         # if enableMexFilesTest == 1:
         #     v2 = BTimesv1MinusbetTimesv0(B, v0, v1, bet, findFirstColumnWithNonZeroElement(B))
         #     if (any(abs(v - v2) > 0.000001))
@@ -54,7 +54,7 @@ def lanczosForChefsi1(B, nev, v, m, tol):
         if enableMexFilesTest == 0:
             v = v - alp * v1
         # else:
-        # TODO: compare performance between c++ and matlab
+        # TODO: compare performance between c++ and python
 
         #     vTemp = v - alp * v1
         #     vTemp2 = vMinusalpTimesv1(v, v1, alp)

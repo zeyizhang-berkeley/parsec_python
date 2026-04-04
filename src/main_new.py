@@ -7,6 +7,7 @@ actual RSDFT solve implemented in ``rsdft_solver.py``.
 
 from __future__ import annotations
 
+import argparse
 import sys
 from pathlib import Path
 
@@ -16,6 +17,30 @@ from rsdft_models import SolverSettings
 from rsdft_output import initialize_output_file, write_rsdft_parameter_output
 from rsdft_setup import prepare_system
 from rsdft_solver import run_rsdft_calculation
+
+
+def _parse_cli_args(argv: list[str]) -> argparse.Namespace:
+    """Parse the optional input path and forced backend selection."""
+    parser = argparse.ArgumentParser(
+        description="Run the refactored RSDFT driver from the flattened src tree."
+    )
+    backend_group = parser.add_mutually_exclusive_group()
+    backend_group.add_argument(
+        "--cpu",
+        action="store_true",
+        help="Force the CPU backend regardless of file/default settings.",
+    )
+    backend_group.add_argument(
+        "--gpu",
+        action="store_true",
+        help="Force the GPU backend regardless of file/default settings.",
+    )
+    parser.add_argument(
+        "input_file",
+        nargs="?",
+        help="Optional input file path (.in, .inp, .json, .dat, .mat, .txt).",
+    )
+    return parser.parse_args(argv)
 
 
 def main(argv: list[str] | None = None):
@@ -31,14 +56,19 @@ def main(argv: list[str] | None = None):
         printed run diagnostics.
     """
     argv = list(sys.argv[1:] if argv is None else argv)
+    cli_args = _parse_cli_args(argv)
     base_dir = Path(__file__).resolve().parent
 
     # 1. Load default solver settings and periodic-table metadata.
     settings = SolverSettings()
+    if cli_args.gpu:
+        settings.use_gpu = 1
+    elif cli_args.cpu:
+        settings.use_gpu = 0
     settings.normalize()
 
     elem, n_elements = load_elements(base_dir)
-    cli_input_path = argv[0] if argv else None
+    cli_input_path = cli_args.input_file
 
     # 2. Gather geometry, charge state, density mode, and optional overrides.
     input_data = prepare_input_data(elem, settings, cli_input_path, base_dir)
@@ -48,10 +78,19 @@ def main(argv: list[str] | None = None):
         print("No diagonalization override supplied for ML density input; using diagmeth=2 by default.")
 
     applied = settings.apply_overrides(input_data.settings_overrides)
+    if cli_args.gpu:
+        settings.use_gpu = 1
+    elif cli_args.cpu:
+        settings.use_gpu = 0
+    settings.normalize()
     if applied:
         print("Applied solver setting overrides:")
         for name, value in applied.items():
             print(f"  {name}: {value}")
+    if cli_args.gpu:
+        print("Forced GPU backend from command line.")
+    elif cli_args.cpu:
+        print("Forced CPU backend from command line.")
 
     # 3. Select CPU/GPU implementations, then derive the simulation domain.
     backend = select_solver_backend(settings)

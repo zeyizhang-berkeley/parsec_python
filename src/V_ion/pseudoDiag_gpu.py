@@ -14,7 +14,7 @@ logging.basicConfig(level=logging.ERROR, filename='error_log.txt', filemode='a',
 
 class MexFileDiscrepancyError(Exception):
     """
-    Custom exception class to replicate MATLAB's struct-style error reporting.
+    Custom exception class.
     """
 
     def __init__(self, message, identifier=None, stack=None):
@@ -26,7 +26,7 @@ class MexFileDiscrepancyError(Exception):
 
 def logError(exception):
     """
-    Custom logging function to log errors similarly to MATLAB's logError function.
+    Custom logging function to log errors.
 
     Args:
         exception (MexFileDiscrepancyError): Custom exception object with the error details.

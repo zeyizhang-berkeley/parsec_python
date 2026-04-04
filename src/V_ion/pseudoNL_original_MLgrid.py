@@ -176,8 +176,6 @@ def pseudoNL_MLgrid(Domain, Atoms, elem, N_elements):
             vnll = np.zeros((indx ** 2 + 1, 3))
 
             # The following calculations have been moved outside of loops to optimize performance.
-            # In MATLAB, cell-by-cell operations are slow, so this change speeds up the process
-            # by performing vectorized operations on arrays.
             # Explanation of the operations below:
             # - { xx, yy, zz } / dd calculates px, py, and pz respectively, element by element.
             # - wavpp * vspp calculates the 'fac' for ulmspx2, ulmspy2, and ulmspz2.

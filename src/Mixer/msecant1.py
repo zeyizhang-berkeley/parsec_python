@@ -26,20 +26,20 @@ class mixer:
         self.reset_state()
 
     def reset_state(self):
-        """Reset persistent variables - equivalent to MATLAB 'clear msecant1'."""
+        """Reset persistent variables."""
         self.DX = None  # Will store x differences and E vectors
         self.DF = None  # Will store f differences and V vectors
         self.N = None   # Stores the last group N_i
         self.EN_stage = None
 
     def mixer(self, x1, f1):
-        """Main entry point matching MATLAB signature."""
+        """Main entry point."""
         x_new, m = self.msecant1(x1, f1)
         return x_new, m
 
     def msecant1(self, x1, f1):
         """
-        Core msecant1 algorithm - faithful translation of MATLAB msecant1.m
+        Core msecant1 algorithm
         """
         # Get parameters from includemix
         p = self.params
@@ -54,7 +54,6 @@ class mixer:
         f1 = np.asarray(f1).flatten()
 
         # m = number of previous iterates (columns in DX)
-        # In MATLAB: m = size(DX,2)
         if self.DX is None:
             m = 0
         else:
@@ -62,7 +61,7 @@ class mixer:
 
         # First iteration - no previous iterate available
         if m == 0:
-            # Store the current iterate (MATLAB: DX(:,1) = x1; DF(:,1) = f1)
+            # Store the current iterate
             self.DX = x1[:, np.newaxis].copy()
             self.DF = f1[:, np.newaxis].copy()
             
@@ -84,7 +83,6 @@ class mixer:
             sz = group_size
 
         # Check for restart condition
-        # MATLAB: if EN_stage~=1 && m>=2 && norm(DF(:,m),2)<restart_factor*norm(f1,2)
         if self.EN_stage != 1 and m >= 2:
             norm_df_last = np.linalg.norm(self.DF[:, m-1], 2)
             norm_f1 = np.linalg.norm(f1, 2)
@@ -101,41 +99,29 @@ class mixer:
                 return x_new, 0
 
         # Compute res (size of last group) and ngroup
-        # MATLAB: res = mod(m+sz-1,sz)+1
         res = (m + sz - 1) % sz + 1
-        # MATLAB: ngroup = (m-res)/sz
         ngroup = (m - res) // sz
 
         # Update DX and DF if not in EN_stage 1
         if self.EN_stage != 1:
-            # MATLAB uses 1-based index m, Python uses 0-based index m-1
-            # DX(:,m) = x1 - DX(:,m)  -->  DX[:, m-1] = x1 - DX[:, m-1]
             self.DX[:, m-1] = x1 - self.DX[:, m-1]  # dx_m = x_{m+1} - x_m
             self.DF[:, m-1] = f1 - self.DF[:, m-1]  # df_m = f_{m+1} - f_m
             
             dx = self.DX[:, m-1].copy()
             
-            # DX(:,m) = DX(:,m) + mix*DF(:,m)
             self.DX[:, m-1] = self.DX[:, m-1] + mix * self.DF[:, m-1]
             
-            # for i=1:ngroup
-            #     DX(:,m) = DX(:,m) - DX(:,(i-1)*sz+1:i*sz) * (DF(:,(i-1)*sz+1:i*sz)' * DF(:,m))
             for i in range(1, ngroup + 1):
-                # MATLAB: (i-1)*sz+1:i*sz  -->  Python: (i-1)*sz : i*sz
                 start_idx = (i - 1) * sz
                 end_idx = i * sz
                 self.DX[:, m-1] = self.DX[:, m-1] - \
                     self.DX[:, start_idx:end_idx] @ (self.DF[:, start_idx:end_idx].T @ self.DF[:, m-1])
-            # DX(:,m) is now E(:,m) in the note
         else:
             dx = None
 
         # Compute new x
-        # x_new = x1 + mix*f1
         x_new = x1 + mix * f1
         
-        # for i=1:ngroup
-        #     x_new = x_new - DX(:,(i-1)*sz+1:i*sz) * (DF(:,(i-1)*sz+1:i*sz)' * f1)
         for i in range(1, ngroup + 1):
             start_idx = (i - 1) * sz
             end_idx = i * sz
@@ -148,11 +134,8 @@ class mixer:
             if self.N is None or self.N.shape[1] < res:
                 self.N = np.zeros((n_size, sz))
             
-            # N(:,res) = -mix*dx
             self.N[:, res-1] = -mix * dx
             
-            # for i=1:ngroup
-            #     N(:,res) = N(:,res) + DF(:,(i-1)*sz+1:i*sz) * (DX(:,(i-1)*sz+1:i*sz)' * dx)
             for i in range(1, ngroup + 1):
                 start_idx = (i - 1) * sz
                 end_idx = i * sz
@@ -161,33 +144,25 @@ class mixer:
 
         # Apply the last group contribution
         if self.EN_stage == 1 and res == sz:
-            # MATLAB: x_new = x_new - DX(:,ngroup*sz+1:m) * (DF(:,ngroup*sz+1:m)' * f1)
             start_idx = ngroup * sz
             end_idx = m
             if end_idx > start_idx:
                 x_new = x_new - self.DX[:, start_idx:end_idx] @ (self.DF[:, start_idx:end_idx].T @ f1)
         else:
-            # M = N' * DF(:,m-res+1:m)
-            # MATLAB m-res+1:m  -->  Python (m-res) : m
             M = self.N[:, :res].T @ self.DF[:, m-res:m]
             
-            # C = qinv(M, tol)
             C = qinv(M, tol)
             
             if res == sz:
-                # DF(:,m-sz+1:m) = N * C'
                 # This updates DF to become V in the note
                 self.DF[:, m-sz:m] = self.N[:, :sz] @ C.T
                 
-                # x_new = x_new - DX(:,m-res+1:m) * (DF(:,m-res+1:m)' * f1)
                 x_new = x_new - self.DX[:, m-res:m] @ (self.DF[:, m-res:m].T @ f1)
             else:
-                # x_new = x_new - DX(:,m-res+1:m) * ((C * N') * f1)
                 x_new = x_new - self.DX[:, m-res:m] @ ((C @ self.N[:, :res].T) @ f1)
 
         # Store current iterate for next iteration
         if self.EN_stage != 2:
-            # DX(:,m+1) = x1; DF(:,m+1) = f1
             self.DX = np.hstack([self.DX, x1[:, np.newaxis]])
             self.DF = np.hstack([self.DF, f1[:, np.newaxis]])
 

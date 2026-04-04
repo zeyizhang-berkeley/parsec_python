@@ -5,7 +5,7 @@ from .includemix import get_params
 
 class mixer:
     """
-    Hybrid multi-secant update (MATLAB msecant3.m).
+    Hybrid multi-secant update.
     """
     def __init__(self):
         self.params = get_params()

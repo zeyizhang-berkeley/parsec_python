@@ -8,7 +8,6 @@ except ImportError:
 
 def occupations(lam, Temp, Nelec, tol):
     """
-    Python translation of the MATLAB `occupations` function.
     Uses a bisection algorithm to find the Fermi level and occupation numbers.
 
     Parameters:

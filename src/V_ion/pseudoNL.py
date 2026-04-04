@@ -116,7 +116,7 @@ def pseudoNL(Domain, Atoms, elem, N_elements):
                 zzz = (k - 1) * h - rad - zza
                 for j in range(j0 - span, j0 + span + 1):
                     yyy = (j - 1) * h - rad - yya
-                    # Reset interval guesses for each y-slice (matches MATLAB logic)
+                    # Reset interval guesses for each y-slice
                     j_p_ps = 1
                     j_wfn = 1
                     for i in range(i0 - span, i0 + span + 1):
