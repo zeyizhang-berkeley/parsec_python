@@ -1,4 +1,4 @@
-# PARSEC Python
+# PARSEC.py
 
 Python version of the real-space DFT workflow used in this repository.
 
