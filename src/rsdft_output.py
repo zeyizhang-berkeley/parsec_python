@@ -295,6 +295,16 @@ def print_total_energy_summary(energies: EnergyComponents, n_atoms: int) -> None
     )
 
 
+def print_and_write_total_runtime(output_file: str, elapsed_seconds: float) -> None:
+    """Report the end-to-end solve runtime to stdout and the text log."""
+    print("\n Runtime Summary \n")
+    print(f" Total runtime [sec]     = {elapsed_seconds:12.6f}")
+
+    with open(output_file, "a", encoding="utf-8") as fid:
+        fid.write("\n\n Runtime Summary \n\n")
+        fid.write(f" Total runtime [sec]     = {elapsed_seconds:12.6f}\n")
+
+
 def save_wavefunction(
     wfn_file: str,
     domain,

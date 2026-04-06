@@ -28,6 +28,7 @@ from V_xc.exc_nspn import exc_nspn
 from rsdft_models import EnergyComponents, PreparedSystem, SCFResult, SolverBackend
 from rsdft_output import (
     TimingRecorder,
+    print_and_write_total_runtime,
     print_eigenvalues_to_console,
     print_total_energy_summary,
     save_density_variants,
@@ -170,6 +171,8 @@ def run_rsdft_calculation(
         ``SCFResult`` containing the final density, potentials, eigenpairs,
         convergence flag, and other end-of-run quantities.
     """
+    total_runtime_start = time.perf_counter()
+
     print(" ")
     print("******************")
     print("     OUTPUT       ")
@@ -329,10 +332,7 @@ def run_rsdft_calculation(
 
         start_time = time.time()
         hart_tol = 1e-5
-        if backend.label == "gpu" and problem.settings.cg_prec:
-            hart_prec_label = "gpu-no-prec (ILU unavailable on GPU path)"
-        else:
-            hart_prec_label = "precLU" if problem.settings.cg_prec else "no prec"
+        hart_prec_label = "precLU" if problem.settings.cg_prec else "no prec"
 
         if problem.settings.cg_prec:
             print(f"with CG_prec (Hartree CG tol = {hart_tol:.1e})")
@@ -443,6 +443,9 @@ def run_rsdft_calculation(
             problem.input_data.atoms,
             backend.to_numpy_array,
         )
+
+    total_runtime = time.perf_counter() - total_runtime_start
+    print_and_write_total_runtime(problem.paths.output_file, total_runtime)
 
     return SCFResult(
         rho=rho,

@@ -6,7 +6,6 @@ import scipy.sparse as sps
 
 set_reduction_accelerators([])
 set_routine_accelerators([])
-warned_preconditioner = False
 
 
 def _to_gpu_matrix(A):
@@ -19,47 +18,58 @@ def _to_gpu_matrix(A):
     return cp.asarray(A, dtype=cp.float32)
 
 
+def _apply_preconditioner(preconditioner, precfun, residual):
+    if preconditioner is None or precfun is None:
+        return residual
+
+    residual_host = cp.asnumpy(residual)
+    if callable(precfun):
+        z_host = precfun(preconditioner, residual_host)
+    elif isinstance(precfun, str):
+        if precfun == "precLU" and hasattr(preconditioner, "solve"):
+            z_host = preconditioner.solve(residual_host)
+        else:
+            raise TypeError(f"Unsupported GPU preconditioner label: {precfun}")
+    elif hasattr(precfun, "solve"):
+        z_host = precfun.solve(residual_host)
+    else:
+        raise TypeError("GPU preconditioner must be callable or expose a solve() method")
+
+    return cp.asarray(z_host, dtype=cp.float32).ravel()
+
+
 def pcg(A, rhs, x0, m, tol, *args):
     """
-    GPU-accelerated Conjugate Gradient solver using CuPy.
-
-    Parameters:
-    A   -- SciPy/CuPy matrix (n x n)
-    rhs -- CuPy or NumPy ndarray (n x 1)
-    x0  -- Initial guess (n x 1)
-    m   -- Max iterations
-    tol -- Convergence tolerance
-
-    Returns:
-    x   -- Solution vector on the GPU
-    its -- Number of iterations
+    Solve A * x = rhs on the GPU using the same PCG iteration as the CPU path.
     """
-    global warned_preconditioner
-    if len(args) >= 2:
-        if not warned_preconditioner:
-            print("Warning: GPU PCG currently ignores the CPU-side preconditioner arguments.")
-            warned_preconditioner = True
+    if len(args) == 2:
+        PRE, precfun = args
+    else:
+        PRE = precfun = None
 
     A = _to_gpu_matrix(A)
     rhs = cp.asarray(rhs, dtype=cp.float32).ravel()
     x = cp.asarray(x0, dtype=cp.float32).ravel()
-    # Flatten vectors for faster inner products on GPU.
-    r = rhs - A @ x
-    p = r.copy()
 
-    ro1 = cp.inner(r, r)
-    tol1 = (tol ** 2) * ro1 
+    r = rhs - A @ x
+    z = _apply_preconditioner(PRE, precfun, r)
+    p = z.copy()
+    ro1 = cp.inner(z, r)
+    tol1 = (tol**2) * ro1
 
     its = 0
-    while its < m and ro1 > tol1:
+    while its < m and bool((ro1 > tol1).item()):
         its += 1
-        Ap = A @ p
-        alpha = ro1 / cp.inner(p, Ap)
-        x += alpha * p
-        r -= alpha * Ap
-        ro_new = cp.inner(r, r)
-        beta = ro_new / ro1
-        p = r + beta * p
-        ro1 = ro_new
+        ro = ro1
+        ap = A @ p
+        alp = ro / cp.inner(ap, p)
+
+        x += alp * p
+        r -= alp * ap
+
+        z = _apply_preconditioner(PRE, precfun, r)
+        ro1 = cp.inner(z, r)
+        bet = ro1 / ro
+        p = z + bet * p
 
     return x, its

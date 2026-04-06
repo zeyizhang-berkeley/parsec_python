@@ -1,28 +1,20 @@
 import cupy as cp
 
+
 def FermiDirac(lam, EF, Temp, Nelec):
     """
-    GPU-accelerated Fermi-Dirac distribution using CuPy.
-
-    Parameters:
-    lam (cp.ndarray): Eigenvalues (GPU array).
-    EF (float): Fermi level.
-    Temp (float): Temperature in energy units.
-    Nelec (float): Total number of electrons.
-
-    Returns:
-    fe (float): Deviation from expected electron count.
-    occup (cp.ndarray): Occupation numbers on GPU.
+    GPU version of the CPU Fermi-Dirac occupation helper.
     """
-    # Constants
     kT = Temp * 6.33327186e-06
-    spin = 1  # spin factor
+    spin = 1
 
-    # Fermi–Dirac distribution
-    t = 1 + cp.exp((lam - EF) / kT)
-    occup = spin / t
+    logits = (lam - EF) / kT
+    exp_neg = cp.exp(-cp.abs(logits))
+    occup = cp.where(
+        logits >= 0,
+        spin * exp_neg / (1.0 + exp_neg),
+        spin / (1.0 + exp_neg),
+    )
 
-    # Electron count deviation
     fe = cp.sum(occup) - Nelec / 2
-
     return fe, occup

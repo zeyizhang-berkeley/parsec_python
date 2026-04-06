@@ -21,6 +21,7 @@ from Eigensolvers.chsubsp import chsubsp as chsubsp_cpu
 from Eigensolvers.occupations import occupations as occupations_cpu
 from Eigensolvers.pcg import pcg as pcg_cpu
 from Mixer.mixer import mixer, reset_mixer
+from rsdft_output import print_and_write_total_runtime
 import matplotlib.pyplot as plt
 import cupy as cp 
 from cupy._core import set_reduction_accelerators, set_routine_accelerators
@@ -1404,6 +1405,7 @@ def flush_setup_timings(filename):
 
 # Write the output to the file
 write_rsdft_parameter_output(output_file, nev, Atoms, n_atom, Domain, h, poldeg, fd_order)
+total_runtime_start = time.perf_counter()
 
 print(' ')
 print('******************')
@@ -1676,10 +1678,7 @@ while err > tol and its <= maxits:
     start_time = time.time()
 
     hart_tol = 1e-5
-    if use_gpu and CG_prec:
-        hart_prec_label = "gpu-no-prec (ILU unavailable on GPU path)"
-    else:
-        hart_prec_label = "precLU" if CG_prec else "no prec"
+    hart_prec_label = "precLU" if CG_prec else "no prec"
     with open(output_file, 'a') as fid:
         fid.write(f'Hartree CG tol :\t{hart_tol:.1e} ({hart_prec_label})\n')
     if CG_prec:
@@ -1856,6 +1855,9 @@ if save_wfn:
             wfnid.write(np.array(len(xyz), dtype=np.uint32).tobytes())
             for j in range(len(xyz)):
                 wfnid.write(np.array(xyz[j, :], dtype=np.float64).tobytes())
+
+total_runtime = time.perf_counter() - total_runtime_start
+print_and_write_total_runtime(output_file, total_runtime)
 
 # Close output file
 fid.close()

@@ -61,7 +61,7 @@ def lanczosForChsubsp(B, nev, v, m):
     rr = []
     X1 = []
     #indx = []
-    bound = 0.0
+    bound = None
     VV = cp.zeros((n, m), dtype=cp.float32)
 
     while k < m:
@@ -114,6 +114,8 @@ def lanczosForChsubsp(B, nev, v, m):
             break
 
     rr, X1 = cp.linalg.eigh(Tmat[:k, :k])
+    if bound is None or not cp.isfinite(bound):
+        bound = cp.max(cp.abs(rr)) + bet
 
     del Tmat
     del v
