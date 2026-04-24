@@ -1,31 +1,21 @@
 import cupy as cp
 from cupy.linalg import qr, eigh
-import cupyx.scipy.sparse as cpsparse
-import scipy.sparse as sps
 
 try:
+    from .gpu_linear_operator import to_gpu_matrix
     from .lancz_uppbnd_gpu import lancz_uppbnd
     from .Rayleighritz_gpu import Rayleighritz
 except ImportError:
+    from gpu_linear_operator import to_gpu_matrix
     from lancz_uppbnd_gpu import lancz_uppbnd
     from Rayleighritz_gpu import Rayleighritz
 
 
 def _to_gpu_matrix(H):
     """
-    Ensure H is a GPU matrix (dense CuPy ndarray or sparse CuPy CSR).
+    Ensure H is a GPU matrix, sparse matrix, or custom GPU linear operator.
     """
-    if isinstance(H, cp.ndarray):
-        return H.astype(cp.float32), "dense"
-
-    elif sps.issparse(H):  # SciPy sparse → CuPy sparse
-        return cpsparse.csr_matrix(H.astype("float32")), "sparse"
-
-    elif isinstance(H, cpsparse.spmatrix):  # Already CuPy sparse
-        return H.astype(cp.float32), "sparse"
-
-    else:
-        raise TypeError("H must be CuPy ndarray or SciPy/CuPy sparse matrix")
+    return to_gpu_matrix(H, return_mode=True)
 
 
 def first_filt(nev, H, polm=10):

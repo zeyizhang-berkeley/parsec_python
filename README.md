@@ -49,6 +49,136 @@ your machine, point the following environment variables to writable folders:
 - `TMP`
 - `CUPY_CACHE_DIR`
 
+### PowerShell quick start
+
+If you are using PowerShell and want the environment activated in your current
+shell, load the repo helper script with dot-sourcing:
+
+```powershell
+Set-ExecutionPolicy -Scope Process Bypass
+. .\Enter-ParsecEnv.ps1
+```
+
+That command:
+
+- activates the `parsec_python` Conda environment when available
+- otherwise falls back to `.\.conda_env`
+- sets `MPLCONFIGDIR`, `CUPY_CACHE_DIR`, `TEMP`, and `TMP`
+- clears inherited `PYTHONPATH` / `PYTHONHOME` values that can interfere with the env
+- sets `CUDA_PATH` if CUDA 13.0 is installed in the default Windows location
+- changes into `src\`
+
+After that, run:
+
+```powershell
+python main_new.py
+```
+
+To stay in the repo root instead of changing into `src\`, use:
+
+```powershell
+Set-ExecutionPolicy -Scope Process Bypass
+. .\Enter-ParsecEnv.ps1 -RepoRoot
+python .\src\main_new.py
+```
+
+## Native C++ Scaffold
+
+This repo now includes an additive scaffold for future C++/OpenMP versions of:
+
+- `pseudoDiag`
+- `pseudoNL_original`
+
+The scaffold lives in:
+
+- `src/native/`
+- `src/V_ion/pseudoDiag_cpp.py`
+- `src/V_ion/pseudoNL_original_cpp.py`
+
+Important:
+
+- the existing Python implementations are unchanged
+- the new native entry points are not wired into the default backend yet
+- the C++ functions are placeholders that currently raise a clear runtime error
+- the purpose of this scaffold is to establish the build system, module layout,
+  and wrapper API before porting the hot loops
+
+### Build prerequisites on Windows
+
+To build the extension from source you will need:
+
+- Visual Studio Build Tools with MSVC C++
+- OpenMP support
+- CMake
+- Ninja
+
+These tools were not available on `PATH` in the current shell, so the scaffold
+was added but not compiled here.
+
+### Build commands
+
+From the repo root inside your Python environment:
+
+```powershell
+python -m pip install --upgrade pip
+python -m pip install scikit-build-core pybind11
+python -m pip install -v .
+```
+
+After a successful build, you can inspect the extension with:
+
+```powershell
+python -c "import rsdft_native; print(rsdft_native.build_info())"
+```
+
+The expected result now looks like:
+
+```python
+{'scaffold': False, 'implemented_kernels': ('pseudo_diag_omp', 'pseudo_nl_omp'), 'openmp_enabled': True, 'openmp_max_threads': 8}
+```
+
+### Wrapper usage
+
+Once the extension is built, the additive wrappers can be imported directly:
+
+```python
+from V_ion.pseudoDiag_cpp import pseudoDiag
+from V_ion.pseudoNL_original_cpp import pseudoNL
+```
+
+Those wrappers intentionally mirror the future native call sites without
+replacing the existing Python modules.
+
+### Enable native kernels in the driver
+
+The refactored driver now defaults to the native C++/OpenMP ionic kernels when
+the `rsdft_native` extension is installed. To run explicitly with the native
+diagonal and nonlocal setup, you can still set:
+
+```powershell
+$env:PARSEC_NATIVE_PSEUDODIAG = "1"
+$env:PARSEC_NATIVE_PSEUDONL = "1"
+$env:OMP_NUM_THREADS = "8"
+python src\main_new.py --cpu samples\h\h_smoke.json
+```
+
+You can also enable only one native kernel:
+
+```powershell
+$env:PARSEC_NATIVE_PSEUDODIAG = "1"
+Remove-Item Env:PARSEC_NATIVE_PSEUDONL -ErrorAction SilentlyContinue
+python src\main_new.py --cpu samples\h\h_smoke.json
+```
+
+To force the legacy Python ionic kernels for comparison, set either variable to
+`0` before running:
+
+```powershell
+$env:PARSEC_NATIVE_PSEUDODIAG = "0"
+$env:PARSEC_NATIVE_PSEUDONL = "0"
+python src\main_new.py --cpu samples\h\h_smoke.json
+```
+
 ## Running The Refactored Driver
 
 From this package directory:

@@ -182,6 +182,11 @@ class SolverBackend:
     label: str
     pseudo_diag: Callable[..., Any]
     pseudo_nl: Callable[..., Any]
+    pseudo_diag_source: str
+    pseudo_nl_source: str
+    xc: Callable[..., Any]
+    mixer: Callable[..., Any]
+    reset_mixer: Callable[..., Any]
     first_filt: Callable[..., Any]
     chefsi1: Callable[..., Any]
     lanczos: Callable[..., Any]

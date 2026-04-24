@@ -20,10 +20,8 @@ import scipy.sparse.linalg as spla
 from Eigensolvers.pcg import pcg as pcg_cpu
 from Laplacian.fd3d import fd3d
 from Laplacian.nuclear import nuclear
-from Mixer.mixer import mixer, reset_mixer
 from V_ion.nelectrons import nelectrons
 from V_ion.pseudoNL_original_ML4Den import pseudoNL_ML4Den
-from V_xc.exc_nspn import exc_nspn
 
 from rsdft_models import EnergyComponents, PreparedSystem, SCFResult, SolverBackend
 from rsdft_output import (
@@ -49,9 +47,43 @@ def _scaled_lanczos_steps(nev: int, modifier: float) -> int:
     return nev + max(1, int(round(500 * modifier)))
 
 
-def _build_preconditioner(A, cg_prec: int):
+def _density_setup_needs_cpu_laplacian(density_method: str) -> bool:
+    """Return True when the initial-density path still needs a CPU Laplacian."""
+    return density_method not in {"sad", "sad_ml_grid"}
+
+
+def _build_laplacians(problem: PreparedSystem, backend: SolverBackend):
+    """Build the Laplacian matrices required by the selected backend."""
+    h = problem.domain["h"]
+    nx, ny, nz = problem.domain["nx"], problem.domain["ny"], problem.domain["nz"]
+    scale = 1.0 / (h * h)
+
+    if backend.label != "gpu":
+        return scale * fd3d(nx, ny, nz, problem.settings.fd_order), None
+
+    laplacian_cpu = None
+    if _density_setup_needs_cpu_laplacian(problem.input_data.density_method):
+        laplacian_cpu = scale * fd3d(nx, ny, nz, problem.settings.fd_order)
+
+    try:
+        from Laplacian.fd3d_gpu import fd3d_gpu
+    except ImportError as exc:
+        raise SystemExit("GPU backend requested but fd3d_gpu could not be imported.") from exc
+
+    laplacian_gpu = fd3d_gpu(nx, ny, nz, problem.settings.fd_order, scale=scale)
+    return laplacian_cpu, laplacian_gpu
+
+
+def _build_preconditioner(A, cg_prec: int, backend: SolverBackend, density_method: str):
     """Build the ILU preconditioner used by the CPU Hartree solve."""
     if not cg_prec:
+        return []
+
+    if backend.label == "gpu" and not _density_setup_needs_cpu_laplacian(density_method):
+        print("Skipping CPU ILU build on GPU backend; the GPU Hartree path does not use it.")
+        return []
+
+    if A is None:
         return []
 
     print("Calling ilu0 ...")
@@ -136,13 +168,15 @@ def compute_energy_components(
     nev: int,
     e_nuc0: float,
     h: float,
+    backend: SolverBackend,
 ) -> EnergyComponents:
     """Package the current energy breakdown into an ``EnergyComponents`` object."""
     esum = float(np.sum(lam_host[:nev] * occup_host[:nev]))
     eigen_sum_ry = 4.0 * esum
-    hartree_ry = float(np.sum(rho * (hpot + hpot0)) * h**3)
-    vxc_sum_ry = float(np.sum(rho * xc_potential) * h**3)
-    xc_ry = float(exc)
+    xp = backend.array_module
+    hartree_ry = float(backend.to_host_scalar(xp.sum(rho * (hpot + hpot0)) * h**3))
+    vxc_sum_ry = float(backend.to_host_scalar(xp.sum(rho * xc_potential) * h**3))
+    xc_ry = float(backend.to_host_scalar(exc))
     total_ry = eigen_sum_ry - hartree_ry + xc_ry - vxc_sum_ry + float(e_nuc0)
     return EnergyComponents(
         eigen_sum_ry=eigen_sum_ry,
@@ -183,12 +217,15 @@ def run_rsdft_calculation(
 
     # Stage 1: build the finite-difference Laplacian on the chosen domain.
     start_time = time.time()
-    A = (1.0 / (h * h)) * fd3d(nx, ny, nz, problem.settings.fd_order)
+    A, gpu_laplacian = _build_laplacians(problem, backend)
     laplacian_time = time.time() - start_time
     print(laplacian_time)
     timings.add("Laplacian construction", laplacian_time)
 
-    n = A.shape[0]
+    if backend.label == "gpu":
+        n = gpu_laplacian.shape[0]
+    else:
+        n = A.shape[0]
     Hpot = np.zeros(n)
     pot = Hpot.copy()
     err = 10.0 + problem.settings.tol
@@ -201,7 +238,12 @@ def run_rsdft_calculation(
     print(" Enuc time", enuc_time)
     timings.add("Ion-ion repulsion setup", enuc_time)
 
-    preconditioner = _build_preconditioner(A, problem.settings.cg_prec)
+    preconditioner = _build_preconditioner(
+        A,
+        problem.settings.cg_prec,
+        backend,
+        problem.input_data.density_method,
+    )
 
     print(" Working.....setting up diagonal part of ionic potential...")
     start_time = time.time()
@@ -241,7 +283,11 @@ def run_rsdft_calculation(
 
     print(" Working.....setting up exchange and correlation potentials...")
     start_time = time.time()
-    XCpot, exc = exc_nspn(problem.domain, rhoxc)
+    if backend.label == "gpu":
+        cp = backend.cupy_module
+        XCpot_backend, exc = backend.xc(problem.domain, cp.asarray(rhoxc, dtype=cp.float32))
+    else:
+        XCpot_backend, exc = backend.xc(problem.domain, rhoxc)
     exc_time = time.time() - start_time
     print(" exc time: ", exc_time)
     timings.add("Exchange-correlation setup", exc_time)
@@ -249,18 +295,45 @@ def run_rsdft_calculation(
     write_initial_density_diagnostics(problem.paths.output_file, rhoxc, hpsum0_ev, exc)
     timings.flush(problem.paths.output_file)
 
-    xcpot = np.transpose(XCpot)
     nelec = nelectrons(problem.input_data.atoms, elem, n_elements)
     if problem.input_data.z_charge != 0:
         nelec -= problem.input_data.z_charge
 
-    pot = ppot + hpot0 + 0.5 * xcpot
-    reset_mixer()
+    if backend.label == "gpu":
+        cp = backend.cupy_module
+        rho0_backend = cp.asarray(rho0, dtype=cp.float32)
+        hpot0_backend = cp.asarray(hpot0, dtype=cp.float32)
+        ppot_backend = cp.asarray(ppot, dtype=cp.float32)
+        Hpot_backend = cp.asarray(Hpot, dtype=cp.float32)
+        XCpot_backend = cp.asarray(XCpot_backend, dtype=cp.float32).reshape(-1)
+        pot_backend = ppot_backend + hpot0_backend + 0.5 * XCpot_backend
+        rho_backend = rho0_backend / h**3
+    else:
+        rho0_backend = rho0
+        hpot0_backend = hpot0
+        ppot_backend = ppot
+        Hpot_backend = Hpot
+        XCpot_backend = np.asarray(XCpot_backend).reshape(-1)
+        pot_backend = ppot_backend + hpot0_backend + 0.5 * XCpot_backend
+        rho_backend = rhoxc
+
+    backend.reset_mixer()
 
     with open(problem.paths.output_file, "a", encoding="utf-8") as fid:
         fid.write("\n----------------------------------\n\n")
 
-    half_a_plus_vnl = 0.5 * A + vnl
+    half_a_plus_vnl = None
+    gpu_hamiltonian = None
+    rho_rhs_scale = 4 * np.pi / h**3
+    if backend.label == "gpu":
+        from Eigensolvers.gpu_linear_operator import ShiftedHamiltonianOperator, to_gpu_matrix
+
+        gpu_base_hamiltonian = gpu_laplacian * np.float32(0.5) + to_gpu_matrix(vnl)
+        gpu_hamiltonian = ShiftedHamiltonianOperator(gpu_base_hamiltonian, pot_backend)
+        pot_backend = gpu_hamiltonian.diagonal
+    else:
+        half_a_plus_vnl = 0.5 * A + vnl
+
     if problem.settings.adaptive_scheme != 0 and sum(problem.input_data.n_atom) <= 2:
         degree_modifier = 0.75
         m_modifier = 0.95
@@ -271,7 +344,6 @@ def run_rsdft_calculation(
     W = []
     lam = []
     occup = []
-    rho = np.zeros(n)
     lam_host = np.array([])
     occup_host = np.array([])
     n_atoms = sum(atom["coord"].shape[0] for atom in problem.input_data.atoms)
@@ -282,7 +354,11 @@ def run_rsdft_calculation(
         iterations += 1
         print(f"  Working ... SCF iter # {iterations} ... ")
 
-        B = half_a_plus_vnl + sp.diags(pot, 0, shape=(n, n))
+        if backend.label == "gpu":
+            gpu_hamiltonian.update_diagonal(pot_backend)
+            B = gpu_hamiltonian
+        else:
+            B = half_a_plus_vnl + sp.diags(pot_backend, 0, shape=(n, n))
         start_time = time.time()
 
         # Solve the current Hamiltonian using the selected eigensolver path.
@@ -321,11 +397,15 @@ def run_rsdft_calculation(
         occup_host = np.asarray(backend.to_numpy_array(occup)).reshape(-1)
 
         # Update the density from the occupied states, then solve Poisson/XC.
-        rho = (W[:, : problem.nev] ** 2) @ (2 * occup)
-        rho = np.asarray(backend.to_numpy_array(rho)).reshape(-1)
-
-        hrhs = (4 * np.pi / h**3) * (rho - rho0)
-        rho = rho / h**3
+        rho_grid_backend = (W[:, : problem.nev] ** 2) @ (2 * occup)
+        if backend.label == "gpu":
+            rho_grid_backend = backend.array_module.asarray(rho_grid_backend).reshape(-1)
+            hrhs = rho_rhs_scale * (rho_grid_backend - rho0_backend)
+            rho_backend = rho_grid_backend / h**3
+        else:
+            rho_grid_backend = np.asarray(backend.to_numpy_array(rho_grid_backend)).reshape(-1)
+            hrhs = rho_rhs_scale * (rho_grid_backend - rho0_backend)
+            rho_backend = rho_grid_backend / h**3
 
         start_time = time.time()
         hart_tol = 1e-5
@@ -337,19 +417,33 @@ def run_rsdft_calculation(
         if problem.settings.cg_prec:
             print(f"with CG_prec (Hartree CG tol = {hart_tol:.1e})")
             if backend.label == "cpu":
-                Hpot, _ = pcg_cpu(A, hrhs, Hpot, 200, hart_tol, preconditioner, "precLU")
+                Hpot_backend, _ = pcg_cpu(A, hrhs, Hpot_backend, 200, hart_tol, preconditioner, "precLU")
             else:
-                Hpot, _ = backend.pcg(A, hrhs, Hpot, 200, hart_tol, preconditioner, "precLU")
+                Hpot_backend, _ = backend.pcg(gpu_laplacian, hrhs, Hpot_backend, 200, hart_tol, preconditioner, "precLU")
         else:
             print(f"no CG_prec (Hartree CG tol = {hart_tol:.1e})")
-            Hpot, _ = backend.pcg(A, hrhs, Hpot, 200, hart_tol)
-
-        Hpot = np.asarray(backend.to_numpy_array(Hpot)).reshape(-1)
+            if backend.label == "gpu":
+                Hpot_backend, _ = backend.pcg(gpu_laplacian, hrhs, Hpot_backend, 200, hart_tol)
+            else:
+                Hpot_backend, _ = backend.pcg(A, hrhs, Hpot_backend, 200, hart_tol)
         hart_time = time.time() - start_time
 
-        XCpot, exc = exc_nspn(problem.domain, rho, problem.paths.output_file)
-        pot_new = ppot + 0.5 * XCpot + Hpot + hpot0
-        err_new = np.linalg.norm(pot_new - pot) / np.linalg.norm(pot_new)
+        XCpot_backend, exc = backend.xc(problem.domain, rho_backend, problem.paths.output_file)
+        if backend.label == "gpu":
+            XCpot_backend = backend.array_module.asarray(XCpot_backend).reshape(-1)
+            pot_new_backend = ppot_backend + 0.5 * XCpot_backend + Hpot_backend + hpot0_backend
+            delta_backend = pot_new_backend - pot_backend
+            err_new = float(
+                backend.to_host_scalar(
+                    backend.array_module.linalg.norm(delta_backend)
+                    / backend.array_module.linalg.norm(pot_new_backend)
+                )
+            )
+        else:
+            XCpot_backend = np.asarray(XCpot_backend).reshape(-1)
+            pot_new_backend = ppot_backend + 0.5 * XCpot_backend + Hpot_backend + hpot0_backend
+            delta_backend = pot_new_backend - pot_backend
+            err_new = np.linalg.norm(delta_backend) / np.linalg.norm(pot_new_backend)
 
         # Mild adaptive tuning of polynomial degree / Lanczos subspace size.
         if problem.settings.adaptive_scheme == 0 or err_new > 1 or err_new > 2 * err:
@@ -364,16 +458,17 @@ def run_rsdft_calculation(
 
         err = err_new
         iteration_energies = compute_energy_components(
-            rho,
-            Hpot,
-            hpot0,
-            XCpot,
+            rho_backend,
+            Hpot_backend,
+            hpot0_backend,
+            XCpot_backend,
             exc,
             lam_host,
             occup_host,
             problem.nev,
             e_nuc0,
             h,
+            backend,
         )
         write_scf_iteration(
             problem.paths.output_file,
@@ -392,7 +487,7 @@ def run_rsdft_calculation(
         )
         print(f"   ... SCF error = {err:10.2e}\n")
 
-        pot, _ = mixer(pot, pot_new - pot)
+        pot_backend, _ = backend.mixer(pot_backend, delta_backend)
 
     # Stage 4: final reporting and optional wavefunction export.
     print("SCF loop completed.")
@@ -412,31 +507,38 @@ def run_rsdft_calculation(
         print("**************************")
         print("         ")
 
-    save_density_variants(rho * (problem.domain["h"] ** 3), problem.domain, problem.paths.converged_density_base)
+    rho_host = np.asarray(backend.to_numpy_array(rho_backend)).reshape(-1)
+    Hpot_host = np.asarray(backend.to_numpy_array(Hpot_backend)).reshape(-1)
+    XCpot_host = np.asarray(backend.to_numpy_array(XCpot_backend)).reshape(-1)
+    pot_host = np.asarray(backend.to_numpy_array(pot_backend)).reshape(-1)
+    hpot0_host = np.asarray(backend.to_numpy_array(hpot0_backend)).reshape(-1)
+
+    save_density_variants(rho_host * (problem.domain["h"] ** 3), problem.domain, problem.paths.converged_density_base)
     print_eigenvalues_to_console(problem.nev, lam_host, occup_host)
 
     final_energies = compute_energy_components(
-        rho,
-        Hpot,
-        hpot0,
-        XCpot,
+        rho_backend,
+        Hpot_backend,
+        hpot0_backend,
+        XCpot_backend,
         exc,
         lam_host,
         occup_host,
         problem.nev,
         e_nuc0,
         h,
+        backend,
     )
     write_total_energy_summary(problem.paths.output_file, final_energies, n_atoms)
     print_total_energy_summary(final_energies, n_atoms)
 
-    reset_mixer()
+    backend.reset_mixer()
     if problem.settings.save_wfn:
         save_wavefunction(
             problem.paths.wfn_file,
             problem.domain,
-            pot,
-            rho,
+            pot_host,
+            rho_host,
             W,
             problem.nev,
             problem.n_types,
@@ -445,11 +547,11 @@ def run_rsdft_calculation(
         )
 
     return SCFResult(
-        rho=rho,
-        hpot=Hpot,
-        xc_potential=XCpot,
+        rho=rho_host,
+        hpot=Hpot_host,
+        xc_potential=XCpot_host,
         exc=float(exc),
-        potential=pot,
+        potential=pot_host,
         wavefunctions=W,
         eigenvalues=lam_host,
         occupations=occup_host,
@@ -457,6 +559,6 @@ def run_rsdft_calculation(
         error=err,
         converged=converged,
         e_nuc0=float(e_nuc0),
-        hpot0=hpot0,
+        hpot0=hpot0_host,
         n_atoms=n_atoms,
     )

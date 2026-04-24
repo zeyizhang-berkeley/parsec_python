@@ -95,7 +95,14 @@ def main(argv: list[str] | None = None):
     # 3. Select CPU/GPU implementations, then derive the simulation domain.
     backend = select_solver_backend(settings)
     print(f"Successfully loaded {len(input_data.atoms)} atomic species.")
-    print(f"Using {backend.label.upper()} backend for available solver stages.")
+    if backend.pseudo_diag_source != backend.label or backend.pseudo_nl_source != backend.label:
+        print(
+            f"Using {backend.label.upper()} backend for eigensolver/Hartree stages "
+            f"with {backend.pseudo_diag_source.upper()} diagonal and "
+            f"{backend.pseudo_nl_source.upper()} nonlocal ionic setup."
+        )
+    else:
+        print(f"Using {backend.label.upper()} backend for available solver stages.")
 
     problem = prepare_system(input_data, settings, elem, n_elements)
     print(f"Atoms {problem.input_data.atoms}")

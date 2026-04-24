@@ -1,14 +1,14 @@
 import cupy as cp
 from cupy.linalg import qr, eigh
-import cupyx.scipy.sparse as cpsparse
-import scipy.sparse as sps
 
 try:
     from .ch_filter import ch_filter
+    from .gpu_linear_operator import to_gpu_matrix
     from .Rayleighritz_gpu import Rayleighritz
     from .lanczosForChsubsp_gpu import lanczosForChsubsp
 except ImportError:
     from ch_filter import ch_filter
+    from gpu_linear_operator import to_gpu_matrix
     from Rayleighritz_gpu import Rayleighritz
     from lanczosForChsubsp_gpu import lanczosForChsubsp
 from updatePercentageComplete import updatePercentageComplete
@@ -18,13 +18,7 @@ enableMexFilesTest = 0
 
 
 def _to_gpu_matrix(B):
-    if isinstance(B, cp.ndarray):
-        return B.astype(cp.float32, copy=False)
-    if isinstance(B, cpsparse.spmatrix):
-        return B.astype(cp.float32)
-    if sps.issparse(B):
-        return cpsparse.csr_matrix(B.astype("float32"))
-    return cp.asarray(B, dtype=cp.float32)
+    return to_gpu_matrix(B)
 
 
 def lanczos(B, nev, v, m, tol, *args):
