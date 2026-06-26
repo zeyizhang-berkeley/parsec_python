@@ -1,15 +1,15 @@
 import cupy as cp
 from cupy.linalg import qr, eigh
-import cupyx.scipy.sparse as cpsparse
-import scipy.sparse as sps
 
 try:
     from .lanczosForChsubsp_gpu import lanczosForChsubsp
     from .ch_filter import ch_filter
+    from .gpu_linear_operator import to_gpu_matrix
     from .Rayleighritz_gpu import Rayleighritz
 except ImportError:
     from lanczosForChsubsp_gpu import lanczosForChsubsp
     from ch_filter import ch_filter
+    from gpu_linear_operator import to_gpu_matrix
     from Rayleighritz_gpu import Rayleighritz
 
 OPTIMIZATIONLEVEL = 0
@@ -17,13 +17,7 @@ enableMexFilesTest = 0
 
 
 def _to_gpu_matrix(H):
-    if isinstance(H, cp.ndarray):
-        return H.astype(cp.float32, copy=False)
-    if isinstance(H, cpsparse.spmatrix):
-        return H.astype(cp.float32)
-    if sps.issparse(H):
-        return cpsparse.csr_matrix(H.astype("float32"))
-    return cp.asarray(H, dtype=cp.float32)
+    return to_gpu_matrix(H)
 
 
 def chsubsp(deg, nev, H):

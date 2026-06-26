@@ -1,16 +1,16 @@
 import cupy as cp
 from cupy.linalg import qr, eigh
-import cupyx.scipy.sparse as cpsparse
-import scipy.sparse as sps
 
 try:
     from .Rayleighritz_gpu import Rayleighritz
-    from .lanczosForChefsi1_gpu import lanczosForChefsi1
     from .ch_filter import ch_filter
+    from .gpu_linear_operator import to_gpu_matrix
+    from .lanczosForChefsi1_gpu import lanczosForChefsi1
 except ImportError:
     from Rayleighritz_gpu import Rayleighritz
-    from lanczosForChefsi1_gpu import lanczosForChefsi1
     from ch_filter import ch_filter
+    from gpu_linear_operator import to_gpu_matrix
+    from lanczosForChefsi1_gpu import lanczosForChefsi1
 
 
 OPTIMIZATIONLEVEL = 0
@@ -18,15 +18,8 @@ enableMexFilesTest = 0
 
 
 def _to_gpu_matrix(H):
-    """Convert H to CuPy dense or CuPy sparse (CSR) format."""
-    if isinstance(H, cp.ndarray):
-        return H.astype(cp.float32, copy=False), "dense"
-    elif sps.issparse(H):
-        return cpsparse.csr_matrix(H.astype("float32")), "sparse"
-    elif isinstance(H, cpsparse.spmatrix):
-        return H.astype(cp.float32), "sparse"
-    else:
-        raise TypeError("H must be CuPy array or SciPy/CuPy sparse matrix")
+    """Convert H to a CuPy matrix, sparse matrix, or custom GPU operator."""
+    return to_gpu_matrix(H, return_mode=True)
 
 
 def chefsi1(Vin, ritzv, deg, nev, H):
@@ -54,7 +47,7 @@ def chefsi1(Vin, ritzv, deg, nev, H):
     W, _ = qr(W, mode="reduced")
 
     # --- Rayleigh-Ritz projection ---
-    Vin_proj = H @ W  # cuBLAS/cuSPARSE
+    Vin_proj = H @ W  # cuBLAS/cuSPARSE or custom operator matvec
     if OPTIMIZATIONLEVEL != 0:
         G = Rayleighritz(Vin_proj, W, n2)
     else:

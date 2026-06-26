@@ -10,6 +10,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
+from rsdft_hartree import normalize_hartree_method
+
 
 A0_ANG = 0.529177210903
 RY_EV = 13.605698066
@@ -34,6 +36,7 @@ class SolverSettings:
     adaptive_scheme: int = 0
     use_gpu: int = 0
     recenter_atoms: int = 1
+    hartree_method: str = "split"
 
     @staticmethod
     def _parse_tol(value: Any) -> float:
@@ -73,6 +76,7 @@ class SolverSettings:
         self.adaptive_scheme = 1 if int(self.adaptive_scheme) else 0
         self.use_gpu = 1 if int(self.use_gpu) else 0
         self.recenter_atoms = 1 if int(self.recenter_atoms) else 0
+        self.hartree_method = normalize_hartree_method(self.hartree_method)
 
         if not 0 <= self.diagmeth <= 3:
             self.diagmeth = 3
@@ -98,6 +102,9 @@ class SolverSettings:
             "gpu": ("use_gpu", self._parse_bool),
             "recenter_atoms": ("recenter_atoms", self._parse_bool),
             "recenter": ("recenter_atoms", self._parse_bool),
+            "hartree_method": ("hartree_method", normalize_hartree_method),
+            "hartree_potential_method": ("hartree_method", normalize_hartree_method),
+            "hartree": ("hartree_method", normalize_hartree_method),
         }
 
         applied: dict[str, Any] = {}
@@ -182,6 +189,11 @@ class SolverBackend:
     label: str
     pseudo_diag: Callable[..., Any]
     pseudo_nl: Callable[..., Any]
+    pseudo_diag_source: str
+    pseudo_nl_source: str
+    xc: Callable[..., Any]
+    mixer: Callable[..., Any]
+    reset_mixer: Callable[..., Any]
     first_filt: Callable[..., Any]
     chefsi1: Callable[..., Any]
     lanczos: Callable[..., Any]
@@ -225,6 +237,17 @@ class EnergyComponents:
     xc_ry: float
     ion_ry: float
     total_ry: float
+
+
+@dataclass
+class SCFDiagnostics:
+    """Convergence diagnostics for one SCF iteration."""
+    potential_relative: float
+    potential_norm: float
+    potential_abs_norm: float
+    potential_rms: float
+    density_relative: float
+    energy_change_ry: float | None
 
 
 @dataclass

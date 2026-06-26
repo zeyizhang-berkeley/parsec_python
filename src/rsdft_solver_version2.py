@@ -25,18 +25,11 @@ from V_ion.pseudoNL_original_ML4Den import pseudoNL_ML4Den
 
 from rsdft_diagnostics import (
     compute_orbital_stationarity_diagnostic,
-    write_hartree_consistency_diagnostic,
     write_orbital_stationarity_diagnostic,
 )
-from rsdft_hartree import (
-    describe_hartree_method,
-    hartree_rhs_from_grid_density,
-    solve_hartree_from_grid_density,
-)
-from rsdft_models import EnergyComponents, PreparedSystem, RY_EV, SCFDiagnostics, SCFResult, SolverBackend
+from rsdft_models import EnergyComponents, PreparedSystem, SCFDiagnostics, SCFResult, SolverBackend
 from rsdft_output import (
     TimingRecorder,
-    print_and_write_total_runtime,
     print_eigenvalues_to_console,
     print_total_energy_summary,
     save_density_variants,
@@ -198,6 +191,33 @@ def compute_energy_components(
     )
 
 
+def _parsec_charge_weighted_sre(
+    delta_potential,
+    rho,
+    h: float,
+    backend: SolverBackend,
+    nrep: float = 1.0,
+) -> float:
+    """Return PARSEC's default charge-weighted SRE for one spin channel.
+
+    The refactored Python path is spin-unpolarized and does not use symmetry
+    representations, so ``nrep`` is one unless that support is added later.
+    """
+    xp = backend.array_module
+    delta = xp.asarray(delta_potential)
+    rho_arr = xp.asarray(rho)
+    hcub = h**3
+
+    electron_count = xp.sum(rho_arr) * hcub * nrep
+    electron_count_host = float(backend.to_host_scalar(electron_count))
+    if electron_count_host <= 0.0:
+        return float("inf")
+
+    weighted_sre_sq = xp.sum(rho_arr * delta * delta) * hcub * nrep / electron_count
+    weighted_sre_sq = xp.maximum(weighted_sre_sq, 0.0)
+    return float(backend.to_host_scalar(xp.sqrt(weighted_sre_sq)))
+
+
 def _safe_ratio(numerator: float, denominator: float) -> float:
     """Return a finite relative value when both norms are zero."""
     if denominator == 0.0:
@@ -208,104 +228,6 @@ def _safe_ratio(numerator: float, denominator: float) -> float:
 def _backend_norm(backend: SolverBackend, value) -> float:
     """Compute a vector norm and convert the result to a Python float."""
     return float(backend.to_host_scalar(backend.array_module.linalg.norm(value)))
-
-
-def _backend_abs_max(backend: SolverBackend, value) -> float:
-    """Return max(abs(value)) as a Python float for either backend."""
-    xp = backend.array_module
-    return float(backend.to_host_scalar(xp.max(xp.abs(value))))
-
-
-def _backend_mean(backend: SolverBackend, value) -> float:
-    """Return mean(value) as a Python float for either backend."""
-    return float(backend.to_host_scalar(backend.array_module.mean(value)))
-
-
-def _compute_hartree_consistency_diagnostic(
-    laplacian,
-    rho,
-    hpot,
-    hpot0,
-    xc_potential,
-    exc: float,
-    lam_host,
-    occup_host,
-    nev: int,
-    e_nuc0: float,
-    h: float,
-    backend: SolverBackend,
-    carried_energies: EnergyComponents,
-    pcg_max_iters: int = 200,
-    pcg_tol: float = 1.0e-5,
-) -> dict[str, object]:
-    """Compare the carried split Hartree potential with a full final-density solve."""
-    if laplacian is None:
-        return {"available": False, "reason": "no Laplacian was available for the active backend"}
-
-    xp = backend.array_module
-    rho_backend = xp.asarray(rho).reshape(-1)
-    carried_hartree = xp.asarray(hpot).reshape(-1) + xp.asarray(hpot0).reshape(-1)
-    full_rhs = (4.0 * np.pi) * rho_backend
-    rhs_norm = _backend_norm(backend, full_rhs)
-
-    recomputed_hartree, recomputed_iterations = backend.pcg(
-        laplacian,
-        full_rhs,
-        xp.zeros_like(rho_backend),
-        pcg_max_iters,
-        pcg_tol,
-    )
-    recomputed_hartree = xp.asarray(recomputed_hartree).reshape(-1)
-
-    carried_residual = laplacian @ carried_hartree - full_rhs
-    recomputed_residual = laplacian @ recomputed_hartree - full_rhs
-    carried_residual_norm = _backend_norm(backend, carried_residual)
-    recomputed_residual_norm = _backend_norm(backend, recomputed_residual)
-
-    hartree_delta = carried_hartree - recomputed_hartree
-    hartree_delta_norm = _backend_norm(backend, hartree_delta)
-    recomputed_norm = _backend_norm(backend, recomputed_hartree)
-    hartree_delta_mean = _backend_mean(backend, hartree_delta)
-    hartree_delta_centered = hartree_delta - hartree_delta_mean
-
-    zero_hartree0 = xp.zeros_like(recomputed_hartree)
-    recomputed_energies = compute_energy_components(
-        rho_backend,
-        recomputed_hartree,
-        zero_hartree0,
-        xc_potential,
-        exc,
-        lam_host,
-        occup_host,
-        nev,
-        e_nuc0,
-        h,
-        backend,
-    )
-
-    size_scale = np.sqrt(float(rho_backend.size))
-    return {
-        "available": True,
-        "recomputed_iterations": int(recomputed_iterations),
-        "carried_residual_norm": carried_residual_norm,
-        "carried_residual_relative": _safe_ratio(carried_residual_norm, rhs_norm),
-        "carried_residual_rms": carried_residual_norm / size_scale,
-        "recomputed_residual_norm": recomputed_residual_norm,
-        "recomputed_residual_relative": _safe_ratio(recomputed_residual_norm, rhs_norm),
-        "recomputed_residual_rms": recomputed_residual_norm / size_scale,
-        "hartree_delta_norm": hartree_delta_norm,
-        "hartree_delta_relative": _safe_ratio(hartree_delta_norm, recomputed_norm),
-        "hartree_delta_rms": hartree_delta_norm / size_scale,
-        "hartree_delta_max_abs": _backend_abs_max(backend, hartree_delta),
-        "hartree_delta_mean": hartree_delta_mean,
-        "hartree_delta_centered_rms": _backend_norm(backend, hartree_delta_centered) / size_scale,
-        "carried_hartree_ry": carried_energies.hartree_ry,
-        "recomputed_hartree_ry": recomputed_energies.hartree_ry,
-        "hartree_energy_delta_ry": recomputed_energies.hartree_ry - carried_energies.hartree_ry,
-        "carried_total_ry": carried_energies.total_ry,
-        "recomputed_total_ry": recomputed_energies.total_ry,
-        "total_energy_delta_ry": recomputed_energies.total_ry - carried_energies.total_ry,
-    }
 
 
 def run_rsdft_calculation(
@@ -325,8 +247,6 @@ def run_rsdft_calculation(
         ``SCFResult`` containing the final density, potentials, eigenpairs,
         convergence flag, and other end-of-run quantities.
     """
-    total_runtime_start = time.perf_counter()
-
     print(" ")
     print("******************")
     print("     OUTPUT       ")
@@ -352,8 +272,6 @@ def run_rsdft_calculation(
     Hpot = np.zeros(n)
     pot = Hpot.copy()
     err = 10.0 + problem.settings.tol
-    hartree_method = problem.settings.hartree_method
-    active_laplacian = gpu_laplacian if backend.label == "gpu" else A
 
     # Stage 2: set up ionic terms and the initial charge density.
     print(" Working.....setting up ionic potential...")
@@ -393,31 +311,10 @@ def run_rsdft_calculation(
         rho0 *= scaling_factor
         hpot0 *= scaling_factor
 
-    initial_hartree_source = "initial-density setup hpot0"
-    initial_hartree_iterations = None
-    if hartree_method in {"consistent_split", "full"}:
-        start_time = time.time()
-        initial_hartree_backend, initial_hartree_iterations = solve_hartree_from_grid_density(
-            active_laplacian,
-            backend.array_module.asarray(rho0).reshape(-1),
-            h,
-            backend,
-        )
-        initial_hartree_host = np.asarray(backend.to_numpy_array(initial_hartree_backend)).reshape(-1)
-        if hartree_method == "consistent_split":
-            hpot0 = initial_hartree_host
-            Hpot = np.zeros_like(hpot0)
-            initial_hartree_source = "recomputed hpot0 from rho0 with active Poisson solver"
-        else:
-            hpot0 = np.zeros_like(initial_hartree_host)
-            Hpot = initial_hartree_host
-            initial_hartree_source = "initial full Hartree solve from rho0"
-        timings.add("Initial Hartree Poisson setup", time.time() - start_time)
-
     save_density_variants(rho0, problem.domain, problem.paths.initial_density_base)
 
     rhoxc = np.transpose(rho0) / (h**3)
-    hpsum0 = float(np.sum(rho0 * (Hpot + hpot0)))
+    hpsum0 = float(np.sum(rho0 * hpot0))
     hpsum0_ev = hpsum0 * 13.605698066
 
     print(" Working.....setting up nonlocal part of ionic potential...")
@@ -439,16 +336,6 @@ def run_rsdft_calculation(
     timings.add("Exchange-correlation setup", exc_time)
 
     write_initial_density_diagnostics(problem.paths.output_file, rhoxc, hpsum0_ev, exc)
-    print(f" Hartree potential method: {hartree_method}")
-    print(f" Hartree method detail: {describe_hartree_method(hartree_method)}")
-    if initial_hartree_iterations is not None:
-        print(f" Initial Hartree Poisson iterations: {initial_hartree_iterations}")
-    with open(problem.paths.output_file, "a", encoding="utf-8") as fid:
-        fid.write(f" Hartree potential method: {hartree_method}\n")
-        fid.write(f" Hartree method detail: {describe_hartree_method(hartree_method)}\n")
-        fid.write(f" Initial Hartree source: {initial_hartree_source}\n")
-        if initial_hartree_iterations is not None:
-            fid.write(f" Initial Hartree Poisson iterations: {initial_hartree_iterations}\n")
     timings.flush(problem.paths.output_file)
 
     nelec = nelectrons(problem.input_data.atoms, elem, n_elements)
@@ -462,7 +349,7 @@ def run_rsdft_calculation(
         ppot_backend = cp.asarray(ppot, dtype=cp.float32)
         Hpot_backend = cp.asarray(Hpot, dtype=cp.float32)
         XCpot_backend = cp.asarray(XCpot_backend, dtype=cp.float32).reshape(-1)
-        pot_backend = ppot_backend + Hpot_backend + hpot0_backend + 0.5 * XCpot_backend
+        pot_backend = ppot_backend + hpot0_backend + 0.5 * XCpot_backend
         rho_backend = rho0_backend / h**3
     else:
         rho0_backend = rho0
@@ -470,16 +357,19 @@ def run_rsdft_calculation(
         ppot_backend = ppot
         Hpot_backend = Hpot
         XCpot_backend = np.asarray(XCpot_backend).reshape(-1)
-        pot_backend = ppot_backend + Hpot_backend + hpot0_backend + 0.5 * XCpot_backend
+        pot_backend = ppot_backend + hpot0_backend + 0.5 * XCpot_backend
         rho_backend = rhoxc
 
     backend.reset_mixer()
 
     with open(problem.paths.output_file, "a", encoding="utf-8") as fid:
         fid.write("\n----------------------------------\n\n")
+        fid.write("SCF convergence metric: PARSEC charge-weighted SRE\n")
+        fid.write("SRE = sqrt(h^3 * sum_i rho_i * (V_new_i - V_old_i)^2 / N_e)\n\n")
 
     half_a_plus_vnl = None
     gpu_hamiltonian = None
+    rho_rhs_scale = 4 * np.pi / h**3
     if backend.label == "gpu":
         from Eigensolvers.gpu_linear_operator import ShiftedHamiltonianOperator, to_gpu_matrix
 
@@ -557,24 +447,19 @@ def run_rsdft_calculation(
         rho_grid_backend = (W[:, : problem.nev] ** 2) @ (2 * occup)
         if backend.label == "gpu":
             rho_grid_backend = backend.array_module.asarray(rho_grid_backend).reshape(-1)
-            if hartree_method == "full":
-                hartree_density_grid = rho_grid_backend
-            else:
-                hartree_density_grid = rho_grid_backend - rho0_backend
-            hrhs = hartree_rhs_from_grid_density(hartree_density_grid, h, backend)
+            hrhs = rho_rhs_scale * (rho_grid_backend - rho0_backend)
             rho_backend = rho_grid_backend / h**3
         else:
             rho_grid_backend = np.asarray(backend.to_numpy_array(rho_grid_backend)).reshape(-1)
-            if hartree_method == "full":
-                hartree_density_grid = rho_grid_backend
-            else:
-                hartree_density_grid = rho_grid_backend - rho0_backend
-            hrhs = hartree_rhs_from_grid_density(hartree_density_grid, h, backend)
+            hrhs = rho_rhs_scale * (rho_grid_backend - rho0_backend)
             rho_backend = rho_grid_backend / h**3
 
         start_time = time.time()
         hart_tol = 1e-5
-        hart_prec_label = "precLU" if problem.settings.cg_prec else "no prec"
+        if backend.label == "gpu" and problem.settings.cg_prec:
+            hart_prec_label = "gpu-no-prec (ILU unavailable on GPU path)"
+        else:
+            hart_prec_label = "precLU" if problem.settings.cg_prec else "no prec"
 
         if problem.settings.cg_prec:
             print(f"with CG_prec (Hartree CG tol = {hart_tol:.1e})")
@@ -603,12 +488,14 @@ def run_rsdft_calculation(
         potential_abs_norm = _backend_norm(backend, delta_backend)
         potential_new_norm = _backend_norm(backend, pot_new_backend)
         potential_rms = potential_abs_norm / np.sqrt(delta_backend.size)
-        err_new = potential_abs_norm / potential_new_norm
+        potential_relative = _safe_ratio(potential_abs_norm, potential_new_norm)
 
         density_delta_backend = rho_backend - previous_rho_backend
         density_abs_norm = _backend_norm(backend, density_delta_backend)
         density_norm = _backend_norm(backend, rho_backend)
         density_relative = _safe_ratio(density_abs_norm, density_norm)
+
+        err_new = _parsec_charge_weighted_sre(delta_backend, rho_backend, h, backend)
 
         # Mild adaptive tuning of polynomial degree / Lanczos subspace size.
         if problem.settings.adaptive_scheme == 0 or err_new > 1 or err_new > 2 * err:
@@ -639,7 +526,7 @@ def run_rsdft_calculation(
         if previous_total_energy_ry is not None:
             energy_change_ry = abs(iteration_energies.total_ry - previous_total_energy_ry)
         scf_diagnostics = SCFDiagnostics(
-            potential_relative=err,
+            potential_relative=potential_relative,
             potential_norm=potential_new_norm,
             potential_abs_norm=potential_abs_norm,
             potential_rms=potential_rms,
@@ -662,19 +549,7 @@ def run_rsdft_calculation(
             iteration_energies,
             n_atoms,
         )
-        print(f"   ... SCF error = {err:10.2e}")
-        print(
-            "   ... potential residual: "
-            f"rel = {err:10.2e}, norm(potNew) = {potential_new_norm:10.5e}, "
-            f"norm(delta) = {potential_abs_norm:10.5e}, RMS(delta) = {potential_rms:10.5e}"
-        )
-        energy_change_text = (
-            "n/a (first SCF iteration)"
-            if energy_change_ry is None
-            else f"{energy_change_ry * RY_EV:10.5e} eV = {energy_change_ry:10.5e} Ry"
-        )
-        print(f"   ... density residual rel = {density_relative:10.2e}")
-        print(f"   ... total energy change = {energy_change_text}\n")
+        print(f"   ... PARSEC charge-weighted SRE = {err:10.2e}\n")
 
         previous_rho_backend = backend.array_module.asarray(rho_backend).copy()
         previous_total_energy_ry = iteration_energies.total_ry
@@ -724,45 +599,6 @@ def run_rsdft_calculation(
     write_total_energy_summary(problem.paths.output_file, final_energies, n_atoms)
     print_total_energy_summary(final_energies, n_atoms)
 
-    active_laplacian = gpu_laplacian if backend.label == "gpu" else A
-    hartree_diagnostic = _compute_hartree_consistency_diagnostic(
-        active_laplacian,
-        rho_backend,
-        Hpot_backend,
-        hpot0_backend,
-        XCpot_backend,
-        exc,
-        lam_host,
-        occup_host,
-        problem.nev,
-        e_nuc0,
-        h,
-        backend,
-        final_energies,
-    )
-    write_hartree_consistency_diagnostic(problem.paths.output_file, hartree_diagnostic)
-    if hartree_diagnostic.get("available"):
-        print(
-            " Hartree consistency residual rel "
-            f"(carried/recomputed) = {hartree_diagnostic['carried_residual_relative']:.3e} / "
-            f"{hartree_diagnostic['recomputed_residual_relative']:.3e}"
-        )
-        print(
-            " Hartree carried-vs-recomputed delta RMS = "
-            f"{hartree_diagnostic['hartree_delta_rms']:.3e}, "
-            "centered RMS = "
-            f"{hartree_diagnostic['hartree_delta_centered_rms']:.3e}"
-        )
-        print(
-            " Recomputed-Hartree total energy delta = "
-            f"{hartree_diagnostic['total_energy_delta_ry'] * RY_EV:.5e} eV"
-        )
-    else:
-        print(
-            " Hartree consistency diagnostic skipped: "
-            f"{hartree_diagnostic.get('reason', 'unknown reason')}"
-        )
-
     if backend.label == "gpu" and gpu_hamiltonian is not None:
         density_potential_backend = ppot_backend + 0.5 * XCpot_backend + Hpot_backend + hpot0_backend
         gpu_hamiltonian.update_diagonal(density_potential_backend)
@@ -800,9 +636,6 @@ def run_rsdft_calculation(
             problem.input_data.atoms,
             backend.to_numpy_array,
         )
-
-    total_runtime = time.perf_counter() - total_runtime_start
-    print_and_write_total_runtime(problem.paths.output_file, total_runtime)
 
     return SCFResult(
         rho=rho_host,

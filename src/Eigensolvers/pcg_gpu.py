@@ -12,6 +12,8 @@ def _to_gpu_matrix(A):
     if isinstance(A, cp.ndarray):
         return A.astype(cp.float32, copy=False)
     if isinstance(A, cpsparse.spmatrix):
+        if A.dtype == cp.float32:
+            return A
         return A.astype(cp.float32)
     if sps.issparse(A):
         return cpsparse.csr_matrix(A.astype("float32"))

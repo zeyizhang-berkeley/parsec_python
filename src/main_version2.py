@@ -16,7 +16,7 @@ from rsdft_input import has_diagmeth_override, load_elements, prepare_input_data
 from rsdft_models import SolverSettings
 from rsdft_output import initialize_output_file, write_rsdft_parameter_output
 from rsdft_setup import prepare_system
-from rsdft_solver import run_rsdft_calculation
+from rsdft_solver_version2 import run_rsdft_calculation
 
 
 def _parse_cli_args(argv: list[str]) -> argparse.Namespace:

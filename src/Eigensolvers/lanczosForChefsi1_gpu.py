@@ -1,21 +1,17 @@
 import cupy as cp
 from cupy.linalg import norm, eigh
-import cupyx.scipy.sparse as cpsparse
-import scipy.sparse as sps
+
+try:
+    from .gpu_linear_operator import to_gpu_matrix
+except ImportError:
+    from gpu_linear_operator import to_gpu_matrix
 
 enableMexFilesTest = 0
 
 
 def _to_gpu_matrix(B):
     """Convert B to dense or sparse CuPy matrix."""
-    if isinstance(B, cp.ndarray):
-        return B.astype(cp.float32), "dense"
-    elif sps.issparse(B):
-        return cpsparse.csr_matrix(B.astype("float32")), "sparse"
-    elif isinstance(B, cpsparse.spmatrix):
-        return B.astype(cp.float32), "sparse"
-    else:
-        raise TypeError("B must be CuPy array or SciPy/CuPy sparse matrix")
+    return to_gpu_matrix(B, return_mode=True)
 
 
 def lanczosForChefsi1(B, nev, v, m, tol=1e-6, reorth=False):

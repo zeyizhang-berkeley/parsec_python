@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from rsdft_models import A0_ANG, EnergyComponents, RY_EV
+from rsdft_models import A0_ANG, EnergyComponents, RY_EV, SCFDiagnostics
 
 
 @dataclass
@@ -185,6 +185,7 @@ def write_scf_iteration(
     hart_prec_label: str,
     hart_time: float,
     error: float,
+    diagnostics: SCFDiagnostics,
     energies: EnergyComponents,
     n_atoms: int,
 ) -> None:
@@ -203,6 +204,19 @@ def write_scf_iteration(
         fid.write(f"Hartree CG tol :\t{hart_tol:.1e} ({hart_prec_label})\n")
         fid.write(f"\nHartree potential time [sec]: \t{hart_time}\n\n")
         fid.write(f"   ... SCF error = {error:10.2e}\n")
+        fid.write("   SCF diagnostics this iter:\n")
+        fid.write(f"     Potential residual rel  = {diagnostics.potential_relative:10.2e}\n")
+        fid.write(f"     Potential norm          = {diagnostics.potential_norm:10.5e}\n")
+        fid.write(f"     Potential residual norm = {diagnostics.potential_abs_norm:10.5e}\n")
+        fid.write(f"     Potential residual RMS  = {diagnostics.potential_rms:10.5e}\n")
+        fid.write(f"     Density residual rel    = {diagnostics.density_relative:10.2e}\n")
+        if diagnostics.energy_change_ry is None:
+            fid.write("     Total energy change     = n/a (first SCF iteration)\n")
+        else:
+            fid.write(
+                f"     Total energy change     = {diagnostics.energy_change_ry * RY_EV:10.5e}  eV   = "
+                f"{diagnostics.energy_change_ry:10.5e}  Ry\n"
+            )
         fid.write("   Energy components this iter:\n")
         fid.write(
             f"     Sum of eigenvalues      = {energies.eigen_sum_ry * RY_EV:10.5f}  eV   = "
