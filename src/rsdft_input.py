@@ -82,6 +82,9 @@ def prompt_for_settings_overrides(settings: SolverSettings) -> dict[str, Any]:
         "recenter_atoms": _prompt_value_with_default(
             "Recenter atoms for default SAD grid? (0/1)", int, settings.recenter_atoms
         ),
+        "hartree_method": _prompt_value_with_default(
+            "Hartree method (split/consistent_split/full)", str, settings.hartree_method
+        ),
         "nev": _prompt_value_with_default("Number of eigenvalues (blank = auto)", int, "auto"),
         "grid_spacing": _prompt_value_with_default("Grid spacing h [Bohr] (blank = auto)", float, "auto"),
         "sphere_radius": _prompt_value_with_default("Sphere radius [Bohr] (blank = auto)", float, "auto"),
