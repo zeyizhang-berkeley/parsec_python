@@ -2,23 +2,50 @@
 
 Python version of the real-space DFT workflow used in this repository.
 
-This package currently contains two entry paths:
+This repository contains three entry paths:
 
-- `src/main.py`: the older monolithic driver.
-- `src/main_new.py`: the refactored driver with separated input/setup/output/solver modules.
+- `src/new_architecture/main.py`: the modular PARSEC-input single-point
+  launcher.
+- `src/old_architecture/main.py`: the older monolithic driver.
+- `src/old_architecture/main_new.py`: the refactored legacy driver with separated
+  input/setup/output/solver modules.
 
-The recent cleanup work in this repo was done around `main_new.py`. If you want the cleaner code path, use `main_new.py`.
+For an isolated CA-LDA calculation driven by a real PARSEC `parsec.in` and
+Martins-new `*_POTRE.DAT` files, use the self-contained package launcher:
+
+```powershell
+cd src\new_architecture
+python main.py path\to\parsec.in --dry-run
+python main.py path\to\parsec.in
+```
+
+That path is a native Python translation organized by physical concept. It
+does not launch or bind to the PARSEC Fortran executable; its `chebff` route
+uses the translated CHEBFF/SUBSPACE algorithms with no ARPACK fallback.
+
+Keep the POTRE files beside `parsec.in`, named after each `Atom_Type` (for
+example, `H_POTRE.DAT`). See
+[`src/new_architecture/README.md`](src/new_architecture/README.md) for
+outputs, supported options, and the modular Python API.
+
+The older JSON/manual workflow remains available through
+`src/old_architecture/main_new.py`.
 
 ## Repo Layout
 
-- `src/main_new.py`: small orchestrator for the refactored workflow.
-- `src/rsdft_input.py`: manual input, file input, unit conversion, ML-grid path resolution.
-- `src/rsdft_setup.py`: grid spacing, domain construction, recentering, output-path generation.
-- `src/rsdft_backend.py`: CPU/GPU backend selection.
-- `src/rsdft_solver.py`: the real-space DFT calculation and SCF loop.
-- `src/rsdft_output.py`: output log, density saves, timing summaries, optional `wfn.dat`.
-- `src/GUI/gui_input_generator.py`: GUI for generating `.in` input files.
-- `src/elements_new.csv`: element lookup table used during setup.
+- `src/new_architecture/`: modular PARSEC-style physics, ESDF reader, CLI,
+  folder-local launcher, tests, and implementation notes.
+- `src/old_architecture/`: the previous Python implementation, including its
+  drivers, numerical modules, GUI, tools, and data resources.
+- `src/old_architecture/main_new.py`: small orchestrator for the refactored legacy
+  workflow.
+- `src/old_architecture/rsdft_input.py`: manual/file input and unit conversion.
+- `src/old_architecture/rsdft_setup.py`: domain construction and output paths.
+- `src/old_architecture/rsdft_backend.py`: CPU/GPU backend selection.
+- `src/old_architecture/rsdft_solver.py`: the legacy SCF calculation.
+- `src/old_architecture/GUI/gui_input_generator.py`: legacy GUI input generator.
+- `src/old_architecture/native/`: C++/OpenMP acceleration sources for the legacy
+  `V_ion` workflow.
 
 ## Environment Setup
 
@@ -56,30 +83,19 @@ shell, load the repo helper script with dot-sourcing:
 
 ```powershell
 Set-ExecutionPolicy -Scope Process Bypass
-. .\Enter-ParsecEnv.ps1
+. .\use-parsec-env.ps1
 ```
 
 That command:
 
-- activates the `parsec_python` Conda environment when available
-- otherwise falls back to `.\.conda_env`
+- activates `.\.venv312`
 - sets `MPLCONFIGDIR`, `CUPY_CACHE_DIR`, `TEMP`, and `TMP`
-- clears inherited `PYTHONPATH` / `PYTHONHOME` values that can interfere with the env
-- sets `CUDA_PATH` if CUDA 13.0 is installed in the default Windows location
-- changes into `src\`
+- selects an available CUDA installation or the local CUDA shim
 
 After that, run:
 
 ```powershell
-python main_new.py
-```
-
-To stay in the repo root instead of changing into `src\`, use:
-
-```powershell
-Set-ExecutionPolicy -Scope Process Bypass
-. .\Enter-ParsecEnv.ps1 -RepoRoot
-python .\src\main_new.py
+python .\src\old_architecture\main_new.py
 ```
 
 ## Native C++ Scaffold
@@ -91,9 +107,9 @@ This repo now includes an additive scaffold for future C++/OpenMP versions of:
 
 The scaffold lives in:
 
-- `src/native/`
-- `src/V_ion/pseudoDiag_cpp.py`
-- `src/V_ion/pseudoNL_original_cpp.py`
+- `src/old_architecture/native/`
+- `src/old_architecture/V_ion/pseudoDiag_cpp.py`
+- `src/old_architecture/V_ion/pseudoNL_original_cpp.py`
 
 Important:
 
@@ -142,12 +158,13 @@ The expected result now looks like:
 Once the extension is built, the additive wrappers can be imported directly:
 
 ```python
-from V_ion.pseudoDiag_cpp import pseudoDiag
-from V_ion.pseudoNL_original_cpp import pseudoNL
+from old_architecture.V_ion.pseudoDiag_cpp import pseudoDiag
+from old_architecture.V_ion.pseudoNL_original_cpp import pseudoNL
 ```
 
 Those wrappers intentionally mirror the future native call sites without
-replacing the existing Python modules.
+replacing the existing Python modules. Package imports require `src` on
+`PYTHONPATH`.
 
 ### Enable native kernels in the driver
 
@@ -159,7 +176,7 @@ diagonal and nonlocal setup, you can still set:
 $env:PARSEC_NATIVE_PSEUDODIAG = "1"
 $env:PARSEC_NATIVE_PSEUDONL = "1"
 $env:OMP_NUM_THREADS = "8"
-python src\main_new.py --cpu samples\h\h_smoke.json
+python src\old_architecture\main_new.py --cpu samples\h\h_smoke.json
 ```
 
 You can also enable only one native kernel:
@@ -167,7 +184,7 @@ You can also enable only one native kernel:
 ```powershell
 $env:PARSEC_NATIVE_PSEUDODIAG = "1"
 Remove-Item Env:PARSEC_NATIVE_PSEUDONL -ErrorAction SilentlyContinue
-python src\main_new.py --cpu samples\h\h_smoke.json
+python src\old_architecture\main_new.py --cpu samples\h\h_smoke.json
 ```
 
 To force the legacy Python ionic kernels for comparison, set either variable to
@@ -176,7 +193,7 @@ To force the legacy Python ionic kernels for comparison, set either variable to
 ```powershell
 $env:PARSEC_NATIVE_PSEUDODIAG = "0"
 $env:PARSEC_NATIVE_PSEUDONL = "0"
-python src\main_new.py --cpu samples\h\h_smoke.json
+python src\old_architecture\main_new.py --cpu samples\h\h_smoke.json
 ```
 
 ## Running The Refactored Driver
@@ -184,7 +201,7 @@ python src\main_new.py --cpu samples\h\h_smoke.json
 From this package directory:
 
 ```bash
-python src/main_new.py
+python src/old_architecture/main_new.py
 ```
 
 That starts the interactive/manual-input flow.
@@ -192,7 +209,7 @@ That starts the interactive/manual-input flow.
 To run from an input file:
 
 ```bash
-python src/main_new.py path/to/your_input.in
+python src/old_architecture/main_new.py path/to/your_input.in
 ```
 
 Supported input formats:
@@ -299,7 +316,7 @@ Inside that folder you may see:
 Launch it from this package directory:
 
 ```bash
-python src/GUI/gui_input_generator.py
+python src/old_architecture/GUI/gui_input_generator.py
 ```
 
 The GUI can:
@@ -326,8 +343,9 @@ If GPU support is missing, the run exits with a clear error message listing the 
 If you want to compare the old and new drivers on the same case:
 
 1. Activate your Python environment.
-2. Run the old path with `src/main.py`.
-3. Run the refactored path with `src/main_new.py` on the same input.
+2. Run the old path with `src/old_architecture/main.py`.
+3. Run the refactored path with `src/old_architecture/main_new.py` on the same
+   input.
 4. Compare:
    - total energies
    - convergence behavior
@@ -336,10 +354,11 @@ If you want to compare the old and new drivers on the same case:
 
 ## Current Status
 
-`main.py` was intentionally left untouched during the refactor so the old workflow remains available.
+The monolithic `main.py` workflow is preserved inside `src/old_architecture`;
+only its package import paths changed during the move.
 
 The current recommended development path is:
 
-- use `src/main_new.py`
+- use `src/old_architecture/main_new.py`
 - keep new changes in the refactored modules
 - use the GUI generator for consistent `.in` file generation
