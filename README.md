@@ -62,7 +62,7 @@ For example:
 
 ```powershell
 python src\parsec_python\main.py `
-  src\parsec_python\acceleration\benchmarks\0d_naphthalene\parsec.in `
+  examples\0d_naphthalene\parsec.in `
   --no-archive
 ```
 
@@ -89,6 +89,14 @@ Useful options include:
 ## Source layout
 
 ```text
+examples/                          runnable calculations and benchmark data
+├── README.md                      case guide and execution commands
+├── h2_canonical_nodg/
+├── h2_full_nonlocal/
+├── 0d_benzene/
+├── 0d_naphthalene/
+├── 0d_Si28H36/
+└── 0_CH4_CF4/
 src/
 ├── parsec_python/                 canonical DFT package
 │   ├── main.py                    default command-line launcher
@@ -117,7 +125,6 @@ src/
 │   │   ├── native/                optional C++/OpenMP extension
 │   │   ├── resident.py            warmed-process execution
 │   │   └── tests/                 backend, parity, and GPU tests
-│   ├── benchmarks/                compact reference/parity cases
 │   └── tests/                     scientific and architecture tests
 ├── pp_generation/                 general FHI98PP generation package
 └── tools/
@@ -127,6 +134,8 @@ src/
 There are no longer separate `new_architecture` and
 `accelerated_architecture` packages. `parsec_python.acceleration` is an
 internal implementation layer, not a second public solver.
+Runnable inputs and benchmark reference data are deliberately outside the
+importable package under [`examples/`](examples/README.md).
 
 ## Scientific flow
 

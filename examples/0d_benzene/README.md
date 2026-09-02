@@ -27,11 +27,11 @@ nonlinear core correction.
 
 ## Run
 
-From `src/parsec_python`:
+From the repository root:
 
 ```powershell
-python main.py benchmarks\0d_benzene\parsec.in --dry-run
-python main.py benchmarks\0d_benzene\parsec.in --no-archive
+python src\parsec_python\main.py examples\0d_benzene\parsec.in --dry-run
+python src\parsec_python\main.py examples\0d_benzene\parsec.in --no-archive
 ```
 
 The physical calculation writes `parsec.out` in this directory. The

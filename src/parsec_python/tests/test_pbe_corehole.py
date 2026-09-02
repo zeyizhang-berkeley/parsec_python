@@ -13,9 +13,8 @@ from parsec_python.models import GridSettings
 
 
 BENCHMARK = (
-    Path(__file__).parents[1]
-    / "acceleration"
-    / "benchmarks"
+    Path(__file__).resolve().parents[3]
+    / "examples"
     / "0_CH4_CF4"
     / "python_pbe"
 )

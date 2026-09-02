@@ -151,13 +151,14 @@ solver can read converted norm-conserving UPF data, but conversion does not by
 itself validate transferability, ghost states, relativistic content, or
 core-hole suitability.
 
-## Benchmarks and validation
+## Examples and validation
 
-`benchmarks/` contains compact readable-path parity cases.
-`acceleration/benchmarks/` contains larger performance and specialized
-validation cases, including naphthalene, `Si28H36`, and core-hole PBE work.
-Local result files and caches can remain in those directories but are not part
-of the maintained source interface.
+Runnable calculations and benchmark data live in the repository-level
+[`examples/`](../../examples/README.md) directory, beside `src/` rather than
+inside this importable package. It includes compact parity cases, larger
+performance systems such as naphthalene and `Si28H36`, and the specialized
+core-hole PBE study. Local result files and caches can remain inside a case
+directory but are not part of the maintained source interface.
 
 Run the readable suite:
 

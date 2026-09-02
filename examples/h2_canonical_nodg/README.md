@@ -16,10 +16,10 @@ sets the order to one.
 
 ## Run the Python calculation
 
-From `src/parsec_python`:
+From the repository root:
 
 ```powershell
-python main.py benchmarks\h2_canonical_nodg\parsec.in --no-archive
+python src\parsec_python\main.py examples\h2_canonical_nodg\parsec.in --no-archive
 ```
 
 The calculation writes a PARSEC-style text report to `parsec.out` in

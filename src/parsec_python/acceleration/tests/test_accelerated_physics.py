@@ -295,10 +295,10 @@ class NativeCALDATests(unittest.TestCase):
 class NativeIonicSetupTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
-        package_root = Path(__file__).resolve().parents[2]
+        repository_root = Path(__file__).resolve().parents[4]
         potential_path = (
-            package_root
-            / "benchmarks"
+            repository_root
+            / "examples"
             / "0d_naphthalene"
             / "C_POTRE.DAT"
         )

@@ -141,8 +141,8 @@ class ParsecRadialSplineTests(unittest.TestCase):
 
     def test_nonlocal_spline_clamps_only_its_radial_query(self) -> None:
         path = (
-            Path(__file__).parents[2]
-            / "benchmarks"
+            Path(__file__).resolve().parents[4]
+            / "examples"
             / "0d_benzene"
             / "C_POTRE.DAT"
         )

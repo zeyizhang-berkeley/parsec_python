@@ -84,13 +84,13 @@ repository root:
 
 ```powershell
 .venv312\Scripts\python.exe src\tools\upf_to_parsec.py `
-  src\parsec_python\acceleration\benchmarks\0_CH4_CF4\0_ARES_CH4_CF4\test_CH4_CF4\pbe\CH4\IS\C.pbe-mt-cpi.UPF `
-  src\parsec_python\acceleration\benchmarks\0_CH4_CF4\python_pbe\pseudopotentials\C_POTRE.DAT
+  examples\0_CH4_CF4\0_ARES_CH4_CF4\test_CH4_CF4\pbe\CH4\IS\C.pbe-mt-cpi.UPF `
+  examples\0_CH4_CF4\python_pbe\pseudopotentials\C_POTRE.DAT
 
 .venv312\Scripts\python.exe src\tools\upf_to_parsec.py `
   --allow-ionized-reference `
-  src\parsec_python\acceleration\benchmarks\0_CH4_CF4\0_ARES_CH4_CF4\test_CH4_CF4\pbe\CH4\FS_1s\C.pbe-mt-cpi-1s.UPF `
-  src\parsec_python\acceleration\benchmarks\0_CH4_CF4\python_pbe\pseudopotentials\C-1s_POTRE.DAT
+  examples\0_CH4_CF4\0_ARES_CH4_CF4\test_CH4_CF4\pbe\CH4\FS_1s\C.pbe-mt-cpi-1s.UPF `
+  examples\0_CH4_CF4\python_pbe\pseudopotentials\C-1s_POTRE.DAT
 ```
 
 The initial and final carbon pseudopotentials have different ionic charges,
@@ -128,7 +128,7 @@ After all four jobs finish, compare directly with the supplied ARES logs:
 
 ```powershell
 .venv312\Scripts\python.exe `
-  src\parsec_python\acceleration\benchmarks\0_CH4_CF4\python_pbe\analyze.py
+  examples\0_CH4_CF4\python_pbe\analyze.py
 ```
 
 ## PBE reproduction results

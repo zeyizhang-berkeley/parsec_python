@@ -29,11 +29,11 @@ electron-ion energy          -7.04547304 Ry
 ion-ion energy                1.41113867 Ry
 ```
 
-Run Python from `src/parsec_python`:
+Run Python from the repository root:
 
 ```powershell
-python main.py benchmarks\h2_full_nonlocal\parsec.in --dry-run
-python main.py benchmarks\h2_full_nonlocal\parsec.in --no-archive
+python src\parsec_python\main.py examples\h2_full_nonlocal\parsec.in --dry-run
+python src\parsec_python\main.py examples\h2_full_nonlocal\parsec.in --no-archive
 ```
 
 The Python log is written here as `parsec.out`. The source PARSEC output

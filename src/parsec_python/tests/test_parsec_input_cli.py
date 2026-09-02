@@ -32,7 +32,8 @@ DATA = Path(__file__).parent / "data"
 H2_INPUT = DATA / "H2_parsec.in"
 SMOKE_INPUT = DATA / "H_cli_smoke.in"
 PACKAGE_ROOT = Path(__file__).resolve().parents[1]
-PHYSICAL_H2 = PACKAGE_ROOT / "benchmarks" / "h2_full_nonlocal"
+REPOSITORY_ROOT = PACKAGE_ROOT.parents[1]
+PHYSICAL_H2 = REPOSITORY_ROOT / "examples" / "h2_full_nonlocal"
 
 
 class ParsecInputTests(unittest.TestCase):

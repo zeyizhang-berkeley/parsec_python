@@ -315,8 +315,8 @@ class PseudopotentialTests(unittest.TestCase):
 
     def test_unhyphenated_benzene_wavefunction_marker(self) -> None:
         path = (
-            Path(__file__).parents[1]
-            / "benchmarks"
+            Path(__file__).resolve().parents[3]
+            / "examples"
             / "0d_benzene"
             / "C_POTRE.DAT"
         )
