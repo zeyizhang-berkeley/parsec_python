@@ -2,14 +2,17 @@
 """Convert a semilocal norm-conserving UPF v2 file to PARSEC POTRE.DAT.
 
 This converter targets PARSEC's ``martins_new`` pseudopotential reader.  It
-currently supports the conservative subset used by the FHI H and Si UPFs in
-the 0d_Si28H36 benchmark:
+supports the conservative semilocal subset emitted by the FHI98PP conversion
+workflow:
 
 * UPF v2, norm-conserving semilocal (``pseudo_type="SL"``);
 * one scalar potential and one PP_CHI reference function for every
   consecutive angular channel (the UPF local channel may lie above the
   header's nonlocal ``l_max``);
-* no spin-orbit terms, PAW/ultrasoft data, or nonlinear core correction;
+* optional nonlinear core correction (``PP_NLCC``), preserved in PARSEC's
+  radial ``4*pi*r**2*rho_core`` convention;
+* both ordinary nonlocal projectors and a genuinely all-local potential;
+* no spin-orbit terms or PAW/ultrasoft data;
 * a pure-exponential UPF radial mesh.
 
 The conversion is not a text-only format change.  UPF potentials are sampled
@@ -71,6 +74,7 @@ class UpfData:
     radius: tuple[float, ...]
     mesh_dx: float
     channels: tuple[Channel, ...]
+    core_density: tuple[float, ...] | None
     radial_valence_charge: tuple[float, ...]
     projector_cutoff: float
 
@@ -88,6 +92,7 @@ class ParsecData:
     grid_b: float
     radius: tuple[float, ...]
     channels: tuple[Channel, ...]
+    has_core_correction: bool
     radial_core_charge: tuple[float, ...]
     radial_valence_charge: tuple[float, ...]
     projector_cutoff: float
@@ -202,13 +207,10 @@ def parse_upf(path: Path, allow_ionized_reference: bool = False) -> UpfData:
         "is_paw": parse_bool(header.get("is_paw")),
         "is_coulomb": parse_bool(header.get("is_coulomb")),
         "has_so": parse_bool(header.get("has_so")),
-        "core_correction": parse_bool(header.get("core_correction")),
     }
     relativistic = header.get("relativistic", "").strip().lower()
     if relativistic in {"full", "fully", "relativistic"}:
         unsupported_flags["fully_relativistic"] = True
-    if root.find("PP_NLCC") is not None:
-        unsupported_flags["PP_NLCC"] = True
     enabled = [name for name, value in unsupported_flags.items() if value]
     if enabled:
         raise ConversionError(
@@ -321,6 +323,21 @@ def parse_upf(path: Path, allow_ionized_reference: bool = False) -> UpfData:
         root.find("PP_RHOATOM"), mesh_size, "PP_RHOATOM"
     )
 
+    core_correction = parse_bool(header.get("core_correction"))
+    nlcc = root.find("PP_NLCC")
+    if core_correction != (nlcc is not None):
+        raise ConversionError(
+            "PP_HEADER core_correction and PP_NLCC presence disagree"
+        )
+    core_density = (
+        parse_values(nlcc, mesh_size, "PP_NLCC") if nlcc is not None else None
+    )
+    if core_density is not None:
+        if min(core_density) < -1.0e-12:
+            raise ConversionError("PP_NLCC contains a negative core density")
+        if max(core_density) <= 0.0:
+            raise ConversionError("PP_NLCC is present but contains no core charge")
+
     nonlocal_field = root.find("PP_NONLOCAL")
     if nonlocal_field is None:
         raise ConversionError("UPF is missing PP_NONLOCAL projectors")
@@ -415,11 +432,20 @@ def parse_upf(path: Path, allow_ionized_reference: bool = False) -> UpfData:
                 "reproduced by this converter"
             )
     if not cutoffs:
-        raise ConversionError(
-            "UPF has no positive PP_BETA cutoff_radius; PARSEC needs a nonzero "
-            "projector cutoff in each wavefunction record"
+        if expected_projector_l:
+            raise ConversionError(
+                "UPF has no positive PP_BETA cutoff_radius for its nonlocal projectors"
+            )
+        # An all-local pseudopotential has no KB support radius.  Martins-new
+        # nevertheless requires a positive value in its informational
+        # wavefunction record.  The start of the verified Coulomb tail is a
+        # deterministic physical extent; neither PARSEC implementation uses
+        # it to construct a projector because there are no nonlocal channels.
+        projector_cutoff = find_coulomb_tail_start(
+            radius, tuple(potentials.values()), z_valence
         )
-    projector_cutoff = max(cutoffs)
+    else:
+        projector_cutoff = max(cutoffs)
     if projector_cutoff >= radius[-1]:
         raise ConversionError(
             f"projector cutoff {projector_cutoff} is outside the radial mesh"
@@ -446,6 +472,7 @@ def parse_upf(path: Path, allow_ionized_reference: bool = False) -> UpfData:
         radius=radius,
         mesh_dx=mesh_dx,
         channels=channels,
+        core_density=core_density,
         radial_valence_charge=radial_valence_charge,
         projector_cutoff=projector_cutoff,
     )
@@ -667,6 +694,32 @@ def convert_data(
             raise ConversionError("interpolated PP_RHOATOM became negative")
         radial_valence_charge.append(value)
 
+    radial_core_charge: list[float] = []
+    if upf.core_density is None:
+        radial_core_charge = [0.0] * len(target_radius)
+    else:
+        for target in target_radius:
+            if target < upf.radius[0]:
+                density = even_origin_extrapolation(
+                    upf.radius, upf.core_density, target
+                )
+            elif target > upf.radius[-1]:
+                density = 0.0
+            else:
+                density = log_linear_interpolate(
+                    upf.radius,
+                    log_source_radius,
+                    upf.core_density,
+                    target,
+                )
+            if density < 0.0 and abs(density) < 1.0e-12:
+                density = 0.0
+            if density < 0.0:
+                raise ConversionError("interpolated PP_NLCC became negative")
+            # UPF stores the volume density rho_core.  Martins-new stores the
+            # radial charge 4*pi*r**2*rho_core and divides it back on input.
+            radial_core_charge.append(4.0 * math.pi * target * target * density)
+
     return ParsecData(
         element=upf.element,
         xc_code=xc_code,
@@ -677,7 +730,8 @@ def convert_data(
         grid_b=grid_b,
         radius=target_radius,
         channels=tuple(converted_channels),
-        radial_core_charge=(0.0,) * len(target_radius),
+        has_core_correction=upf.core_density is not None,
+        radial_core_charge=tuple(radial_core_charge),
         radial_valence_charge=tuple(radial_valence_charge),
         projector_cutoff=upf.projector_cutoff,
         source_name=source_name,
@@ -718,7 +772,8 @@ def write_parsec(path: Path, data: ParsecData) -> None:
 
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="ascii", newline="\n") as handle:
-        handle.write(f" {data.element:<2} {data.xc_code:2} nrl nc  \n")
+        core_marker = "pcec" if data.has_core_correction else "nc"
+        handle.write(f" {data.element:<2} {data.xc_code:2} nrl {core_marker:<4}\n")
         handle.write(
             f" converted from {data.source_name} "
             f"(UPF {data.source_version}, semilocal norm-conserving)\n"
@@ -728,11 +783,19 @@ def write_parsec(path: Path, data: ParsecData) -> None:
             + configuration_description(data.channels, data.projector_cutoff)
             + "\n"
         )
+        core_metadata = ""
+        header_labels = "nl nls nr a b zion"
+        if data.has_core_correction:
+            # UPF preserves the complete model core density but not the
+            # generator-specific cfac/rcfac parameters.  PARSEC reads and
+            # reports these two legacy fields but does not use them; zero is
+            # therefore an explicit 'not available', not a guessed value.
+            core_metadata = "  0.000000000000E+00  0.000000000000E+00"
+            header_labels += " cfac rcfac"
         handle.write(
             f" {len(data.channels):3d}  0 {len(data.radius):4d}"
             f"  {data.grid_a:.12E}  {data.grid_b:.12E}"
-            f"  {data.z_valence:.12E}"
-            "   nl nls nr a b zion\n"
+            f"  {data.z_valence:.12E}{core_metadata}   {header_labels}\n"
         )
 
         handle.write(" Radial grid follows\n")
@@ -798,6 +861,12 @@ def validate_converted_data(data: ParsecData) -> None:
         raise ConversionError("generated radial fields do not all have nr values")
     if any(not math.isfinite(value) for values in arrays for value in values):
         raise ConversionError("generated data contains a non-finite value")
+    if min(data.radial_core_charge) < -1.0e-12:
+        raise ConversionError("generated radial core charge became negative")
+    if data.has_core_correction and max(data.radial_core_charge) <= 0.0:
+        raise ConversionError("generated NLCC radial charge is empty")
+    if not data.has_core_correction and any(data.radial_core_charge):
+        raise ConversionError("generated non-NLCC potential has core charge")
 
     charge = trapezoid(data.radial_valence_charge, data.radius)
     if abs(charge - data.reference_electrons) > 2.0e-3 * max(
@@ -896,6 +965,10 @@ def validate_written_file(path: Path, expected: ParsecData) -> None:
         raise ConversionError("generated first-line element field is malformed")
     if lines[0][4:6].strip() != expected.xc_code:
         raise ConversionError("generated first-line XC field is malformed")
+    expected_core_marker = "pcec" if expected.has_core_correction else "nc"
+    identity = lines[0].split()
+    if len(identity) < 4 or identity[3] != expected_core_marker:
+        raise ConversionError("generated first-line core marker is malformed")
 
     header = lines[3].split()
     try:
@@ -915,6 +988,11 @@ def validate_written_file(path: Path, expected: ParsecData) -> None:
         raise ConversionError("generated numeric header b is wrong")
     if not math.isclose(z_valence, expected.z_valence, rel_tol=6.0e-13):
         raise ConversionError("generated numeric header zion is wrong")
+    if expected.has_core_correction:
+        if len(header) < 8:
+            raise ConversionError("generated NLCC header lacks cfac/rcfac fields")
+        if any(parse_float(value) != 0.0 for value in header[6:8]):
+            raise ConversionError("generated unavailable cfac/rcfac fields are not zero")
 
     position = 4
     if lines[position].strip() != "Radial grid follows":
@@ -1044,6 +1122,11 @@ def report(data: ParsecData, output: Path) -> None:
         f"r=[{data.radius[0]:.12g}, {data.radius[-1]:.12g}] bohr"
     )
     print(f"radial valence charge integral={charge:.12g}")
+    if data.has_core_correction:
+        print(
+            "radial NLCC core charge integral="
+            f"{trapezoid(data.radial_core_charge, data.radius):.12g}"
+        )
     for channel in data.channels:
         norm = trapezoid(
             [value * value for value in channel.wavefunction], data.radius
