@@ -11,6 +11,10 @@ specification and numerical reference.
 
 ## Entry points
 
+For Linux environment creation, C++/OpenMP builds, optional NVIDIA/CuPy setup
+and Bash launch commands, see the repository's
+[Linux installation guide](../../README.md#linux-installation).
+
 From the repository root:
 
 ```powershell
