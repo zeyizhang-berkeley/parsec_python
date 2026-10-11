@@ -337,6 +337,9 @@ src/
 │   ├── Mixer/                     SCF potential mixing
 │   ├── Energy/                    total-energy bookkeeping
 │   ├── SCF/                       self-consistent single-point loop
+│   ├── Forces/                    atomic forces of isolated systems
+│   ├── Relaxation/                BFGS, steepest descent, manual movements
+│   ├── MolecularDynamics/         PARSEC molecular dynamics
 │   ├── Output/                    PARSEC-shaped text reporting
 │   ├── acceleration/              internal optimized implementation
 │   │   ├── backends/              SciPy, CuPy, and native adapters
@@ -385,6 +388,14 @@ The isolated single-point workflow is:
 The Hamiltonian and nonlocal potential remain matrix-free during iterative
 eigensolution. Static terms are prepared once; only density-dependent local
 fields change during SCF.
+
+With `Minimization: bfgs | simple | manual` or `Molecular_Dynamics: true` the
+single point becomes one step of an ionic loop: the atomic forces are
+evaluated, the atoms are moved as PARSEC moves them, the terms that depend on
+their positions are rebuilt on the same grid, and the next SCF loop continues
+from the previous wavefunctions. `Skip_Force: false` adds the forces to a
+single point. See
+[Forces, relaxation and molecular dynamics](src/parsec_python/FORCES_AND_RELAXATION.md).
 
 ## Modular Python API
 
@@ -581,6 +592,7 @@ python src\tools\upf_to_parsec.py input.UPF output_POTRE.DAT
 - [PARSEC algorithm map](src/parsec_python/PARSEC_ALGORITHM.md)
 - [Python implementation map](src/parsec_python/PYTHON_IMPLEMENTATION.md)
 - [Package architecture](src/parsec_python/ARCHITECTURE.md)
+- [Forces, relaxation and molecular dynamics](src/parsec_python/FORCES_AND_RELAXATION.md)
 - [Acceleration implementation](src/parsec_python/acceleration/README.md)
 - [ML initial-density interface](src/parsec_python/MLDensity/README.md)
 - [Pseudopotential generation](src/pp_generation/README.md)

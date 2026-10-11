@@ -64,6 +64,11 @@ The exit status is 0 for a finished run, 3 when an SCF loop did not converge
 and 4 when the structure is not relaxed (movements used up, or the optimizer
 stopped above `Force_Min`).
 
+Two inputs of Fortran PARSEC are kept as runnable examples with their Fortran
+trajectories: `examples/0d_water_geoopt` (BFGS) and
+`examples/0d_SiNa4_relaxation` (BFGS with an old-format pseudopotential and
+occupations from `occup.in`).
+
 ### Files
 
 A relaxation writes beside the input (the multi-node runner: into its output
