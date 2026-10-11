@@ -6,7 +6,7 @@ potentials are in Rydberg unless a field explicitly says otherwise.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from pathlib import Path
 import re
 from typing import Literal, Mapping, Sequence
@@ -67,6 +67,15 @@ class SpeciesPotential:
     Such a correction is required before comparing total energies obtained
     with ordinary and core-hole pseudopotentials having different valence
     charges.
+
+    ``pseudopotential_format`` is ``"martins_new"`` (a ``*_POTRE.DAT`` file)
+    or ``"martins_old"`` (``*_POTR.DAT``).  An old file holds neither
+    occupations nor a cutoff radius, and PARSEC reads them from the input:
+    ``number_of_channels`` (``Potential_Num``), ``electrons_per_orbital``
+    (the ``Electron_Per_Orbital`` block: s, p, d, f; their sum is the ionic
+    charge) and ``core_cutoff_radius`` (``Core_Cutoff_Radius`` in bohr, the
+    radius of the nonlocal projectors).  All three are required for an old
+    file and refused for a new one, which holds its own.
     """
 
     path: str | Path
@@ -75,11 +84,16 @@ class SpeciesPotential:
     use_spline: bool = False
     element_symbol: str | None = None
     atomic_energy_correction: float = 0.0
+    pseudopotential_format: str = "martins_new"
+    number_of_channels: int | None = None
+    electrons_per_orbital: tuple[float, ...] | None = None
+    core_cutoff_radius: float | None = None
 
     def __post_init__(self) -> None:
         local_l = int(self.local_angular_momentum)
         if local_l != self.local_angular_momentum or not 0 <= local_l <= 3:
             raise ValueError("local angular momentum must be 0 (s) through 3 (f)")
+        self._check_format_input(local_l)
         element = self.element_symbol
         if element is None:
             # Species labels are supplied by the surrounding mapping, so a
@@ -99,6 +113,52 @@ class SpeciesPotential:
             None if element is None else element.strip(),
         )
         object.__setattr__(self, "atomic_energy_correction", correction)
+
+    def _check_format_input(self, local_l: int) -> None:
+        """Validate what the input adds to a pseudopotential file."""
+
+        pseudo_format = str(self.pseudopotential_format).strip().lower()
+        if pseudo_format not in {"martins_new", "martins_old"}:
+            raise ValueError(
+                "pseudopotential_format must be 'martins_new' or 'martins_old'"
+            )
+        object.__setattr__(self, "pseudopotential_format", pseudo_format)
+        given = (
+            self.number_of_channels,
+            self.electrons_per_orbital,
+            self.core_cutoff_radius,
+        )
+        if pseudo_format == "martins_new":
+            if any(value is not None for value in given):
+                raise ValueError(
+                    "number_of_channels, electrons_per_orbital and "
+                    "core_cutoff_radius belong to a martins_old pseudopotential"
+                )
+            return
+        if any(value is None for value in given):
+            raise ValueError(
+                "a martins_old pseudopotential needs number_of_channels, "
+                "electrons_per_orbital and core_cutoff_radius"
+            )
+        channels = int(self.number_of_channels)
+        if channels != self.number_of_channels or not 1 <= channels <= 4:
+            raise ValueError("number_of_channels must be 1 to 4")
+        if local_l >= channels:
+            raise ValueError(
+                "the local angular momentum lies beyond the number of channels"
+            )
+        electrons = tuple(float(value) for value in self.electrons_per_orbital)
+        if len(electrons) < channels or not np.all(np.isfinite(electrons)):
+            raise ValueError(
+                "electrons_per_orbital needs a finite occupation for every channel"
+            )
+        radius = float(self.core_cutoff_radius)
+        if not np.isfinite(radius) or radius <= 0.0:
+            raise ValueError("core_cutoff_radius must be positive")
+        object.__setattr__(self, "number_of_channels", channels)
+        # PARSEC reads one occupation per channel and ignores the rest.
+        object.__setattr__(self, "electrons_per_orbital", electrons[:channels])
+        object.__setattr__(self, "core_cutoff_radius", radius)
 
 
 @dataclass(frozen=True)
@@ -411,7 +471,14 @@ class MixingSettings:
 
 @dataclass(frozen=True)
 class SCFSettings:
-    """Spin-unpolarized, isolated single-point SCF controls."""
+    """Spin-unpolarized, isolated single-point SCF controls.
+
+    ``fixed_occupations`` holds one occupation per state of
+    ``number_of_states``, in ascending order of energy and with one standing
+    for a doubly occupied orbital.  It is what PARSEC reads from ``occup.in``
+    for a negative ``Fermi_Temp``; when given, no Fermi level is searched and
+    the temperature is not used.
+    """
 
     max_iterations: int = 50
     convergence_criterion: float = 2.0e-4
@@ -421,6 +488,19 @@ class SCFSettings:
     use_plain_residual: bool = False
     normalize_initial_density: bool = True
     xc_functional: XCFunctional = "ca"
+    fixed_occupations: tuple[float, ...] | None = None
+
+    def __repr__(self) -> str:
+        # The text of these settings is hashed by the cache keys of the
+        # accelerated driver and stored in test records.  Occupations that
+        # are not set print nothing, so that the text of every calculation
+        # with a Fermi level stays what it was before the field existed.
+        shown = [
+            f"{item.name}={getattr(self, item.name)!r}"
+            for item in fields(self)
+            if item.name != "fixed_occupations" or self.fixed_occupations is not None
+        ]
+        return f"{type(self).__qualname__}({', '.join(shown)})"
 
     def __post_init__(self) -> None:
         max_iterations = int(self.max_iterations)
@@ -431,11 +511,13 @@ class SCFSettings:
             or self.convergence_criterion <= 0
         ):
             raise ValueError("SCF convergence criterion must be positive")
-        if (
-            not np.isfinite(self.fermi_temperature_kelvin)
-            or self.fermi_temperature_kelvin < 0
+        if not np.isfinite(self.fermi_temperature_kelvin) or (
+            self.fermi_temperature_kelvin < 0 and self.fixed_occupations is None
         ):
-            raise ValueError("negative Fermi temperature/file occupations are not supported")
+            raise ValueError(
+                "a negative Fermi temperature selects fixed occupations "
+                "(PARSEC's occup.in): give fixed_occupations"
+            )
         if not np.isfinite(self.net_charge):
             raise ValueError("net_charge must be finite")
         if self.xc_functional not in {"ca", "pbe"}:
@@ -445,6 +527,18 @@ class SCFSettings:
             if states != self.number_of_states or states < 1:
                 raise ValueError("number_of_states must be a positive integer")
             object.__setattr__(self, "number_of_states", states)
+        if self.fixed_occupations is not None:
+            fixed = tuple(float(value) for value in self.fixed_occupations)
+            if (
+                self.number_of_states is None
+                or len(fixed) != self.number_of_states
+                or not np.all(np.isfinite(fixed))
+            ):
+                raise ValueError(
+                    "fixed_occupations needs one finite value per state of "
+                    "number_of_states"
+                )
+            object.__setattr__(self, "fixed_occupations", fixed)
         object.__setattr__(self, "max_iterations", max_iterations)
 
 
@@ -533,6 +627,78 @@ class InitialDensitySettings:
             value = getattr(self, name)
             if value is not None:
                 object.__setattr__(self, name, Path(value))
+
+
+#: ``Max_Step`` default of ``usrinputfile.F90``.  BFGS runs unrestricted
+#: when the input leaves ``Max_Step`` at this value.
+DEFAULT_RELAXATION_MAXIMUM_STEP = 0.05
+
+RelaxationMethod = Literal["simple", "bfgs", "manual"]
+
+
+@dataclass(frozen=True)
+class RelaxationSettings:
+    """Input of a structural relaxation (``usrinputfile.F90``).
+
+    ``method`` is ``Minimization``: ``simple`` (steepest descent), ``bfgs``
+    (limited-memory BFGS) or ``manual`` (structures read from
+    ``manual.dat``).  ``max_movements`` is ``Movement_Num``;
+    ``minimum_force`` is ``Force_Min`` in Ry/bohr; ``maximum_step`` and
+    ``minimum_step`` are ``Max_Step`` and ``Min_Step`` in bohr;
+    ``bfgs_corrections`` is ``BFGS_number_corr``; ``restart`` is
+    ``Relax_Restart``.
+    """
+
+    method: RelaxationMethod
+    max_movements: int = 500
+    minimum_force: float = 1.0e-2
+    maximum_step: float = DEFAULT_RELAXATION_MAXIMUM_STEP
+    minimum_step: float = 1.0e-4
+    bfgs_corrections: int = 7
+    restart: bool = False
+
+    def __post_init__(self) -> None:
+        if self.method not in {"simple", "bfgs", "manual"}:
+            raise ValueError(f"unknown minimization method: {self.method!r}")
+        if int(self.max_movements) != self.max_movements or self.max_movements < 0:
+            raise ValueError("Movement_Num must be a nonnegative integer")
+        if not self.minimum_force >= 1.0e-5:
+            raise ValueError(
+                "Force_Min is below numerical accuracy; increase it to at least 1e-5"
+            )
+        if self.method == "simple":
+            if not self.maximum_step >= 1.0e-5:
+                raise ValueError(
+                    "Max_Step is too small; increase it to at least 1e-5"
+                )
+            # domove.f90 takes log((stepmax-stepmin)/(stepmax-50*stepmin)):
+            # outside this window the Fortran moves the atoms by NaN.
+            if not self.maximum_step > 50.0 * self.minimum_step > 0.0:
+                raise ValueError(
+                    "the simple minimization needs Max_Step > 50*Min_Step > 0"
+                )
+        if self.method == "bfgs" and self.bfgs_corrections < 1:
+            raise ValueError("BFGS_number_corr must be positive")
+        object.__setattr__(self, "max_movements", int(self.max_movements))
+        object.__setattr__(self, "bfgs_corrections", int(self.bfgs_corrections))
+
+    @property
+    def force_threshold(self) -> float:
+        """Force below which the structure counts as relaxed; zero for manual."""
+
+        return 0.0 if self.method == "manual" else float(self.minimum_force)
+
+    @property
+    def bfgs_bound(self) -> float:
+        """Largest displacement of a coordinate from its start, or ``-1``.
+
+        ``usrinputfile.F90`` compares ``Max_Step`` with its default: an input
+        that leaves it there (or sets exactly that value) runs unrestricted.
+        """
+
+        if self.maximum_step == DEFAULT_RELAXATION_MAXIMUM_STEP:
+            return -1.0
+        return float(self.maximum_step)
 
 
 @dataclass(frozen=True)
@@ -687,6 +853,9 @@ class SinglePointResult:
         default_factory=lambda: np.empty(0, dtype=np.int32)
     )
     atomic_reference_correction: float = 0.0
+    # Buffered eigensubspace of the last eigenproblem.  An ionic step hands
+    # it to the SCF loop of the next structure; nothing else reads it.
+    eigensolver_state: object | None = None
 
     @property
     def all_electron_total(self) -> float:

@@ -11,12 +11,14 @@ from typing import TYPE_CHECKING, Iterable
 import numpy as np
 
 from ..models import (
+    DEFAULT_RELAXATION_MAXIMUM_STEP,
     Atom,
     EigensolverSettings,
     GridSettings,
     HartreeSettings,
     InitialDensitySettings,
     MixingSettings,
+    RelaxationSettings,
     SCFSettings,
     SinglePointInput,
     SpeciesPotential,
@@ -24,6 +26,7 @@ from ..models import (
     PeriodicGridSettings,
 )
 from ..MLDensity.field import normalize_density_units
+from ..MolecularDynamics.settings import MolecularDynamicsSettings
 
 if TYPE_CHECKING:
     from ..Hartree.domain import DomainChoice
@@ -67,6 +70,20 @@ class ParsecInputTranslation:
     domain: "DomainChoice | None" = None
     boundary_tolerance_from: str = "default"
     domain_rule_seconds: float = 0.0
+    # Structural relaxation (``Minimization``), ``None`` for a single point.
+    # ``movable`` holds one flag per atom of the problem (``Move_Flag`` and
+    # the optional fourth column of ``Atom_Coord``).  ``compute_forces`` says
+    # that the forces of the structure are wanted: always with a relaxation
+    # or dynamics, and for a single point when the input says
+    # ``Skip_Force: false``.  ``use_symmetry`` is false where PARSEC switches
+    # the point group off although ``Ignore_Symmetry`` is not set: manual
+    # movements and molecular dynamics.
+    relaxation: "RelaxationSettings | None" = None
+    movable: tuple[bool, ...] = ()
+    compute_forces: bool = False
+    use_symmetry: bool = True
+    # Molecular dynamics (``Molecular_Dynamics``), ``None`` when it is off.
+    molecular_dynamics: "MolecularDynamicsSettings | None" = None
 
 
 @dataclass(frozen=True)
@@ -75,6 +92,22 @@ class _InputItem:
     value: str | tuple[str, ...]
     line: int
     is_block: bool = False
+
+
+#: Keywords of ``usrinputfile.F90`` for molecular dynamics.
+_MOLECULAR_DYNAMICS_KEYS = (
+    "molecular_dynamics",
+    "restart_mode",
+    "cooling_method",
+    "tinit",
+    "t_final",
+    "t_step",
+    "time_step",
+    "friction_coefficient",
+    "step_num",
+    "rng_seed",
+    "test_rng",
+)
 
 
 def _normalize_label(value: str) -> str:
@@ -229,6 +262,24 @@ def _energy_rydberg(value: str, *, label: str) -> float:
     return number * factor
 
 
+def _force_rydberg_per_bohr(value: str, *, label: str) -> float:
+    number = _first_float(value, label=label)
+    remainder = _FLOAT_PATTERN.sub("", value, count=1).strip().lower()
+    unit = re.sub(r"[.\s_-]", "", remainder)
+    if unit in {"", "ry/bohr", "rydberg/bohr", "ry/au"}:
+        factor = 1.0
+    elif unit in {"ha/bohr", "hartree/bohr", "ha/au", "hartree/au"}:
+        factor = 2.0
+    elif unit in {"ev/ang", "ev/angstrom"}:
+        factor = EV_TO_RYDBERG / ANGSTROM_TO_BOHR
+    else:
+        raise UnsupportedParsecOptionError(
+            f"{label}: unsupported force unit {remainder!r}; use Ry/bohr, "
+            "Hartree/bohr, or eV/ang"
+        )
+    return number * factor
+
+
 def _temperature_kelvin(value: str, *, label: str) -> float:
     number = _first_float(value, label=label)
     remainder = _FLOAT_PATTERN.sub("", value, count=1).strip().lower()
@@ -352,12 +403,90 @@ def _coordinate_factor(value: str) -> float:
     )
 
 
+def _martins_old_input(
+    symbol: str,
+    scalar: dict[str, list["_InputItem"]],
+    blocks: dict[str, list["_InputItem"]],
+    species_index: int,
+    old_index: int,
+) -> dict[str, object]:
+    """Read what a ``martins_old`` species adds to its file.
+
+    ``usrinputfile.F90`` reads ``Potential_Num`` for every species and
+    ``Core_Cutoff_Radius`` and ``Electron_Per_Orbital`` for old-format
+    species only, and ESDF hands out the occurrences of a label in the order
+    of the calls.  A species therefore takes the ``Potential_Num`` of its
+    position among all species (``species_index``) and the other two of its
+    position among the old-format ones (``old_index``).
+
+    Where PARSEC would go on with a default (no nonlocal projectors without
+    a cutoff radius, no ionic charge without occupations) this reader stops.
+    """
+
+    counts = scalar.get("potential_num", [])
+    if species_index >= len(counts):
+        raise ParsecInputError(
+            f"Atom_Type {symbol}: a martins_old pseudopotential needs "
+            "Potential_Num.  PARSEC gives the n-th Potential_Num of the input "
+            f"to the n-th Atom_Type whatever its format: {len(counts)} were "
+            f"found and {symbol} is Atom_Type {species_index + 1}, so give one "
+            "to every Atom_Type before it as well"
+        )
+    channels = _integer(
+        str(counts[species_index].value), label=f"{symbol} Potential_Num"
+    )
+    if not 1 <= channels <= 4:
+        raise ParsecInputError(
+            f"Atom_Type {symbol}: impossible number of potentials "
+            f"{channels}; Potential_Num must be 1 to 4"
+        )
+    radii = scalar.get("core_cutoff_radius", [])
+    if old_index >= len(radii):
+        raise ParsecInputError(
+            f"Atom_Type {symbol}: a martins_old pseudopotential needs "
+            "Core_Cutoff_Radius, the radius of its nonlocal projectors"
+        )
+    radius = _physical_length(
+        str(radii[old_index].value), label=f"{symbol} Core_Cutoff_Radius"
+    )
+    if not radius > 0.0:
+        raise ParsecInputError(
+            f"Atom_Type {symbol}: Core_Cutoff_Radius must be positive"
+        )
+    orbital_blocks = blocks.get("electron_per_orbital", [])
+    if old_index >= len(orbital_blocks):
+        raise ParsecInputError(
+            f"Atom_Type {symbol}: a martins_old pseudopotential needs an "
+            "Electron_Per_Orbital block; its sum is the ionic charge"
+        )
+    lines = orbital_blocks[old_index].value
+    if len(lines) != 1:
+        raise ParsecInputError(
+            f"Atom_Type {symbol}: there should be only one line in the "
+            "Electron_Per_Orbital block"
+        )
+    electrons, unit = _block_numbers(lines, label=f"{symbol} Electron_Per_Orbital")
+    if unit or len(electrons) < channels:
+        raise ParsecInputError(
+            f"Atom_Type {symbol}: Electron_Per_Orbital must hold the "
+            f"occupations of the {channels} channels of Potential_Num"
+        )
+    return {
+        "pseudopotential_format": "martins_old",
+        "number_of_channels": channels,
+        # PARSEC reads Potential_Num values and ignores the rest of the line.
+        "electrons_per_orbital": tuple(electrons[:channels]),
+        "core_cutoff_radius": radius,
+    }
+
+
 def _find_potential(
     symbol: str,
     input_directory: Path,
     pseudopotential_directory: Path | None,
+    extension: str = "POTRE",
 ) -> Path:
-    filename = f"{symbol}_POTRE.DAT"
+    filename = f"{symbol}_{extension}.DAT"
     directories: list[Path] = []
     if pseudopotential_directory is not None:
         directories.append(pseudopotential_directory)
@@ -406,8 +535,16 @@ def _parse_parsec_input(
         "cubic_spline",
         "so_psp",
         "atomic_energy_correction",
+        "move_flag",
+        "potential_num",
+        "core_cutoff_radius",
     }
-    block_keys = {"atom_coord", "domain_shape_parameters", "cell_shape"}
+    block_keys = {
+        "atom_coord",
+        "domain_shape_parameters",
+        "cell_shape",
+        "electron_per_orbital",
+    }
     accepted_global = {
         "restart_run",
         "relax_restart",
@@ -463,6 +600,8 @@ def _parse_parsec_input(
         "force_min",
         "max_step",
         "min_step",
+        "bfgs_number_corr",
+        *_MOLECULAR_DYNAMICS_KEYS,
         "dynamic_diag_tol",
         # PARSEC.py extension: a modular initial-density source.  These
         # labels do not alter the DFT grid or any post-initialization physics.
@@ -527,8 +666,11 @@ def _parse_parsec_input(
             else (source.parent / candidate).resolve()
         )
 
-    if optional_bool("restart_run") or optional_bool("relax_restart"):
-        raise UnsupportedParsecOptionError("restart calculations are not supported")
+    if optional_bool("restart_run"):
+        raise UnsupportedParsecOptionError(
+            "Restart_Run (restart of the electronic structure from parsec.dat) "
+            "is not supported; Relax_Restart is"
+        )
     if optional_bool("old_pseudopotential_format"):
         raise UnsupportedParsecOptionError(
             "Old_Pseudopotential_Format=true is not supported; use PARSEC's "
@@ -694,19 +836,41 @@ def _parse_parsec_input(
             )
         return default
 
+    minimization = _normalize_label(one("minimization", "none"))
+    if minimization == "":
+        minimization = "none"
+    if minimization not in {"none", "simple", "bfgs", "manual"}:
+        raise ParsecInputError(f"unknown minimization method: {minimization!r}")
+    # usrinputfile.F90 reads the molecular dynamics input with the
+    # minimization: the two exclude each other, and either one makes the
+    # movable flags of the atoms count.
+    molecular_dynamics = MolecularDynamicsSettings.from_keywords(
+        {
+            key: one(key)
+            for key in (*_MOLECULAR_DYNAMICS_KEYS, "minimization")
+            if key in scalar
+        }
+    )
+    atoms_move = minimization != "none" or molecular_dynamics.enabled
+
     local_map = {"s": 0, "p": 1, "d": 2, "f": 3}
     atoms: list[Atom] = []
+    movable: list[bool] = []
+    coordinate_notes: list[str] = []
     specifications: dict[str, SpeciesPotential] = {}
     global_cubic_occurrences = scalar.get("cubic_spline", [])
+    old_format_species = 0
     for species_index, (symbol, coordinate_item) in enumerate(
         zip(symbols, coordinate_blocks)
     ):
         pseudo_format = _normalize_label(
             species_value("pseudopotential_format", species_index, "martins_new")
         )
-        if pseudo_format not in {"martins_new", "martinsnew"}:
+        if pseudo_format not in {"martins_new", "martinsnew", "martins_old"}:
             raise UnsupportedParsecOptionError(
-                f"Atom_Type {symbol}: only Pseudopotential_Format=martins_new is supported"
+                f"Atom_Type {symbol}: Pseudopotential_Format must be "
+                "martins_new or martins_old; martins_wang and fhipp are not "
+                "supported"
             )
         local_label = _normalize_label(
             species_value("local_component", species_index)
@@ -732,8 +896,23 @@ def _parse_parsec_input(
             if species_index < len(global_cubic_occurrences)
             else False
         )
+        format_input: dict[str, object] = {}
+        if pseudo_format == "martins_old":
+            if read_vcd:
+                raise ParsecInputError(
+                    f"Atom_Type {symbol}: Read_VCD needs a martins_new "
+                    "pseudopotential; an old Martins file holds no valence "
+                    "charge density"
+                )
+            format_input = _martins_old_input(
+                symbol, scalar, blocks, species_index, old_format_species
+            )
+            old_format_species += 1
         potential_path = _find_potential(
-            symbol, source.parent, pp_directory
+            symbol,
+            source.parent,
+            pp_directory,
+            "POTR" if format_input else "POTRE",
         )
         element_symbol = species_value(
             "element_symbol", species_index, ""
@@ -757,22 +936,74 @@ def _parse_parsec_input(
             use_spline=use_spline,
             element_symbol=element_symbol,
             atomic_energy_correction=correction,
+            **format_input,
         )
 
-        for coordinate_line in coordinate_item.value:
+        # Move_Flag of usrinputfile.F90: 0 (default) moves every atom of the
+        # type; n > 0 moves its first n atoms; a negative value reads a
+        # fourth column (1 moves, 0 fixes) when the atoms move at all.
+        move_flag = _integer(
+            species_value("move_flag", species_index, "0"),
+            label=f"{symbol} Move_Flag",
+        )
+        if move_flag > len(coordinate_item.value):
+            raise ParsecInputError(
+                f"Atom_Type {symbol}: invalid Move_Flag value {move_flag}"
+            )
+        for row_index, coordinate_line in enumerate(coordinate_item.value):
             values, unit = _block_numbers((coordinate_line,), label=f"{symbol} Atom_Coord")
-            if unit or len(values) != 3:
+            wanted = 4 if (move_flag < 0 and atoms_move) else 3
+            if unit or len(values) < wanted:
                 raise ParsecInputError(
                     f"line {coordinate_item.line}: every Atom_Coord row must "
-                    "contain exactly three numbers"
+                    f"contain {'three coordinates and a movement index' if wanted == 4 else 'exactly three numbers'}"
                 )
+            if len(values) > 3 and move_flag >= 0 and row_index == 0:
+                # PARSEC reads three numbers and leaves the rest of the row.
+                coordinate_notes.append(
+                    f"Atom_Type {symbol}: the Atom_Coord rows hold more than three "
+                    "numbers; without a negative Move_Flag the further columns are "
+                    "ignored, as in PARSEC."
+                )
+            if move_flag == 0 or not atoms_move:
+                moves = True
+            elif move_flag > 0:
+                moves = row_index < move_flag
+            else:
+                if values[3] not in (0.0, 1.0):
+                    raise ParsecInputError(
+                        f"Atom_Type {symbol}: invalid atom movement index "
+                        f"{values[3]:g}; use 0 or 1"
+                    )
+                moves = values[3] == 1.0
+            movable.append(moves)
             atoms.append(
-                Atom(symbol, np.asarray(values, dtype=float) * coordinate_factor)
+                Atom(symbol, np.asarray(values[:3], dtype=float) * coordinate_factor)
             )
         if not any(atom.symbol == symbol for atom in atoms):
             raise ParsecInputError(f"Atom_Type {symbol} has an empty Atom_Coord block")
+    for key, table in (("core_cutoff_radius", scalar), ("electron_per_orbital", blocks)):
+        # PARSEC reads these for martins_old species only, in their order: a
+        # line under another species would go to the next old-format one.
+        if len(table.get(key, [])) > old_format_species:
+            raise ParsecInputError(
+                f"{key} occurs {len(table[key])} times, but only "
+                f"{old_format_species} Atom_Type(s) have "
+                "Pseudopotential_Format: martins_old, the format that reads it"
+            )
+    if (
+        any(item.read_valence_density for item in specifications.values())
+        and specifications[symbols[-1]].pseudopotential_format != "martins_new"
+    ):
+        # pseudo.f90 tests the format of the last Atom_Type, whichever
+        # species has Read_VCD, and stops with error 23.
+        raise ParsecInputError(
+            "Read_VCD is set and the last Atom_Type has a martins_old "
+            "pseudopotential: PARSEC stops there, because it tests the format "
+            "of the last Atom_Type; put a martins_new Atom_Type last"
+        )
 
-    warnings: list[str] = []
+    warnings: list[str] = list(coordinate_notes)
     if "total_atom_num" in scalar:
         declared_atoms = _integer(
             one("total_atom_num"), label="Total_Atom_Num"
@@ -796,14 +1027,23 @@ def _parse_parsec_input(
         "min_step",
     }
     ionic_controls_present = bool(ionic_control_keys.intersection(scalar))
-    for key, label in (
-        ("ion_energy_diff", "Ion_Energy_Diff"),
-        ("force_min", "Force_Min"),
-        ("max_step", "Max_Step"),
-        ("min_step", "Min_Step"),
-    ):
-        if key in scalar:
-            _strict_float(one(key), label=label)
+    if "ion_energy_diff" in scalar:
+        _energy_rydberg(one("ion_energy_diff"), label="Ion_Energy_Diff")
+    force_minimum = (
+        _force_rydberg_per_bohr(one("force_min"), label="Force_Min")
+        if "force_min" in scalar
+        else 1.0e-2
+    )
+    maximum_step = (
+        _physical_length(one("max_step"), label="Max_Step")
+        if "max_step" in scalar
+        else DEFAULT_RELAXATION_MAXIMUM_STEP
+    )
+    minimum_step = (
+        _physical_length(one("min_step"), label="Min_Step")
+        if "min_step" in scalar
+        else 1.0e-4
+    )
     states = _integer(one("states_num"), label="States_Num")
 
     eigensolver_method = _normalize_label(one("eigensolver", "chebdav"))
@@ -955,15 +1195,32 @@ def _parse_parsec_input(
         raise ParsecInputError(
             f"Solver_Lpole/Hartree_Boundary_Tolerance: {error}"
         ) from error
+    fermi_temperature = _temperature_kelvin(
+        one("fermi_temp", "80"), label="Fermi_Temp"
+    )
+    fixed_occupations = None
+    if fermi_temperature < 0:
+        # initial.f90: a negative temperature reads the occupations from the
+        # file occup.in of the run directory.
+        from ..Occupations import read_occupation_file
+
+        occupation_file = read_occupation_file(source.parent / "occup.in", states)
+        fixed_occupations = occupation_file.occupations
+        if occupation_file.unread_lines:
+            warnings.append(
+                f"{occupation_file.source.name}: only the first section is "
+                "read, as PARSEC does without spin polarization; "
+                f"{occupation_file.unread_lines} further line(s), the "
+                "sections of other spin channels, are ignored."
+            )
     scf = SCFSettings(
         max_iterations=_integer(one("max_iter", "50"), label="Max_Iter"),
         convergence_criterion=_energy_rydberg(
             one("convergence_criterion", "2e-4 Ry"),
             label="Convergence_Criterion",
         ),
-        fermi_temperature_kelvin=_temperature_kelvin(
-            one("fermi_temp", "80"), label="Fermi_Temp"
-        ),
+        fermi_temperature_kelvin=fermi_temperature,
+        fixed_occupations=fixed_occupations,
         number_of_states=states,
         net_charge=_charge_electrons(
             one("net_charges", "0"), label="Net_Charges"
@@ -1025,37 +1282,76 @@ def _parse_parsec_input(
         ),
     )
 
-    minimization = _normalize_label(one("minimization", "none"))
-    if minimization in {"", "none"}:
-        recenter = True
-    elif minimization == "manual":
-        manual_movement_count = 0 if movement_count is None else movement_count
-        if manual_movement_count != 0:
+    relaxation = None
+    use_symmetry = True
+    # A manual run keeps the coordinates of the input and of manual.dat as
+    # they are; every other calculation recentres the cluster.
+    recenter = minimization != "manual"
+    if minimization != "none":
+        if is_periodic:
             raise UnsupportedParsecOptionError(
-                "manual ionic movements are not part of a single-point calculation"
+                f"Minimization={minimization!r} with Boundary_Conditions=bulk: "
+                "structural relaxation is implemented for isolated systems "
+                "(Boundary_Conditions: cluster) only"
             )
-        recenter = False
-    elif minimization == "bfgs":
-        recenter = True
-        warnings.append(
-            "Minimization=BFGS and its ionic-step/force controls are ignored; "
-            "the supplied geometry is evaluated as one fixed single point."
+        relaxation = RelaxationSettings(
+            method=minimization,
+            max_movements=500 if movement_count is None else movement_count,
+            minimum_force=force_minimum,
+            maximum_step=maximum_step,
+            minimum_step=minimum_step,
+            bfgs_corrections=_integer(
+                one("bfgs_number_corr", "7"), label="BFGS_number_corr"
+            ),
+            restart=optional_bool("relax_restart"),
         )
+        if minimization == "manual":
+            # parsec.F90 uses no symmetry when the structures are imposed,
+            # and usrinputfile.F90 makes every atom movable.
+            use_symmetry = False
+            movable = [True] * len(atoms)
+        elif not any(movable):
+            raise ParsecInputError(
+                "Minimization is requested, but Move_Flag leaves no atom movable"
+            )
     else:
-        raise UnsupportedParsecOptionError(
-            f"Minimization={minimization!r}; relaxation and dynamics are not supported"
-        )
-
-    if minimization in {"", "none"} and ionic_controls_present:
+        if ionic_controls_present:
+            warnings.append(
+                "Ionic relaxation thresholds/step controls are present without an "
+                "active minimizer and are ignored for this fixed single point."
+            )
+        if optional_bool("relax_restart"):
+            warnings.append(
+                "Relax_Restart is set without Minimization and is ignored."
+            )
+    if molecular_dynamics.enabled:
+        if is_periodic:
+            raise UnsupportedParsecOptionError(
+                "Molecular_Dynamics with Boundary_Conditions=bulk: molecular "
+                "dynamics is implemented for isolated systems "
+                "(Boundary_Conditions: cluster) only"
+            )
+        if not any(movable):
+            raise ParsecInputError(
+                "Molecular_Dynamics is requested, but Move_Flag leaves no atom movable"
+            )
+        # parsec.F90 uses no symmetry in molecular dynamics.
+        use_symmetry = False
+    # PARSEC always evaluates the forces.  Here a single point evaluates
+    # them only on request, so that inputs without the line keep their cost.
+    compute_forces = atoms_move or ("skip_force" in scalar and not skip_force)
+    if not molecular_dynamics.enabled and any(
+        key in scalar for key in _MOLECULAR_DYNAMICS_KEYS if key != "molecular_dynamics"
+    ):
         warnings.append(
-            "Ionic relaxation thresholds/step controls are present without an "
-            "active minimizer and are ignored for this fixed single point."
+            "Molecular dynamics controls are present without "
+            "Molecular_Dynamics: true and are ignored."
         )
-
-    if "skip_force" in scalar and not skip_force:
+    if compute_forces and is_periodic:
+        compute_forces = False
         warnings.append(
-            "Skip_force=false requests forces in PARSEC, but this single-point "
-            "implementation currently reports energies only."
+            "Skip_force=false requests forces, which are implemented for "
+            "isolated systems only; this periodic run reports energies only."
         )
 
     if ignore_symmetry and not is_periodic:
@@ -1182,6 +1478,11 @@ def _parse_parsec_input(
         domain=domain,
         boundary_tolerance_from=boundary_tolerance_from,
         domain_rule_seconds=domain_rule_seconds,
+        relaxation=relaxation,
+        movable=tuple(movable),
+        compute_forces=compute_forces,
+        use_symmetry=use_symmetry,
+        molecular_dynamics=molecular_dynamics if molecular_dynamics.enabled else None,
     )
 
 
@@ -1241,7 +1542,11 @@ def summarize_translation(translation: ParsecInputTranslation) -> str:
             f"SCF: states={problem.scf.number_of_states}, "
             f"max_iter={problem.scf.max_iterations}, "
             f"vconv={problem.scf.convergence_criterion:.6g} Ry, "
-            f"T={problem.scf.fermi_temperature_kelvin:.6g} K"
+            + (
+                f"T={problem.scf.fermi_temperature_kelvin:.6g} K"
+                if problem.scf.fixed_occupations is None
+                else "occupations fixed by occup.in"
+            )
         ),
         (
             f"Eigensolver: {problem.eigensolver.method}, "
@@ -1291,7 +1596,18 @@ def summarize_translation(translation: ParsecInputTranslation) -> str:
         lines.append(
             f"PP {symbol}: {potential.path} "
             f"(local l={potential.local_angular_momentum}, "
-            f"Read_VCD={potential.read_valence_density})"
+            f"Read_VCD={potential.read_valence_density}"
+            + (
+                ""
+                if potential.pseudopotential_format == "martins_new"
+                else (
+                    f", {potential.pseudopotential_format}: "
+                    f"Potential_Num={potential.number_of_channels}, "
+                    f"Electron_Per_Orbital={potential.electrons_per_orbital}, "
+                    f"Core_Cutoff_Radius={potential.core_cutoff_radius:.6g} bohr"
+                )
+            )
+            + ")"
         )
     return "\n".join(lines)
 

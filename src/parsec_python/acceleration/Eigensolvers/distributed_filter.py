@@ -103,6 +103,21 @@ class DistributedFilter:
         # Wall time of the downloads from the owner and of the replicas, for reports.
         self.replica_seconds=perf_counter()-started
 
+    def replace_projectors(self,projectors,signs):
+        """Give every replica the projectors the owner has taken, and record new graphs.
+
+        ``projectors`` is the host CSR of the owner's ``B`` and ``signs`` its signs. A recorded
+        graph holds the projector arrays of the operator it was recorded for, so every device,
+        the owner included, starts with an empty graph workspace.
+        """
+        cp,_=require_cupy();operator=self.owner_ref()
+        if operator is None:raise ReferenceError('filter owner released')
+        for device in self.devices:
+            with cp.cuda.Device(device):
+                if device!=self.owner:
+                    self.replicas[device].replace_projectors((projectors,signs))
+                self.graphs[device]=BlockFilterGraphs(operator if device==self.owner else self.replicas[device])
+
     def apply(self,matrix,blocks,lower,upper,reset,out=None):
         cp,_=require_cupy();operator=self.owner_ref()
         if operator is None:raise ReferenceError('filter owner released')
@@ -145,6 +160,29 @@ class DistributedFilter:
                     target[...]=result
             stream.synchronize()
         return output
+
+
+def replace_operator_projectors(operator,nonlocal_operator):
+    """Install the projectors of moved atoms in ``operator`` and in all that was derived from it.
+
+    The operator keeps its stencil, its potential buffer and its identity, so the subspace an
+    eigensolver saved for it stays valid. Its recorded filter graphs are dropped, and the replicas
+    that other devices of its sector hold take the same projectors. Runs on the device of the
+    operator, whatever device is current.
+    """
+    cp,_=require_cupy()
+    with cp.cuda.Device(int(operator.effective_potential.device.id)):
+        operator.replace_projectors(nonlocal_operator)
+        if getattr(operator,'_filter_graph_workspace',None) is not None:
+            operator._filter_graph_workspace=None
+        worker=getattr(operator,'_distributed_filter',None)
+        if worker is not None:
+            offsets,columns,values=operator.projector_csr_data
+            projectors=sp.csr_matrix((cp.asnumpy(values),cp.asnumpy(columns),cp.asnumpy(offsets)),
+                                    shape=(operator.shape[0],operator.projector_count))
+            signs=cp.asnumpy(operator.projector_signs)
+    if worker is not None:
+        worker.replace_projectors(projectors,signs)
 
 
 def distributed_filter(operator,matrix,blocks,lower,upper,reset,out=None):

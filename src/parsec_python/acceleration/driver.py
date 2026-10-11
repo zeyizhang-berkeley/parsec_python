@@ -164,6 +164,17 @@ def _reference_cache_key(
             int(bool(specification.read_valence_density)),
             int(bool(specification.use_spline)),
         )))
+        if specification.pseudopotential_format != "martins_new":
+            # What the input adds to an old Martins file: the occupations,
+            # hence the ionic charge, and the radius of the projectors.
+            # Nothing is hashed for a new-format species, whose key stays
+            # what it was.
+            digest.update(repr((
+                specification.pseudopotential_format,
+                specification.number_of_channels,
+                specification.electrons_per_orbital,
+                specification.core_cutoff_radius,
+            )).encode("utf-8"))
         with path.open("rb") as stream:
             while chunk := stream.read(1024 * 1024):
                 digest.update(chunk)
@@ -807,6 +818,73 @@ def _hartree_boundary_tail(reference, *, on_device: bool, device_id: int | None)
         tail_values=tail_values,
     )
     return replace(tail, values_from="device kernel") if on_device else tail
+
+
+def _geometry_builder_hooks(selection, *, ionic_sector_rank: bool) -> dict:
+    """Builders of the ionic fields of moved atoms.
+
+    They are the ones :func:`_prepare_reference_physics` gives the preparation
+    of the same backend selection, so that a moved structure is built by the
+    kernels that built the first one.
+    """
+
+    if selection.finite_difference_builder != "native":
+        return {}
+    from .backends.native import _load_native
+    from .V_ion import NativeIonicBuilders
+
+    try:
+        native_module = _load_native()
+    except BackendUnavailableError:
+        return {}
+    if not hasattr(native_module, "RadialGridEvaluator"):
+        return {}
+    builders = NativeIonicBuilders()
+    if (
+        selection.selected == "cupy"
+        and os.environ.get("PARSEC_IONIC_BACKEND", "native").lower() == "cupy"
+    ):
+        from .V_ion.cupy_ionic import CupyIonicBuilders
+
+        builders = CupyIonicBuilders(sector_rank=ionic_sector_rank)
+    return dict(
+        local_ionic_builder=builders.build_local_ionic_potential,
+        nonlocal_projector_builder=builders.build_nonlocal_projectors,
+        atomic_density_builder=builders.superpose_atomic_density,
+    )
+
+
+def _refresh_boundary_tail(builder, reference, *, on_device: bool, device_id):
+    """Give a boundary builder the atomic tail of the atoms of ``reference``.
+
+    Returns the :class:`parsec_python.Hartree.AtomicTail` the Hartree solver
+    is to add from now on, ``None`` where the plan has no tail or the builder
+    evaluates it per exterior point and keeps it to itself.  ``builder`` may
+    be ``None``: the caller then passes the returned tail to its solver.
+    """
+
+    plan = getattr(reference, "hartree_boundary", None)
+    if plan is None or not plan.atomic_tail:
+        return None
+    if hasattr(builder, "set_atomic_tail"):
+        from parsec_python.Hartree import valence_point_charges
+
+        host_values = {}
+        if _hartree_tail_on_host():
+            from .Hartree.atomic_tail import host_tail_values
+
+            host_values["tail_values"] = host_tail_values
+        builder.set_atomic_tail(
+            *valence_point_charges(
+                reference.atoms, reference.pseudopotentials, reference.electron_count
+            ),
+            **host_values,
+        )
+        return _attached_boundary_tail(builder)
+    tail = _hartree_boundary_tail(reference, on_device=on_device, device_id=device_id)
+    if builder is not None and tail is not None:
+        builder.set_boundary_tail(tail)
+    return tail
 
 
 def _attached_boundary_tail(builder):
@@ -1767,7 +1845,12 @@ def prepare_single_point(
         boundary_setup_status = "overlapped with GPU orbital setup"
 
     if mpi_context is not None and orbital_decomposition is None:
-        raise ValueError("MPI SCF requires a CuPy orbital symmetry decomposition")
+        raise ValueError(
+            "MPI SCF requires a CuPy orbital symmetry decomposition: the ranks divide "
+            "the symmetry sectors of the structure, and this one has no supported "
+            "point-group symmetry (or symmetry is switched off). Run it on one node "
+            "with --serial-control, which uses all GPUs of that node"
+        )
 
     # The full-grid GPU operator serves only the pure-CuPy Poisson solver,
     # which a sector worker does not build.
@@ -2930,6 +3013,135 @@ def prepare_single_point(
         implementation.info,
         details=implementation.info.details + component_details,
     )
+    # ------------------------------------------------------------------
+    # Ionic steps.  The execution objects built above are shared by every
+    # structure of a relaxation: what they hold for the atom positions is
+    # replaced in place, and the Hartree and XC closures read the rebound
+    # ``reference`` and tail from here on.
+    # ------------------------------------------------------------------
+
+    def tail_maximum():
+        return (
+            hartree_boundary_tail.maximum
+            if hartree_boundary_tail is not None
+            else native_boundary_builder.atomic_tail_maximum
+            if boundary_on_wedge_gpu or boundary_on_point_gpu
+            else None
+        )
+
+    def projector_gradients():
+        """Gradients of the projectors of the present atoms, column for column."""
+
+        from parsec_python.Forces import (
+            NonlocalProjectorGradients,
+            build_nonlocal_projector_gradients,
+            gradient_columns_for,
+        )
+
+        operator = reference.nonlocal_operator
+        gradients = build_nonlocal_projector_gradients(
+            reference.grid,
+            reference.atoms,
+            reference.pseudopotentials,
+            reference.input.pseudopotentials,
+        )
+        columns = gradient_columns_for(operator.labels, gradients.labels)
+        if isinstance(columns, slice):
+            return gradients
+        return NonlocalProjectorGradients(
+            components=tuple(
+                component[:, columns] for component in gradients.components
+            ),
+            signs=gradients.signs[columns],
+            labels=tuple(operator.labels),
+        )
+
+    def move_atoms(positions):
+        """Rebuild in this process what depends on the atom positions.
+
+        ``parsec.F90`` after ``domove``: ``isolat``, ``nonloc``, ``corecd``,
+        ``ionpot`` and ``forceion`` on the unchanged grid.  A rank that only
+        serves symmetry sectors rebuilds its projectors alone.
+        """
+
+        nonlocal reference, hartree_boundary_tail, native_xc_evaluator
+        from parsec_python.SCF import update_geometry as update_reference_geometry
+        from parsec_python.models import Atom
+
+        positions = np.asarray(positions, dtype=np.float64)
+        if positions.shape != (len(reference.atoms), 3):
+            raise ValueError("one position per atom of the prepared system is required")
+        atoms = tuple(
+            Atom(atom.symbol, position)
+            for atom, position in zip(reference.atoms, positions)
+        )
+        if symmetry_reduction is not None:
+            # Sectors, wedge fields and wedge sums hold for this group only.
+            from .Forces.local_device import sector_atom_images
+
+            sector_atom_images(symmetry_reduction, atoms)
+        moved = update_reference_geometry(
+            reference,
+            atoms,
+            **_geometry_builder_hooks(
+                selection, ionic_sector_rank=mpi_context is not None
+            ),
+            build_atomic_tail=False,
+        )
+        implementation.replace_nonlocal_operator(moved.nonlocal_operator)
+        if symmetry_eigensolver is not None:
+            symmetry_eigensolver.replace_nonlocal_operator(moved.nonlocal_operator)
+        if not sector_worker:
+            tail_on_gpu = (
+                selection.selected == "cupy"
+                and selection.hartree_backend in {"native", "cupy"}
+                and not tail_on_host
+            )
+            hartree_boundary_tail = _refresh_boundary_tail(
+                native_boundary_builder,
+                moved,
+                on_device=tail_on_gpu,
+                device_id=(
+                    hartree_device
+                    if selection.hartree_backend == "native"
+                    else None
+                ),
+            )
+            if type(native_xc_evaluator).__name__ == "NativeCALDAEvaluator":
+                # The C++ evaluator owns a copy of the frozen core density.
+                native_xc_evaluator = type(native_xc_evaluator)(
+                    moved.core_density,
+                    moved.grid.volume_element,
+                    scf_reducer,
+                )
+        reference = moved
+
+    def update_system(system, atoms):
+        """Move the atoms on every rank; return the system of the new structure."""
+
+        atoms = tuple(atoms)
+        if len(atoms) != len(reference.atoms) or any(
+            new.symbol != old.symbol for new, old in zip(atoms, reference.atoms)
+        ):
+            raise ValueError("moved atoms must keep their number, order and species")
+        positions = np.array(
+            [np.asarray(atom.position, dtype=np.float64) for atom in atoms]
+        )
+        if mpi_context is not None:
+            mpi_context.execute(symmetry_eigensolver, "geometry", positions)
+        else:
+            move_atoms(positions)
+        return replace(
+            system,
+            reference=reference,
+            xc_evaluator=native_xc_evaluator,
+            boundary_tail_maximum=tail_maximum(),
+        )
+
+    if symmetry_eigensolver is not None:
+        symmetry_eigensolver.projector_gradient_provider = projector_gradients
+        symmetry_eigensolver.geometry_handler = move_atoms
+
     return AcceleratedPreparedSinglePointSystem(
         reference=reference,
         backend=implementation,
@@ -2938,13 +3150,9 @@ def prepare_single_point(
             implementation, "eigenproblem_solver", None
         ),
         hartree_solver=accelerated_hartree,
-        boundary_tail_maximum=(
-            hartree_boundary_tail.maximum
-            if hartree_boundary_tail is not None
-            else native_boundary_builder.atomic_tail_maximum
-            if boundary_on_wedge_gpu or boundary_on_point_gpu
-            else None
-        ),
+        boundary_tail_maximum=tail_maximum(),
+        geometry_updater=None if is_periodic else update_system,
+        projector_gradients=None if is_periodic else projector_gradients,
         orbital_density_builder=getattr(
             implementation, "orbital_density_builder", None
         ),
@@ -3017,16 +3225,99 @@ def run_scf(
     system: AcceleratedPreparedSinglePointSystem,
     *,
     callback: Callable[[SCFIteration], None] | None = None,
+    warm_start=None,
 ) -> AcceleratedSinglePointResult:
-    """Run the validated SCF loop using the selected execution backend."""
+    """Run the validated SCF loop using the selected execution backend.
 
-    result = run_accelerated_scf(system, callback=callback)
+    ``warm_start`` continues from the loop of the structure before an ionic
+    move; :func:`warm_start_for_moved_atoms` builds it.
+    """
+
+    result = run_accelerated_scf(system, callback=callback, warm_start=warm_start)
     boundary_check = _hartree_boundary_check(system, result)
     if boundary_check:
         result.backend = replace(
             result.backend, details=result.backend.details + boundary_check
         )
     return result
+
+
+def update_geometry(
+    system: AcceleratedPreparedSinglePointSystem, atoms
+) -> AcceleratedPreparedSinglePointSystem:
+    """Return the prepared system of moved atoms on the same grid.
+
+    The counterpart of :func:`parsec_python.SCF.update_geometry`.  The
+    Hamiltonian operators on the devices, the Hartree solver, the symmetry
+    maps and the eigensolver with its saved subspaces are kept and shared
+    with ``system``: their projectors, the atomic tail of the Hartree
+    boundary and the core density are replaced in place, on every rank of an
+    MPI run.  ``system`` itself keeps its static fields, which is what
+    :func:`warm_start_for_moved_atoms` reads, but can no longer be solved.
+
+    The symmetry sectors were chosen for the first structure.  The moved
+    atoms must have every symmetry operation those sectors use; a relaxation
+    keeps them by symmetrizing its forces.
+    """
+
+    updater = getattr(system, "geometry_updater", None)
+    if updater is None:
+        raise NotImplementedError(
+            "this prepared system does not support moving its atoms"
+        )
+    return updater(system, atoms)
+
+
+def warm_start_for_moved_atoms(previous_system, previous_result, system):
+    """What the SCF loop of moved atoms takes over (``parsec.F90`` after ``domove``).
+
+    The counterpart of :func:`parsec_python.SCF.warm_start_for_moved_atoms`:
+    the last mixed potential with the local ionic potential exchanged, the
+    last Hartree potential, and the eigensolver subspaces, which stay on
+    their devices and ranks and are marked for a new loop there.
+    """
+
+    from parsec_python.SCF import SCFWarmStart, state_for_new_potential
+
+    solver = system.eigenproblem_solver
+    restart = getattr(solver, "start_new_scf_loop", None)
+    state = (
+        restart()
+        if callable(restart)
+        else state_for_new_potential(previous_result.eigensolver_state)
+    )
+    return SCFWarmStart(
+        input_potential=(
+            np.asarray(previous_result.next_effective_potential)
+            - np.asarray(previous_system.ionic_potential)
+            + np.asarray(system.ionic_potential)
+        ),
+        hartree_potential=np.asarray(previous_result.hartree_potential),
+        eigensolver_state=state,
+    )
+
+
+def compute_forces(system, result, *, symmetrize: bool = True, operations=None):
+    """Atomic forces of a finished SCF loop (:mod:`.Forces`)."""
+
+    from .Forces import compute_forces as accelerated_forces
+
+    return accelerated_forces(
+        system, result, symmetrize=symmetrize, operations=operations
+    )
+
+
+def ionic_backend():
+    """The accelerated operations of an ionic loop (:mod:`parsec_python.Relaxation`)."""
+
+    from parsec_python.Relaxation.ionic_loop import IonicBackend
+
+    return IonicBackend(
+        run_scf=run_scf,
+        compute_forces=compute_forces,
+        update_geometry=update_geometry,
+        warm_start=warm_start_for_moved_atoms,
+    )
 
 
 def run_single_point(
@@ -3046,7 +3337,11 @@ def run_single_point(
 
 __all__ = [
     "AcceleratedPreparedSinglePointSystem",
+    "compute_forces",
+    "ionic_backend",
     "prepare_single_point",
+    "update_geometry",
+    "warm_start_for_moved_atoms",
     "profile_hamiltonian_components",
     "run_scf",
     "run_single_point",

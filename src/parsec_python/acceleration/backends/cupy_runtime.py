@@ -79,6 +79,19 @@ class CuPySCFEigensolver:
                 "CuPy SCF state does not belong to this persistent eigensolver"
             )
         result = self.solver.solve(requested_states, settings=settings)
+        return self._result(result)
+
+    def start_new_scf_loop(self):
+        """Keep the subspace for the SCF loop of the next structure.
+
+        Returns the state to hand to that loop, ``None`` before any solve.
+        """
+
+        if self.solver is None:
+            return None
+        return self.solver.start_new_scf_loop()
+
+    def _result(self, result) -> _SCFEigvalResult:
         return _SCFEigvalResult(
             eigenvalues=result.eigenvalues,
             vectors=result.vectors,
@@ -349,6 +362,35 @@ class CuPyHamiltonianBackend(HamiltonianBackend):
                 self.timing_stats.initialization_seconds
             )
         return self.device_operator
+
+    def replace_nonlocal_operator(self, nonlocal_operator) -> None:
+        """Take the projectors of moved atoms, on the host and on the device.
+
+        The full-grid device operator, where one exists, keeps its stencil,
+        its potential buffer and its identity; filter graphs recorded for it
+        are dropped.  Symmetry-sector operators are replaced by their
+        eigensolver, which reduces these projectors itself.
+        """
+
+        projectors = sp.csc_matrix(nonlocal_operator.projectors, dtype=np.float64)
+        projectors.sort_indices()
+        if projectors.shape[0] != self.shape[0]:
+            raise ValueError(
+                "projector row count must match the negative Laplacian"
+            )
+        self.host_projectors = projectors
+        self.host_signs = np.asarray(nonlocal_operator.signs, dtype=np.float64)
+        self.host_nonlocal_operator = NonlocalProjectorOperator(
+            projectors=projectors,
+            signs=self.host_signs.copy(),
+            labels=tuple(nonlocal_operator.labels),
+        )
+        if self.device_operator is not None:
+            from ..Eigensolvers.distributed_filter import replace_operator_projectors
+
+            replace_operator_projectors(
+                self.device_operator, self.host_nonlocal_operator
+            )
 
     def bind(self, effective_potential: np.ndarray) -> CuPyBoundHamiltonian:
         return CuPyBoundHamiltonian(self, effective_potential)

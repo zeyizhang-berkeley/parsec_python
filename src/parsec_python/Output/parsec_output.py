@@ -34,6 +34,7 @@ from ..Hartree.domain import (
     sphere_shell_sums,
     wall_energy,
 )
+from .force_output import force_report_lines
 from ..models import MAXIMUM_MULTIPOLE_ORDER, SCFIteration, SinglePointResult
 from ..V_ion import center_cluster_geometry, ionic_charge
 
@@ -876,7 +877,11 @@ class ParsecTextReporter:
             " ----------------",
             f" Number of states: {scf.number_of_states:12d}",
             f" Net cluster charge = {scf.net_charge:8.3f}      [e]",
-            f" Fermi temperature = {scf.fermi_temperature_kelvin:9.2f} [K]",
+            (
+                f" Fermi temperature = {scf.fermi_temperature_kelvin:9.2f} [K]"
+                if scf.fixed_occupations is None
+                else " WARNING: reading occupations from occup.in file"
+            ),
             "",
             " Self-consistency data:",
             " ----------------------",
@@ -1007,8 +1012,12 @@ class ParsecTextReporter:
                         " Physical element : "
                         f"{specification.element_symbol or potential.symbol}"
                     ),
-                    " martins_new",
-                    "  pseudopotential format : new Martins",
+                    f" {potential.file_format}",
+                    (
+                        "  pseudopotential format : old Martins"
+                        if potential.file_format == "martins_old"
+                        else "  pseudopotential format : new Martins"
+                    ),
                     f"  pseudopotential file   : {potential.source}",
                     (
                         f"  radial points/channels : {potential.radii.size}"
@@ -1123,8 +1132,13 @@ class ParsecTextReporter:
                 f"      tdiag_sum = {self._diagonalization_total:11.2f}"
             ),
             "",
-            f" Fermi level at {step.fermi_level:10.4f} [Ry]",
-            "",
+            # flevel.f90 reports no Fermi level with the occupations of
+            # occup.in: none is searched.
+            *(
+                (f" Fermi level at {step.fermi_level:10.4f} [Ry]", "")
+                if self.problem.scf.fixed_occupations is None
+                else ()
+            ),
             "   State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.",
             "",
         ]
@@ -1201,7 +1215,19 @@ class ParsecTextReporter:
         self._previous_total = energies.total
         self.write("\n".join(lines))
 
-    def finish(self, result: SinglePointResult, elapsed_seconds: float) -> None:
+    def finish(
+        self,
+        result: SinglePointResult,
+        elapsed_seconds: float,
+        *,
+        forces=None,
+    ) -> None:
+        """Report the end of one SCF loop.
+
+        ``forces`` is the :class:`parsec_python.Forces.ForceResult` of the
+        structure, where one was evaluated; its tables then take the place
+        of the statement that forces are not calculated.
+        """
         status = (
             "Self-consistency convergence achieved."
             if result.converged
@@ -1311,15 +1337,28 @@ class ParsecTextReporter:
                     " --------------------------------------------------",
                 ]
             )
-        lines.extend(
-            [
-                "",
-                "Forces, dipoles, and MPI statistics",
-                "are not calculated by this Python single-point implementation.",
-                "",
-                " =================================================================",
-            ]
-        )
+        if forces is None:
+            lines.extend(
+                [
+                    "",
+                    "Forces, dipoles, and MPI statistics",
+                    "are not calculated by this Python single-point implementation.",
+                    "",
+                    " =================================================================",
+                ]
+            )
+        else:
+            lines.extend(
+                [
+                    *force_report_lines(forces, self.translation.output_level),
+                    f"Time for forces [sec] : {forces.seconds:11.2f}",
+                    "",
+                    "Dipoles and MPI statistics",
+                    "are not calculated by this Python implementation.",
+                    "",
+                    " =================================================================",
+                ]
+            )
         self.write("\n".join(lines))
 
 

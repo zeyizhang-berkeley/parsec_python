@@ -200,6 +200,50 @@ The local component is not encoded in POTRE. `Local_Component` is required per
 species (`usrinputfile.F90:1806-1827`), and the user is responsible for avoiding
 ghost states.
 
+### Old Martins layout (`_POTR.DAT`)
+
+`Pseudopotential_Format: martins_old` selects the `MARTINS_OLD` branches of
+`pseudo.f90`. The file `<Symbol>_POTR.DAT` is read with list-directed
+statements (`pseudo.f90:163-177`, `289-348`):
+
+1. `ns lll icore`: radial samples, channels, core-correction flag
+2. `nloc(1..lll)`: angular momentum + 1 of every column
+3. `ns` records `r, V(nloc(1)), ..., V(nloc(lll))`: the potentials in Rydberg
+4. `ns` records `r, u(nloc(1)), ..., u(nloc(lll))`: reduced radial functions
+5. with `icore > 0`, `ns` records `r, rho_core`; a file that ends early
+   keeps zeros
+
+The potentials are stored as `V_l`, not `r V_l`, and the core charge as a
+volume density, not as a radial charge. The file names no element and no
+functional, and holds no grid parameter, no ionic charge, no occupation, no
+valence charge and no cutoff radius. Those come from elsewhere:
+
+- `Potential_Num` must equal `lll` (`pseudo.f90:170-177`, error 202).
+- The `Electron_Per_Orbital` block gives the occupations `f_l` of the
+  channels, s first; `Zion = sum_l f_l` (`pseudo.f90:132-135`). The atomic
+  density is always `sum_l f_l u_l²/(4 pi r²)`; `Read_VCD` is refused.
+- `Core_Cutoff_Radius` is `rcore`, the radius of the nonlocal sphere, as it
+  is given (`usrinputfile.F90:1837`). `nonloc.F90:150-247` keeps the grid
+  points with `|r-R| <= rcore`. For a new file `rcore` is instead the first
+  radial sample beyond the largest channel cutoff of the file
+  (`pseudo.f90:515-522`).
+- The grid `r(i) = a exp(b(i-1)) - a` (`i=1` is the origin PARSEC inserts) is
+  fitted to the samples `i_0=101` and `j0=201` (`pseudo.f90:323-337`):
+
+```text
+a = r(i_0)² / [r(j0) - 2 r(i_0)]
+b = log[r(j0)/a + 1] / (j0 - 1)
+```
+
+Everything downstream (local potential, projectors, densities, derivative
+tables of the forces) is the code of the new format.
+
+ESDF hands out the occurrences of a label in the order of the calls
+(`esdf_mod.f90`). `Potential_Num` is read for every species, the other two
+for old-format species only. A new-format species ahead of an old-format one
+therefore takes the first `Potential_Num` of the input, and PARSEC stops
+with error 138 unless that species has a line of its own.
+
 ### Local ionic potential
 
 After choosing `l_local`,
@@ -502,6 +546,16 @@ sum_i f_i = Ne/2
 Each `f_i` lies in `[0,1]`; the factor two for spin degeneracy is applied
 elsewhere. The bisection count tolerance is `1e-12`, maximum iterations 100,
 and exponent cutoff 35.
+
+A negative `Fermi_Temp` replaces the search by the occupations of the file
+`occup.in` (`initial.f90:461-523`). Each spin channel has a section there: a
+title line, the number of fully occupied states, the number `m` of
+occupations set by hand, and `m` records with a state index and its
+occupation. A calculation without spin polarization reads the first section
+only. `initial.f90` stops (error 233) when `2 sum_i f_i` differs from `Ne` by
+more than `1e-5`. At every SCF step `flevel.f90:172-197` gives the n-th
+occupation to the state with the n-th lowest eigenvalue, whatever its
+representation, and reports no Fermi level.
 
 For full-grid, unpolarized orbitals with Euclidean column norm one,
 `newrho.F90` builds

@@ -911,6 +911,153 @@ class CuPySymmetrySCFEigensolver:
         self._state = None
         self._sector_counts = None
 
+    # ----- ionic steps --------------------------------------------------
+
+    #: Set by the driver that prepared the system: a callable returning the
+    #: gradients of the present projectors
+    #: (:class:`parsec_python.Forces.NonlocalProjectorGradients`), with their
+    #: columns in the order of the projectors.
+    projector_gradient_provider = None
+    #: Set by the same driver: a callable taking the ``(atoms, 3)`` positions
+    #: of moved atoms and rebuilding what this process holds for them.
+    geometry_handler = None
+
+    def start_new_scf_loop(self):
+        """Keep every sector subspace for the SCF loop of the next structure.
+
+        Each sector solver, on whichever rank holds it, marks its saved
+        subspace as the start of a new loop (``solver%firstfilt`` of
+        ``parsec.F90``).  Returns the state to hand to that loop, ``None``
+        before any solve.
+        """
+
+        context = getattr(self, "mpi_context", None)
+        if context is not None:
+            context.execute(self, "new_scf_loop")
+        else:
+            self._start_new_scf_loop_local()
+        return self._state
+
+    def _start_new_scf_loop_local(self) -> None:
+        for solver in self._solvers:
+            if solver is not None:
+                solver.start_new_scf_loop()
+        self._mpi_latest_results = {}
+
+    def replace_nonlocal_operator(self, nonlocal_operator) -> None:
+        """Install the projectors of moved atoms in the sectors solved here.
+
+        The full-grid projectors are reduced to every sector of this process
+        as they were at construction, and each sector operator takes them in
+        place, with its replicas on the other devices of a shared sector.
+        Stencils, potential buffers and saved subspaces stay.  In an MPI run
+        every rank does this for its own sectors.
+        """
+
+        from .distributed_filter import replace_operator_projectors
+
+        reduced = self.decomposition.reduce_nonlocal_operators(
+            nonlocal_operator, self._owned_representations
+        )
+        for representation in self._owned_representations:
+            replace_operator_projectors(
+                self._operators[representation], reduced[representation]
+            )
+
+    def projector_force_terms(
+        self,
+        representations: np.ndarray,
+        columns: np.ndarray,
+        occupations: np.ndarray,
+    ) -> np.ndarray:
+        """Nonlocal force terms per projector, summed over all sectors.
+
+        ``representations`` and ``columns`` name, in global eigenvalue order,
+        the sector and the sector column of every selected state, and
+        ``occupations`` holds their occupations: what the density of the last
+        SCF iteration was built from.  The result is the host array
+        ``t[q, c] = 4*sum_n f_n s_q <beta_q|psi_n><d_c beta_q|psi_n>`` of
+        shape ``(projectors, 3)``; the orbitals stay on their devices and
+        ranks.
+        """
+
+        payload = (
+            np.ascontiguousarray(representations, dtype=np.int32),
+            np.ascontiguousarray(columns, dtype=np.int32),
+            np.ascontiguousarray(occupations, dtype=np.float64),
+        )
+        context = getattr(self, "mpi_context", None)
+        if context is not None:
+            return context.execute(self, "forces", payload)
+        return self._projector_force_terms_local(*payload)
+
+    def _projector_force_terms_local(
+        self,
+        representations: np.ndarray,
+        columns: np.ndarray,
+        occupations: np.ndarray,
+    ) -> np.ndarray:
+        from time import perf_counter
+        from types import SimpleNamespace
+
+        from ..Forces.nonlocal_device import gradient_transposes, projector_force_terms
+
+        provider = self.projector_gradient_provider
+        if provider is None:
+            raise RuntimeError(
+                "this eigensolver was not given the projector gradients of its system"
+            )
+        started = perf_counter()
+        gradients = provider()
+        built = perf_counter()
+        reduced = [
+            self.decomposition.reduce_nonlocal_operators(
+                SimpleNamespace(
+                    projectors=component,
+                    signs=gradients.signs,
+                    labels=gradients.labels,
+                ),
+                self._owned_representations,
+            )
+            for component in gradients.components
+        ]
+        reduced_at = perf_counter()
+        total = np.zeros((len(gradients.labels), 3), dtype=np.float64)
+        for representation in self._owned_representations:
+            selected = np.flatnonzero(representations == representation)
+            if not selected.size:
+                continue
+            weights = occupations[selected]
+            if not np.array_equal(columns[selected], np.arange(selected.size)):
+                raise RuntimeError(
+                    "the selected states of a sector are not its leading columns"
+                )
+            occupied = np.flatnonzero(weights != 0.0)
+            if not occupied.size:
+                continue
+            weights = weights[: int(occupied[-1]) + 1]
+            state = self._solvers[representation].device_state
+            if state is None or int(state.subspace.vectors.shape[1]) < weights.size:
+                raise RuntimeError(
+                    "a sector no longer holds the orbitals of the last SCF iteration"
+                )
+            total += projector_force_terms(
+                self._operators[representation],
+                state.subspace.vectors,
+                weights,
+                gradient_transposes(
+                    tuple(reduced[axis][representation].projectors for axis in range(3))
+                ),
+            )
+        # Wall seconds of this process: building the gradients on the full
+        # grid, reducing them to its sectors, contracting them on its devices.
+        self.force_phase_seconds = {
+            "gradients": built - started,
+            "reduction": reduced_at - built,
+            "contraction": perf_counter() - reduced_at,
+        }
+        return total
+
     def _state_fit_bytes(self, counts: list[int]) -> dict[int, int]:
         """Bytes that the rule of the state storage counts on each device for the sectors solved here.
 

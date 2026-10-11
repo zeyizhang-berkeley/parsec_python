@@ -38,6 +38,13 @@ class AcceleratedPreparedSinglePointSystem:
     materialize_final_wavefunctions: bool = True
     # ``max |C_L|`` of the atomic tail the substituted Hartree solver adds.
     boundary_tail_maximum: float | None = None
+    # Ionic steps.  ``geometry_updater(system, atoms)`` rebuilds what the
+    # execution objects shared by this system hold for the atom positions
+    # and returns the system of the moved atoms; ``projector_gradients()``
+    # returns the gradients of the present projectors for the forces.  Both
+    # are ``None`` where the preparation does not support moving atoms.
+    geometry_updater: Callable[..., object] | None = None
+    projector_gradients: Callable[[], object] | None = None
 
     def __getattr__(self, name: str):
         return getattr(self.reference, name)
@@ -66,8 +73,13 @@ def run_scf(
     system: AcceleratedPreparedSinglePointSystem,
     *,
     callback: Callable[[SCFIteration], None] | None = None,
+    warm_start=None,
 ) -> AcceleratedSinglePointResult:
-    """Run the validated SCF algorithm through an accelerated H backend."""
+    """Run the validated SCF algorithm through an accelerated H backend.
+
+    ``warm_start`` continues from the SCF loop of the structure before an
+    ionic move (:class:`parsec_python.SCF.SCFWarmStart`).
+    """
     symmetry_eigensolver = getattr(
         system.backend, "symmetry_eigensolver", None
     )
@@ -84,6 +96,7 @@ def run_scf(
             residual_metrics_evaluator=system.residual_metrics_evaluator,
             total_energy_evaluator=system.total_energy_evaluator,
             scalar_field_adapter=system.scalar_field_adapter,
+            warm_start=warm_start,
         )
         return _finalize_result(system, result, symmetry_eigensolver)
     finally:
@@ -91,14 +104,15 @@ def run_scf(
             restore_allocator()
 
 
-def _finalize_result(system, result, symmetry_eigensolver):
-    """Finalize output inside the allocator-restoration scope, including OOMs."""
-    # The CuPy SCF downloads only density vectors during nonlinear iterations.
-    # Materialize the requested orbitals once for the public final result.
-    if (
-        system.backend_info.selected == "cupy"
-        and system.materialize_final_wavefunctions
-    ):
+def materialize_wavefunctions(system, result) -> None:
+    """Replace device or lazy sector orbitals of ``result`` by a host matrix.
+
+    The CuPy SCF downloads only density vectors during nonlinear iterations;
+    this downloads the orbitals once, for a caller that wants them in the
+    result.  An ionic loop leaves it to the end of the last structure.
+    """
+
+    if system.backend_info.selected == "cupy":
         from time import perf_counter
 
         import numpy as np
@@ -125,6 +139,12 @@ def _finalize_result(system, result, symmetry_eigensolver):
                 timing_stats.final_wavefunction_download_seconds += (
                     perf_counter() - started
                 )
+
+
+def _finalize_result(system, result, symmetry_eigensolver):
+    """Finalize output inside the allocator-restoration scope, including OOMs."""
+    if system.materialize_final_wavefunctions:
+        materialize_wavefunctions(system, result)
     synchronize_statistics = getattr(
         system.backend, "synchronize_statistics", None
     )

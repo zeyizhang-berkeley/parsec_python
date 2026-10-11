@@ -20,7 +20,7 @@ _MODULE_STARTED = time.perf_counter()
 
 import argparse
 import ctypes
-from dataclasses import asdict, is_dataclass
+from dataclasses import asdict, is_dataclass, replace
 import hashlib
 import json
 import math
@@ -594,7 +594,11 @@ def execute(args, cp, comm, MPI, initialization_seconds, initial_affinity=None):
     from parsec_python.acceleration.cli import _RunLog, _symmetry_cache_directory
     from parsec_python.acceleration.Output import AcceleratedTextReporter
     from parsec_python.acceleration.backends.cupy_capture import capture_statistics
-    from parsec_python.acceleration.driver import hartree_boundary_check_seconds, prepare_single_point, run_scf
+    from parsec_python.acceleration.driver import (hartree_boundary_check_seconds, ionic_backend, prepare_single_point,
+                                                   run_scf)
+    from parsec_python.cli import relaxation_exit_code
+    from parsec_python.Relaxation.run import (relaxation_header_lines, restart_structure, run_recorded_relaxation,
+                                              run_single_point_with_forces, symmetry_decision)
     from parsec_python.acceleration.experimental.mpi_scf import MPISectorContext, MPISymmetryDensityBuilder
 
     affinity_restorations = int(_restore_affinity(initial_affinity))
@@ -610,7 +614,35 @@ def execute(args, cp, comm, MPI, initialization_seconds, initial_affinity=None):
         # Refused here by name: the sphere and the symmetry sectors read below are those of a cluster.
         raise ValueError('the full-SCF runner divides the symmetry sectors of an isolated cluster; a periodic input '
                          '(Boundary_Conditions: bulk) is not supported: run it with parsec_python/main.py')
-    symmetry = args.symmetry or ('off' if translation.ignore_symmetry else 'auto')
+    # Relax_Restart, or --restart-from, replaces the coordinates of the input on every rank alike.
+    translation, relax_restart, restart_notes = restart_structure(
+        translation, translation.source.parent,
+        None if args.restart_from is None else args.restart_from.expanduser().resolve())
+    # No point group for manual movements, or where the movable flags do not respect it.
+    if translation.molecular_dynamics is not None and not args.serial_control:
+        # The ranks of this runner divide the symmetry sectors, and molecular dynamics uses no symmetry.
+        raise ValueError('molecular dynamics uses no symmetry and so cannot be divided among ranks: '
+                         'run it with parsec_python/main.py or with --serial-control')
+    from parsec_python.MolecularDynamics.run import (restart_structure as dynamics_restart_structure,
+                                                     run_recorded_molecular_dynamics)
+    translation, dynamics_restart, dynamics_notes = dynamics_restart_structure(translation, translation.source.parent)
+    restart_notes = [*restart_notes, *dynamics_notes]
+    use_symmetry, symmetry_note = symmetry_decision(translation)
+    # Whether the atoms stay in the point group of the first structure, which Ignore_Symmetry does not tell.
+    # The command line may overrule that keyword, but not a run that leaves the group.
+    keeps_group, group_note = symmetry_decision(replace(translation, ignore_symmetry=False))
+    if args.symmetry == 'on' and not keeps_group:
+        raise ValueError('--symmetry on cannot be used here: '
+                         + (group_note or 'manual movements and molecular dynamics use no symmetry'))
+    symmetry = (args.symmetry if args.symmetry is not None and (keeps_group or args.symmetry == 'off')
+                else ('auto' if use_symmetry else 'off'))
+    # Forces are symmetrized where the calculation itself uses the group.
+    symmetrize_forces = keeps_group and symmetry != 'off'
+    if symmetry == 'off' and not args.serial_control:
+        # The ranks of this runner divide the symmetry sectors.
+        raise ValueError('this run uses no point-group symmetry'
+                         + (f' ({symmetry_note})' if symmetry_note else '')
+                         + ', so its sectors cannot be divided among ranks: run it on one node with --serial-control')
     # As in acceleration.cli: none unless --symmetry-cache names its directory.
     cache = _symmetry_cache_directory(args)
     output = args.output_dir.resolve()
@@ -641,6 +673,12 @@ def execute(args, cp, comm, MPI, initialization_seconds, initial_affinity=None):
             reporter.header()
             for warning in translation.warnings:
                 log.write(f'WARNING: {warning}')
+            if symmetry_note is not None:
+                log.write(f'WARNING: {symmetry_note}')
+            for note in restart_notes:
+                log.write(note)
+            if translation.relaxation is not None:
+                log.write('\n'.join(relaxation_header_lines(translation)))
             if translation.output_all_states:
                 log.write('BENCHMARK: Output_All_States overridden false; no full orbital materialization/archive.')
             log.write(f'Full SCF mode: {"serial production control" if args.serial_control else "MPI symmetry sectors"}; '
@@ -694,8 +732,25 @@ def execute(args, cp, comm, MPI, initialization_seconds, initial_affinity=None):
                 reporter.iteration(item)
                 memory.append(_observe_memory(cp, args.devices, f'iteration_{item.iteration}'))
             scf_started = time.perf_counter()
+            forces = outcome = dynamics = None
             try:
-                result = run_scf(system, callback=iteration)
+                if translation.molecular_dynamics is not None:
+                    dynamics = run_recorded_molecular_dynamics(translation, system, ionic_backend(), reporter,
+                                                               log.write, directory=output, restart=dynamics_restart)
+                    result, forces = dynamics.result, dynamics.forces
+                elif translation.relaxation is not None:
+                    # Every structure is solved by the ranks as the first one: the root moves the atoms on all of
+                    # them, continues its SCF loop from the previous one and collects the forces.
+                    outcome = run_recorded_relaxation(translation, system, ionic_backend(), reporter, log.write,
+                                                      directory=output, input_directory=translation.source.parent,
+                                                      restart=relax_restart, symmetrize=symmetrize_forces)
+                    result = outcome.result
+                    forces = outcome.records[-1].forces
+                elif translation.compute_forces:
+                    result, forces = run_single_point_with_forces(system, ionic_backend(), reporter,
+                                                                  symmetrize=symmetrize_forces)
+                else:
+                    result = run_scf(system, callback=iteration)
                 _synchronize(cp, args.devices)
                 scf_completed = time.perf_counter()
             finally:
@@ -716,7 +771,8 @@ def execute(args, cp, comm, MPI, initialization_seconds, initial_affinity=None):
             # it returns: its seconds are a phase of their own and no part of the SCF.
             check_seconds = hartree_boundary_check_seconds(result)
             scf_seconds = scf_completed-scf_started-check_seconds
-            reporter.finish(result, scf_seconds)
+            if forces is None:
+                reporter.finish(result, scf_seconds)
             reporting_completed = time.perf_counter()
             log.write(f' Pre-SCF setup/reporting wall time [sec] : {scf_started-started:11.6f}')
             log.write(f' Post-SCF finalization/reporting [sec] : {reporting_completed-scf_completed+check_seconds:11.6f}')
@@ -726,19 +782,47 @@ def execute(args, cp, comm, MPI, initialization_seconds, initial_affinity=None):
             domain = reporter.domain if isinstance(reporter.domain, dict) else None
             root_report = dict(converged=bool(result.converged), iterations=int(result.iterations),
                 electron_count=float(result.electron_count), energies_ry=asdict(result.energies),
-                fermi_level_ry=float(result.fermi_level), backend=asdict(result.backend),
+                fermi_level_ry=float(result.fermi_level) if np.isfinite(result.fermi_level) else None,
+                backend=asdict(result.backend),
                 backend_statistics=asdict(result.backend_statistics), scf_timings=asdict(result.timings),
                 iteration_history=[asdict(item) for item in result.history],
                 reported_program_seconds=reported_seconds, scf_seconds=scf_seconds,
                 pre_scf_setup_reporting_seconds=scf_started-started,
                 post_scf_finalization_reporting_seconds=reporting_completed-scf_completed+check_seconds,
                 hartree_boundary_check_seconds=check_seconds,
-                hartree_boundary=_hartree_boundary_record(system, result),
+                hartree_boundary=_hartree_boundary_record(
+                    outcome.system if outcome is not None else dynamics.system if dynamics is not None else system,
+                    result),
                 domain=domain,
                 first_iteration_diagonalization_seconds=float(result.history[0].diagonalization_seconds) if result.history else 0.0,
                 wall_time_stack_seconds=_stack_phases(result, scf_seconds, reported_seconds, check_seconds))
+            if forces is not None:
+                # Forces of the last structure in Ry/bohr; for a relaxation every structure that was computed.
+                root_report['forces'] = dict(total=forces.total.tolist(), net=forces.net_force.tolist(),
+                    maximum=forces.maximum, symmetry_operations=forces.symmetry_operations, seconds=forces.seconds,
+                    phase_seconds=forces.phase_seconds)
+            if dynamics is not None:
+                root_report['molecular_dynamics'] = dict(
+                    scf_failed=bool(dynamics.scf_failed),
+                    steps=[dict(index=item.index, energy_ry=item.energy, maximum_force=item.maximum_force,
+                                scf_iterations=item.scf_iterations, converged=item.converged, seconds=item.seconds,
+                                temperature=None if item.step is None else item.step.temperature,
+                                conserved_energy_ry=None if item.step is None else item.step.conserved_energy)
+                           for item in dynamics.records])
+            if outcome is not None:
+                root_report['relaxation'] = dict(
+                    method=translation.relaxation.method, minimum_force=translation.relaxation.minimum_force,
+                    minimum_force_found=bool(outcome.minimum_force_found), done=bool(outcome.done),
+                    movements_exhausted=bool(outcome.movements_exhausted), scf_failed=bool(outcome.scf_failed),
+                    steps=[dict(step=item.step, energy_ry=item.energy, maximum_force=item.maximum_force,
+                                scf_iterations=item.scf_iterations, converged=item.converged, seconds=item.seconds,
+                                force_seconds=item.forces.seconds,
+                                force_phase_seconds=item.forces.phase_seconds) for item in outcome.records],
+                    step_timings=outcome.timings,
+                    final_positions_bohr=outcome.positions.tolist())
             archive_started = time.perf_counter()
-            save_result_archive(archive_path, result, include_wavefunctions=False)
+            save_result_archive(archive_path, result, include_wavefunctions=False, forces=forces, relaxation=outcome,
+                                dynamics=dynamics)
             root_report['archive_write_seconds_excluded_from_reported'] = time.perf_counter()-archive_started
             root_report['archive_sha256'] = _digest(archive_path)
             log.write(f'Result archive: {archive_path}')
@@ -815,7 +899,9 @@ def execute(args, cp, comm, MPI, initialization_seconds, initial_affinity=None):
     ranks = comm.gather(local, root=0)
     exit_code = None
     if rank == 0:
-        exit_code = 0 if result.converged else 3
+        exit_code = relaxation_exit_code(
+            result, outcome,
+            manual=translation.relaxation is not None and translation.relaxation.method == 'manual')
         payload = dict(kind='complete_scf_mpi_symmetry_sectors', schema_version=1,
             status='converged' if result.converged else 'not_converged', complete=True,
             serial_control=args.serial_control, ranks=size, nodes=len(placement), gpu_count=len(physical_devices),
@@ -866,6 +952,9 @@ def _build_parser():
     parser.add_argument('--backend', choices=('auto', 'cupy'), default='auto')
     parser.add_argument('--symmetry', choices=('auto', 'on', 'off'))
     parser.add_argument('--pp-dir', type=Path)
+    parser.add_argument('--restart-from', type=Path,
+                        help='take the atom coordinates from this file: a relax_restart.dat (its BFGS state continues '
+                             'a BFGS relaxation) or an .xyz file (last frame); every rank must be able to read it')
     cache = parser.add_mutually_exclusive_group()
     cache.add_argument('--symmetry-cache', type=Path, metavar='DIRECTORY',
                        help='read and write the symmetry cache in DIRECTORY; it pays only for repeated calculations of '

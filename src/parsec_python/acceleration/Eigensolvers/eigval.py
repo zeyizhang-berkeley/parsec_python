@@ -175,6 +175,22 @@ class CuPyEigvalSolver:
 
         self._state = None
 
+    def start_new_scf_loop(self) -> CuPyEigvalDeviceState | None:
+        """Mark the saved subspace as the start of another SCF loop.
+
+        ``parsec.F90`` sets ``solver%firstfilt`` again after every SCF loop,
+        so that the first SUBSPACE pass for the next structure takes its
+        lower filter bound from the saved Ritz values.  The subspace itself
+        is kept.  Returns the state to hand to that loop.
+        """
+
+        state = self._state
+        if state is not None and not state.subspace.first_filter:
+            self._state = replace(
+                state, subspace=replace(state.subspace, first_filter=True)
+            )
+        return self._state
+
     def offload_state_to_host(self) -> CuPyEigvalDeviceState | None:
         """Move the persistent Ritz state to exact FP64 host storage.
 

@@ -210,8 +210,10 @@ class AcceleratedTextReporter:
         self,
         result: AcceleratedSinglePointResult,
         elapsed_seconds: float,
+        *,
+        forces=None,
     ) -> None:
-        self.reference.finish(result, elapsed_seconds)
+        self.reference.finish(result, elapsed_seconds, forces=forces)
         # What the reference reporter estimated of the sphere joins the
         # details of the result, where the archive and the timing files
         # keep it beside the Hartree boundary.

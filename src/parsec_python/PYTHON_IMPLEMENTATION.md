@@ -25,6 +25,7 @@ parsec_python/
 ├── Laplacian/finite_difference.py
 │                              Fornberg weights and sparse -∇²
 ├── Pseudopotential/potre.py   Martins-new POTRE reader/radial data
+├── Pseudopotential/potr.py    old Martins POTR reader
 ├── V_ion/ionic_potential.py   local Vion, SAD/NLCC, KB projectors, EII
 ├── Hartree/poisson.py         boundary multipoles and Poisson CG
 ├── V_xc/ca_lda.py             unpolarized CA/PZ LDA
@@ -41,6 +42,7 @@ parsec_python/
 │   ├── subspace.py            one later-SCF saved-subspace filter
 │   └── eigval.py              selected first solver/SUBSPACE dispatch
 ├── Occupations/fermi_dirac.py Fermi level and 2/h³ density
+├── Occupations/fixed.py       occupations of occup.in
 ├── Mixer/anderson.py          SRE metrics and Anderson mixing
 ├── Energy/total_energy.py     PARSEC totnrg expression
 ├── SCF/single_point.py        static preparation and SCF loop
@@ -384,6 +386,20 @@ state counts are preferable for reproducible comparisons.
 from POTRE occupations and pseudo-wavefunctions. Set it true to use the
 tabulated valence charge, as the H2 reference input does.
 
+`SpeciesPotential.pseudopotential_format="martins_old"` reads an old Martins
+file (`<Symbol>_POTR.DAT`, `Pseudopotential_Format: martins_old`). Such a file
+holds neither occupations, nor an ionic charge, nor a cutoff radius, so the
+species must give `number_of_channels` (`Potential_Num`),
+`electrons_per_orbital` (the `Electron_Per_Orbital` block, whose sum is the
+ionic charge) and `core_cutoff_radius` (`Core_Cutoff_Radius`, the radius of
+its nonlocal projectors). Old and new files can be mixed in one input.
+
+`SCFSettings.fixed_occupations` holds one occupation per state in ascending
+order of energy; no Fermi level is then searched. The input translator fills
+it from the file `occup.in` beside the input when `Fermi_Temp` is negative.
+Without spin polarization only the first section of that file is read, as in
+PARSEC.
+
 `recenter_geometry=True` applies PARSEC's bounding-box-midpoint recentering.
 Set it false when coordinates are already deliberately placed relative to the
 domain origin.
@@ -467,7 +483,7 @@ than substituted.
 - Ono-Hirose `Double_grid_order > 1`
 - forces, stress, geometry optimization, and molecular dynamics
 - DFT+U, external fields, k-points, and complex orbitals
-- old Martins, Wang, and FHI pseudopotential formats
+- Martins-Wang and FHI pseudopotential formats
 - PARSEC binary restart/checkpoint compatibility
 
 Sphere and box domains are implemented. POTRE files with spin-orbit channels

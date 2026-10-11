@@ -13,6 +13,18 @@ from typing import Sequence
 import numpy as np
 
 from .driver import prepare_single_point, prepare_periodic_single_point, run_scf
+from .MolecularDynamics.run import (
+    restart_structure as dynamics_restart_structure,
+    run_recorded_molecular_dynamics,
+)
+from .Relaxation.backend import reference_backend
+from .Relaxation.run import (
+    relaxation_header_lines,
+    restart_structure,
+    run_recorded_relaxation,
+    run_single_point_with_forces,
+    symmetry_decision,
+)
 from .Input import (
     ParsecInputError,
     parse_parsec_input,
@@ -114,11 +126,21 @@ def save_result_archive(
     result: SinglePointResult,
     *,
     include_wavefunctions: bool = False,
+    forces=None,
+    relaxation=None,
+    dynamics=None,
 ) -> Path:
     """Save a portable NumPy result archive without wavefunctions by default.
 
     The members are stored uncompressed.  ``np.load`` reads the archive like
-    a compressed one.
+    a compressed one.  ``forces`` (a :class:`parsec_python.Forces.ForceResult`)
+    adds the force tables of the structure under ``forces_*`` and
+    ``relaxation`` (an :class:`parsec_python.Relaxation.IonicOutcome`) the
+    positions, energies and forces of every structure under ``relaxation_*``;
+    ``dynamics`` (a
+    :class:`parsec_python.MolecularDynamics.run.MolecularDynamicsOutcome`)
+    the structures, energies and temperatures of a molecular dynamics run
+    under ``dynamics_*``.
     """
     output = _npz_path(Path(path).expanduser().resolve())
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -291,11 +313,66 @@ def save_result_archive(
                 payload[f"backend_statistic_{name}"] = np.asarray(value)
     if include_wavefunctions:
         payload["wavefunctions"] = result.wavefunctions
+    if forces is not None:
+        payload["forces_positions"] = np.asarray(forces.positions)
+        payload["forces_total"] = np.asarray(forces.total)
+        payload["forces_ion_ion"] = np.asarray(forces.ion_ion)
+        payload["forces_local_ionic"] = np.asarray(forces.local.ionic)
+        payload["forces_self_consistency"] = np.asarray(forces.local.self_consistency)
+        payload["forces_core_correction"] = np.asarray(forces.local.core_correction)
+        payload["forces_nonlocal"] = np.asarray(forces.nonlocal_pseudopotential)
+        payload["forces_net"] = np.asarray(forces.net_force)
+        payload["forces_torque"] = np.asarray(forces.torque)
+    if relaxation is not None and relaxation.records:
+        records = relaxation.records
+        payload["relaxation_positions"] = np.asarray([item.positions for item in records])
+        payload["relaxation_energies"] = np.asarray([item.energy for item in records])
+        payload["relaxation_forces"] = np.asarray([item.forces.total for item in records])
+        payload["relaxation_maximum_forces"] = np.asarray(
+            [item.maximum_force for item in records]
+        )
+        payload["relaxation_scf_iterations"] = np.asarray(
+            [item.scf_iterations for item in records]
+        )
+        payload["relaxation_final_positions"] = np.asarray(relaxation.positions)
+        payload["relaxation_minimum_force_found"] = np.asarray(
+            relaxation.minimum_force_found
+        )
+    if dynamics is not None and dynamics.records:
+        records = dynamics.records
+        payload["dynamics_positions"] = np.asarray([item.positions for item in records])
+        payload["dynamics_energies"] = np.asarray([item.energy for item in records])
+        steps = [item.step for item in records if item.step is not None]
+        payload["dynamics_temperatures"] = np.asarray([item.temperature for item in steps])
+        payload["dynamics_kinetic_energies"] = np.asarray(
+            [item.kinetic_energy for item in steps]
+        )
+        payload["dynamics_conserved_energies"] = np.asarray(
+            [item.conserved_energy for item in steps]
+        )
+        payload["dynamics_next_positions"] = np.asarray(dynamics.positions)
     # Almost all bytes are full-grid coordinates and scalar fields.  Deflating
     # them runs zlib on one core (about 30 s for a 1.3 GB archive), so the
     # members are written as they are.
     np.savez(output, **payload)
     return output
+
+
+def relaxation_exit_code(result, outcome, *, manual: bool = False) -> int:
+    """Exit status of a run: 0 done, 3 an SCF loop did not converge, 4 not relaxed.
+
+    A relaxation counts as done when the largest force fell below
+    ``Force_Min``; a run of manual movements when every structure was
+    computed.  ``outcome`` is ``None`` for a single point.
+    """
+
+    if outcome is None:
+        return 0 if result.converged else 3
+    if outcome.scf_failed:
+        return 3
+    if outcome.error:
+        return 4
+    return 0 if (manual or outcome.minimum_force_found) else 4
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -336,6 +413,17 @@ def _build_parser() -> argparse.ArgumentParser:
         help=(
             "include wavefunctions even when Output_All_States is false "
             "(they can make the archive large)"
+        ),
+    )
+    parser.add_argument(
+        "--restart-from",
+        type=Path,
+        default=None,
+        help=(
+            "take the atom coordinates from this file instead of the input: a "
+            "relax_restart.dat (its BFGS state continues a BFGS relaxation) or "
+            "an .xyz file (last frame); Relax_Restart in the input reads "
+            "relax_restart.dat beside it"
         ),
     )
     parser.add_argument(
@@ -390,6 +478,22 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
 
     input_directory = translation.source.parent
+    try:
+        translation, relax_restart, restart_notes = restart_structure(
+            translation,
+            input_directory,
+            None
+            if arguments.restart_from is None
+            else _resolve_output(arguments.restart_from, input_directory, ""),
+        )
+        translation, dynamics_restart, dynamics_notes = dynamics_restart_structure(
+            translation, input_directory
+        )
+        restart_notes = [*restart_notes, *dynamics_notes]
+        use_symmetry, symmetry_note = symmetry_decision(translation)
+    except (OSError, ValueError) as error:
+        print(f"Input error: {error}", file=sys.stderr)
+        return 2
     log_path = _resolve_output(arguments.log, input_directory, "parsec.out")
     archive_path = _resolve_output(
         arguments.output, input_directory, "parsec_python_results.npz"
@@ -437,17 +541,55 @@ def main(argv: Sequence[str] | None = None) -> int:
             switch_warnings = () if is_periodic else ignored_boundary_switch_warnings()
             for warning in (*translation.warnings, *switch_warnings):
                 log.write(f"WARNING: {warning}")
+            if symmetry_note is not None:
+                log.write(f"WARNING: {symmetry_note}")
+            for note in restart_notes:
+                log.write(note)
             log.write()
+            if translation.relaxation is not None:
+                log.write("\n".join(relaxation_header_lines(translation)))
             if is_periodic:
                 system = prepare_periodic_single_point(translation.problem)
             else:
                 system = prepare_single_point(translation.problem)
             reporter.setup(system)
 
-            scf_start = time.perf_counter()
-            result = run_scf(system, callback=reporter.iteration)
-            scf_elapsed = time.perf_counter() - scf_start
-            reporter.finish(result, scf_elapsed)
+            forces = None
+            outcome = None
+            dynamics = None
+            if translation.relaxation is not None:
+                outcome = run_recorded_relaxation(
+                    translation,
+                    system,
+                    reference_backend(),
+                    reporter,
+                    log.write,
+                    directory=input_directory,
+                    restart=relax_restart,
+                    symmetrize=use_symmetry,
+                )
+                result = outcome.result
+                forces = outcome.records[-1].forces
+            elif translation.molecular_dynamics is not None:
+                dynamics = run_recorded_molecular_dynamics(
+                    translation,
+                    system,
+                    reference_backend(),
+                    reporter,
+                    log.write,
+                    directory=input_directory,
+                    restart=dynamics_restart,
+                )
+                result, forces = dynamics.result, dynamics.forces
+            elif translation.compute_forces:
+                result, forces = run_single_point_with_forces(
+                    system, reference_backend(), reporter, symmetrize=use_symmetry
+                )
+            else:
+                scf_start = time.perf_counter()
+                result = run_scf(system, callback=reporter.iteration)
+                scf_elapsed = time.perf_counter() - scf_start
+                reporter.finish(result, scf_elapsed)
             total_elapsed = time.perf_counter() - start
             log.write(f" Total Python wall time [sec] : {total_elapsed:11.2f}")
 
@@ -459,10 +601,29 @@ def main(argv: Sequence[str] | None = None) -> int:
                         arguments.save_wavefunctions
                         or translation.output_all_states
                     ),
+                    # A plain single point keeps the call it always made.
+                    **{
+                        name: value
+                        for name, value in (
+                            ("forces", forces),
+                            ("relaxation", outcome),
+                            ("dynamics", dynamics),
+                        )
+                        if value is not None
+                    },
                 )
                 log.write(f"Result archive: {saved}")
             log.write(f"Text log: {log_path}")
-            return 0 if result.converged else 3
+            if dynamics is not None:
+                return 3 if dynamics.scf_failed else 0
+            return relaxation_exit_code(
+                result,
+                outcome,
+                manual=(
+                    translation.relaxation is not None
+                    and translation.relaxation.method == "manual"
+                ),
+            )
     except KeyboardInterrupt:
         if not getattr(run_log, "failure_reported", False) and not arguments.quiet:
             print("Calculation interrupted by user.", file=sys.stderr)

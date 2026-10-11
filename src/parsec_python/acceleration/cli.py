@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import replace
 from pathlib import Path
 import sys
 import time
@@ -15,12 +16,25 @@ from parsec_python.Input import (
 )
 from parsec_python.Output.parsec_output import domain_dry_run_lines
 from parsec_python.V_ion import load_pseudopotentials
-from parsec_python.cli import save_result_archive
+from parsec_python.MolecularDynamics.run import (
+    restart_structure as dynamics_restart_structure,
+    run_recorded_molecular_dynamics,
+)
+from parsec_python.Relaxation.run import (
+    relaxation_header_lines,
+    restart_structure,
+    run_recorded_relaxation,
+    run_single_point_with_forces,
+    symmetry_decision,
+)
+from parsec_python.cli import relaxation_exit_code, save_result_archive
 
 from .Output import AcceleratedTextReporter
 from .backends.selection import resolve_backend
+from .SCF.single_point import materialize_wavefunctions
 from .driver import (
     hartree_boundary_check_seconds,
+    ionic_backend,
     prepare_single_point,
     profile_hamiltonian_components,
     run_scf,
@@ -107,6 +121,17 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument("input", type=Path, help="PARSEC input file, usually parsec.in")
+    parser.add_argument(
+        "--restart-from",
+        type=Path,
+        default=None,
+        help=(
+            "take the atom coordinates from this file instead of the input: a "
+            "relax_restart.dat (its BFGS state continues a BFGS relaxation) or "
+            "an .xyz file (last frame); Relax_Restart in the input reads "
+            "relax_restart.dat beside it"
+        ),
+    )
     parser.add_argument(
         "--backend",
         choices=("auto", "scipy", "native", "cupy"),
@@ -234,11 +259,46 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"Input error: {error}", file=sys.stderr)
         return 2
 
+    try:
+        translation, relax_restart, restart_notes = restart_structure(
+            translation,
+            translation.source.parent,
+            None
+            if arguments.restart_from is None
+            else _resolve_output(arguments.restart_from, translation.source.parent, ""),
+        )
+        translation, dynamics_restart, dynamics_notes = dynamics_restart_structure(
+            translation, translation.source.parent
+        )
+        restart_notes = [*restart_notes, *dynamics_notes]
+        use_symmetry, symmetry_note = symmetry_decision(translation)
+        # Whether the atoms stay in the point group of the first structure,
+        # which Ignore_Symmetry does not tell.  The command line may overrule
+        # that keyword, but not a run that leaves the group.
+        keeps_group, group_note = symmetry_decision(
+            replace(translation, ignore_symmetry=False)
+        )
+    except (OSError, ValueError) as error:
+        print(f"Input error: {error}", file=sys.stderr)
+        return 2
+    if arguments.symmetry == "on" and not keeps_group:
+        print(
+            "Input error: --symmetry on cannot be used here: "
+            + (
+                group_note
+                or "manual movements and molecular dynamics use no symmetry"
+            ),
+            file=sys.stderr,
+        )
+        return 2
     symmetry_mode = (
         arguments.symmetry
         if arguments.symmetry is not None
-        else ("off" if translation.ignore_symmetry else "auto")
+        and (keeps_group or arguments.symmetry == "off")
+        else ("auto" if use_symmetry else "off")
     )
+    # Forces are symmetrized where the calculation itself uses the group.
+    symmetrize_forces = use_symmetry and symmetry_mode != "off"
 
     summary = summarize_translation(translation)
     if arguments.dry_run:
@@ -319,7 +379,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             reporter.header()
             for warning in translation.warnings:
                 log.write(f"WARNING: {warning}")
+            if symmetry_note is not None:
+                log.write(f"WARNING: {symmetry_note}")
+            for note in restart_notes:
+                log.write(note)
             log.write()
+            if translation.relaxation is not None:
+                log.write("\n".join(relaxation_header_lines(translation)))
 
             system = prepare_single_point(
                 translation.problem,
@@ -332,13 +398,19 @@ def main(argv: Sequence[str] | None = None) -> int:
             # orbitals resident/lazy unless the user explicitly requests
             # their public full-grid array.  This does not affect SCF density,
             # energies, eigenvalues, or any normal text output.
-            system.materialize_final_wavefunctions = bool(
+            wavefunctions_wanted = bool(
                 not arguments.no_archive
                 and (
                     arguments.save_wavefunctions
                     or translation.output_all_states
                 )
             )
+            # A relaxation exports the orbitals of its last structure only.
+            moving = (
+                translation.relaxation is not None
+                or translation.molecular_dynamics is not None
+            )
+            system.materialize_final_wavefunctions = wavefunctions_wanted and not moving
             reporter.setup(system)
             if arguments.profile_operator:
                 component_times = profile_hamiltonian_components(
@@ -351,12 +423,52 @@ def main(argv: Sequence[str] | None = None) -> int:
                 log.write()
 
             scf_started = time.perf_counter()
-            result = run_scf(system, callback=reporter.iteration)
-            scf_completed = time.perf_counter()
-            # run_scf makes the optional check of the Hartree boundary before
-            # it returns: it is finalization, not SCF.
-            check_seconds = hartree_boundary_check_seconds(result)
-            reporter.finish(result, scf_completed - scf_started - check_seconds)
+            forces = None
+            outcome = None
+            dynamics = None
+            check_seconds = 0.0
+            if translation.relaxation is not None:
+                outcome = run_recorded_relaxation(
+                    translation,
+                    system,
+                    ionic_backend(),
+                    reporter,
+                    log.write,
+                    directory=input_directory,
+                    restart=relax_restart,
+                    symmetrize=symmetrize_forces,
+                )
+                result = outcome.result
+                forces = outcome.records[-1].forces
+                if wavefunctions_wanted:
+                    materialize_wavefunctions(outcome.system, result)
+                scf_completed = time.perf_counter()
+            elif translation.molecular_dynamics is not None:
+                dynamics = run_recorded_molecular_dynamics(
+                    translation,
+                    system,
+                    ionic_backend(),
+                    reporter,
+                    log.write,
+                    directory=input_directory,
+                    restart=dynamics_restart,
+                )
+                result, forces = dynamics.result, dynamics.forces
+                if wavefunctions_wanted:
+                    materialize_wavefunctions(dynamics.system, result)
+                scf_completed = time.perf_counter()
+            elif translation.compute_forces:
+                result, forces = run_single_point_with_forces(
+                    system, ionic_backend(), reporter, symmetrize=symmetrize_forces
+                )
+                scf_completed = time.perf_counter()
+            else:
+                result = run_scf(system, callback=reporter.iteration)
+                scf_completed = time.perf_counter()
+                # run_scf makes the optional check of the Hartree boundary
+                # before it returns: it is finalization, not SCF.
+                check_seconds = hartree_boundary_check_seconds(result)
+                reporter.finish(result, scf_completed - scf_started - check_seconds)
             reporting_completed = time.perf_counter()
             log.write(
                 f" Pre-SCF setup/reporting wall time [sec] : "
@@ -378,18 +490,37 @@ def main(argv: Sequence[str] | None = None) -> int:
                         arguments.save_wavefunctions
                         or translation.output_all_states
                     ),
+                    # A plain single point keeps the call it always made.
+                    **{
+                        name: value
+                        for name, value in (
+                            ("forces", forces),
+                            ("relaxation", outcome),
+                            ("dynamics", dynamics),
+                        )
+                        if value is not None
+                    },
                 )
                 log.write(f"Result archive: {saved}")
             log.write(f"Text log: {log_path}")
-            return 0 if result.converged else 3
+            if dynamics is not None:
+                return 3 if dynamics.scf_failed else 0
+            return relaxation_exit_code(
+                result,
+                outcome,
+                manual=(
+                    translation.relaxation is not None
+                    and translation.relaxation.method == "manual"
+                ),
+            )
     except KeyboardInterrupt:
-        if not run_log.failure_reported and not arguments.quiet:
+        if not getattr(run_log, "failure_reported", False) and not arguments.quiet:
             print("Calculation interrupted by user.", file=sys.stderr)
         return 130
     except Exception as error:
         if arguments.debug:
             raise
-        if not run_log.failure_reported:
+        if not getattr(run_log, "failure_reported", False):
             print(
                 f"Calculation failed: {type(error).__name__}: {error}",
                 file=sys.stderr,

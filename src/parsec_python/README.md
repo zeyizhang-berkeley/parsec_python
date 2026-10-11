@@ -75,7 +75,7 @@ python src\parsec_python\reference_main.py calculation\parsec.in --no-archive
 | `MLDensity/` | Load or predict optional SCDP/ChargE3Net initial densities on the exact DFT grid. |
 | `Grid/` | Build centered isolated sphere or box grids. |
 | `Laplacian/` | Generate high-order finite-difference coefficients and sparse `-nabla^2`. |
-| `Pseudopotential/` | Read Martins-new `POTRE.DAT`, integrate radial data, and reproduce PARSEC splines. |
+| `Pseudopotential/` | Read Martins-new `POTRE.DAT` and old-format `POTR.DAT`, integrate radial data, and reproduce PARSEC splines. |
 | `V_ion/` | Assemble local ionic fields, KB nonlocal factors, initial atomic density, and ion-ion energy. |
 | `Hartree/` | Construct open-boundary data and solve the finite-difference Poisson equation. |
 | `V_xc/` | Evaluate CA/PZ LDA or spin-unpolarized PBE and their energy terms. |
@@ -85,6 +85,9 @@ python src\parsec_python\reference_main.py calculation\parsec.in --no-archive
 | `Mixer/` | Apply PARSEC-style potential mixing and residual tests. |
 | `Energy/` | Assemble the total-energy decomposition. |
 | `SCF/` | Orchestrate one complete self-consistent single point. |
+| `Forces/` | Evaluate ion-ion, local and nonlocal atomic forces and symmetrize them. |
+| `Relaxation/` | Move the atoms: L-BFGS-B, steepest descent, manual structures, the ionic loop and its files. |
+| `MolecularDynamics/` | Integrate the equations of motion of `moldyn.f90` and write its files. |
 | `Output/` | Write PARSEC-shaped text and machine-readable results. |
 | `acceleration/` | Implement optimized backends, GPU eigensolvers, symmetry sectors, resident execution, and the native extension. |
 | `driver.py` | Prepare and run the readable reference workflow. |
@@ -135,7 +138,10 @@ Currently supported:
 
 - isolated spherical and box domains;
 - high-order Cartesian finite differences;
-- scalar norm-conserving Martins-new pseudopotentials through `l=3`;
+- scalar norm-conserving Martins-new pseudopotentials through `l=3`, and
+  old-format Martins files (`Pseudopotential_Format: martins_old`);
+- occupations read from `occup.in` (`Fermi_Temp` negative) in place of a
+  Fermi distribution;
 - separable Kleinman--Bylander nonlocal projectors;
 - optional nonlinear core correction;
 - CA/PZ LDA and spin-unpolarized PBE;
@@ -143,15 +149,20 @@ Currently supported:
 - exact automatic reflection/signed-permutation representation reduction
   where supported;
 - core-hole species labels such as `C-1s` with an explicit
-  `Element_Symbol: C` and optional `Atomic_Energy_Correction`.
+  `Element_Symbol: C` and optional `Atomic_Energy_Correction`;
+- atomic forces, structural relaxation (`Minimization: bfgs`, `simple`,
+  `manual`) and molecular dynamics of isolated systems, on every execution
+  path including several GPU nodes, with `relax_restart.dat` exchanged with
+  PARSEC in both directions; see
+  [FORCES_AND_RELAXATION.md](FORCES_AND_RELAXATION.md).
 
 Not currently supported as production physics:
 
 - periodic boundary conditions;
 - spin polarization or spin--orbit coupling;
-- forces and geometry relaxation;
+- forces, relaxation and molecular dynamics of periodic cells;
 - hybrid/meta-GGA functionals and DFT+U;
-- PARSEC restart-file compatibility;
+- PARSEC restart files other than `relax_restart.dat` and `mdinit.dat`;
 - Ono--Hirose double-grid order greater than one.
 
 Unsupported requested input is rejected rather than silently approximated.
@@ -434,6 +445,14 @@ The pseudopotential filename is normally `<Atom_Type>_POTRE.DAT`. A
 configuration-qualified core-hole type therefore uses, for example,
 `C-1s_POTRE.DAT` while `Element_Symbol: C` preserves chemical identity.
 
+An old-format Martins file, `<Atom_Type>_POTR.DAT`, is read with
+`Pseudopotential_Format: martins_old`. It holds potentials and radial
+functions only, so the input supplies the rest, as for Fortran PARSEC:
+`Potential_Num` (the number of channels), the block `Electron_Per_Orbital`
+(their occupations, whose sum is the ionic charge) and `Core_Cutoff_Radius`
+(the radius of the projectors). The SiNa4 relaxation test of Fortran PARSEC
+(`tests/relaxation`) uses one.
+
 Pseudopotentials and the selected XC functional must be consistent. The
 solver can read converted norm-conserving UPF data, but conversion does not by
 itself validate transferability, ghost states, relativistic content, or
@@ -472,6 +491,9 @@ present.
 - [PYTHON_IMPLEMENTATION.md](PYTHON_IMPLEMENTATION.md): Python mapping and
   parity status for each physical stage.
 - [ARCHITECTURE.md](ARCHITECTURE.md): package boundaries and native-port rules.
+- [FORCES_AND_RELAXATION.md](FORCES_AND_RELAXATION.md): forces, structural
+  relaxation and molecular dynamics: keywords, files, algorithm, differences
+  from PARSEC and validation.
 - [acceleration/README.md](acceleration/README.md): backend selection,
   optimized kernels, resident execution, and profiling.
 - [acceleration/ACCELERATION_AUDIT.md](acceleration/ACCELERATION_AUDIT.md):

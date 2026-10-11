@@ -113,6 +113,37 @@ left both unnamed. The inputs of the series set
 `Chebyshev_Degree: 15`; `tests/data/C795H300_parsec.in` of the reference
 package is the smallest of them.
 
+### Relaxations and forces on several nodes
+
+The same runner and launch script take an input with `Minimization: bfgs` or
+`simple`, or with `Skip_Force: false`. The output directory then also receives
+`atom.cor`, `relax_restart.dat`, `iterate.dat` and `relaxation.xyz`, and
+`timing.json` holds, under `result.relaxation`, the energy, largest force, SCF
+iterations and wall time of every structure, with the time of the parts of
+each ionic step (`step_timings`) and of each force evaluation
+(`force_phase_seconds`).
+
+Between two structures nothing that a single point keeps on the devices
+leaves them. The root sends three more commands to the ranks: `geometry`
+(every rank replaces the projectors of its sectors in place, also on the
+devices that share a sector basis), `new_scf_loop` (every sector solver keeps
+its subspace as the start of the next SCF loop) and `forces` (every rank
+contracts the nonlocal force terms of its sectors on its devices; the root
+adds them). The local forces are summed on the GPUs of the root node over the
+symmetry wedge of the grid.
+
+The ranks divide the symmetry sectors of the structure. A structure without
+point-group symmetry, a relaxation whose `Move_Flag` breaks the symmetry, a
+`manual` relaxation and molecular dynamics therefore run on the GPUs of one
+node, with the runner option `--serial-control`.
+
+Measured for C795H300 on A100 nodes (seven structures to 0.01 Ry/bohr with
+the inputs of the series above): 47 s on 4 GPUs, 35 s on 8 and 30 s on 16,
+with identical trajectories; a later structure costs 2.3 s of SCF, 0.5 s of
+forces and 0.26 s of rebuilding on 16 GPUs. The comparisons with Fortran
+PARSEC and the other measurements are in
+[FORCES_AND_RELAXATION.md](../FORCES_AND_RELAXATION.md).
+
 ## Correctness and memory
 
 Filtering is FP64 unless `PARSEC_CUPY_MIXED_FILTER` asks for the FP32 later
