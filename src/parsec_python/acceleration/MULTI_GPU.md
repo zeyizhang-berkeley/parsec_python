@@ -685,6 +685,20 @@ only the widths and degrees that are new and keeps the buffers.
 `PARSEC_CUPY_FILTER_GRAPH_REUSE=0` (default `1`) records one graph per block and
 all of them again whenever the block plan changes, as before; the filtered
 columns are the same to the last bit.
+Every recurrence step of a graph first forms the projector coefficients
+`diag(signs) B.T X` of its block. Where the projector rows have at least 256
+entries, one CUDA block of 128 threads forms them for a projector and the up
+to six columns of the filter block (`PARSEC_CUPY_PROJECTOR_BLOCK_COLUMNS=6`,
+the default); `1` keeps the former kernel, a CUDA block per projector and
+column. Both sum a column in the same order, so the coefficients and the
+filtered columns are the same to the last bit. A graph replays the kernel it
+was recorded with: an operator keeps the kernel it was built with, the other
+devices of a shared sector are given that of the sector owner, and a workspace
+whose operator has been given another projection records its graphs again. On
+one A100 the kernel of six columns took 0.066 against 0.097 ms per launch for
+4,601 projectors of 324 entries and 0.133 against 0.193 ms for 9,449 of 311
+(a synthetic factor, the kernel alone); complete calculations have not run
+with it on A100 nodes. `README.md` has the switch in its tables.
 The bounded persistent graph buffers use direct CUDA allocations so that small
 long-lived pieces cannot strand multi-gigabyte orbital blocks in CuPy's caching
 pool. Temporary orbitals still use the configured allocator. These graph buffers
@@ -703,7 +717,9 @@ PYTHONPATH=src python -m unittest \
 The tests check bitwise sequence/seed continuity, filtering equivalence,
 changing bounds and potential, strided/remainder blocks, workspace lifetime,
 nondefault streams, shared graphs against one graph per block over the plans of
-a run, also with passes that nothing waits for on two streams, and independent
+a run, also with passes that nothing waits for on two streams, six columns per
+projection block against one over the same plans and through both filters, a
+workspace that records again for another projection kernel, and independent
 concurrent capture on two devices.
 They also verify that graph workspaces do not retain or fragment the orbital pool.
 Use complete converged SCF runs to select performance options; increasing batch

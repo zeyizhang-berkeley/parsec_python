@@ -59,6 +59,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 # in both sides of a comparison. PARSEC_NATIVE_SECTOR_ASSEMBLY, which chooses
 # the reduction of that matrix, stays the launcher's, and the filter stays
 # FP64: its former default, the FP32 later filter, is no reference.
+# The projector coefficients of the control come from the kernel with one
+# CUDA block per projector and column, for the same reason: a run forms them
+# with a block per projector and six columns, the same sums to the last bit.
 # A control on two or three devices solves several sectors of a device one
 # after another like any run: their unused pool blocks stay until the density
 # step, as before.
@@ -157,6 +160,7 @@ _SERIAL_CONTROL_SETTINGS = {
     'PARSEC_FAST_GRID': '0',
     'PARSEC_HARTREE_BOUNDARY_KERNEL': 'full',
     'PARSEC_HARTREE_ATOMIC_TAIL_VALUES': 'host',
+    'PARSEC_CUPY_PROJECTOR_BLOCK_COLUMNS': '1',
 }
 
 

@@ -1497,6 +1497,42 @@ sector on two devices. Neither changes which bases are shared but for the up
 to 128 MiB that the first adds to the count of a sector on four devices, and
 of one on two that names slabs of 4 GiB.
 
+One switch came after these runs. Its kernel was timed by itself on one
+A100; no complete calculation has run with it on A100 nodes, and the last
+column says what was measured there:
+
+| Switch | Default | Former value | Results | Says what ran | Serial control | A100, default against former |
+|---|---|---|---|---|---|---|
+| `PARSEC_CUPY_PROJECTOR_BLOCK_COLUMNS` | `6`: where the projector coefficients `diag(signs) B.T X` take the tree reduction (projector rows of at least 256 entries, `PARSEC_CUPY_PROJECTOR_REDUCTION`), one CUDA block of 128 threads serves a projector and up to six columns, on every route that forms them: each recurrence step of a filter, in recorded graphs and outside them, `H X` of the Ritz step, every device of a shared sector, the full-grid operator, and the FP32 kernels of the opt-in later filter | `1`: a block per projector and column | same bits | `orbital_sector_projector_reduction`, and `gpu_projector_reduction` without symmetry sectors: `parallel6` against `parallel` (`serial`, the kernel of shorter rows, under either value); the variable under `environment` of a rank | `1` | the kernel alone on one A100, six columns of a synthetic factor: 0.066 against 0.097 ms per launch for 4,601 projectors of 324 entries on 2,873,400 rows and 0.133 against 0.193 ms for 9,449 of 311 on 5,660,200, 1.47 and 1.45 times as fast, the time that of the device in both; the same coefficients to the last bit for one to six columns |
+
+The former kernel launches a block of 128 threads for every projector and
+column: a thread sums every 128th entry of the projector row for its column,
+and seven barriers reduce the 128 partial sums in a tree. With six columns
+per block a thread keeps six partial sums. It reads the index and the value
+of an entry once instead of six times, and the block passes its barriers
+once. Every column has the partial sums it had, in the same order, and the
+same tree, so the coefficients are the same to the last bit. A block of more
+than six columns, as `H X` of the Ritz step has them, is launched six
+columns at a time, as the stencil kernels take it; one launch took them all
+before. Rows below 256 entries keep the canonical-order kernel, one thread
+per projector and column, which the switch does not reach.
+
+An operator reads the switch when it is built and keeps its kernel. Its
+filter graphs record that kernel, the other devices of a shared sector are
+given the one of the owner, and a graph workspace whose operator has been
+given another projection since records its graphs again: a graph replays
+the kernel it was recorded with. A value that is neither `6` nor `1` stops
+the construction of the operator.
+
+What the kernel is of a calculation follows from an earlier timing on one
+A100: with 19,392 electrons (a sector of 2,873,400 rows and 4,601
+projectors, slot-major stencil) the projection took 0.090 ms of a filter
+step of 1.150 ms for six columns. At 1.47 times a step would lose 0.029 ms
+of that, 2.5 %; this is derived, not measured in a calculation, and so is
+any gain of a run. The other part of the nonlocal term in a step, the
+scatter `B C` inside the fused kernel (0.081 ms of that step), already
+serves six columns per thread and is unchanged.
+
 The sphere radius has no environment switch. An input that leaves
 `Boundary_Sphere_Radius` out gets the radius and the Hartree tolerance of
 the default rule in the parser (reference `README.md`, "Sphere radius left
@@ -1730,7 +1766,11 @@ temporary directory from silently disabling the custom projector kernel.
 The default `PARSEC_CUPY_PROJECTOR_REDUCTION=auto` retains canonical serial
 summation for short projector rows and selects a deterministic 128-thread
 tree reduction only for rows with at least 256 entries. `serial` and
-`parallel` force either policy for profiling.
+`parallel` force either policy for profiling. A CUDA block of the tree
+reduction serves one projector and up to six vector columns
+(`PARSEC_CUPY_PROJECTOR_BLOCK_COLUMNS=6`, the default; `1` is the former
+kernel with a block per projector and column, see the switch below the last
+table of switches).
 Set `PARSEC_CUPY_CUSTOM_PROJECTOR_DOT=0` to restore cuSPARSE and
 `PARSEC_CUPY_FUSED_PROJECTORS=0` for an unfused comparison. The earlier compact CSR-order
 kernel and generic CuPy CSR remain automatic fallbacks. Set

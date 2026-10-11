@@ -1194,6 +1194,8 @@ class SectorStateStorageTests(unittest.TestCase):
         # And the limit of that buffer, at the value it had, with the tile that takes the bytes of its budget.
         self.assertEqual({name: control[name] for name in later}, later)
         self.assertEqual(control["PARSEC_CUPY_STREAMING_RITZ_TILE"], "budget")
+        # The projection kernel with a CUDA block per projector and column came after them.
+        self.assertEqual(control.pop("PARSEC_CUPY_PROJECTOR_BLOCK_COLUMNS"), "1")
         self.assertEqual(len(control), 26)
 
     def test_the_former_values_of_the_switches_of_the_round_after_select_every_former_route_together(self):

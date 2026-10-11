@@ -930,6 +930,30 @@ class SectorGroupTileTests(unittest.TestCase):
         self.assertEqual(worker.replicas[2].compact_finite_difference.storage_mode, self.slot_major)
         self.assertEqual(group.stencil_storage, "mixed")
 
+    def test_replicas_form_the_projector_coefficients_with_the_kernel_of_their_owner(self):
+        # The other devices of a sector are built after its owner. They are given the columns per block of its
+        # tree projection, whatever the switch says by then; an owner without a projection names none.
+        cp = _DevicesCuPy()
+        metadata = build_stencil_major_metadata(_irregular_operator(1031))
+        for held, later in ((1, "6"), (6, "1"), (None, "1")):
+            named = []
+
+            def replica(*arguments, **options):
+                named.append(options["projection_block_columns"])
+                return CuPyHamiltonian(*arguments, **options)
+
+            with self.subTest(owner=held, later=later), _settings(), _devices(cp):
+                owner = CuPyHamiltonian(None, np.zeros(1031), None, retain_generic_laplacian=False,
+                                        finite_difference_metadata=metadata, implicit_tile=0)
+                self.assertIsNone(owner.custom_projector_projection)
+                if held is not None:
+                    owner.custom_projector_projection = SimpleNamespace(block_columns=held)
+                with patch.dict(os.environ, PARSEC_CUPY_PROJECTOR_BLOCK_COLUMNS=later), \
+                     patch.object(distributed_filter, "CuPyHamiltonian", replica):
+                    worker = DistributedFilter(owner, (0, 1, 2))
+                self.assertEqual(named, [held, held])
+                self.assertEqual(sorted(worker.replicas), [1, 2])
+
     def test_the_stencil_for_the_replicas_is_downloaded_in_the_layout_of_the_owner(self):
         cp = _DevicesCuPy()
         metadata = build_stencil_major_metadata(_irregular_operator(1031))

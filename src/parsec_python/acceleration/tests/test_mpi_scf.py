@@ -792,6 +792,10 @@ class MPISCFTests(unittest.TestCase):
             self.assertEqual(sector_stencil_route(), 'csr')
             self.assertFalse(_fast_maps_requested())
             self.assertFalse(graph_reuse_requested())
+            # Its projector coefficients come from one CUDA block per projector and column, so that the
+            # kernel of six columns per block is not in both sides either.
+            from parsec_python.acceleration.backends.cupy_projectors import projector_block_columns
+            self.assertEqual(projector_block_columns(), 1)
             # The full-grid kernels of the Hartree boundary, so that the wedge kernels of an engaged plan are
             # not in both sides. Which boundary values they evaluate stays the launcher's: the plan is physics.
             self.assertEqual(driver._hartree_boundary_kernel(), 'full')
@@ -854,7 +858,8 @@ class MPISCFTests(unittest.TestCase):
             (routes,) = mpi_full_scf._serial_control_notes(None)
             self.assertTrue(routes.startswith('Serial control routes: PARSEC_CUPY_RITZ_SYRK=on '))
             for setting in ('PARSEC_SECTOR_STENCIL=csr', 'PARSEC_SYMMETRY_FAST_MAPS=0', 'PARSEC_CUPY_FILTER_GRAPH_REUSE=0',
-                            'PARSEC_HARTREE_BOUNDARY_KERNEL=full', 'PARSEC_HARTREE_ATOMIC_TAIL_VALUES=host'):
+                            'PARSEC_HARTREE_BOUNDARY_KERNEL=full', 'PARSEC_HARTREE_ATOMIC_TAIL_VALUES=host',
+                            'PARSEC_CUPY_PROJECTOR_BLOCK_COLUMNS=1'):
                 self.assertIn(setting, routes.split())
             # An entry of a cache holds the maps and stencils of the run that wrote it, by whatever route.
             # Only a control that was given a directory reads one.
