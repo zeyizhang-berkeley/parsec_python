@@ -631,7 +631,11 @@ class SectorStateStorageTests(unittest.TestCase):
                         solver.device_ids, self.vectors(sector, on_device) + streaming_workspace_bytes(*sector)))
             if layout == (self.K11, self.ONE_PER_DEVICE):
                 self.assertEqual(pinned.memory_allocator_policy, report)
-                self.assertEqual(solver.state_fit_bytes[0], 55_881_883_200 + 4_294_954_664)
+                # One buffer of 2 GiB beside the vectors, and of 4 GiB under the former limit of one array.
+                self.assertEqual(solver.state_fit_bytes[0], 55_881_883_200 + 2_147_467_608)
+                former, events = self.decide(*layout, PARSEC_CUPY_STREAMING_RITZ_LIMIT_BYTES=str(4 << 30))
+                self.assertEqual((former.state_fit_bytes[0], former._host_spill_sector_states, events),
+                                 (55_881_883_200 + 4_294_954_664, False, []))
 
     def test_a_shared_basis_is_counted_by_the_blocks_of_its_devices(self):
         from parsec_python.acceleration.Eigensolvers import distributed_state
@@ -732,33 +736,56 @@ class SectorStateStorageTests(unittest.TestCase):
         from parsec_python.acceleration.Eigensolvers.rayleigh_ritz import streaming_workspace_bytes
         gib = 1 << 30
         whole = dict(PARSEC_CUPY_SECTOR_STATE_AUTO_FRACTION="1")
-        # 10,456 electrons on one device: 75.38 GiB of vectors and a buffer of 2.36 GiB, 77.73 GiB of 79.25.
-        # The count leaves out what else the device holds: the devices that ran sampled at least 1.026
-        # times theirs, which is 79.8 GiB here.  Held against 0.978 of the device the states are spilled,
-        # as the rule before spilled them; held against all of it they stayed, and the run was derived to
-        # stop for memory.
+        # The buffer of one array as it was, at most 4 GiB, and the share that was chosen with it.
+        limit = dict(PARSEC_CUPY_STREAMING_RITZ_LIMIT_BYTES=str(4 * gib))
+        former = dict(limit, PARSEC_CUPY_SECTOR_STATE_AUTO_FRACTION="0.978")
+        # 10,456 electrons on one device: 75.38 GiB of vectors and a buffer of 2 GiB, 77.37 GiB of 79.25.
+        # The count leaves out what else the device holds: the devices that ran sampled at least 1.0268
+        # times theirs, which is 79.5 GiB here.  Held against 0.974 of the device the states are spilled,
+        # as the rule before spilled them; held against all of it they stayed, and with the buffer of
+        # 2.36 GiB that such a sector took then the run stopped for memory.
         layout = (self.K09, ((0,),) * 4)
         solver, events = self.decide(*layout)
         count = solver.state_fit_bytes[0]
         self.assertEqual(count, self.vectors(self.K09, 4) + streaming_workspace_bytes(*self.K09))
-        self.assertEqual(count, 83_462_830_704)
-        self.assertAlmostEqual(count / gib, 77.73, delta=.005)
+        self.assertEqual(count, 83_081_129_472)
+        self.assertAlmostEqual(count / gib, 77.375, delta=.005)
         self.assertEqual((solver._host_spill_sector_states, solver.sector_state_storage, events),
                          (True, self.SPILLED, self.LEFT_POOL[0,]))
-        self.assertGreater(1.026 * count, self.TOTAL)
+        self.assertGreater(1.0268 * count, self.TOTAL)
         solver, events = self.decide(*layout, **whole)
         self.assertEqual((solver._host_spill_sector_states, solver.sector_state_storage, events),
                          (False, self.KEPT, []))
         self.assertEqual(solver.state_fit_bytes[0], count)
-        # The fullest device that ran, 14,680 electrons on two: 75.50 GiB counted, 78.28 sampled.  The
-        # share lies between the two cells, and one below 0.9527 would spill the run that fitted.
+        # With that buffer the count was 77.73 GiB, which the share of then, 0.978, spilled.  The smaller
+        # buffer brings the count below that share, which would keep the states: the share has come down
+        # with the count, to the reciprocal of the least ratio of peak to count that was measured.
+        for environment, counted, spilled in ((former, 83_462_830_704, True), (limit, 83_462_830_704, True),
+                                              (dict(PARSEC_CUPY_SECTOR_STATE_AUTO_FRACTION="0.978"), count, False)):
+            solver, events = self.decide(*layout, **environment)
+            self.assertEqual((solver.state_fit_bytes[0], solver._host_spill_sector_states, bool(events)),
+                             (counted, spilled, spilled))
+        self.assertLess(count / self.TOTAL, .978)
+        self.assertLess(.978, 83_462_830_704 / self.TOTAL)
+        # The fullest device that ran, 14,680 electrons on two: 73.50 GiB counted, and 75.47 and 76.28
+        # sampled on its two devices with the buffer of 2 GiB (75.50 counted, 77.47 and 78.28 sampled with
+        # that of 4).  The share lies between the two cells, and one below 0.9275 would spill the run that
+        # fitted.
         fitted = (self.K10, ((0,), (1,), (0,), (1,)))
-        for environment, spilled in (({}, False), (whole, False), (dict(PARSEC_CUPY_SECTOR_STATE_AUTO_FRACTION="0.95"), True)):
+        for environment, spilled in (({}, False), (whole, False), (dict(PARSEC_CUPY_SECTOR_STATE_AUTO_FRACTION="0.92"), True)):
             solver, events = self.decide(*fitted, **environment)
             self.assertEqual((solver._host_spill_sector_states, bool(events)), (spilled, spilled))
-            self.assertEqual(solver.state_fit_bytes[0], 81_064_975_872)
-        self.assertLess(81_064_975_872 / self.TOTAL, .978)
-        self.assertLess(.978, count / self.TOTAL)
+            self.assertEqual(solver.state_fit_bytes[0], 78_917_498_592)
+        self.assertLess(78_917_498_592 / self.TOTAL, .974)
+        self.assertLess(.974, count / self.TOTAL)
+        self.assertEqual([round((peak << 20) / 78_917_498_592, 4) for peak in (77_285, 78_109)], [1.0269, 1.0378])
+        self.assertGreaterEqual(.974 * (77_285 << 20) / 78_917_498_592, 1.)
+        # The former count of that run, and the ratio that the former share was chosen by.
+        for environment, spilled in ((former, False), (dict(limit, PARSEC_CUPY_SECTOR_STATE_AUTO_FRACTION="0.95"), True)):
+            solver, events = self.decide(*fitted, **environment)
+            self.assertEqual((solver.state_fit_bytes[0], solver._host_spill_sector_states, bool(events)),
+                             (81_064_975_872, spilled, spilled))
+        self.assertEqual([round((peak << 20) / 81_064_975_872, 4) for peak in (79_333, 80_157)], [1.0262, 1.0368])
         # The share is of the device: with one half, a device of twice the count keeps its states and
         # two bytes less are too few.  With all of it, a device of exactly the count keeps them and one
         # byte less does not.
@@ -781,10 +808,13 @@ class SectorStateStorageTests(unittest.TestCase):
             solver, events = self.decide(*layout, PARSEC_CUPY_DIRECT_ALLOCATOR_FRACTION=fraction,
                                          PARSEC_CUPY_SECTOR_STATE_AUTO_FRACTION="0.5")
             self.assertEqual((solver._host_spill_sector_states, bool(events)), (spilled, spilled))
-        # The budget of the slabs is counted as the Ritz step takes it: 1 GiB in place of 2.36.
-        solver, _events = self.decide(*layout, PARSEC_CUPY_STREAMING_RITZ_BYTES=str(gib))
-        self.assertLess(solver.state_fit_bytes[0], count - gib)
-        self.assertLessEqual(solver.state_fit_bytes[0] - self.vectors(self.K09, 4), gib)
+        # The budget of the slabs is counted as the Ritz step takes it, whatever the limit of one array: 1 GiB
+        # in place of 2, and 3 GiB where 3 are named.
+        for budget, counted in ((gib, 1_073_737_728), (3 * gib, 3_221_223_696)):
+            for environment in ({}, limit):
+                solver, _events = self.decide(*layout, PARSEC_CUPY_STREAMING_RITZ_BYTES=str(budget), **environment)
+                self.assertEqual(solver.state_fit_bytes[0] - self.vectors(self.K09, 4), counted)
+                self.assertLessEqual(counted, budget)
         # Two arrays in the Ritz step are counted as one.
         solver, _events = self.decide(*layout, PARSEC_CUPY_STREAMING_RITZ="0")
         self.assertEqual(solver.state_fit_bytes[0], count)
@@ -794,7 +824,8 @@ class SectorStateStorageTests(unittest.TestCase):
         # First runs of one series on A100 nodes, all with ``device`` and ``pool`` named: rows and columns of
         # a sector, ranks, devices of a rank, and the sampled peak of the fullest device in MiB.  The first
         # rank of each, with the sector groups that the runner gives it.  A sector of two ranks lies on two
-        # devices, whose Ritz step cut slabs of 4 GiB in that series: the count is made with that limit.
+        # devices, whose Ritz step cut slabs of 4 GiB in that series, and a sector of one rank on one device,
+        # whose buffer took 4 GiB at most: the count is made with those limits.
         # The fourth is of later runs on the code of that series, 14,680 electrons on two devices: the
         # fullest device that ran, 80,157 of its 81,152 MiB, where 77,310 are counted.
         runs = (
@@ -802,18 +833,24 @@ class SectorStateStorageTests(unittest.TestCase):
             (*self.K11, 1, 4, 60251), (*self.K11, 2, 4, 37459), (*self.K11, 4, 4, 20417),
             (3_786_832, 2978, 2, 4, 54795), (3_786_832, 2978, 4, 4, 29451),
             (*self.K13, 2, 4, 70817), (*self.K13, 4, 4, 37831), (5_660_200, 4928, 4, 4, 63911))
-        self.assertEqual(self.decide(self.K10, ((0,), (1,), (0,), (1,)))[0].state_fit_bytes,
+        one_array = dict(PARSEC_CUPY_STREAMING_RITZ_LIMIT_BYTES=str(4 << 30))
+        self.assertEqual(self.decide(self.K10, ((0,), (1,), (0,), (1,)), **one_array)[0].state_fit_bytes,
                          {0: 81_064_975_872, 1: 81_064_975_872})
+        self.assertEqual(self.decide(self.K10, ((0,), (1,), (0,), (1,)))[0].state_fit_bytes,
+                         {0: 78_917_498_592, 1: 78_917_498_592})
         series = dict(PARSEC_CUPY_DISTRIBUTED_STATE_PAIR_SLAB_BYTES=str(4 << 30))
         # The same sectors of two devices with the slabs of 2 GiB that are the default: peaks of later
         # runs, 3.7 to 3.8 GiB below those of the series, where 4 GiB less are counted.
         pair_peaks = {2_873_400: 33643, 3_786_832: 50859, 4_130_510: 67031}
+        # And sectors on one device with the buffer of 2 GiB that is the default: peaks of later runs with
+        # that budget, 2.0 GiB below those with 4 GiB in the same allocation, where 2 GiB less are counted.
+        buffer_peaks = {(*self.K10, 2): 78109, (*self.K10, 4): 41049, (*self.K11, 4): 58155}
         former = []
         for rows, columns, ranks, devices, peak in runs:
             with self.subTest(rows=rows, ranks=ranks, devices=devices):
                 mine = sector_device_groups(4, ranks, 0, tuple(range(devices)))
                 groups = tuple(mine.get(index, (9,)) for index in range(4))
-                slabs = series if ranks == 2 else {}
+                slabs = series if ranks == 2 else one_array if ranks == 1 else {}
                 solver, events = self.decide((rows, columns), groups, tuple(mine), **slabs)
                 # The route of the named values, and a count that the device did exceed.
                 self.assertEqual((solver._host_spill_sector_states, events), (False, []))
@@ -826,6 +863,15 @@ class SectorStateStorageTests(unittest.TestCase):
                     self.assertLess(count, pair_peaks[rows] << 20)
                     self.assertGreater(count, (pair_peaks[rows] << 20) * .85)
                     self.assertAlmostEqual((max(solver.state_fit_bytes.values()) - count) / (1 << 30), 4, delta=.02)
+                if (rows, columns, devices) in buffer_peaks and ranks == 1:
+                    default, events = self.decide((rows, columns), groups, tuple(mine))
+                    self.assertEqual((default._host_spill_sector_states, events), (False, []))
+                    count = max(default.state_fit_bytes.values())
+                    later = buffer_peaks[rows, columns, devices]
+                    self.assertLess(count, later << 20)
+                    self.assertGreater(count, (later << 20) * .85)
+                    self.assertAlmostEqual((max(solver.state_fit_bytes.values()) - count) / (1 << 30), 2, delta=.001)
+                    self.assertAlmostEqual((peak - later) / 1024, 2, delta=.05)
                 solver, events = self.decide((rows, columns), groups, tuple(mine),
                                              PARSEC_CUPY_DIRECT_ALLOCATOR_FRACTION="0.5", **slabs)
                 former.append(solver._host_spill_sector_states and bool(events))
@@ -1079,7 +1125,10 @@ class SectorStateStorageTests(unittest.TestCase):
                     rounds((1494, 1484)), rounds((750, 744, 744, 740)),
                     distributed_state.shared_pool_release_requested())
 
-        with patch.dict(os.environ):
+        # The buffer of a sector on one device took 4 GiB at most in the code of these nine and takes 2 since:
+        # its limit, which came after them, is held here at the value it had.
+        later = dict(PARSEC_CUPY_STREAMING_RITZ_LIMIT_BYTES="4294967296")
+        with patch.dict(os.environ, later):
             for name in (*former, "PARSEC_CUPY_STREAMING_RITZ_BYTES", "PARSEC_CUPY_RITZ_GRAM_SLABS"):
                 os.environ.pop(name, None)
             self.assertEqual(routes(), (True, 2 << 30, 70, 70, "threads", True, True, "A"))
@@ -1096,15 +1145,15 @@ class SectorStateStorageTests(unittest.TestCase):
         # The storage of the states: 14,680 electrons on two devices keep them where they fit, and with the
         # nine values are spilled by the vectors against half of a device, which counts no bytes.
         layout = (self.K10, ((0,), (1,), (0,), (1,)))
-        solver, events = self.decide(*layout)
+        solver, events = self.decide(*layout, **later)
         self.assertEqual((solver._host_spill_sector_states, events), (False, []))
         self.assertEqual(solver.state_fit_bytes, {0: 81_064_975_872, 1: 81_064_975_872})
-        solver, events = self.decide(*layout, **former)
+        solver, events = self.decide(*layout, **former, **later)
         self.assertEqual((solver._host_spill_sector_states, events, solver.state_fit_bytes),
                          (True, self.LEFT_POOL[0, 1], None))
         # The count of the new rule is that of the slabs of a budget: it does not move with the multiple.
         for multiple in ("1", "64"):
-            solver, _events = self.decide(*layout, PARSEC_CUPY_RITZ_GRAM_MULTIPLE=multiple)
+            solver, _events = self.decide(*layout, PARSEC_CUPY_RITZ_GRAM_MULTIPLE=multiple, **later)
             self.assertEqual(solver.state_fit_bytes, {0: 81_064_975_872, 1: 81_064_975_872})
         # The serial control of the runner names five of the nine, each at this value.  The other four
         # it leaves alone: it shares no basis, and the report of the sphere is no route of the solver.
@@ -1115,7 +1164,101 @@ class SectorStateStorageTests(unittest.TestCase):
                 "PARSEC_CUPY_DENSITY_RELEASE", "PARSEC_CUDA_CONTEXT_CREATION",
                 "PARSEC_CUPY_DIRECT_ALLOCATOR_FRACTION", "PARSEC_CUPY_SPILL_DOWNLOAD_ORDER",
                 "PARSEC_CUPY_RITZ_GRAM_MULTIPLE")})
-        self.assertEqual(len(control), 24)
+        # And the limit of that buffer, at the value it had, with the tile that takes the bytes of its budget.
+        self.assertEqual({name: control[name] for name in later}, later)
+        self.assertEqual(control["PARSEC_CUPY_STREAMING_RITZ_TILE"], "budget")
+        self.assertEqual(len(control), 26)
+
+    def test_the_former_values_of_the_switches_of_the_round_after_select_every_former_route_together(self):
+        import importlib
+        from parsec_python.acceleration.benchmarks import mpi_full_scf
+        from parsec_python.acceleration.Eigensolvers import distributed_state
+        # The package also exports a function named like this submodule.
+        ritz = importlib.import_module("parsec_python.acceleration.Eigensolvers.rayleigh_ritz")
+        # Three defaults came after the nine above, and the rows behind theirs in that table of README.md give
+        # each a former value: the slabs of the overlap of a shared basis, the buffer of a sector on one device and
+        # the share of a device that the rule of this class holds its count against.  With the three named a
+        # process cuts, takes and decides as it did; with none, as it does.
+        former = dict(PARSEC_CUPY_RITZ_GRAM_SLABS="8", PARSEC_CUPY_STREAMING_RITZ_LIMIT_BYTES="4294967296",
+                      PARSEC_CUPY_SECTOR_STATE_AUTO_FRACTION="0.978")
+        # Sectors of 3,480 to 39,368 electrons: the nine clusters of the measured series.
+        sectors = ((677_542, 442), (1_031_322, 665), (1_194_720, 897), self.K09, self.K10, self.K11,
+                   (3_786_832, 2978), self.K13, (5_660_200, 4928))
+
+        def cuts():
+            # The slabs of the overlap of a shared basis (None: those of the count of slabs, which follow),
+            # and the slab, the tile and the counted buffer of the same sector on one device.
+            shapes = [ritz._streaming_shape(SimpleNamespace(shape=sector, nbytes=8 * sector[0] * sector[1]))
+                      for sector in sectors]
+            return ([distributed_state.overlap_slab_width(columns) for _rows, columns in sectors],
+                    [ritz._gram_slab_width(columns) for _rows, columns in sectors],
+                    [width for width, _tile in shapes], [tile for _width, tile in shapes],
+                    [ritz.streaming_workspace_bytes(*sector) for sector in sectors])
+
+        with patch.dict(os.environ):
+            for name in (*former, "PARSEC_CUPY_STREAMING_RITZ_BYTES", "PARSEC_CUPY_RITZ_GRAM_MULTIPLE",
+                         "PARSEC_CUPY_DISTRIBUTED_STATE_OVERLAP_COLUMNS"):
+                os.environ.pop(name, None)
+            overlap, counted, slabs, tiles, buffers = cuts()
+            self.assertEqual(overlap, [128] * 9)
+            self.assertEqual(counted, [56, 64, 64, 128, 192, 256, 320, 448, 576])
+            self.assertEqual(slabs, [192, 128, 64, 128, 64, 64, 64, 64, 64])
+            os.environ.update(former)
+            before = cuts()
+            # The count of slabs is every route's again, and the buffer an eighth of the basis within 1 and
+            # 4 GiB: the slabs of the series that ran before these defaults.
+            self.assertEqual(before[:3], ([None] * 9, counted, [192, 128, 64, 128, 192, 128, 128, 128, 64]))
+            # Up to 16 GiB of basis the buffer is what it was: 3,480, 5,264 and 7,120 electrons.
+            self.assertEqual((slabs[:3], tiles[:3], buffers[:3]), (before[2][:3], before[3][:3], before[4][:3]))
+            # 10,456 electrons, 18.8 GiB: the slab of 128 columns stays under a lower tile.
+            self.assertEqual((slabs[3], before[2][3], tiles[3], before[3][3]), (128, 128, 204_288, 240_599))
+            self.assertTrue(all(new <= old for new, old in zip(tiles, before[3])))
+            self.assertEqual([round(count / (1 << 30), 2) for count in buffers], [1., 1., 1., 2., 2., 2., 2., 2., 2.7])
+            self.assertEqual([round(count / (1 << 30), 2) for count in before[4]], [1., 1., 1., 2.36, 4., 4., 4., 4., 4.])
+        # The storage of the states.  10,456 electrons on one device are spilled either way, by 0.974 of the
+        # device with the buffer of 2 GiB and by 0.978 with that of 2.36; 14,680 on two keep theirs either
+        # way, and so does every layout of the measured series that kept them.
+        for layout, spilled, counts in (((self.K09, ((0,),) * 4), True, (83_081_129_472, 83_462_830_704)),
+                                        ((self.K10, ((0,), (1,), (0,), (1,))), False, (78_917_498_592, 81_064_975_872)),
+                                        ((self.K11, self.ONE_PER_DEVICE), False, (58_029_350_808, 60_176_837_864)),
+                                        ((self.K06, ((0,),) * 4), False, (10_656_895_808, 10_656_895_808))):
+            with self.subTest(layout=layout):
+                now, events = self.decide(*layout)
+                then, former_events = self.decide(*layout, **former)
+                self.assertEqual((now._host_spill_sector_states, then._host_spill_sector_states), (spilled, spilled))
+                self.assertEqual((bool(events), bool(former_events)), (spilled, spilled))
+                self.assertEqual((now.state_fit_bytes[0], then.state_fit_bytes[0]), counts)
+                self.assertEqual((now.sector_state_storage, now.memory_allocator_policy),
+                                 (then.sector_state_storage, then.memory_allocator_policy))
+        # The serial control of the runner names the limit of the buffer, at this value.  It shares no basis
+        # and decides the storage by the rule before this one, so it names neither of the other two.
+        control = {}
+        mpi_full_scf._keep_former_routes(control)
+        self.assertEqual({name: value for name, value in control.items() if name in former},
+                         dict(PARSEC_CUPY_STREAMING_RITZ_LIMIT_BYTES="4294967296"))
+        # A fourth switch came with them and changed no default: the tile of the rotation of one array takes
+        # the bytes of the budget unless it is told to follow the slab that is cut, whose bytes the buffer and
+        # the count then are.  They move with the multiple, which cuts the slab; the count of the default
+        # does not.
+        tile = dict(PARSEC_CUPY_STREAMING_RITZ_TILE="slab")
+        for layout, counted, spilled in (((self.K09, ((0,),) * 4), 82_904_641_024, True),
+                                         ((self.K10, ((0,), (1,), (0,), (1,))), 78_103_702_464, False),
+                                         ((self.K11, self.ONE_PER_DEVICE), 57_353_064_000, False),
+                                         ((self.K06, ((0,),) * 4), 10_623_858_560, False)):
+            with self.subTest(layout=layout, tile="slab"):
+                default, _events = self.decide(*layout)
+                named, _events = self.decide(*layout, PARSEC_CUPY_STREAMING_RITZ_TILE="budget")
+                slab, events = self.decide(*layout, **tile)
+                self.assertEqual(named.state_fit_bytes, default.state_fit_bytes)
+                self.assertEqual((slab.state_fit_bytes[0], slab._host_spill_sector_states, bool(events)),
+                                 (counted, spilled, spilled))
+                self.assertLess(counted, default.state_fit_bytes[0])
+                whole, _events = self.decide(*layout, PARSEC_CUPY_RITZ_GRAM_MULTIPLE="1", **tile)
+                self.assertGreater(whole.state_fit_bytes[0], counted)
+                self.assertLessEqual(whole.state_fit_bytes[0], default.state_fit_bytes[0])
+        with self.assertRaisesRegex(ValueError, "PARSEC_CUPY_STREAMING_RITZ_TILE must be budget or slab"):
+            self.decide(self.K06, ((0,),) * 4, PARSEC_CUPY_STREAMING_RITZ_TILE="row")
+        self.assertEqual(control["PARSEC_CUPY_STREAMING_RITZ_TILE"], "budget")
 
 
 class SpillDownloadTests(unittest.TestCase):

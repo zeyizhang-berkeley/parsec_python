@@ -1451,6 +1451,71 @@ class ExchangePlanTests(unittest.TestCase):
                                                      + [(stop - start) % whole] * bool((stop - start) % whole))
                                 self.assertLessEqual(max(mine), max(theirs))
 
+    def test_the_overlap_of_a_row_block_takes_slabs_of_128_columns_unless_a_count_of_slabs_is_named(self):
+        width_of = distributed_state.overlap_slab_width
+        name, count, multiple = ('PARSEC_CUPY_DISTRIBUTED_STATE_OVERLAP_COLUMNS', 'PARSEC_CUPY_RITZ_GRAM_SLABS',
+                                 'PARSEC_CUPY_RITZ_GRAM_MULTIPLE')
+
+        def pairs(columns, width):
+            # The column pairs that slabs of this width multiply: each slab by the columns from its first one on.
+            return sum((columns - start) * (min(columns, start + width) - start) for start in range(0, columns, width))
+
+        with patch.dict(os.environ):
+            for unset in (name, count, multiple):
+                os.environ.pop(unset, None)
+            # The rule reads the columns of a sector and nothing else of it: one slab up to 128 columns and slabs
+            # of 128 beyond, so that no slab but the last one of a basis is narrower.
+            same = []
+            for columns in range(1, 6001):
+                width = width_of(columns)
+                self.assertEqual(width, min(columns, 128))
+                slabs = [min(columns, start + width) - start for start in range(0, columns, width)]
+                self.assertEqual((len(slabs), set(slabs[:-1]) <= {128}, sum(slabs)), (-(-columns // 128), True, columns))
+                if width == rayleigh_ritz._gram_slab_width(columns):
+                    same.append(columns)
+            # An eighth of the columns, the former slab, is cut to 128 columns as well from 1,017 to 1,528: such
+            # a sector keeps its slabs, and with them its bits.  Below, the slabs were narrower; beyond, wider.
+            self.assertEqual(same, [1] + list(range(1017, 1529)))
+            # The sectors of the measured series, 3,480 to 39,368 electrons: their former slabs, and what the
+            # slabs of the rule and the former ones multiply of the full product.
+            series = (442, 665, 897, 1314, 1842, 2431, 2978, 3704, 4928)
+            former = [rayleigh_ritz._gram_slab_width(columns) for columns in series]
+            self.assertEqual(former, [56, 64, 64, 128, 192, 256, 320, 448, 576])
+            self.assertEqual([(round(pairs(columns, 128) / columns ** 2, 3), round(pairs(columns, width) / columns ** 2, 3))
+                              for columns, width in zip(series, former)],
+                             [(.634, .563), (.593, .547), (.571, .536), (.548, .548), (.534, .551), (.526, .551),
+                              (.521, .553), (.517, .559), (.513, .557)])
+            # (1 + width / columns) / 2 of it where the width divides the columns and less with a short last
+            # slab, so narrower slabs multiply less.
+            for columns in (1314, 2978, 4928):
+                shares = [pairs(columns, width) / columns ** 2 for width in (64, 128, 192, 256, 576)]
+                self.assertEqual(shares, sorted(shares))
+                for width, share in zip((64, 128, 192, 256, 576), shares):
+                    self.assertTrue(.5 < share <= (1 + width / columns) / 2)
+            self.assertEqual(pairs(4096, 128) / 4096 ** 2, (1 + 128 / 4096) / 2)
+            # A slab is a whole multiple like every other, and its columns can be named: narrower than 128 only so.
+            for value, widths in (('1', (128, 300)), ('64', (128, 256)), ('100', (100, 300)), ('256', (128, 256)),
+                                  ('48', (96, 288))):
+                with patch.dict(os.environ, {multiple: value}):
+                    self.assertEqual(width_of(5000), widths[0])
+                    with patch.dict(os.environ, {name: '300'}):
+                        self.assertEqual((width_of(5000), width_of(300), width_of(299)), (widths[1], 300, 299))
+            with patch.dict(os.environ, {name: '64'}):
+                self.assertEqual((width_of(5000), width_of(64), width_of(65)), (64, 64, 64))
+            # A count of slabs that is named is the cut of every route: the rule steps back whatever the columns
+            # and the width say, and the product reads the count as it did.  Eight is the cut that was.
+            for slabs in ('8', '1', '32'):
+                with patch.dict(os.environ, {count: slabs, name: '64'}):
+                    self.assertEqual({width_of(columns) for columns in (1, 100, 129, 1314, 4928)}, {None})
+            with patch.dict(os.environ, {count: '8'}):
+                self.assertEqual([rayleigh_ritz._gram_slab_width(columns) for columns in series], former)
+            # Neither is taken as it comes.
+            for bad in ('0', '-128', 'wide', '', '12.8'):
+                with patch.dict(os.environ, {name: bad}), self.assertRaisesRegex(ValueError, name):
+                    width_of(500)
+                with patch.dict(os.environ, {count: bad}), self.assertRaisesRegex(ValueError, count):
+                    width_of(500)
+
     def test_a_row_block_ends_where_no_round_writes_rows_over_columns_that_are_still_to_go(self):
         ends_of = distributed_state.SectorDeviceGroup._row_block_ends
         cases = (
@@ -2375,7 +2440,7 @@ class RitzStandInTests(unittest.TestCase):
              'PARSEC_CUPY_EXCHANGE_CHUNK_BYTES', 'PARSEC_CUPY_EXCHANGE_CONCURRENT', 'PARSEC_CUPY_EXCHANGE_COLUMN_COPIES',
              'PARSEC_CUPY_EXCHANGE_PAIRS', 'PARSEC_CUPY_DISTRIBUTED_STATE_SLABS', 'PARSEC_CUPY_RITZ_CONDITION_HELPER',
              'PARSEC_CUPY_DISTRIBUTED_STATE_PAIR_SLAB_BYTES', 'PARSEC_CUPY_RITZ_GRAM_MULTIPLE',
-             'PARSEC_CUPY_DISTRIBUTED_STATE_POOL_RELEASE')
+             'PARSEC_CUPY_DISTRIBUTED_STATE_POOL_RELEASE', 'PARSEC_CUPY_DISTRIBUTED_STATE_OVERLAP_COLUMNS')
 
     def _step(self, rows, widths, blocks, *, eager=False, unstable=False, roomy=False, hartree_device=None,
               **environment):
@@ -2385,7 +2450,9 @@ class RitzStandInTests(unittest.TestCase):
         blocks per device; ``None`` leaves that to the default.  ``roomy`` column blocks have the capacity that
         the group gives the blocks of a trial basis; the others are as large as their columns.  The small
         problem is solved on the host unless ``environment`` names the device for it.  ``hartree_device`` is
-        the device that the sector operator names as the holder of the Hartree objects.
+        the device that the sector operator names as the holder of the Hartree objects.  A value of ``None``
+        in ``environment`` removes a setting of the class: the count of the slabs of a Gram product, which
+        the class names, is then left to the step.
         """
 
         cp, runtime = _stand_in(eager)
@@ -2452,7 +2519,10 @@ class RitzStandInTests(unittest.TestCase):
              patch.object(distributed_state, '_device_overlap_condition', estimate), patch.dict(os.environ):
             for name in self.unset + ('PARSEC_CUPY_DISTRIBUTED_STATE_BLOCKS',):
                 os.environ.pop(name, None)
-            os.environ.update(self.settings, **environment)
+            os.environ.update(self.settings, **{name: value for name, value in environment.items() if value is not None})
+            for name, value in environment.items():
+                if value is None:
+                    os.environ.pop(name, None)
             if blocks is not None:
                 os.environ['PARSEC_CUPY_DISTRIBUTED_STATE_BLOCKS'] = str(blocks)
             run.sector = _Sector(cp, runtime, devices, hamiltonian)
@@ -2866,6 +2936,87 @@ class RitzStandInTests(unittest.TestCase):
                 with patch.dict(os.environ, PARSEC_CUPY_RITZ_GRAM_MULTIPLE=bad, PARSEC_CUPY_DISTRIBUTED_STATE_BLOCKS=blocks):
                     with self.assertRaisesRegex(ValueError, 'PARSEC_CUPY_RITZ_GRAM_MULTIPLE'):
                         group._capacities(_columns((3, 2)), [0, 4, 9])
+
+    def test_every_step_forms_its_overlap_in_slabs_of_128_columns_unless_a_count_of_slabs_is_named(self):
+        # Two devices with 157 columns: the rule cuts the overlap of a row block into a slab of 128 columns and
+        # one of 29, where an eighth of the columns, the former slab, is 20.
+        rows, widths = 257, (80, 77)
+        lower = rayleigh_ritz._lower_triangle_product
+        for blocks in (1, 2, 3):
+            with self.subTest(blocks=blocks):
+                asked = []
+
+                def recorded(left, right, *width):
+                    asked.append((left is right, int(left.shape[1]), width))
+                    return lower(left, right, *width)
+
+                # The overlap reaches the product inside its own module, the projection of three tall blocks
+                # from the step.
+                with patch.object(rayleigh_ritz, '_lower_triangle_product', recorded), \
+                     patch.object(distributed_state, '_lower_triangle_product', recorded):
+                    rule = self._step(rows, widths, blocks, PARSEC_CUPY_RITZ_GRAM_SLABS=None)
+                    overlaps = [call for call in asked if call[0]]
+                    self.assertEqual(len(asked) - len(overlaps), 2 * (blocks == 3))
+                    del asked[:]
+                    named = self._step(rows, widths, blocks)
+                # The rule names the width to the product of every row block.  With the count named, as this
+                # class names it, the product is given nothing and reads the count itself: the call that was.
+                # The projection of the step with three tall blocks is such a product too and keeps the count.
+                self.assertEqual(overlaps, [(True, 157, (128,))] * 2)
+                self.assertEqual([call for call in asked if call[0]], [(True, 157, ())] * 2)
+                self.assertEqual([call for call in asked if not call[0]], [(False, 157, ())] * 2 if blocks == 3 else [])
+                self.assertEqual((rule.group.overlap_columns, named.group.overlap_columns), (128, 20))
+                for run in (rule, named):
+                    self._assert_ritz_pairs(run)
+                # Another cut of the same lower triangle: the Ritz values agree at round-off.
+                np.testing.assert_allclose(rule.values, named.values, rtol=0, atol=1e-11)
+                if blocks != 1:
+                    # In the order of the basis: all of the first slab and nothing above the second.
+                    self.assertTrue(rule.gram[0][:128, :128].all())
+                    self.assertFalse(rule.gram[0][:128, 128:].any())
+                    self.assertFalse(named.gram[0][:20, 20:].any())
+        # Where the rule and the count cut the same slabs the two are one computation.  47 columns in slabs of
+        # 6, an eighth of them, give the Gram pair, the Ritz values and the rotated basis of the named count
+        # to the last bit: so does, by default, every sector of 1,017 to 1,528 columns, whose eighth is cut to
+        # 128.  Another width leaves the projection its bits and forms the overlap from other slabs.
+        four = (12, 12, 12, 11)
+        for blocks in (1, 2, 3):
+            with self.subTest(blocks=blocks, widths=four):
+                named = self._step(rows, four, blocks)
+                rule = self._step(rows, four, blocks, PARSEC_CUPY_RITZ_GRAM_SLABS=None,
+                                  PARSEC_CUPY_DISTRIBUTED_STATE_OVERLAP_COLUMNS='6')
+                other = self._step(rows, four, blocks, PARSEC_CUPY_RITZ_GRAM_SLABS=None,
+                                   PARSEC_CUPY_DISTRIBUTED_STATE_OVERLAP_COLUMNS='7')
+                self.assertEqual([run.group.overlap_columns for run in (named, rule, other)], [6, 6, 7])
+                for mine, theirs in zip((*rule.gram, rule.values, rule.rotated), (*named.gram, named.values, named.rotated)):
+                    np.testing.assert_array_equal(mine, theirs)
+                np.testing.assert_array_equal(other.gram[1], named.gram[1])
+                np.testing.assert_allclose(np.tril(other.gram[0]), np.tril(named.gram[0]), rtol=0, atol=1e-13)
+                if blocks != 1:
+                    # In the order of the basis: the seventh column lies in the first slab of 7 and above the
+                    # second slab of 6.
+                    self.assertTrue(other.gram[0][0, 6] != 0. and named.gram[0][0, 6] == 0.)
+                self._assert_ritz_pairs(other)
+        # A basis of no more columns than a slab is one slab, the full product of the row block, where the
+        # count cut eight.
+        small = self._step(rows, four, 1, PARSEC_CUPY_RITZ_GRAM_SLABS=None)
+        self._assert_ritz_pairs(small)
+        self.assertEqual(small.group.overlap_columns, 47)
+        # An overlap that is formed without slabs has none to report.
+        full = self._step(rows, widths, 1, PARSEC_CUPY_RITZ_GRAM_SLABS=None, PARSEC_CUPY_RITZ_SYRK='off')
+        self._assert_ritz_pairs(full)
+        self.assertIsNone(full.group.overlap_columns)
+        # A width that is no count of columns, and a count of slabs that is none, stop the run where the trial
+        # basis is sized, before the first filter, whichever step is named.
+        cp, _runtime = _stand_in()
+        group = distributed_state.SectorDeviceGroup(_Owner(cp, (0, 1)), (0, 1))
+        self.assertIsNone(group.overlap_columns)
+        for name in ('PARSEC_CUPY_DISTRIBUTED_STATE_OVERLAP_COLUMNS', 'PARSEC_CUPY_RITZ_GRAM_SLABS'):
+            for bad in ('0', '-128', 'wide', ''):
+                for blocks in ('1', '2', '3'):
+                    with patch.dict(os.environ, {name: bad, 'PARSEC_CUPY_DISTRIBUTED_STATE_BLOCKS': blocks}):
+                        with self.assertRaisesRegex(ValueError, name):
+                            group._capacities(_columns((3, 2)), [0, 4, 9])
 
     def test_a_workspace_that_a_pass_has_outgrown_goes_back_before_the_larger_one_is_taken(self):
         # The density step leaves the pools of a shared basis as they are, so the group itself returns the

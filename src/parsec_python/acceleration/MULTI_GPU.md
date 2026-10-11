@@ -162,7 +162,8 @@ gather but cannot eliminate the final host matrix's memory requirement.
 
 In a process with several devices the sectors that one of them solves one
 after another have a CUDA stream each, and CuPy's memory pool keeps one free
-list per stream: the Ritz buffer that a sector gave back (1 to 4 GiB) could
+list per stream: the Ritz buffer that a sector gave back (1 to 4 GiB then, 2
+at most since) could
 not serve the next sector, which took another, and both stayed until the
 density step emptied the pool. With
 two A100 for four sectors the sampled peak stood two such buffers above the
@@ -226,7 +227,7 @@ or `auto`). A named value is taken as it is. `auto`, the default of both,
 keeps the states on their devices and CuPy's pool unless the sectors of some
 device cannot fit it; then the states are spilled to the host after every
 solve and allocations bypass the pool. What is held against the memory of a
-device, against `PARSEC_CUPY_SECTOR_STATE_AUTO_FRACTION` of it (0.978 by
+device, against `PARSEC_CUPY_SECTOR_STATE_AUTO_FRACTION` of it (0.974 by
 default, see below), is a count of what its Ritz steps need: the vectors of
 every sector whose basis lies on it and one slab buffer, that of its largest
 sector, since its sectors are solved in turn; for a basis that the devices
@@ -243,14 +244,19 @@ outside the context. So it was, by that or less, on 61 of the 208 devices
 with shared blocks in the first runs of one series, all from 14,680
 electrons down, while from 19,392 electrons up they sampled 0.5 to 5.0 GiB
 more than the count and the context. For 19,392 electrons on four A100 the
-count is 56.0 of the 79.25 GiB of a device (that run peaked at 58.8 GiB),
-for 14,680 on two 75.5 and for 10,456 on one 77.7, which is above that share
+count is 54.0 of the 79.25 GiB of a device (a run peaked at 56.8 GiB),
+for 14,680 on two 73.5 and for 10,456 on one 77.4, which is above that share
 of the device: they are spilled, and so are the four sectors of 14,680
-electrons on one device, which count 147 GiB. 14,680 electrons on two
+electrons on one device, which count 145 GiB. Those are the counts with the
+buffer of at most 2 GiB that a sector on one device takes
+(`PARSEC_CUPY_STREAMING_RITZ_LIMIT_BYTES`, `README.md`); with the buffer of
+at most 4 GiB that it took before they were 56.0, 75.5 and 77.7 GiB, and the
+first of those runs peaked at 58.8 GiB. 14,680 electrons on two
 devices are the fullest device that has run: a first run on the code before
 this rule, with both values named, took 239.4 s and peaked at 77.5 and 78.3
 GiB (79,333 and 80,157 MiB), 0.97 GiB below the device, with the total
-energy of the run on four devices to the last bit. A run that fits with
+energy of the run on four devices to the last bit; with the buffer of 2 GiB
+it peaked at 75.5 and 76.3 GiB (77,285 and 78,109 MiB). A run that fits with
 `device` and `pool` named therefore takes that route without naming them,
 with the same two report lines (`orbital_sector_state_storage`,
 `orbital_memory_allocator`); the runner records both for every rank, with
@@ -276,26 +282,55 @@ on a device of 85. Naming `PARSEC_CUPY_DIRECT_ALLOCATOR_FRACTION` selects
 that rule again, with the fraction it names; `0.5` gives the former
 decisions and report lines.
 
-The count leaves out what else a device holds (58.8 GiB were sampled where
-it gives 56.0), so it is held against a share of the device and not all of
-it: `PARSEC_CUPY_SECTOR_STATE_AUTO_FRACTION`, 0.978 by default; `1` holds it
-against all of the device. In the first runs on A100 nodes every device
+The count leaves out what else a device holds (56.8 GiB were sampled where
+it gives 54.0), so it is held against a share of the device and not all of
+it: `PARSEC_CUPY_SECTOR_STATE_AUTO_FRACTION`, 0.974 by default; `1` holds it
+against all of the device. The share was 0.978 while the buffer of a sector
+on one device took up to 4 GiB. In the first runs on A100 nodes with that
+buffer every device
 that held a basis of its own sampled at least 1.026 times its count: 39
 devices of 15 runs with 3.2 to 75.5 GiB counted, the least of them the
 device without the Hartree arrays in that run of 14,680 electrons on two
 (77.5 GiB sampled, 75.5 counted), and from 50 GiB counted up the peak lay
-1.8 to 2.8 GiB above the count. At 0.978 a device is therefore taken as too
-small only where that ratio puts its peak above its memory, 1.74 GiB below
+1.8 to 2.8 GiB above the count. At 0.978 a device was therefore taken as too
+small only where that ratio put its peak above its memory, 1.74 GiB below
 a device of 79.25 GiB. That run of 14,680 electrons, at
-0.953 of its devices, keeps its states. 10,456 electrons on one A100 count
-77.7 GiB, 0.981 of the device, and are spilled, as the former rule spilled
+0.953 of its devices, kept its states. 10,456 electrons on one A100 counted
+77.7 GiB, 0.981 of the device, and were spilled, as the former rule spilled
 them: by that ratio they would peak at 79.8 GiB or more, and held against
-all of the device they are told that they fit and are expected to stop for
+all of the device they were told that they fit and were expected to stop for
 memory, as with `device` named. Both have run since (below): the first
 ended by the spill and the second stopped. A sampled peak includes
 blocks that the pool only caches and returns when an allocation fails, so a
 run can need less than it sampled: between 0.953 and 0.981 of a device no
-run exists, and where in that band the share lies is a choice.
+run existed, and where in that band the share lay was a choice.
+
+With the buffer of at most 2 GiB the count of a device and its peak fall
+together. The run of 14,680 electrons on two devices, with the budget set to
+2 GiB beside the default of then in one allocation, peaked 2,048 MiB lower on
+both devices where 2 GiB less are counted (73.5 GiB): 75.5 and 76.3 GiB
+sampled, 1.027 and 1.038 times the count, and 2.0 and 2.8 GiB above it as
+before. That run is now at 0.927 of its devices. 10,456 electrons on one
+A100 count 77.4 GiB with the smaller buffer, 0.976 of the device: below the
+former share, which would keep their states on the device. Nothing says that
+they fit there. They stopped for memory with a buffer 0.36 GiB larger, and
+the same four sectors in the smaller sphere of the default rule ran on one
+device 2.5 GiB above their count (71.3 GiB counted, 73.8 sampled, 71.5 held
+between the steps), which would be 79.9 GiB here. The share is therefore
+0.974, the reciprocal of 1.027: a device is still taken as too small only
+where the least ratio that was measured puts its peak above its memory,
+2.06 GiB below a device of 79.25 GiB, and those sectors are spilled as they
+were. The band in which no run exists is now 0.927 to 0.976 of a device; a
+first run of those sectors on one A100 with `0.978` named would say whether
+the share can go back. With that buffer a device of 79.25 GiB keeps the
+states of sectors of 32 GiB and more up to 75.2 GiB of them, where it kept
+them up to 73.5: no layout of the measured series lies between. A device
+whose count lies between 0.974 and 0.978 of it with sectors of up to 16 GiB,
+whose buffer is what it was, kept its states and spills them now: none has
+run, and the least ratio that was measured puts its peak above its memory.
+`PARSEC_CUPY_STREAMING_RITZ_LIMIT_BYTES=4294967296` with
+`PARSEC_CUPY_SECTOR_STATE_AUTO_FRACTION=0.978` gives the former count and
+the former decisions.
 A basis that the devices of a group share is counted as the rule that shares
 it counts it, which holds it to
 `PARSEC_CUPY_DISTRIBUTED_STATE_AUTO_FRACTION` of a device (0.85): this share

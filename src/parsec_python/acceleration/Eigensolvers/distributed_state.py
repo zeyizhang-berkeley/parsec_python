@@ -82,8 +82,10 @@ from .rayleigh_ritz import (
     GeneralizedRitzStabilityError,
     _condition_policy,
     _device_overlap_condition,
+    _gram_slab_width,
     _lower_triangle_product,
     _mirrored_lower,
+    _overlap_policy,
     _rotate_in_place,
     _streaming_bytes,
     _symmetric_overlap,
@@ -117,6 +119,9 @@ _ROUND_BYTES = 8 << 30
 # The most bytes of a slab of that step on two devices where no budget is
 # set and :func:`pair_slab_bytes` names no other limit: a round of 4 GiB.
 _PAIR_SLAB_BYTES = 2 << 30
+# The columns of a slab of the overlap of a row block where neither they nor
+# a count of slabs are named (see :func:`overlap_slab_width`).
+_OVERLAP_SLAB_COLUMNS = 128
 # The three ways to split four devices into two pairs: the partner of every
 # device in each turn of an exchange that takes its copies pair by pair (see
 # :func:`paired_exchange_requested`).
@@ -677,7 +682,9 @@ def pair_slab_bytes() -> int:
     any size and in every step of a run, bit for bit: the limit is then
     that of the streaming budget itself.  It is the way back of a sector
     on two devices, beside ``PARSEC_CUPY_RITZ_GRAM_MULTIPLE=1`` since the
-    rounds are cut at whole multiples of 64 columns (:func:`block_rounds`).
+    rounds are cut at whole multiples of 64 columns (:func:`block_rounds`)
+    and ``PARSEC_CUPY_RITZ_GRAM_SLABS=8`` since the overlap is cut into
+    slabs of 128 (:func:`overlap_slab_width`).
     ``PARSEC_CUPY_STREAMING_RITZ_BYTES=4294967296``, that of four devices,
     is not: a basis below 32 GiB took an eighth of itself per slab and
     takes 4 GiB with it, also one that a trim has taken below 32 GiB after
@@ -694,18 +701,90 @@ def pair_slab_bytes() -> int:
     return value
 
 
+def overlap_slab_width(columns: int) -> int | None:
+    """Columns per slab of the overlap ``X.T X`` of a row block of a shared basis.
+
+    ``PARSEC_CUPY_DISTRIBUTED_STATE_OVERLAP_COLUMNS`` sets them; 128 is the
+    default.  They are cut down to a whole multiple like every slab
+    (:func:`rayleigh_ritz.gram_multiple`, which leaves 128), and a basis of
+    no more columns is one slab, the full product.  ``None`` where
+    ``PARSEC_CUPY_RITZ_GRAM_SLABS`` names a count of slabs: the overlap is
+    then cut by that count, as it was and as a sector on one device cuts
+    its own (:func:`rayleigh_ritz._gram_slab_width`).  ``8`` there is the
+    former cut of every step, bit for bit.
+
+    A slab is multiplied by the columns from its own first one onwards, so
+    slabs of ``w`` of ``m`` columns form about ``(1 + w / m) / 2`` of the
+    full product: what lies above the diagonal inside a slab is formed for
+    nothing, and the narrower the slabs the less of it.  A count of slabs
+    lets them widen with the basis.  Eight slabs of 4,928 states are 576
+    columns wide and form 0.557 of the full product, slabs of 128 form
+    0.513; of 2,978 states 0.553 and 0.521.  The right-hand side of such a
+    product costs in steps of 64 columns, which is why a slab is a whole
+    multiple, and of the multiples one ran slower.  In first runs on A100
+    nodes the overlap of the row blocks, by the products of its slabs and
+    the seconds it took, ran at 12.8 to 16.0 Tflop/s per device in slabs of
+    64 columns (5,264 and 7,120 electrons on 8 and 16 GPUs), at 17.0 to
+    17.6 in slabs of 128, 192 and 256 (10,456, 14,680 and 19,392) and at
+    15.8 to 16.9 in slabs of 320, 448 and 576 (23,768, 29,576 and 39,368).
+    So 128 columns: the narrowest width that ran at the rate of the best.
+
+    Measured there with the count named so that the slabs are 128 columns
+    wide, beside the eight slabs in one allocation: the overlap of a
+    sector took 26.79 instead of 31.46 s for 39,368 electrons on 16 GPUs
+    (27.81 s in slabs of 256), 11.04 instead of 12.18 s for 29,576 and
+    6.57 instead of 7.14 s for 23,768; on 8 GPUs 22.53 instead of 25.83 s
+    for 29,576 and 13.59 instead of 14.97 s for 23,768, at 16.7 to 17.3
+    Tflop/s.  The total energies moved by 2e-8 to 1.6e-7 Ry: the lower
+    triangle is summed from other pieces.  The rule makes these cuts, and
+    the same slabs as before from 1,017 to 1,528 columns, where an eighth
+    is cut to 128 as well (10,456 electrons).  Not measured: a sector of
+    1,529 to 2,552 columns, whose slabs of 192 and 256 become 128 for 3 to
+    5% fewer operations (14,680 and 19,392 electrons), and one below 1,017
+    columns, whose slabs of 64 and fewer become 128 and form 7 to 13% more
+    (3,480 to 7,120 electrons, where the overlap of a sector takes 0.04
+    to 0.47 s of a run).
+
+    The rule is that of a row block: every step of a shared basis forms
+    its overlap from the complete row block of a device.  A sector on one
+    device keeps the count.  Its overlap is the same product over all its
+    rows, but its records time it together with the projection, so no run
+    says what another width of the overlap gives there, and on a
+    workstation GPU more slabs did not always gain
+    (:func:`rayleigh_ritz.gram_multiple`).  The projection of the step
+    with three tall blocks keeps the count too.
+    """
+
+    name = "PARSEC_CUPY_DISTRIBUTED_STATE_OVERLAP_COLUMNS"
+    raw = os.environ.get(name, str(_OVERLAP_SLAB_COLUMNS)).strip()
+    try:
+        width = int(raw)
+    except ValueError as error:
+        raise ValueError(f"{name} must be an integer") from error
+    if width < 1:
+        raise ValueError(f"{name} must be positive")
+    columns = int(columns)
+    if "PARSEC_CUPY_RITZ_GRAM_SLABS" in os.environ:
+        # Read here for its form, as the product reads it.
+        _gram_slab_width(columns)
+        return None
+    return columns if width >= columns else _whole_multiple(width)
+
+
 def slab_columns(rows: int, columns: int, devices: int, wide: bool = False, blocks: int = 2) -> int:
     """The most columns of one slab of ``H X`` in a Ritz step that forms it in slabs.
 
-    A slab of all rows takes the bytes that the one-array route gives its
-    projection slab (:func:`rayleigh_ritz._streaming_bytes` of the whole
-    basis: ``PARSEC_CUPY_STREAMING_RITZ_BYTES``, or an eighth of the basis
-    but at least 1 and at most 4 GiB; at most 6 GiB if ``wide``, which
-    :func:`wider_slabs_fit` decides).  It is never wider than half of an
-    even share of the columns: a device holds two slabs at a time (see
-    :func:`slab_workspace`), which then take no more than the tall block
-    they replace.  The width does not depend on how the columns are split
-    between the devices.
+    A slab of all rows takes the bytes of the streaming budget
+    (:func:`rayleigh_ritz._streaming_bytes` of the whole basis:
+    ``PARSEC_CUPY_STREAMING_RITZ_BYTES``, or an eighth of the basis but at
+    least 1 and at most 4 GiB; at most 6 GiB if ``wide``, which
+    :func:`wider_slabs_fit` decides).  That was the slab of the one-array
+    route too, which has taken 2 GiB at most since, by a limit that no
+    step here reads (:func:`rayleigh_ritz.one_array_buffer_limit`).  A slab
+    is never wider than half of an even share of the columns: a device
+    holds two slabs at a time (see :func:`slab_workspace`), which then take
+    no more than the tall block they replace.  The width does not depend
+    on how the columns are split between the devices.
 
     In the step with one tall block (``blocks`` of 1) on four or more
     devices, a slab that no set budget sizes takes at most an even share
@@ -1241,12 +1320,17 @@ class SectorDeviceGroup:
         # is left of that stage is the projection, whose products are as
         # wide as the rounds of a step with one tall block and as the slabs
         # of a step with two.  The widths of the two matrices are cut apart
-        # (:func:`rayleigh_ritz._gram_slab_width`, :func:`block_rounds`,
+        # (:func:`overlap_slab_width`, :func:`block_rounds`,
         # :func:`projection_slabs`) and one setting moves both
         # (:func:`rayleigh_ritz.gram_multiple`): this says which of them a
         # change of the stage comes from.  A step with three tall blocks
         # forms both matrices in one call and counts nothing here.
         self.overlap_seconds = 0.0
+        # The columns of the widest slab of the overlap of the latest Ritz
+        # step, for reports: those of :func:`overlap_slab_width`, or of the
+        # count of slabs where one is named.  None before the first step and
+        # where the overlap has no slabs (``PARSEC_CUPY_RITZ_SYRK`` on or off).
+        self.overlap_columns = None
         self._tall = self._chunk = self._work = 0
         # The devices that still hold, in the free list of their stream, a
         # slab workspace that a later pass has outgrown.
@@ -1420,6 +1504,7 @@ class SectorDeviceGroup:
         column_copies_requested()
         condition_helper_policy()
         gram_multiple()
+        overlap_slab_width(1)
         shared_pool_release_requested()
         blocks = tall_blocks_per_device()
         if blocks != 3:
@@ -2089,6 +2174,27 @@ class SectorDeviceGroup:
         finally:
             self.seconds["dense"] += perf_counter() - started
 
+    def _overlap_width(self, states: int) -> int | None:
+        """The slab width that a step gives :meth:`_overlap`, noted for reports.
+
+        That of :func:`overlap_slab_width`, read once for all devices:
+        ``None`` where a count of slabs is named, which the product then
+        reads as it did.
+        """
+
+        width = overlap_slab_width(states)
+        if _overlap_policy() != "slabs":
+            self.overlap_columns = None
+        else:
+            self.overlap_columns = min(int(states), _gram_slab_width(states) if width is None else width)
+        return width
+
+    @staticmethod
+    def _overlap(block, width: int | None):
+        """The lower triangle of the overlap of a row block: in slabs of ``width`` columns, or cut by the named count."""
+
+        return _symmetric_overlap(block) if width is None else _symmetric_overlap(block, width)
+
     def ritz(self, operator: Any, filtered: DistributedBasis, *, stages: bool):
         """Generalized Rayleigh--Ritz of a filtered basis; consumes ``filtered``.
 
@@ -2124,10 +2230,11 @@ class SectorDeviceGroup:
             return self._ritz_two_blocks(operator, filtered, stages=stages)
         cp, _ = require_cupy()
         on_device = dense_solve_on_device()
-        rows, _columns = filtered.shape
+        rows, states = filtered.shape
         layout = filtered.layout
         edges = self.row_edges(rows)
         tall, _piece = self._capacities(layout, edges)
+        overlap_width = self._overlap_width(states)
         columns = filtered.take()
 
         def stage(name):
@@ -2151,7 +2258,7 @@ class SectorDeviceGroup:
             self.seconds["to_rows"] += perf_counter() - started
 
             def gram(index, device):
-                overlap = _symmetric_overlap(row_basis[index])
+                overlap = self._overlap(row_basis[index], overlap_width)
                 # A row block's part of X.T (H X) is not symmetric, but the
                 # parts are summed entry by entry and only the lower triangle
                 # of the sum is read: the lower triangle of each part suffices.
@@ -2278,6 +2385,7 @@ class SectorDeviceGroup:
             # the widest of them lets it be.
             width = self.slab_columns
             work = self._cut_capacity(rows, width, widest)
+        overlap_width = self._overlap_width(states)
         columns = filtered.take()
 
         def stage(name):
@@ -2308,7 +2416,7 @@ class SectorDeviceGroup:
                 # the projection.  Row-major: the owner copies raw memory.
                 pair = cp.zeros((2, states, states), dtype=cp.float64)
                 if row_basis[index].shape[0]:
-                    pair[0] = _symmetric_overlap(row_basis[index])
+                    pair[0] = self._overlap(row_basis[index], overlap_width)
                 return pair
 
             before = self.seconds["gram"]
@@ -2531,6 +2639,7 @@ class SectorDeviceGroup:
         self.slab_cut = "equal" if rounds == block_rounds(widths, budget) else "multiple"
         self.slab_columns, self.projection_columns = width, max(place[-1][1] for place in places)
         work = self._cut_capacity(rows, width, self.projection_columns, 1)
+        overlap_width = self._overlap_width(states)
         columns = filtered.take()
 
         def stage(name):
@@ -2596,7 +2705,7 @@ class SectorDeviceGroup:
 
         def overlap(index, device):
             if row_basis[index].shape[0]:
-                pairs[index][0] = _symmetric_overlap(row_basis[index])
+                pairs[index][0] = self._overlap(row_basis[index], overlap_width)
 
         def lift(index, device, step):
             if resident[index][step].size:
@@ -3002,6 +3111,7 @@ __all__ = [
     "equal_slabs_requested",
     "shared_pool_release_requested",
     "pair_slab_bytes",
+    "overlap_slab_width",
     "wider_slabs_fit",
     "slab_columns",
     "slab_workspace",

@@ -42,10 +42,17 @@ from .distributed_state import shared_basis_devices, shared_block_bytes
 from .eigval import CuPyEigvalResult, CuPyEigvalSolver, spill_download_order
 from .filter_graph import graph_route_name
 from .rayleigh_ritz import (
+    _tile_follows_slab,
     gram_multiple,
+    one_array_buffer_limit,
     streaming_ritz_requested,
     streaming_workspace_bytes,
 )
+
+# The share of a device's memory that the states of its sectors and one Ritz
+# buffer may take where ``auto`` decides their storage
+# (:meth:`CuPySymmetrySCFEigensolver._configure_large_problem_allocator`).
+_SECTOR_STATE_SHARE = "0.974"
 
 
 @dataclass(frozen=True)
@@ -279,7 +286,7 @@ def sector_pool_release_requested() -> bool:
 
     CuPy's memory pool keeps the blocks that arrays gave back in one free
     list per stream, and a process with several devices gives each sector a
-    stream of its own.  The Ritz buffer that a sector gave back (1 to 4 GiB,
+    stream of its own.  The Ritz buffer that a sector gave back (1 to 2 GiB,
     :func:`rayleigh_ritz._streaming_workspace`) can then not serve the next
     sector of the same device, which takes another one: both stay until the
     density step empties the pool, although the sectors of a device are
@@ -934,7 +941,10 @@ class CuPySymmetrySCFEigensolver:
         (``PARSEC_CUPY_STREAMING_RITZ``) is counted as the one with one.  A
         device that this count overfills cannot keep the states of its
         sectors on any route; one that it does not may still be too small
-        for them (58.8 GiB were sampled where it gives 56.0).
+        for them (56.8 GiB were sampled where it gives 54.0).  The buffer
+        is counted as the step takes it, within the limit of one array
+        where no budget is set: 2 GiB for these sectors, 4 GiB before
+        (:func:`rayleigh_ritz.one_array_buffer_limit`).
 
         For a shared basis the count is not a lower limit.  It is the count
         of the rule that shares the basis, whose workspace is that of slabs
@@ -989,7 +999,7 @@ class CuPySymmetrySCFEigensolver:
         devices and the pool of CuPy unless the sectors of some device
         cannot fit it (:meth:`_state_fit_bytes` above
         ``PARSEC_CUPY_SECTOR_STATE_AUTO_FRACTION`` of the memory of the
-        device, 0.978 by default): then the states are spilled to the host
+        device, 0.974 by default): then the states are spilled to the host
         after every solve and the allocations bypass the pool, so that a
         device holds the blocks of one sector at a time.  A run whose
         sectors fit thus takes the route of ``device`` and ``pool`` without
@@ -997,17 +1007,34 @@ class CuPySymmetrySCFEigensolver:
 
         The count leaves out what else a device holds, so it is held
         against a share of the device and not all of it.  In first runs on
-        A100 nodes every device with a basis of its own sampled at least
-        1.026 times its count (39 devices of 15 runs, 3.2 to 75.5 GiB
-        counted), and from 50 GiB counted up 1.8 GiB or more above it.  At
-        0.978 the rule therefore takes a device as too small only where
-        that ratio puts its peak above its memory, 1.74 GiB below the
-        79.25 GiB of such a device.  The fullest device that ran, 75.5 GiB
-        counted and 78.3 sampled, keeps its states.  10,456 electrons on
-        one device count 77.7 GiB, 1.5 GiB below the device, and are
-        spilled, as the rule before spilled them: by those figures they
-        would not have fitted.  ``1`` holds the count against all of the
-        device.  A shared basis is counted as the rule that shares it
+        A100 nodes, with the Ritz buffer of at most 4 GiB that a sector on
+        one device took then, every device with a basis of its own sampled
+        at least 1.026 times its count (39 devices of 15 runs, 3.2 to 75.5
+        GiB counted), and from 50 GiB counted up 1.8 GiB or more above it.
+        The share was 0.978 with that count: a device was taken as too
+        small only where that ratio put its peak above its memory, and
+        10,456 electrons on one device, 77.7 GiB counted and 0.981 of the
+        device, were spilled; held against all of the device they stopped
+        for memory.
+
+        The buffer takes 2 GiB at most since
+        (:func:`rayleigh_ritz.one_array_buffer_limit`), and the count with
+        it.  In first runs with that buffer the peak of a device fell by
+        the 2 GiB that its count fell by: the fullest device that ran,
+        14,680 electrons on two, counts 73.5 GiB and sampled 75.5 and 76.3,
+        1.027 times its count and more.  10,456 electrons on one device
+        now count 77.4 GiB, 0.976 of the device, below the former share.
+        Nothing says that they fit: the same sectors in a smaller sphere
+        ran on one device at 2.5 GiB above their count (71.3 counted, 73.8
+        sampled), which would be 79.9 GiB here, of 79.25.  The share is
+        therefore 0.974, the reciprocal of 1.027: a device is still taken
+        as too small only where the least ratio that was measured puts its
+        peak above its memory, 2.06 GiB below a device of 79.25 GiB, and
+        those sectors are spilled as they were.  ``0.978`` is the former
+        share and ``1`` holds the count against all of the device.  A
+        device of 79.25 GiB keeps the states of sectors of 32 GiB and more
+        up to 75.2 GiB of them, where it kept them up to 73.5.  A shared
+        basis is counted as the rule that shares it
         counts it and is held by that rule to
         ``PARSEC_CUPY_DISTRIBUTED_STATE_AUTO_FRACTION`` of a device (0.85),
         so this share decides nothing for it unless that one is raised
@@ -1052,7 +1079,9 @@ class CuPySymmetrySCFEigensolver:
                 "PARSEC_CUPY_SECTOR_STATE_STORAGE must be auto, device, or host"
             )
         share = float(
-            os.environ.get("PARSEC_CUPY_SECTOR_STATE_AUTO_FRACTION", "0.978")
+            os.environ.get(
+                "PARSEC_CUPY_SECTOR_STATE_AUTO_FRACTION", _SECTOR_STATE_SHARE
+            )
         )
         if not 0.0 < share <= 1.0:
             raise ValueError(
@@ -1061,6 +1090,10 @@ class CuPySymmetrySCFEigensolver:
         # Read by the download of a spill, after the first solve: a value
         # it does not know stops the run here, before that solve.
         spill_download_order()
+        # Read by the Ritz step of a sector on one device, inside the first
+        # solve, and by the count below where ``auto`` asks for it.
+        one_array_buffer_limit(0)
+        _tile_follows_slab()
 
         cp, _ = require_cupy()
         persistent_bytes: dict[int, int] = {

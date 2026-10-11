@@ -604,13 +604,24 @@ class MPISCFTests(unittest.TestCase):
             self.assertFalse(ritz.streaming_ritz_requested(SimpleNamespace(low_memory_ritz=True)))
             self.assertIsNone(driver._hartree_device_request())
             # The slabs of its projection as wide as they were: an eighth of the columns, and the columns of
-            # the budget where its launcher asks for one array.
+            # the budget where its launcher asks for one array.  That budget is an eighth of the basis within
+            # 1 and 4 GiB, as it was: the control names the limit that a run has at 2 GiB, and not the budget
+            # itself, which would give a basis below 32 GiB the 4 GiB as well.
             self.assertEqual(ritz.gram_multiple(), 1)
+            self.assertEqual(os.environ['PARSEC_CUPY_STREAMING_RITZ_LIMIT_BYTES'], '4294967296')
             with patch.dict('os.environ'):
                 for name in ('PARSEC_CUPY_RITZ_GRAM_SLABS', 'PARSEC_CUPY_STREAMING_RITZ_BYTES'):
                     os.environ.pop(name, None)
                 sector = SimpleNamespace(shape=(2604846, 1842), nbytes=8 * 2604846 * 1842)
                 self.assertEqual((ritz._gram_slab_width(1842), ritz._streaming_shape(sector)[0]), (231, 206))
+                smaller = SimpleNamespace(shape=(1924792, 1314), nbytes=8 * 1924792 * 1314)
+                self.assertEqual(ritz._streaming_shape(smaller), (164, 240599))
+                # A run cuts the same sectors by 2 GiB and at whole multiples of 64 columns.
+                with patch.dict('os.environ'):
+                    for name in ('PARSEC_CUPY_STREAMING_RITZ_LIMIT_BYTES', 'PARSEC_CUPY_RITZ_GRAM_MULTIPLE'):
+                        os.environ.pop(name, None)
+                    self.assertEqual((ritz._streaming_shape(sector), ritz._streaming_shape(smaller)),
+                                     ((64, 145730), (128, 204288)))
             # Its overlap has no slabs for the multiple to cut: it is asked of DSYRK, for which nothing stands
             # in here, and of no slab width, while the projection of its two arrays asks for that width once.
             basis = np.asfortranarray(np.random.default_rng(5).normal(size=(9, 4)))
@@ -657,7 +668,11 @@ class MPISCFTests(unittest.TestCase):
             self.assertFalse({'PARSEC_CUPY_STREAMING_RITZ_BYTES', 'PARSEC_CUPY_RITZ_CONDITION_HELPER',
                               'PARSEC_CUPY_IMPLICIT_TILE_GROUP_MIN_ROWS', 'PARSEC_CUPY_DISTRIBUTED_STATE_BLOCKS',
                               'PARSEC_CUPY_DISTRIBUTED_STATE_PAIR_SLAB_BYTES', 'PARSEC_CUPY_EXCHANGE_PAIRS',
-                              'PARSEC_CUPY_DISTRIBUTED_STATE_POOL_RELEASE'} & set(names))
+                              'PARSEC_CUPY_DISTRIBUTED_STATE_POOL_RELEASE',
+                              'PARSEC_CUPY_DISTRIBUTED_STATE_OVERLAP_COLUMNS'} & set(names))
+            # The count of the slabs of a Gram product stays the launcher's, as it was: the control cuts its
+            # projection by it, eight where none is named, and forms the overlap of no row block.
+            self.assertNotIn('PARSEC_CUPY_RITZ_GRAM_SLABS', names)
             # Never: only a sector context gives an operator the devices of a group.  The solver of a process
             # without one, as a control is, has four operators that no setting of the sharing lets share.
             from parsec_python.acceleration.Eigensolvers import distributed_state
@@ -1410,16 +1425,17 @@ class FullSCFRunnerContextTests(unittest.TestCase):
         # how the devices issued the copies of the last way to their rows.
         # Of the seconds of the Gram stage it says those of the overlap, whose slabs are cut by another rule
         # than the rounds of the projection: a run and its control differ in each by what that rule gave.
+        # And the columns of the widest of those slabs, which a width of their own cuts unless a count is named.
         self.environment('0')
         seconds = dict(filter=2., gram=1.5)
         shared = SimpleNamespace(devices=(0, 1), passes=3, seconds=seconds, overlap_seconds=.5, tall_blocks=1,
                                  slab_cut='equal',
-                                 slab_columns=2, projection_columns=4, separate_row_blocks=0, condition_device=1,
-                                 condition_seconds=.25, to_rows_copies='together',
+                                 slab_columns=2, projection_columns=4, overlap_columns=10, separate_row_blocks=0,
+                                 condition_device=1, condition_seconds=.25, to_rows_copies='together',
                                  layout=SimpleNamespace(parts=(((0, 3), (6, 8)), ((3, 6), (8, 10)))))
         idle = SimpleNamespace(devices=(0, 1), passes=0, seconds={}, overlap_seconds=0., tall_blocks=None, slab_cut=None,
-                               slab_columns=None, projection_columns=None, separate_row_blocks=0, condition_device=None,
-                               condition_seconds=0., to_rows_copies=None, layout=None)
+                               slab_columns=None, projection_columns=None, overlap_columns=None, separate_row_blocks=0,
+                               condition_device=None, condition_seconds=0., to_rows_copies=None, layout=None)
         operators = (None, SimpleNamespace(_sector_device_group=shared), SimpleNamespace(),
                      SimpleNamespace(_sector_device_group=idle))
         # The layout of the stencil the devices of a group filter with, and the seconds their operators took.
@@ -1431,12 +1447,12 @@ class FullSCFRunnerContextTests(unittest.TestCase):
                          [('implicit_affine_tile_16', 0.25), ('slot-major', 0.5)])
         self.assertEqual(record['distributed_state'], [
             dict(sector=1, devices=[0, 1], ritz_passes=3, seconds=seconds, overlap_seconds=.5, tall_blocks=1, slab_cut='equal',
-                 slab_columns=2, projection_columns=4, separate_row_blocks=0, condition_device=1, condition_seconds=.25,
-                 to_rows_copies='together', column_ranges=[[[0, 3], [6, 8]], [[3, 6], [8, 10]]]),
+                 slab_columns=2, projection_columns=4, overlap_columns=10, separate_row_blocks=0, condition_device=1,
+                 condition_seconds=.25, to_rows_copies='together', column_ranges=[[[0, 3], [6, 8]], [[3, 6], [8, 10]]]),
             # A group that has taken no Ritz step yet.
             dict(sector=3, devices=[0, 1], ritz_passes=0, seconds={}, overlap_seconds=0., tall_blocks=None, slab_cut=None,
-                 slab_columns=None, projection_columns=None, separate_row_blocks=0, condition_device=None,
-                 condition_seconds=0., to_rows_copies=None, column_ranges=None)])
+                 slab_columns=None, projection_columns=None, overlap_columns=None, separate_row_blocks=0,
+                 condition_device=None, condition_seconds=0., to_rows_copies=None, column_ranges=None)])
         # A group has what the record reads from its start, before any step.
         from parsec_python.acceleration.Eigensolvers import distributed_state
 
@@ -1448,7 +1464,7 @@ class FullSCFRunnerContextTests(unittest.TestCase):
         self.assertEqual((group.passes, group.tall_blocks, group.slab_cut, group.slab_columns, group.projection_columns,
                           group.separate_row_blocks, group.layout), (0, None, None, None, None, 0, None))
         self.assertEqual((group.condition_device, group.condition_seconds, group.to_rows_copies), (None, 0., None))
-        self.assertEqual(group.overlap_seconds, 0.)
+        self.assertEqual((group.overlap_seconds, group.overlap_columns), (0., None))
 
     def test_rank_record_names_the_pool_releases_of_finished_sectors(self):
         # What ``sector_pool_releases`` of the rank's solver says; a solver without it released nothing.
@@ -1693,9 +1709,10 @@ class FullSCFRunnerContextTests(unittest.TestCase):
         worker, _created = self.run_worker_rank(self.cupy(count=2), threading.Event(), (None, owner))
         (sector,) = worker['distributed_state']
         self.assertEqual({name: sector[name] for name in ('slab_cut', 'slab_columns', 'projection_columns',
-                                                          'overlap_seconds', 'to_rows_copies', 'tall_blocks')},
+                                                          'overlap_seconds', 'overlap_columns', 'to_rows_copies',
+                                                          'tall_blocks')},
                          dict(slab_cut=None, slab_columns=None, projection_columns=None, overlap_seconds=0.,
-                              to_rows_copies=None, tall_blocks=None))
+                              overlap_columns=None, to_rows_copies=None, tall_blocks=None))
         self.assertEqual(set(sector['seconds']), set(distributed_state.SectorDeviceGroup.STAGES))
         # One note says how each is read.  They stand on neighbouring lines of the runner, written by
         # different changes: every one of them, once.
@@ -1709,6 +1726,9 @@ class FullSCFRunnerContextTests(unittest.TestCase):
                       'slab_columns is the widest slab', 'to_rows_copies is the order', 'PARSEC_CUPY_EXCHANGE_PAIRS',
                       'slab_cut says how that step cut them', 'PARSEC_CUPY_RITZ_GRAM_MULTIPLE columns (64)',
                       'projection_columns is the widest right-hand side', 'overlap_seconds is the part of seconds.gram',
+                      'overlap_columns is the widest slab of that overlap',
+                      '128 columns (PARSEC_CUPY_DISTRIBUTED_STATE_OVERLAP_COLUMNS)',
+                      'PARSEC_CUPY_RITZ_GRAM_SLABS names one (8 gives the former slabs',
                       'shared says whether the pools of the devices of a shared sector basis are emptied as well '
                       '(PARSEC_CUPY_DISTRIBUTED_STATE_POOL_RELEASE)', 'shared_kept counts the densities'):
             with self.subTest(words=words):
@@ -1731,7 +1751,11 @@ class FullSCFRunnerContextTests(unittest.TestCase):
         # for a basis on one device only. Devices that shared a basis have sampled less than their count
         # outside their context.
         (note,) = [note for note in record['notes'] if 'sector_state_fit_bytes' in note]
-        self.assertIn('PARSEC_CUPY_SECTOR_STATE_AUTO_FRACTION (0.978) of the memory of the device', note)
+        self.assertIn('PARSEC_CUPY_SECTOR_STATE_AUTO_FRACTION (0.974) of the memory of the device', note)
+        # The buffer in that count is the one the Ritz step takes, and both former values are named.
+        self.assertIn('with one buffer of the Ritz step (at most 2 GiB, or 64 columns of all rows where 2 GiB hold '
+                      'fewer, where neither PARSEC_CUPY_STREAMING_RITZ_BYTES nor PARSEC_CUPY_STREAMING_RITZ_LIMIT_BYTES '
+                      'is set; 4294967296 for the limit and 0.978 for the share give the former count and decision)', note)
         self.assertIn('For a basis on one device it is a lower limit of what the device must hold', note)
         self.assertIn('For a shared basis it is what the rule that shares it counts', note)
         self.assertIn('a device can hold less outside its context', note)
