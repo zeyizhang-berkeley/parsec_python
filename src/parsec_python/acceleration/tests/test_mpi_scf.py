@@ -1899,7 +1899,8 @@ class FullSCFRunnerContextTests(unittest.TestCase):
         # A density builder as a run makes it, with no switch of the release named.
         with patch.dict('os.environ'):
             for name in ('PARSEC_CUPY_DENSITY_RELEASE', 'PARSEC_CUPY_DISTRIBUTED_STATE_POOL_RELEASE',
-                         'PARSEC_CUPY_DENSITY_COLLECTION', 'PARSEC_CUPY_POOL_RELEASE_ORBITAL_BYTES'):
+                         'PARSEC_CUPY_DENSITY_COLLECTION', 'PARSEC_CUPY_POOL_RELEASE_ORBITAL_BYTES',
+                         'PARSEC_CUPY_SPILL_PINNED_POOL'):
                 os.environ.pop(name, None)
             builder = CuPySymmetryDensityBuilder(lambda *args: None)
         try:
@@ -1911,8 +1912,14 @@ class FullSCFRunnerContextTests(unittest.TestCase):
         # the states and the shared sectors: what one rank and the result record of them.
         for name in ('domain_rule_seconds', 'cuda_context_driver_devices', 'cuda_context_driver_seconds',
                      'density_pool_release', 'orbital_sector_state_storage', 'orbital_memory_allocator',
-                     'sector_state_fit_bytes', 'distributed_state'):
+                     'sector_state_fit_bytes', 'distributed_state', 'spill_staging'):
             self.assertIn(name, rank)
+        # The staging of a spill: nothing for a rank whose states stay on their devices, and in the record of
+        # the release whether the pinned pool is kept where they do not.
+        self.assertIsNone(rank['spill_staging'])
+        self.assertEqual({name: rank['density_pool_release'][name] for name in ('spill_pinned_pool', 'pinned_kept',
+                                                                               'host_uploads')},
+                         dict(spill_pinned_pool='keep', pinned_kept=0, host_uploads=None))
         self.assertIn('domain', record['result'])
         # Of the release: how the pools of several devices are emptied, and whether those of a shared basis
         # are, with the densities after which they were left.
@@ -1956,7 +1963,11 @@ class FullSCFRunnerContextTests(unittest.TestCase):
                       '128 columns (PARSEC_CUPY_DISTRIBUTED_STATE_OVERLAP_COLUMNS)',
                       'PARSEC_CUPY_RITZ_GRAM_SLABS names one (8 gives the former slabs',
                       'shared says whether the pools of the devices of a shared sector basis are emptied as well '
-                      '(PARSEC_CUPY_DISTRIBUTED_STATE_POOL_RELEASE)', 'shared_kept counts the densities'):
+                      '(PARSEC_CUPY_DISTRIBUTED_STATE_POOL_RELEASE)', 'shared_kept counts the densities',
+                      'spill_staging of a rank says how sector states that it keeps on the host went there and back',
+                      'PARSEC_CUPY_SPILL_BUFFERS', 'PARSEC_CUPY_SPILL_PINNED_BYTES', 'PARSEC_CUPY_SPILL_PINNED_POOL',
+                      'host_uploads counts the orbitals that the device builder was handed on the host',
+                      'A serial control names fresh and release where its launcher names neither'):
             with self.subTest(words=words):
                 self.assertEqual(sum(words in note for note in record['notes']), 1)
         # The slab limit of two devices is named where the slabs are and where the storage rule counts them.
@@ -2023,6 +2034,11 @@ class FullSCFRunnerContextTests(unittest.TestCase):
         self.runner._keep_former_routes(control)
         names = ('PARSEC_CUPY_DIRECT_ALLOCATOR_FRACTION', 'PARSEC_CUPY_SPILL_DOWNLOAD_ORDER')
         self.assertEqual([control[name] for name in names], ['0.5', 'C'])
+        # The staging of such a spill is the former one as well, which another note says.
+        names = ('PARSEC_CUPY_SPILL_BUFFERS', 'PARSEC_CUPY_SPILL_PINNED_POOL')
+        self.assertEqual([control[name] for name in names], ['fresh', 'release'])
+        (note,) = [note for note in record['notes'] if 'spill_staging' in note]
+        self.assertIn('A serial control names fresh and release where its launcher names neither', note)
 
 
 class DriverContextTests(unittest.TestCase):

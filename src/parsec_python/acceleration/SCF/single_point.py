@@ -140,6 +140,7 @@ def _finalize_result(system, result, symmetry_eigensolver):
             "orbital_sector_final_state_counts",
             "orbital_memory_allocator",
             "orbital_sector_state_storage",
+            "orbital_sector_spill_staging",
         }
         # Written at preparation from what the sectors held and from the
         # switch of the filter graphs; now from the later passes that ran
@@ -173,6 +174,23 @@ def _finalize_result(system, result, symmetry_eigensolver):
                 str(symmetry_eigensolver.sector_state_storage),
             ),
         )
+        # Only where sector states were kept on the host in buffers of
+        # their own (PARSEC_CUPY_SPILL_BUFFERS): a run that keeps them on
+        # its devices, or stages them as before, has the details it had.
+        staging = getattr(symmetry_eigensolver, "spill_staging", None)
+        if isinstance(staging, dict) and staging["buffers"] == "persistent":
+            sectors = staging["sectors"].values()
+            details += (
+                (
+                    "orbital_sector_spill_staging",
+                    "persistent host buffers with direct copies; "
+                    f"{sum(item['page_locked'] for item in sectors)} of "
+                    f"{len(sectors)} page-locked, "
+                    f"{staging['page_locked_bytes']} B within "
+                    f"{staging['bound_bytes']} B ({staging['bound_from']}), "
+                    f"{staging['pageable_bytes']} B pageable",
+                ),
+            )
         system.backend_info = replace(
             system.backend_info, details=details
         )

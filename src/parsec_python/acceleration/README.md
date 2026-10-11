@@ -1382,7 +1382,8 @@ wait for behind its density command (`release` `threads`, `shared` `keep`,
 row at `1`. A shared basis is never spilled to the host: a rank whose
 sectors are all shared keeps its pools under either storage of the states,
 and sector states that a rank keeps on the host beside a shared basis are
-collected for and empty the pinned pool as they do alone. The block
+collected for as they are alone, and like those leave the pinned pool since
+(`PARSEC_CUPY_SPILL_PINNED_POOL`, below). The block
 "Density at the sphere" after the SCF reads the density of the result on the
 host and takes nothing from a device, whatever the pools hold then.
 
@@ -1411,10 +1412,13 @@ asks it for the overlap (`PARSEC_CUDA_CONTEXT_CREATION=runtime`). Where its
 launcher leaves the storage of the sector states or their allocator to the
 solver it decides by the former rule
 (`PARSEC_CUPY_DIRECT_ALLOCATOR_FRACTION=0.5`) and downloads a spilled basis
-by the former call (`PARSEC_CUPY_SPILL_DOWNLOAD_ORDER=C`): its Ritz step
+by the former call (`PARSEC_CUPY_SPILL_DOWNLOAD_ORDER=C`), into a new array
+and back through the pinned pool, which it empties after every density
+(`PARSEC_CUPY_SPILL_BUFFERS=fresh`, `PARSEC_CUPY_SPILL_PINNED_POOL=release`):
+its Ritz step
 takes two arrays per sector, which the count of the rule that came after
-does not hold; with both values named, as in every measured control, neither
-is read. The report of the sphere (`PARSEC_DOMAIN_REPORT`) is the
+does not hold; with both values named, as in every measured control, none
+of these is read. The report of the sphere (`PARSEC_DOMAIN_REPORT`) is the
 launcher's. Of the Hartree boundary it names the kernels and the evaluator
 of the tail, `PARSEC_HARTREE_BOUNDARY_KERNEL=full` and
 `PARSEC_HARTREE_ATOMIC_TAIL_VALUES=host`, and nothing else: the order, the
@@ -1578,6 +1582,32 @@ shows the chain of stages of a rank (`preparation_stages`, below under
 "Timing and profiling"). The serial control of the runner names the three
 former values, so the line of its routes in `parsec.out` has three settings
 more than it had.
+
+Three switches of the host staging came after that table. They act only
+where sector states are kept on the host
+(`PARSEC_CUPY_SECTOR_STATE_STORAGE=host`, or `auto` where a device that
+solves several sectors in turn cannot hold them together, as on 1 and 2
+GPUs); which sectors are spilled is not theirs to decide. They have not run
+on A100 nodes as complete
+calculations: the last column is one array of 18.84 GiB, the basis of a
+sector of 10,456 electrons, between an A100 and its host.
+
+| Switch | Default | Former value | Results | Says what ran | Serial control | A100 node, one array of 18.84 GiB |
+|---|---|---|---|---|---|---|
+| `PARSEC_CUPY_SPILL_BUFFERS` | `persistent`: a spilled sector keeps one host buffer of the size of its basis; a download writes into it and an upload reads it where it lies (`ndarray.get(out=)`, `ndarray.set`), before a solve and for the density, with no staging block and no second array on the device | `fresh`: a new pageable array for every download (`cupy.asnumpy`) and a block of CuPy's pinned pool for every upload (`cupy.asarray`); `PARSEC_CUPY_SPILL_DOWNLOAD_ORDER` belongs to this staging | same bits | `spill_staging` of a rank in `timing.json`; the detail `orbital_sector_spill_staging` of a run with buffers; `host_uploads` under `density_pool_release` | `fresh` | 0.758 s up and 0.770 s down through a page-locked buffer (24.8 and 24.5 GiB/s) and 1.40 and 1.52 s through a pageable one that is kept, against 1.75 s up with the staging block in the pool (17.99 s with the pool empty) and 2.62 s down into a new array |
+| `PARSEC_CUPY_SPILL_PINNED_BYTES` | unset: the buffers of a process are page-locked while their sum stays within half of the memory that the host has available when the storage is decided, and within `RLIMIT_MEMLOCK` where the system sets one; the buffers beyond that, and one that the driver refuses to lock, are pageable | a number of bytes, taken as it is; `0` locks nothing. There is no former value: `fresh` has no buffers | same bits | `bound_bytes`, `bound_from`, `page_locked_bytes`, `pageable_bytes`, `lock_seconds` and `lock_failures` under `spill_staging` | not named: it has no buffers | page-locking one buffer took 9.6 to 9.7 s, four of them one after another 38.4 s, and their return 13.9 s |
+| `PARSEC_CUPY_SPILL_PINNED_POOL` | `keep`: a density that was handed a sector whose states are on the host leaves CuPy's pinned pool as it is; with `fresh` the staging block then serves every upload of the run | `release`: the pinned pool is emptied after every density | same bits | `spill_pinned_pool` and `pinned_kept` under `density_pool_release` of a rank | `release` | emptying the pool with the staging block of 32 GiB in it took 5.82 to 5.89 s, and page-locking that block again 15.9 to 16.3 s |
+
+`MULTI_GPU.md` describes them. With `fresh` and `release` named a spilled
+calculation takes the former calls in their order and is that of the code
+before these switches bit for bit, also where
+`PARSEC_CUPY_SPILL_DOWNLOAD_ORDER=C` asks for the download as it was before
+that. So it was on a laptop GPU for 32 and 176 electrons through the hybrid
+driver and the MPI runner, every array of the archive, the backend details
+and `parsec.out` apart from its times; with the buffers, page-locked and
+pageable, the arrays and that file were the same and the details had one
+entry more. The serial control names both where its launcher names neither,
+so the line that lists its routes has these two settings more.
 
 The sphere radius has no environment switch. An input that leaves
 `Boundary_Sphere_Radius` out gets the radius and the Hartree tolerance of

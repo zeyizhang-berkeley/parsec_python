@@ -53,6 +53,12 @@ from .rayleigh_ritz import (
     streaming_ritz_requested,
     streaming_workspace_bytes,
 )
+from .spill_buffers import (
+    SpillBuffers,
+    spill_buffer_mode,
+    spill_pinned_bytes,
+    spill_pinned_pool,
+)
 
 # The share of a device's memory that the states of its sectors and one Ritz
 # buffer may take where ``auto`` decides their storage
@@ -371,6 +377,12 @@ class CuPySymmetrySCFEigensolver:
         # ``_state_fit_bytes``); ``None`` where no ``auto`` asked, and
         # where it decided by the former rule, which counts no such bytes.
         self.state_fit_bytes: dict[int, int] | None = None
+        # Of sector states kept on the host: the staging, the host buffers
+        # of the sectors where it has them, and per sector the calls and
+        # seconds of its moves (see ``spill_staging``).
+        self._spill_staging: str | None = None
+        self._spill_buffers: SpillBuffers | None = None
+        self._spill_seconds: dict[int, list] = {}
         self._previous_memory_allocator = None
         self._memory_allocator_evaluated = False
         self.mpi_context = mpi_context
@@ -955,6 +967,11 @@ class CuPySymmetrySCFEigensolver:
                 solver.reset()
         self._state = None
         self._sector_counts = None
+        # A result of an earlier solve may hold views of the spill buffers:
+        # the next solve must not write over them.
+        buffers = getattr(self, "_spill_buffers", None)
+        if buffers is not None:
+            buffers.release()
 
     def _state_fit_bytes(self, counts: list[int]) -> dict[int, int]:
         """Bytes that the rule of the state storage counts on each device for the sectors solved here.
@@ -1096,6 +1113,14 @@ class CuPySymmetrySCFEigensolver:
         (:func:`eigval.spill_download_order`).  Naming
         ``PARSEC_CUPY_DIRECT_ALLOCATOR_FRACTION`` selects that rule, with
         the fraction it names; ``0.5`` was its default.
+
+        Which sectors are spilled is decided above and by nothing below.
+        Where they are, the host buffers of their states are planned here
+        (``PARSEC_CUPY_SPILL_BUFFERS``, :class:`spill_buffers.SpillBuffers`):
+        one per sector of this process, page-locked within the bound of
+        :func:`spill_buffers.page_lock_bound`, which reads the memory that
+        the host has available now.  No device holds more or less for it:
+        an upload takes the one array that it took, and a download none.
         """
 
         if self._memory_allocator_evaluated:
@@ -1132,8 +1157,12 @@ class CuPySymmetrySCFEigensolver:
                 "PARSEC_CUPY_SECTOR_STATE_AUTO_FRACTION must be in (0, 1]"
             )
         # Read by the download of a spill, after the first solve: a value
-        # it does not know stops the run here, before that solve.
+        # it does not know stops the run here, before that solve.  So do
+        # those of its staging, which the density step reads as well.
         spill_download_order()
+        staging = spill_buffer_mode()
+        spill_pinned_pool()
+        spill_pinned_bytes()
         # Read by the Ritz step of a sector on one device, inside the first
         # solve, and by the count below where ``auto`` asks for it.
         one_array_buffer_limit(0)
@@ -1182,6 +1211,22 @@ class CuPySymmetrySCFEigensolver:
             if self._host_spill_sector_states
             else "persistent CUDA representation states"
         )
+        # The host buffers of the spilled sectors and which of them may be
+        # page-locked (PARSEC_CUPY_SPILL_BUFFERS): planned here from the
+        # bytes of each basis at the counts of the first solve, in the
+        # order of the sectors, and taken by each sector when it is first
+        # downloaded.  ``fresh`` plans none: the staging is the former one.
+        self._spill_staging = staging if self._host_spill_sector_states else None
+        self._spill_buffers = None
+        self._spill_seconds = {}
+        if self._host_spill_sector_states and staging == "persistent":
+            self._spill_buffers = SpillBuffers({
+                representation: self.decomposition.sector_size(representation)
+                * int(count)
+                * np.dtype(np.float64).itemsize
+                for representation, count in enumerate(counts)
+                if self._solvers[representation] is not None
+            })
         # PARSEC_CUPY_STREAMING_RITZ=auto: a sector whose basis lies on one
         # device keeps one array of its subspace.  The ordinary Ritz solve
         # keeps two (measured peak about twice the persistent orbitals plus
@@ -1386,20 +1431,41 @@ class CuPySymmetrySCFEigensolver:
         """Run one independent solver on its assigned CUDA stream."""
 
         cp, _ = require_cupy()
+        spilled = getattr(self, "_host_spill_sector_states", False)
+        # The host buffer that the sector keeps, where the staging has
+        # them (PARSEC_CUPY_SPILL_BUFFERS); a solver is handed none
+        # otherwise and moves its states by the former calls.
+        buffers = getattr(self, "_spill_buffers", None)
+        staged = () if buffers is None else (buffers.get(representation),)
+        # Calls and wall seconds of the two moves of this sector, under
+        # either staging: [restores, their seconds, offloads, theirs].
+        moves = (
+            getattr(self, "_spill_seconds", {}).setdefault(
+                representation, [0, 0.0, 0, 0.0]
+            )
+            if spilled
+            else None
+        )
         with cp.cuda.Device(self._sector_device_ids[representation]):
             with self._streams[representation]:
                 solver = self._solvers[representation]
                 if reset:
                     solver.reset()
-                elif getattr(self, "_host_spill_sector_states", False):
-                    solver.restore_state_to_device()
+                elif spilled:
+                    started = perf_counter()
+                    solver.restore_state_to_device(*staged)
+                    moves[0] += 1
+                    moves[1] += perf_counter() - started
                 result = solver.solve(
                     count,
                     settings=settings,
                     spectral_bound=spectral_bound,
                 )
-                if getattr(self, "_host_spill_sector_states", False):
-                    host_state = solver.offload_state_to_host()
+                if spilled:
+                    started = perf_counter()
+                    host_state = solver.offload_state_to_host(*staged)
+                    moves[2] += 1
+                    moves[3] += perf_counter() - started
                     assert host_state is not None
                     result = replace(
                         result,
@@ -1487,6 +1553,42 @@ class CuPySymmetrySCFEigensolver:
                 getattr(self, "_pool_releases", None) or {}
             ).items()
         }
+
+    @property
+    def spill_staging(self) -> dict[str, Any] | None:
+        """How the sector states of this process went to the host and back.
+
+        ``None`` where they stay on their devices.  Otherwise ``buffers``
+        names the staging (``PARSEC_CUPY_SPILL_BUFFERS``), and under either
+        ``restores`` and ``offloads`` count the calls that moved the states
+        of a sector to its device before a solve and to the host behind
+        it, with the wall seconds of those calls.  With ``fresh`` the
+        seconds of a restore end where ``cupy.asarray`` returns, which can
+        be before its copy to the device has completed.  With
+        ``persistent`` they are those of complete copies, the offloads
+        hold the page-locking of each buffer once, and the record of the
+        buffers is added (:attr:`spill_buffers.SpillBuffers.record`): the
+        bound and where it comes from, the bytes that are page-locked and
+        pageable, and the bytes that went up and down.  The uploads of the
+        density step are counted by its builder.  Reports what ran, so it
+        is read after a solve.
+        """
+
+        staging = getattr(self, "_spill_staging", None)
+        if staging is None:
+            return None
+        moves = list((getattr(self, "_spill_seconds", None) or {}).values())
+        record = dict(
+            buffers=staging,
+            restores=sum(item[0] for item in moves),
+            restore_seconds=sum(item[1] for item in moves),
+            offloads=sum(item[2] for item in moves),
+            offload_seconds=sum(item[3] for item in moves),
+        )
+        buffers = getattr(self, "_spill_buffers", None)
+        if buffers is not None:
+            record.update(buffers.record)
+        return record
 
     def _run_one_bound(
         self,

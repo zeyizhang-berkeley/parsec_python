@@ -1011,8 +1011,12 @@ class SectorStateStorageTests(unittest.TestCase):
                  r"PARSEC_CUPY_SECTOR_STATE_AUTO_FRACTION must be in \(0, 1\]"),
                 (dict(PARSEC_CUPY_SECTOR_STATE_AUTO_FRACTION="nan"), r"PARSEC_CUPY_SECTOR_STATE_AUTO_FRACTION must be in \(0, 1\]"),
                 (dict(PARSEC_CUPY_SECTOR_STATE_AUTO_FRACTION="all"), "could not convert string to float"),
-                # Read by the download of a spill, which comes after the first solve.
-                (dict(PARSEC_CUPY_SPILL_DOWNLOAD_ORDER="F"), "PARSEC_CUPY_SPILL_DOWNLOAD_ORDER must be A or C")):
+                # Read by the download of a spill, which comes after the first solve, and by its staging.
+                (dict(PARSEC_CUPY_SPILL_DOWNLOAD_ORDER="F"), "PARSEC_CUPY_SPILL_DOWNLOAD_ORDER must be A or C"),
+                (dict(PARSEC_CUPY_SPILL_BUFFERS="pinned"), "PARSEC_CUPY_SPILL_BUFFERS must be persistent or fresh"),
+                (dict(PARSEC_CUPY_SPILL_PINNED_POOL="0"), "PARSEC_CUPY_SPILL_PINNED_POOL must be keep or release"),
+                (dict(PARSEC_CUPY_SPILL_PINNED_BYTES="half"), "PARSEC_CUPY_SPILL_PINNED_BYTES must be a nonnegative integer"),
+                (dict(PARSEC_CUPY_SPILL_PINNED_BYTES="-1"), "PARSEC_CUPY_SPILL_PINNED_BYTES must be nonnegative")):
             # Also where both values are named and the rule is not asked.
             for named in ({}, dict(PARSEC_CUPY_SECTOR_STATE_STORAGE="device", PARSEC_CUPY_LARGE_PROBLEM_ALLOCATOR="pool")):
                 with self.subTest(environment=environment, named=named), self.assertRaisesRegex(ValueError, words):
@@ -1201,7 +1205,10 @@ class SectorStateStorageTests(unittest.TestCase):
         preparation = {"PARSEC_OVERLAP_ION_ION_SETUP": "0", "PARSEC_OVERLAP_SYMMETRY_SETUP": "0",
                        "PARSEC_IONIC_SUM_GRID": "full"}
         self.assertEqual({name: control[name] for name in preparation}, preparation)
-        self.assertEqual(len(control), 26 + len(preparation))
+        # And, since, the former staging of a spill: the download by the former call belongs to it.
+        self.assertEqual((control["PARSEC_CUPY_SPILL_BUFFERS"], control["PARSEC_CUPY_SPILL_PINNED_POOL"]),
+                         ("fresh", "release"))
+        self.assertEqual(len(control), 28 + len(preparation))
 
     def test_the_former_values_of_the_switches_of_the_round_after_select_every_former_route_together(self):
         import importlib
@@ -1293,6 +1300,63 @@ class SectorStateStorageTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "PARSEC_CUPY_STREAMING_RITZ_TILE must be budget or slab"):
             self.decide(self.K06, ((0,),) * 4, PARSEC_CUPY_STREAMING_RITZ_TILE="row")
         self.assertEqual(control["PARSEC_CUPY_STREAMING_RITZ_TILE"], "budget")
+
+    def test_spilled_sectors_get_host_buffers_planned_within_a_bound_and_none_with_the_former_staging(self):
+        from parsec_python.acceleration.Eigensolvers import spill_buffers
+        # 10,456 electrons on one device are spilled by the rule: four bases of 18.84 GiB on the host.
+        layout = (self.K09, ((0,),) * 4)
+        basis = self.vectors(self.K09)
+        self.assertEqual(basis, 20_233_413_504)
+        former, former_events = self.decide(*layout, PARSEC_CUPY_SPILL_BUFFERS="fresh")
+        self.assertEqual((former._host_spill_sector_states, former._spill_buffers), (True, None))
+        self.assertEqual(former.spill_staging, dict(buffers="fresh", restores=0, restore_seconds=0, offloads=0,
+                                                    offload_seconds=0))
+        # A named bound of a byte less than the four: the first three may be page-locked, in the order of the
+        # sectors.  What is spilled, the allocator and the pools are those of the former staging.
+        solver, events = self.decide(*layout, PARSEC_CUPY_SPILL_PINNED_BYTES=str(4 * basis - 1))
+        self.assertEqual((solver._host_spill_sector_states, solver.sector_state_storage, solver.memory_allocator_policy,
+                          events, solver.state_fit_bytes),
+                         (True, former.sector_state_storage, former.memory_allocator_policy, former_events,
+                          former.state_fit_bytes))
+        record = solver.spill_staging
+        self.assertEqual((record["buffers"], record["bound_bytes"], record["bound_from"]),
+                         ("persistent", 4 * basis - 1, "PARSEC_CUPY_SPILL_PINNED_BYTES"))
+        self.assertEqual({sector: item["planned"] for sector, item in record["sectors"].items()},
+                         {0: "page-locked", 1: "page-locked", 2: "page-locked", 3: "pageable"})
+        self.assertEqual(solver._spill_buffers.planned_bytes, 3 * basis)
+        # Nothing is taken here: a sector takes its buffer when it is first downloaded.
+        self.assertEqual((record["page_locked_bytes"], record["pageable_bytes"], record["lock_seconds"],
+                          [item["bytes"] for item in record["sectors"].values()]), (0, 0, 0, [0] * 4))
+        # Without a named bound the host gives it: half of the memory it has available, the limit of the
+        # system on locked memory where that is less, and nothing where its memory cannot be read.
+        half, limit, unread = ("half of the available host memory", "RLIMIT_MEMLOCK",
+                               "the available memory of the host could not be read")
+        for available, locked, bound, source, planned in (
+                (256 << 30, None, 128 << 30, half, 4), (256 << 30, 1 << 40, 128 << 30, half, 4),
+                (100 << 30, None, 50 << 30, half, 2), (30 << 30, None, 15 << 30, half, 0),
+                (256 << 30, 64 << 20, 64 << 20, limit, 0), (256 << 30, 40 << 30, 40 << 30, limit, 2),
+                (None, None, 0, unread, 0), (None, 40 << 30, 0, unread, 0)):
+            with self.subTest(available=available, locked=locked), \
+                 patch.object(spill_buffers, "host_available_bytes", return_value=available), \
+                 patch.object(spill_buffers, "locked_memory_limit", return_value=locked):
+                record = self.decide(*layout)[0].spill_staging
+                self.assertEqual((record["bound_bytes"], record["bound_from"]), (bound, source))
+                self.assertEqual([item["planned"] for item in record["sectors"].values()],
+                                 ["page-locked"] * planned + ["pageable"] * (4 - planned))
+                # Named bytes are taken as they are, whatever the host says: all, and none.
+                for named, locks in ((str(1 << 50), 4), ("0", 0)):
+                    record = self.decide(*layout, PARSEC_CUPY_SPILL_PINNED_BYTES=named)[0].spill_staging
+                    self.assertEqual((record["bound_bytes"], sum(item["planned"] == "page-locked"
+                                                                  for item in record["sectors"].values())),
+                                     (int(named), locks))
+        # A rank plans for the sectors it solves: two of 19,392 electrons on one device, which cannot hold them.
+        rank, _events = self.decide(self.K11, ((0,), (9,), (0,), (9,)), (0, 2), PARSEC_CUPY_SPILL_PINNED_BYTES=str(1 << 50))
+        self.assertTrue(rank._host_spill_sector_states)
+        self.assertEqual(sorted(rank.spill_staging["sectors"]), [0, 2])
+        # Sectors that stay on their devices have no buffers and no record, whatever the staging is called.
+        for environment in ({}, dict(PARSEC_CUPY_SPILL_BUFFERS="fresh"), dict(PARSEC_CUPY_SPILL_BUFFERS="persistent")):
+            kept, _events = self.decide(self.K06, ((0,),) * 4, **environment)
+            self.assertEqual((kept._host_spill_sector_states, kept._spill_buffers, kept.spill_staging), (False, None, None))
 
 
 class SpillDownloadTests(unittest.TestCase):
@@ -1421,6 +1485,602 @@ class SpillDownloadDeviceTests(unittest.TestCase):
                     self.assertTrue(restored.flags.f_contiguous)
                     self.assertTrue(bool(cp.array_equal(restored, vectors)))
             np.testing.assert_array_equal(hosts[None], hosts["C"])
+
+
+class _StagedArray:
+    """What the staging of a spill reads of a device array, on host memory; ``log`` says what was asked of it."""
+
+    def __init__(self, values, log):
+        self.values, self.log = values, log
+        self.shape, self.dtype, self.ndim, self.size = values.shape, values.dtype, values.ndim, values.size
+        self.flags, self.nbytes = values.flags, values.nbytes
+
+    def get(self, out=None):
+        # As CuPy does it: a target of the order of the array takes the bytes as they lie.
+        self.log.append(("get", "F" if out.flags.f_contiguous else "C"))
+        assert out.flags.f_contiguous and self.flags.f_contiguous
+        out[...] = self.values
+        return out
+
+    def set(self, host):
+        self.log.append(("set", host.shape))
+        self.values[...] = host
+
+
+class SpillBufferTests(unittest.TestCase):
+    """The host buffers of spilled sectors and their direct copies (PARSEC_CUPY_SPILL_BUFFERS), on stand-ins."""
+
+    def setUp(self):
+        from parsec_python.acceleration.Eigensolvers import spill_buffers
+        self.module = spill_buffers
+        self.log, self.locked, self.refuse = [], [], None
+
+        def lock(nbytes):
+            # Page-locked memory of the system: exactly the bytes asked, or the refusal of the driver.
+            self.locked.append(int(nbytes))
+            if self.refuse is not None:
+                raise self.refuse
+            return bytearray(nbytes)
+
+        def asnumpy(array, order="C"):
+            self.log.append(("asnumpy", order))
+            if order == "A":
+                order = "F" if array.flags.f_contiguous and not array.flags.c_contiguous else "C"
+            return np.array(array.values, order=order)
+
+        def asarray(values, dtype=None, order=None):
+            self.log.append(("asarray", np.shape(values), order))
+            return _StagedArray(np.array(values, dtype=dtype, order=order), self.log)
+
+        def empty(shape, dtype=None, order="C"):
+            self.log.append(("empty", tuple(shape), order))
+            return _StagedArray(np.empty(shape, dtype=dtype, order=order), self.log)
+
+        self.cp = SimpleNamespace(
+            ndarray=_StagedArray, float64=np.float64, asnumpy=asnumpy, asarray=asarray, empty=empty,
+            cuda=SimpleNamespace(
+                PinnedMemory=lock, PinnedMemoryPointer=lambda memory, offset: memory,
+                get_current_stream=lambda: SimpleNamespace(synchronize=lambda: self.log.append(("synchronize",)))))
+
+    def device(self, values):
+        return _StagedArray(np.array(values), self.log)
+
+    def buffers(self, sizes, bound):
+        return self.module.SpillBuffers(sizes, (bound, "named by the test"))
+
+    def test_the_switches_name_their_values_and_refuse_others(self):
+        module = self.module
+        with patch.dict(os.environ):
+            for name in ("PARSEC_CUPY_SPILL_BUFFERS", "PARSEC_CUPY_SPILL_PINNED_BYTES"):
+                os.environ.pop(name, None)
+            self.assertEqual((module.spill_buffer_mode(), module.spill_pinned_bytes()), ("persistent", None))
+            for raw, mode in ((" Fresh ", "fresh"), ("persistent", "persistent")):
+                os.environ["PARSEC_CUPY_SPILL_BUFFERS"] = raw
+                self.assertEqual(module.spill_buffer_mode(), mode)
+                # The builder of a density reads it too, when a calculation is prepared.
+                builder = CuPyDeviceDensityBuilder(SimpleNamespace())
+                self.assertEqual((builder.direct_host_upload, builder.host_uploads),
+                                 (mode == "persistent", dict(direct=mode == "persistent", calls=0, bytes=0, seconds=0.0)))
+            for unknown in ("pinned", "0", "former", ""):
+                os.environ["PARSEC_CUPY_SPILL_BUFFERS"] = unknown
+                with self.assertRaisesRegex(ValueError, "PARSEC_CUPY_SPILL_BUFFERS must be persistent or fresh"):
+                    module.spill_buffer_mode()
+                with self.assertRaisesRegex(ValueError, "PARSEC_CUPY_SPILL_BUFFERS"):
+                    CuPyDeviceDensityBuilder(SimpleNamespace())
+            for raw, value in (("0", 0), (" 1073741824 ", 1 << 30), (str(1 << 50), 1 << 50)):
+                os.environ["PARSEC_CUPY_SPILL_PINNED_BYTES"] = raw
+                self.assertEqual(module.spill_pinned_bytes(), value)
+                # A named value is the bound, whatever the host has.
+                with patch.object(module, "host_available_bytes", return_value=1 << 20), \
+                     patch.object(module, "locked_memory_limit", return_value=1 << 10):
+                    self.assertEqual(module.page_lock_bound(), (value, "PARSEC_CUPY_SPILL_PINNED_BYTES"))
+            for unknown, words in (("-1", "must be nonnegative"), ("1e9", "must be a nonnegative integer"),
+                                   ("", "must be a nonnegative integer"), ("all", "must be a nonnegative integer")):
+                os.environ["PARSEC_CUPY_SPILL_PINNED_BYTES"] = unknown
+                with self.assertRaisesRegex(ValueError, "PARSEC_CUPY_SPILL_PINNED_BYTES " + words):
+                    module.spill_pinned_bytes()
+            # What this host says of itself: bytes that are available now, and a limit or none.  The bound
+            # reads the host once, and what is available changes from one reading to the next.
+            del os.environ["PARSEC_CUPY_SPILL_PINNED_BYTES"]
+            limit, read, readings = module.locked_memory_limit(), module.host_available_bytes, []
+
+            def reading():
+                readings.append(read())
+                return readings[-1]
+
+            with patch.object(module, "host_available_bytes", reading):
+                bound, source = module.page_lock_bound()
+            (available,) = readings
+            self.assertTrue(available is None or available > 0)
+            self.assertTrue(limit is None or limit >= 0)
+            if available is None:
+                self.assertEqual((bound, source), (0, "the available memory of the host could not be read"))
+            elif limit is None or limit >= available // 2:
+                self.assertEqual((bound, source), (available // 2, "half of the available host memory"))
+            else:
+                self.assertEqual((bound, source), (limit, "RLIMIT_MEMLOCK"))
+
+    def test_the_host_is_read_as_linux_reports_it_and_not_at_all_where_it_reports_nothing(self):
+        import builtins
+        import sys
+        from unittest.mock import mock_open
+        module = self.module
+        # MemAvailable of /proc/meminfo, in kB: what new work can take, which is more than the free pages.
+        meminfo = ("MemTotal:       263567140 kB\nMemFree:        12345678 kB\nMemAvailable:   251658240 kB\n"
+                   "Buffers:          123456 kB\n")
+        with patch.object(builtins, "open", mock_open(read_data=meminfo)) as opened:
+            self.assertEqual(module.host_available_bytes(), 251658240 * 1024)
+        self.assertEqual(opened.call_args.args[0], "/proc/meminfo")
+        # A kernel without that line, and a host without the file: the other readers of the platform, or none.
+        def missing(*_arguments, **_named):
+            raise FileNotFoundError("/proc/meminfo")
+
+        for reader in (mock_open(read_data="MemTotal: 1 kB\nMemFree: 1 kB\n"), missing):
+            with patch.object(builtins, "open", reader), patch.object(module.sys, "platform", "linux"), \
+                 patch.object(module.os, "sysconf", create=True,
+                              side_effect=lambda name: dict(SC_AVPHYS_PAGES=1000, SC_PAGE_SIZE=4096)[name]):
+                self.assertEqual(module.host_available_bytes(), 1000 * 4096)
+            with patch.object(builtins, "open", reader), patch.object(module.sys, "platform", "linux"), \
+                 patch.object(module.os, "sysconf", create=True, side_effect=ValueError("unrecognized")), \
+                 patch.dict(os.environ):
+                os.environ.pop("PARSEC_CUPY_SPILL_PINNED_BYTES", None)
+                self.assertIsNone(module.host_available_bytes())
+                self.assertEqual(module.page_lock_bound(), (0, "the available memory of the host could not be read"))
+        # The soft limit of the system on locked memory; none where it is unlimited or the platform has none.
+        for soft, infinity, limit in ((65536, -1, 65536), (8 << 20, -1, 8 << 20), (-1, -1, None),
+                                      ((1 << 63) - 1, (1 << 63) - 1, None), (0, -1, 0)):
+            resource = SimpleNamespace(RLIMIT_MEMLOCK=8, RLIM_INFINITY=infinity,
+                                       getrlimit=lambda which, soft=soft: (soft, infinity))
+            with patch.dict(sys.modules, resource=resource):
+                self.assertEqual(module.locked_memory_limit(), limit)
+                # Held against half of what the host has available, the lesser is the bound.
+                with patch.object(module, "host_available_bytes", return_value=64 << 20), patch.dict(os.environ):
+                    os.environ.pop("PARSEC_CUPY_SPILL_PINNED_BYTES", None)
+                    self.assertEqual(module.page_lock_bound(), (
+                        (32 << 20, "half of the available host memory") if limit is None or limit >= 32 << 20
+                        else (limit, "RLIMIT_MEMLOCK")))
+        with patch.dict(sys.modules, resource=None):
+            self.assertIsNone(module.locked_memory_limit())
+        failing = SimpleNamespace(RLIMIT_MEMLOCK=8, RLIM_INFINITY=-1, getrlimit=Mock(side_effect=OSError("not permitted")))
+        with patch.dict(sys.modules, resource=failing):
+            self.assertIsNone(module.locked_memory_limit())
+
+    def test_the_buffers_that_fit_the_bound_are_to_be_locked_in_the_order_of_the_sectors(self):
+        # Bytes of four sectors: the third no longer fits beside the first two, the fourth still does.
+        owner = self.buffers({0: 40, 1: 40, 2: 40, 3: 16}, 100)
+        self.assertEqual([owner.get(sector).lock for sector in range(4)], [True, True, False, True])
+        self.assertEqual((owner.planned_bytes, owner.page_locked_bytes, self.locked), (96, 0, []))
+        self.assertIsNone(owner.get(4))
+        # The four bases of 10,456 electrons on a node that has 240 GiB available, and those of 19,392, of
+        # which the host can lock two within half of that.
+        for basis, locks in ((20_233_413_504, 4), (55_881_883_200, 2)):
+            owner = self.buffers(dict.fromkeys(range(4), basis), (240 << 30) // 2)
+            self.assertEqual(sum(owner.get(sector).lock for sector in range(4)), locks)
+        # A bound of nothing locks nothing, and a basis of no bytes is not asked of the system either.
+        self.assertEqual([item.lock for item in self.buffers({0: 8, 1: 8}, 0)._buffers.values()], [False, False])
+        self.assertFalse(self.buffers({0: 0}, 100).get(0).lock)
+
+    def test_a_download_writes_into_the_buffer_of_its_sector_and_an_upload_reads_it_as_it_lies(self):
+        cp = self.cp
+        rng = np.random.default_rng(5)
+        basis = np.asfortranarray(rng.normal(size=(4, 3)))
+        owner = self.buffers({0: basis.nbytes, 1: basis.nbytes}, 1 << 20)
+        buffer = owner.get(0)
+        host = buffer.download(cp, self.device(basis))
+        # One block of exactly the bytes of the basis is locked, and the array is read into it and waited for.
+        self.assertEqual((self.locked, self.log), ([basis.nbytes], [("get", "F"), ("synchronize",)]))
+        self.assertTrue(host.flags.f_contiguous and host.flags.writeable)
+        self.assertEqual(host.dtype, np.float64)
+        np.testing.assert_array_equal(host, basis)
+        self.assertEqual((buffer.page_locked, buffer.nbytes, owner.page_locked_bytes, buffer.allocations),
+                         (True, basis.nbytes, basis.nbytes, 1))
+        # The next download of the sector writes over the same bytes: nothing is taken again.
+        address = host.ctypes.data
+        later = np.asfortranarray(rng.normal(size=(4, 3)))
+        again = buffer.download(cp, self.device(later))
+        self.assertEqual((again.ctypes.data, self.locked, buffer.allocations), (address, [basis.nbytes], 1))
+        np.testing.assert_array_equal(host, later)
+        # Fewer columns, as a trim leaves them, are the leading bytes of the buffer.
+        del self.log[:]
+        fewer = buffer.download(cp, self.device(later[:, :2]))
+        self.assertEqual((fewer.shape, fewer.ctypes.data, fewer.flags.f_contiguous, buffer.allocations),
+                         ((4, 2), address, True, 1))
+        np.testing.assert_array_equal(fewer, later[:, :2])
+        # An upload takes one device array and reads the host array where it lies; it is complete on return.
+        del self.log[:]
+        device = buffer.upload(cp, fewer)
+        self.assertEqual(self.log, [("empty", (4, 2), "F"), ("set", (4, 2)), ("synchronize",)])
+        np.testing.assert_array_equal(device.values, later[:, :2])
+        self.assertTrue(device.values.flags.f_contiguous)
+        self.assertEqual((buffer.uploads, buffer.upload_bytes, buffer.downloads, buffer.download_bytes,
+                          buffer.reordered_downloads), (1, 64, 3, 96 + 96 + 64, 0))
+        # The other sector has taken nothing, and the record of the process says so.
+        record = owner.record
+        self.assertEqual(record["sectors"], {
+            0: dict(bytes=96, page_locked=True, planned="page-locked", allocations=1),
+            1: dict(bytes=0, page_locked=False, planned="page-locked", allocations=0)})
+        self.assertEqual({name: record[name] for name in (
+            "bound_bytes", "bound_from", "page_locked_bytes", "pageable_bytes", "lock_failures", "uploads",
+            "upload_bytes", "downloads", "reordered_downloads", "download_bytes")}, dict(
+                bound_bytes=1 << 20, bound_from="named by the test", page_locked_bytes=96, pageable_bytes=0,
+                lock_failures=[], uploads=1, upload_bytes=64, downloads=3, reordered_downloads=0, download_bytes=256))
+        self.assertGreaterEqual(record["lock_seconds"], 0.0)
+
+    def test_what_is_locked_stays_within_the_bound_while_an_outgrown_buffer_is_still_read(self):
+        cp = self.cp
+        owner = self.buffers({0: 96}, 200)
+        buffer = owner.get(0)
+        columns = lambda count: self.device(np.asfortranarray(np.arange(4. * count).reshape(4, count)))
+        old = buffer.download(cp, columns(3))
+        self.assertEqual((buffer.page_locked, owner.page_locked_bytes), (True, 96))
+        # The sector grows while a result still reads the old buffer: 96 and 128 bytes are more than the bound.
+        grown = buffer.download(cp, columns(4))
+        self.assertEqual((buffer.page_locked, buffer.nbytes, owner.page_locked_bytes, self.locked), (False, 128, 96, [96]))
+        np.testing.assert_array_equal(grown, np.arange(16.).reshape(4, 4))
+        # The old one is intact for whoever reads it, and is counted until it has gone.
+        np.testing.assert_array_equal(old, np.arange(12.).reshape(4, 3))
+        del old
+        self.assertEqual(owner.page_locked_bytes, 0)
+        # Growing again, it locks what fits now ...
+        wider = buffer.download(cp, columns(5))
+        self.assertEqual((buffer.page_locked, owner.page_locked_bytes, self.locked), (True, 160, [96, 160]))
+        # ... and with nothing left that reads it, the outgrown buffer goes back before the larger one is
+        # counted: 160 and 192 bytes together would not fit.
+        del wider
+        widest = buffer.download(cp, columns(6))
+        self.assertEqual((buffer.page_locked, owner.page_locked_bytes, self.locked, buffer.allocations),
+                         (True, 192, [96, 160, 192], 4))
+        np.testing.assert_array_equal(widest, np.arange(24.).reshape(4, 6))
+        # A buffer that is as large as needed is never taken again.
+        buffer.download(cp, columns(2))
+        self.assertEqual((owner.page_locked_bytes, buffer.allocations), (192, 4))
+        # When the solver and every array have gone, nothing is counted.
+        del widest, buffer
+        owner._buffers.clear()
+        self.assertEqual(owner.page_locked_bytes, 0)
+
+    def test_a_solver_that_has_gone_takes_its_locked_buffers_with_it(self):
+        cp = self.cp
+        owner = self.buffers({0: 96, 1: 64}, 200)
+        hosts = [owner.get(sector).download(cp, self.device(np.asfortranarray(np.arange(4. * count).reshape(4, count))))
+                 for sector, count in ((0, 3), (1, 2))]
+        self.assertEqual(owner.page_locked_bytes, 160)
+        # Nothing but the solver holds the buffers and nobody empties them by hand: what watches the locked
+        # memory must not be what keeps the solver, or every calculation of a process would stay locked.
+        gone, memory = weakref.ref(owner), [weakref.ref(owner.get(sector)) for sector in (0, 1)]
+        del owner, hosts
+        gc.collect()
+        self.assertIsNone(gone())
+        self.assertEqual([item() for item in memory], [None, None])
+
+    def test_a_reset_leaves_an_earlier_result_its_values_and_counts_it_until_it_has_gone(self):
+        cp = self.cp
+        owner = self.buffers({0: 96}, 200)
+        buffer = owner.get(0)
+        columns = lambda scale: self.device(np.asfortranarray(scale * np.arange(12.).reshape(4, 3)))
+        first = buffer.download(cp, columns(1.0))
+        # Without a reset the same sector is downloaded into the same memory (one calculation: the states
+        # of the last step are the ones wanted).
+        again = buffer.download(cp, columns(2.0))
+        self.assertTrue(np.shares_memory(first, again))
+        np.testing.assert_array_equal(first, 2.0 * np.arange(12.).reshape(4, 3))
+        # A reset starts another calculation on the same solver: the result of the one before keeps its
+        # values, and its memory stays counted while it is read.
+        owner.release()
+        self.assertEqual((buffer.nbytes, buffer.page_locked, owner.page_locked_bytes), (0, False, 96))
+        second = buffer.download(cp, columns(3.0))
+        self.assertFalse(np.shares_memory(first, second))
+        np.testing.assert_array_equal(first, 2.0 * np.arange(12.).reshape(4, 3))
+        np.testing.assert_array_equal(second, 3.0 * np.arange(12.).reshape(4, 3))
+        self.assertEqual((buffer.page_locked, owner.page_locked_bytes, self.locked), (True, 192, [96, 96]))
+        del first, again
+        self.assertEqual(owner.page_locked_bytes, 96)
+        # With nothing that reads it, a reset gives the memory back at once.
+        del second
+        owner.release()
+        self.assertEqual(owner.page_locked_bytes, 0)
+
+    def test_a_lock_that_is_refused_or_not_planned_leaves_a_pageable_buffer_that_moves_the_same_bytes(self):
+        cp = self.cp
+        basis = np.asfortranarray(np.random.default_rng(6).normal(size=(5, 4)))
+        # The driver refuses: the buffer is pageable, nothing stays counted, and the record says what it said.
+        owner = self.buffers({0: basis.nbytes}, 1 << 20)
+        self.refuse = MemoryError("out of host memory")
+        refused = owner.get(0)
+        host = refused.download(cp, self.device(basis))
+        np.testing.assert_array_equal(host, basis)
+        self.assertEqual((refused.page_locked, owner.page_locked_bytes, self.locked), (False, 0, [basis.nbytes]))
+        record = owner.record
+        self.assertEqual((record["lock_failures"], record["pageable_bytes"], record["page_locked_bytes"]),
+                         (["sector 0: MemoryError: out of host memory"], basis.nbytes, 0))
+        self.assertEqual(record["sectors"][0], dict(bytes=basis.nbytes, page_locked=False, planned="page-locked",
+                                                     allocations=1))
+        # The bound allows none: the system is not asked.
+        self.refuse = None
+        del self.locked[:], self.log[:]
+        pageable = self.buffers({0: basis.nbytes}, basis.nbytes - 1).get(0)
+        self.assertFalse(pageable.lock)
+        kept = pageable.download(cp, self.device(basis))
+        device = pageable.upload(cp, kept)
+        # The same calls as with a locked buffer, and the same bytes on both sides.
+        self.assertEqual((self.locked, self.log), ([], [("get", "F"), ("synchronize",), ("empty", (5, 4), "F"),
+                                                        ("set", (5, 4)), ("synchronize",)]))
+        self.assertEqual((pageable.page_locked, pageable.owner.record["lock_failures"]), (False, []))
+        np.testing.assert_array_equal(kept, basis)
+        np.testing.assert_array_equal(device.values, basis)
+
+    def test_a_solver_moves_its_states_through_a_buffer_it_is_handed_and_by_the_former_calls_without(self):
+        from parsec_python.acceleration.Eigensolvers import eigval
+        cp = self.cp
+        energies = np.array([3., 1., 2.])
+        basis = np.asfortranarray(np.arange(12.).reshape(4, 3) / 7.)
+        owner = self.buffers({0: basis.nbytes}, 1 << 20)
+        buffer = owner.get(0)
+
+        def moved(values, order=None, **handed):
+            """The host state and the device state again of a solver that holds ``values``, and what each asked."""
+            solver = SpillDownloadTests.solver_with(self.device(values), self.device(energies[:values.shape[1]]))
+            with patch.object(eigval, "require_cupy", lambda: (cp, None)), patch.dict(os.environ):
+                os.environ.pop("PARSEC_CUPY_SPILL_DOWNLOAD_ORDER", None)
+                if order is not None:
+                    os.environ["PARSEC_CUPY_SPILL_DOWNLOAD_ORDER"] = order
+                del self.log[:]
+                host = solver.offload_state_to_host(**handed)
+                down = list(self.log)
+                del self.log[:]
+                device = solver.restore_state_to_device(**handed)
+                return host.subspace, down, device.subspace, list(self.log)
+
+        # Without a buffer the calls are the former ones: the vectors by cupy.asnumpy in the order named,
+        # behind the eigenvalues, and back by cupy.asarray in Fortran order.
+        for order, asked in ((None, "A"), ("C", "C")):
+            host, down, device, up = moved(basis, order)
+            self.assertEqual(down, [("asnumpy", "C"), ("asnumpy", asked)])
+            self.assertEqual(up, [("asarray", (3,), None), ("asarray", (4, 3), "F")])
+            self.assertTrue(host.vectors.flags.f_contiguous and host.vectors.flags.owndata)
+            np.testing.assert_array_equal(host.vectors, basis)
+            np.testing.assert_array_equal(device.vectors.values, basis)
+        self.assertEqual((self.locked, buffer.nbytes), ([], 0))
+        # With one, a Fortran-ordered basis goes down and up by one copy each, whole or as leading columns,
+        # whatever the order of the former download is named; the eigenvalues go as they went.
+        for values, order in ((basis, None), (basis, "C"), (basis[:, :2], None)):
+            host, down, device, up = moved(values, order, buffer=buffer)
+            self.assertEqual(down, [("asnumpy", "C"), ("get", "F"), ("synchronize",)])
+            self.assertEqual(up, [("asarray", (values.shape[1],), None), ("empty", values.shape, "F"),
+                                  ("set", values.shape), ("synchronize",)])
+            # The host array of the state is the buffer, and holds what the former download returned.
+            self.assertTrue(np.shares_memory(host.vectors, buffer._flat))
+            self.assertTrue(host.vectors.flags.f_contiguous)
+            np.testing.assert_array_equal(host.vectors, values)
+            np.testing.assert_array_equal(host.eigenvalues, energies[:values.shape[1]])
+            np.testing.assert_array_equal(device.vectors.values, values)
+            self.assertTrue(device.vectors.values.flags.f_contiguous)
+            self.assertIsNone(host.ritz_workspace)
+            self.assertEqual((host.filter_lower_bound, host.filters_completed), (-1.5, 2))
+        self.assertEqual((self.locked, buffer.allocations, buffer.reordered_downloads), ([basis.nbytes], 1, 0))
+        # Vectors of another layout, as a solve without the column-major filter leaves them, are downloaded by
+        # the former call, in the order named, and laid into the buffer in Fortran order; they go up as above.
+        for values, order, asked in ((np.ascontiguousarray(basis), None, "A"), (np.ascontiguousarray(basis), "C", "C"),
+                                     (np.ascontiguousarray(basis)[:, :2], None, "A")):
+            host, down, device, up = moved(values, order, buffer=buffer)
+            self.assertEqual(down, [("asnumpy", "C"), ("asnumpy", asked)])
+            self.assertEqual(up[1:], [("empty", values.shape, "F"), ("set", values.shape), ("synchronize",)])
+            self.assertTrue(np.shares_memory(host.vectors, buffer._flat))
+            self.assertTrue(host.vectors.flags.f_contiguous)
+            np.testing.assert_array_equal(host.vectors, values)
+            np.testing.assert_array_equal(device.vectors.values, values)
+        self.assertEqual((self.locked, buffer.allocations, buffer.reordered_downloads, buffer.downloads),
+                         ([basis.nbytes], 1, 3, 6))
+
+    def make_solver(self, staging):
+        """A process that keeps the states of two sectors on the host, with stand-ins for their solvers."""
+        calls = []
+
+        def sector(index):
+            def solve(count, settings, spectral_bound=None):
+                calls.append(("solve", index))
+                return CuPyEigvalResult(np.zeros(count), "device vectors", None, "device state", "subspace",
+                                        False, None, count, count, 0.0)
+
+            def restore(*handed):
+                calls.append(("restore", index, handed))
+
+            def offload(*handed):
+                calls.append(("offload", index, handed))
+                return SimpleNamespace(subspace=SimpleNamespace(vectors=f"host vectors {index}"))
+
+            return SimpleNamespace(solve=solve, reset=lambda: calls.append(("reset", index)),
+                                   restore_state_to_device=restore, offload_state_to_host=offload)
+
+        class Place:
+            def __init__(self, *_arguments):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_error):
+                return False
+
+        solver = object.__new__(CuPySymmetrySCFEigensolver)
+        solver._sector_device_ids = (0, 0)
+        solver._streams = [Place(), Place()]
+        solver._solvers = [sector(0), sector(1)]
+        solver._host_spill_sector_states = True
+        solver._spill_staging = staging
+        solver._spill_buffers = self.buffers({0: 96, 1: 96}, 1 << 20) if staging == "persistent" else None
+        solver._spill_seconds = {}
+        cp = SimpleNamespace(cuda=SimpleNamespace(Device=Place))
+        patcher = patch("parsec_python.acceleration.Eigensolvers.symmetry.require_cupy", return_value=(cp, None))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        return solver, calls
+
+    def test_a_sector_is_handed_its_own_buffer_and_none_with_the_former_staging(self):
+        solver, calls = self.make_solver("persistent")
+        first, second = (solver._spill_buffers.get(index) for index in (0, 1))
+        self.assertIsNot(first, second)
+        # The first solve of a sector has nothing to bring back; later ones restore before and offload behind.
+        result = solver._run_one_sector(1, 3, EigvalSettings(), reset=True)
+        self.assertEqual(calls, [("reset", 1), ("solve", 1), ("offload", 1, (second,))])
+        self.assertEqual(result.vectors, "host vectors 1")
+        del calls[:]
+        for index in (0, 1, 0):
+            solver._run_one_sector(index, 3, EigvalSettings(), reset=False)
+        self.assertEqual(calls, [("restore", 0, (first,)), ("solve", 0), ("offload", 0, (first,)),
+                                 ("restore", 1, (second,)), ("solve", 1), ("offload", 1, (second,)),
+                                 ("restore", 0, (first,)), ("solve", 0), ("offload", 0, (first,))])
+        record = solver.spill_staging
+        self.assertEqual((record["buffers"], record["restores"], record["offloads"]), ("persistent", 3, 4))
+        self.assertGreaterEqual(min(record["restore_seconds"], record["offload_seconds"]), 0.0)
+        # The record of the buffers is in it.
+        self.assertEqual((record["bound_bytes"], sorted(record["sectors"])), (1 << 20, [0, 1]))
+        # The former staging: the two calls as they were made, with no argument, and counted like the others.
+        solver, calls = self.make_solver("fresh")
+        solver._run_one_sector(0, 3, EigvalSettings(), reset=True)
+        solver._run_one_sector(0, 3, EigvalSettings(), reset=False)
+        self.assertEqual(calls, [("reset", 0), ("solve", 0), ("offload", 0, ()),
+                                 ("restore", 0, ()), ("solve", 0), ("offload", 0, ())])
+        record = solver.spill_staging
+        self.assertEqual(sorted(record), ["buffers", "offload_seconds", "offloads", "restore_seconds", "restores"])
+        self.assertEqual((record["buffers"], record["restores"], record["offloads"]), ("fresh", 1, 2))
+        # States that stay on their devices are not moved and have no record.
+        solver._host_spill_sector_states, solver._spill_staging = False, None
+        del calls[:]
+        solver._run_one_sector(0, 3, EigvalSettings(), reset=False)
+        self.assertEqual((calls, solver.spill_staging), ([("solve", 0)], None))
+
+
+@unittest.skipUnless(cupy_available(), "CUDA runtime is unavailable")
+class SpillBufferDeviceTests(unittest.TestCase):
+    """The buffers of spilled sectors on one real device: what a copy takes, and that the bits arrive."""
+
+    def setUp(self):
+        import cupy as cp
+        from parsec_python.acceleration.Eigensolvers import spill_buffers
+        self.cp, self.module = cp, spill_buffers
+        pool, pinned = cp.get_default_memory_pool(), cp.cuda.PinnedMemoryPool()
+        self.taken, self.staged, self.locked = [], [], []
+
+        def malloc(size):
+            self.taken.append(int(size))
+            return pool.malloc(size)
+
+        def stage(size):
+            # What CuPy asks of its pinned pool: the staging block of an upload.
+            self.staged.append(int(size))
+            return pinned.malloc(size)
+
+        system = cp.cuda.PinnedMemory
+
+        def lock(size):
+            # Page-locked memory taken from the system directly.
+            self.locked.append(int(size))
+            return system(size)
+
+        self.addCleanup(cp.cuda.set_allocator, cp.cuda.get_allocator())
+        self.addCleanup(cp.cuda.set_pinned_memory_allocator, cp.get_default_pinned_memory_pool().malloc)
+        self.addCleanup(pinned.free_all_blocks)
+        for patcher in (patch.object(cp.cuda, "PinnedMemory", lock), patch.dict(os.environ)):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        for name in ("PARSEC_CUPY_SPILL_BUFFERS", "PARSEC_CUPY_SPILL_PINNED_BYTES", "PARSEC_CUPY_SPILL_DOWNLOAD_ORDER"):
+            os.environ.pop(name, None)
+        self.rows, self.columns = 1 << 16, 24
+        self.whole = cp.asfortranarray(cp.random.default_rng(13).random((self.rows, self.columns), dtype=cp.float64))
+        # In the order it has on the device, as a spill keeps it on the host.
+        self.reference = cp.asnumpy(self.whole, order="A")
+        cp.cuda.set_allocator(malloc)
+        cp.cuda.set_pinned_memory_allocator(stage)
+
+    def test_a_copy_through_a_buffer_takes_no_staging_block_and_no_second_array(self):
+        cp = self.cp
+        nbytes = self.whole.nbytes
+        for bound, locked in ((1 << 40, True), (0, False)):
+            for stream in (cp.cuda.Stream.null, cp.cuda.Stream(non_blocking=True)):
+                with self.subTest(locked=locked, null=stream is cp.cuda.Stream.null), stream:
+                    buffer = self.module.SpillBuffers({0: nbytes}, (bound, "named by the test")).get(0)
+                    del self.taken[:], self.staged[:], self.locked[:]
+                    host = buffer.download(cp, self.whole)
+                    # Nothing on the device and nothing from the pinned pool; one block of exactly the bytes
+                    # of the basis from the system where the bound allows it, which the pool would round up.
+                    self.assertEqual((self.taken, self.staged, self.locked), ([], [], [nbytes] * locked))
+                    self.assertEqual((buffer.page_locked, buffer.nbytes), (locked, nbytes))
+                    self.assertTrue(host.flags.f_contiguous)
+                    np.testing.assert_array_equal(host, self.reference)
+                    # The leading columns that a trim leaves, down into the same bytes and up again.
+                    fewer = buffer.download(cp, self.whole[:, :self.columns - 5])
+                    self.assertEqual((self.taken, self.staged, len(self.locked), buffer.allocations),
+                                     ([], [], int(locked), 1))
+                    np.testing.assert_array_equal(fewer, self.reference[:, :self.columns - 5])
+                    device = buffer.upload(cp, fewer)
+                    # One device array of the bytes that go up, complete when the call is back.
+                    self.assertEqual((self.taken, self.staged), ([fewer.nbytes], []))
+                    self.assertTrue(device.flags.f_contiguous)
+                    fewer[...] = -1.0
+                    self.assertTrue(bool(cp.array_equal(device, self.whole[:, :self.columns - 5])))
+                    del device
+        # The former upload of the same array stages all of it in a block of the pinned pool.
+        del self.taken[:], self.staged[:]
+        former = cp.asarray(self.reference, dtype=cp.float64, order="F")
+        self.assertEqual((self.taken, self.staged), ([nbytes], [nbytes]))
+        self.assertTrue(bool(cp.array_equal(former, self.whole)))
+
+    def test_a_solver_spills_and_restores_the_same_bits_through_a_buffer_as_by_the_former_calls(self):
+        cp = self.cp
+        energies = cp.arange(self.columns, dtype=cp.float64)
+        owner = self.module.SpillBuffers({0: self.whole.nbytes}, (1 << 40, "named by the test"))
+        # The basis as a column-major solve leaves it, its leading columns, and one in C order.
+        for vectors, reordered in ((self.whole, 0), (self.whole[:, :self.columns - 5], 0), (cp.ascontiguousarray(self.whole), 1)):
+            with self.subTest(columns=vectors.shape[1], reordered=reordered):
+                states = {}
+                for name, handed in (("former", {}), ("buffer", dict(buffer=owner.get(0)))):
+                    solver = SpillDownloadTests.solver_with(vectors, energies[:vectors.shape[1]])
+                    before = owner.get(0).reordered_downloads
+                    host = solver.offload_state_to_host(**handed).subspace
+                    self.assertIsInstance(host.vectors, np.ndarray)
+                    self.assertTrue(host.vectors.flags.f_contiguous)
+                    kept = host.vectors.copy()
+                    restored = solver.restore_state_to_device(**handed).subspace
+                    self.assertIsInstance(restored.vectors, cp.ndarray)
+                    self.assertTrue(restored.vectors.flags.f_contiguous)
+                    states[name] = (kept, cp.asnumpy(restored.vectors), cp.asnumpy(restored.eigenvalues), host.eigenvalues)
+                    if handed:
+                        self.assertEqual(owner.get(0).reordered_downloads - before, reordered)
+                for former, buffered in zip(states["former"], states["buffer"]):
+                    np.testing.assert_array_equal(buffered, former)
+                np.testing.assert_array_equal(states["buffer"][0], self.reference[:, :vectors.shape[1]])
+        self.assertEqual((self.locked, owner.get(0).allocations), ([self.whole.nbytes], 1))
+
+    def test_the_density_of_host_orbitals_is_the_same_by_a_direct_upload_as_by_the_former_one(self):
+        cp = self.cp
+        weights = np.linspace(0.0, 1.0, self.columns - 5)
+        densities = {}
+        for mode in ("persistent", "fresh"):
+            os.environ["PARSEC_CUPY_SPILL_BUFFERS"] = mode
+            builder = CuPyDeviceDensityBuilder(cp)
+            self.assertEqual(builder.direct_host_upload, mode == "persistent")
+            # The columns that a density is handed: the leading ones of a Fortran-ordered host array, a view.
+            orbitals = self.reference[:, :self.columns - 5]
+            self.assertTrue(orbitals.flags.f_contiguous and not orbitals.flags.owndata)
+            del self.taken[:], self.staged[:]
+            densities[mode] = builder(orbitals, weights, 0.25)
+            # The upload takes the device array either way, and the staging block only by the former call.
+            self.assertIn(orbitals.nbytes, self.taken)
+            self.assertEqual(orbitals.nbytes in self.staged, mode == "fresh")
+            self.assertEqual({name: builder.host_uploads[name] for name in ("direct", "calls", "bytes")},
+                             dict(direct=mode == "persistent", calls=1, bytes=orbitals.nbytes))
+            # A host array of another layout takes the former call under either value, and orbitals that are
+            # on the device are not uploaded.
+            del self.staged[:]
+            c_ordered = np.ascontiguousarray(orbitals)
+            np.testing.assert_array_equal(builder(c_ordered, weights, 0.25), densities[mode])
+            self.assertIn(c_ordered.nbytes, self.staged)
+            np.testing.assert_array_equal(builder(self.whole[:, :self.columns - 5], weights, 0.25), densities[mode])
+            self.assertEqual(builder.host_uploads["calls"], 2)
+        np.testing.assert_array_equal(densities["persistent"], densities["fresh"])
+        expected = 8.0 * np.sum(self.reference[:, :self.columns - 5] ** 2 * weights, axis=1)
+        np.testing.assert_allclose(densities["persistent"], expected, rtol=1e-13)
 
 
 @unittest.skipUnless(cupy_available(), "CUDA runtime is unavailable")
@@ -1572,7 +2232,9 @@ class SectorStateStorageDeviceTests(unittest.TestCase):
 
     NAMES = ("PARSEC_CUPY_SECTOR_STATE_STORAGE", "PARSEC_CUPY_LARGE_PROBLEM_ALLOCATOR",
              "PARSEC_CUPY_DIRECT_ALLOCATOR_FRACTION", "PARSEC_CUPY_SECTOR_STATE_AUTO_FRACTION",
-             "PARSEC_CUPY_SPILL_DOWNLOAD_ORDER")
+             "PARSEC_CUPY_SPILL_DOWNLOAD_ORDER", "PARSEC_CUPY_SPILL_BUFFERS", "PARSEC_CUPY_SPILL_PINNED_POOL",
+             "PARSEC_CUPY_SPILL_PINNED_BYTES", "PARSEC_CUPY_POOL_RELEASE_ORBITAL_BYTES",
+             "PARSEC_CUPY_GENERALIZED_RITZ")
 
     def tearDown(self):
         gc.collect()
@@ -1595,6 +2257,10 @@ class SectorStateStorageDeviceTests(unittest.TestCase):
             system = prepare_single_point(problem, backend="auto")
             result = run_scf(system)
         details = dict(result.backend.details)
+        # Of the last run: its details, and what its solver and its density builder recorded of a spill.
+        self.details = details
+        self.staging = system.backend.symmetry_eigensolver.spill_staging
+        self.release = dict(system.orbital_density_builder.pool_release)
         return (result, details["orbital_sector_state_storage"], details["orbital_memory_allocator"],
                 system.backend.symmetry_eigensolver.state_fit_bytes)
 
@@ -1654,6 +2320,79 @@ class SectorStateStorageDeviceTests(unittest.TestCase):
         self.assertEqual(spilled.iterations, named.iterations)
         np.testing.assert_allclose(spilled.eigenvalues, named.eigenvalues, rtol=0, atol=1e-9)
         self.assertAlmostEqual(spilled.energies.total, named.energies.total, places=8)
+
+    def test_the_staging_of_a_spill_moves_no_bit(self):
+        # States on the host with the pool of CuPy, and a density step that releases at every size.
+        spill = dict(PARSEC_CUPY_SECTOR_STATE_STORAGE="host", PARSEC_CUPY_LARGE_PROBLEM_ALLOCATOR="pool",
+                     PARSEC_CUPY_POOL_RELEASE_ORBITAL_BYTES="0")
+        former_values = dict(PARSEC_CUPY_SPILL_BUFFERS="fresh", PARSEC_CUPY_SPILL_PINNED_POOL="release")
+        # As the solve of a small sector leaves its vectors, in C order, and with the Ritz step of large
+        # sectors named, which rotates a Fortran-ordered basis in place.
+        for route in ({}, dict(PARSEC_CUPY_GENERALIZED_RITZ="on")):
+            with self.subTest(route=route):
+                # The former staging: no buffer, the pinned pool emptied after every density, and the
+                # details of a run before the buffers.
+                former, *former_lines, _count = self.run_scf(**spill, **route, **former_values)
+                self.assertEqual(former_lines[0], "exact FP64 host spill; one active representation on CUDA")
+                self.assertNotIn("orbital_sector_spill_staging", self.details)
+                self.assertEqual(sorted(self.staging), ["buffers", "offload_seconds", "offloads", "restore_seconds",
+                                                        "restores"])
+                moves = self.staging["restores"], self.staging["offloads"]
+                self.assertEqual((self.staging["buffers"], self.release["spill_pinned_pool"], self.release["pinned_kept"]),
+                                 ("fresh", "release", 0))
+                uploads = self.release["host_uploads"]
+                self.assertEqual((uploads["direct"], uploads["calls"] > 0), (False, True))
+                densities = self.release["calls"]
+                self.assertEqual(densities, former.iterations)
+                # The buffers, page-locked by name, pageable by name and by the rule of the host: the
+                # same bits, the same report lines and the same moves.
+                for bound in (str(1 << 40), "0", None):
+                    named = {} if bound is None else dict(PARSEC_CUPY_SPILL_PINNED_BYTES=bound)
+                    run, *lines, _count = self.run_scf(**spill, **route, **named)
+                    self.assertEqual(lines, former_lines)
+                    self.assert_same_bits(run, former)
+                    record = self.staging
+                    self.assertEqual((record["buffers"], record["restores"], record["offloads"]), ("persistent", *moves))
+                    self.assertEqual((record["uploads"], record["downloads"]), moves)
+                    sectors = record["sectors"].values()
+                    self.assertTrue(all(item["bytes"] > 0 and item["allocations"] == 1 for item in sectors))
+                    held = sum(item["bytes"] for item in sectors)
+                    if bound is not None:
+                        locked = bound != "0"
+                        self.assertEqual((record["bound_bytes"], record["bound_from"]),
+                                         (int(bound), "PARSEC_CUPY_SPILL_PINNED_BYTES"))
+                        self.assertEqual((record["page_locked_bytes"], record["pageable_bytes"], record["lock_failures"]),
+                                         (held if locked else 0, 0 if locked else held, []))
+                        self.assertTrue(all(item["page_locked"] is locked for item in sectors))
+                    else:
+                        self.assertEqual(record["page_locked_bytes"] + record["pageable_bytes"], held)
+                    # A vector that is not Fortran-ordered on its device is downloaded by the former call.
+                    if route:
+                        self.assertLess(record["reordered_downloads"], record["downloads"])
+                    else:
+                        self.assertEqual(record["reordered_downloads"], record["downloads"])
+                    # The density uploads the same columns by direct copies and leaves the pinned pool.
+                    self.assertEqual((self.release["spill_pinned_pool"], self.release["pinned_kept"], self.release["calls"]),
+                                     ("keep", densities, densities))
+                    self.assertEqual({name: self.release["host_uploads"][name] for name in ("direct", "calls", "bytes")},
+                                     dict(direct=True, calls=uploads["calls"], bytes=uploads["bytes"]))
+                    self.assertIn("persistent host buffers with direct copies; ", self.details["orbital_sector_spill_staging"])
+                    self.assertIn(f"{record['page_locked_bytes']} B within {record['bound_bytes']} B ",
+                                  self.details["orbital_sector_spill_staging"])
+                # Each switch goes back by itself: the buffers with the pinned pool emptied, and the former
+                # calls with the pinned pool kept.
+                for one in ({"PARSEC_CUPY_SPILL_PINNED_POOL": "release"}, {"PARSEC_CUPY_SPILL_BUFFERS": "fresh"}):
+                    run, *lines, _count = self.run_scf(**spill, **route, **one)
+                    self.assertEqual(lines, former_lines)
+                    self.assert_same_bits(run, former)
+                    kept = "PARSEC_CUPY_SPILL_BUFFERS" in one
+                    self.assertEqual((self.staging["buffers"], self.release["spill_pinned_pool"], self.release["pinned_kept"]),
+                                     ("fresh" if kept else "persistent", "keep" if kept else "release", densities * kept))
+        # States that stay on the device have no record of a spill and no such detail.
+        self.run_scf(PARSEC_CUPY_SECTOR_STATE_STORAGE="device", PARSEC_CUPY_LARGE_PROBLEM_ALLOCATOR="pool")
+        self.assertIsNone(self.staging)
+        self.assertNotIn("orbital_sector_spill_staging", self.details)
+        self.assertEqual(self.release["host_uploads"]["calls"], 0)
 
 
 if __name__ == "__main__":

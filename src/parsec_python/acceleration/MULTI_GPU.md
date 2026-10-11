@@ -382,11 +382,16 @@ once on the device where it needed it twice. Derived: 10,456
 electrons on one A100 about 24 GiB in place of 40 (24,465 MiB were sampled
 since), and 14,680 on one, whose
 two copies of 35.75 GiB stood at the edge of the device, about 43. The
-upload of the next step is unchanged: it copies the host array through a
-pinned buffer of its size (measured there as well), so the host holds every
-spilled basis and one more, 75 and 19 GiB for 10,456 electrons on one
-device. 19,392 electrons on one node would hold 208 GiB of spilled states
-before any buffer of an upload, 52 GiB for each sector on its way back, on
+upload of the next step was left as it was then: it copied the host array
+through a block of CuPy's pinned pool (measured there as well), so the host
+held every spilled basis and that block. The pool rounds a request up to a
+power of two: for 10,456 electrons on one device the block of a basis of
+18.84 GiB is one of 32 GiB beside the 75 GiB of the four bases, as an A100
+node measured since (a high-water mark of 110.0 GiB of host memory in that
+run, 78.0 GiB when it ended). The spilled states have host buffers of their
+own since, and no such block (below). 19,392 electrons on one node would
+hold 208 GiB of spilled states, 52 GiB for each sector, before the block of
+an upload that the former staging adds, on
 a node of 256 GB: that case is at the limit of the host, on one, two or
 four devices, whatever the device now allows. The rule does not ask what
 the host can hold. The former rule by its fraction spills those 19,392
@@ -416,6 +421,153 @@ stopped in a solve command with an out-of-memory error at 81.9 GB
 allocated. The download was run for 7,120 electrons spilled on one device:
 254.1 s and a peak of 11,085 MiB in the order of the array, 458.9 s and
 18,175 MiB with `PARSEC_CUPY_SPILL_DOWNLOAD_ORDER=C`, the same total energy.
+
+A spilled sector moves its basis three times in an SCF step: to the device
+before its solve, to the host behind it, and to the device once more for the
+density. As it was, every download went into a new pageable array, whose
+pages the system hands out again each time, every upload through a block of
+CuPy's pinned pool, into which the host array is copied first, and the
+density step emptied that pool, so that the first upload of the next step
+page-locked the block again. In a first run of 10,456 electrons on one A100
+with 5 ang of vacuum (four sectors of 1,924,792 rows and 1,314 states, 18.84
+GiB each; 745.1 s) the solve commands took 575.4 s for 216.1 s of device
+work, and the density stage 159.1 s, of which 64.2 s were the eleven returns
+of the pinned pool: 517 s for moving 128 bases. One array of that size
+between an A100 and its host (CuPy 14.2.0; every path returned the bits of
+the source): `cupy.asarray` took 17.99 s with the pinned pool empty, 16.2 s
+of it the page-locking of a block of 32 GiB, and 1.75 s (10.7 GiB/s) with
+the block in the pool; emptying the pool took 5.82 to 5.89 s; `cupy.asnumpy`
+into a new array took 2.62 s (7.2 GiB/s). A buffer of the size of the array
+that is page-locked once (9.6 to 9.7 s) took 0.758 s up and 0.770 s down
+(24.8 and 24.5 GiB/s) by `ndarray.set` and `ndarray.get(out=)`, which hand
+the driver the host memory itself, and a pageable buffer that is kept took
+1.40 and 1.52 s by the same calls (13.4 and 12.4 GiB/s).
+
+Each spilled sector therefore has a host buffer of its own
+(`PARSEC_CUPY_SPILL_BUFFERS=persistent`, the default; `fresh` is the staging
+as it was). It is taken when the sector is first downloaded, at the size of
+its basis, and kept: a later download writes over it, with as many columns
+or, after a trim, with fewer in its leading bytes, and an upload reads it
+where it lies, before a solve and for the density alike. Neither call takes
+a staging block or a second array on the device (a hook on both allocators
+counted none on a laptop GPU, CuPy 14.0.1), and after the first step no page
+of the host is handed out or page-locked again. The host holds every
+spilled basis once. The device holds what it held, one array for an upload
+and none for a download, so the count of the rule above and what it spills
+are unchanged. The host array of the states of a sector is a view of its
+buffer and holds them until the next download of that sector: the density
+step reads it before the next solve, and the solver uploads it first, which
+is what the SCF loop already asked of the arrays of a sector (a later pass
+under `PARSEC_CUPY_RECYCLE_STATE=1` filters its basis in place). A sector
+that grows, as the bracket of the spectrum can ask in the first steps, takes
+a larger buffer. Vectors that are not Fortran-ordered on their device are
+downloaded by the former call, in the order that
+`PARSEC_CUPY_SPILL_DOWNLOAD_ORDER` names, and laid into the buffer in
+Fortran order, a copy on the host that went into a second new array before;
+their uploads are direct like the others. On a laptop GPU the sectors of an
+atom and of a molecule of 32 electrons left such vectors under the settings
+of the hybrid driver itself, where the Ritz step of a small sector
+orthogonalizes its basis first, and those of 176 electrons under launch
+settings of the measured runs left Fortran-ordered ones, as the spilled runs
+on A100 nodes did (the download order above made a second array there). For
+a Fortran-ordered basis the buffers do not read that switch: it belongs to
+`fresh`.
+
+The buffers are page-locked within a bound, so that the driver copies
+between them and the device without a copy of its own. What is page-locked
+is out of reach of everything else on the host until it is given back: the
+system cannot page it out to make room. The bound therefore follows from the
+host. The buffers of a process are locked while their sum stays within half
+of the memory that the host reports as available when the storage of the
+states is decided (`MemAvailable` of `/proc/meminfo`, the available physical
+memory under Windows), which leaves as much available as they take, and
+within the limit of the system on locked memory where it has one
+(`RLIMIT_MEMLOCK`). A host whose memory cannot be read locks nothing.
+`PARSEC_CUPY_SPILL_PINNED_BYTES` names the bound instead and is taken as it
+is; `0` locks nothing. The plan is made with the storage, from the bytes of
+each basis at the state counts of the first solve and in the order of the
+sectors: a buffer is to be locked if it still fits the bound beside those
+before it, so that two launches on a host with the same memory available
+lock the same buffers. A buffer beyond the bound is pageable, and so is one
+that the driver refuses to lock (the record says what it answered): both
+move the same bytes by the same calls, at about half the rate, and a small
+host runs as it did, without the staging block. The bound holds for what is
+locked at any moment: a buffer that a sector has outgrown is counted until
+the result that still reads it has gone. It is a bound of one process:
+several processes that spill on one host each take half of what they find
+available, and a process inside a memory limit of its control group reads
+the memory of the host, so name the bytes there. And it bounds what is
+locked, not what the buffers need: the host holds every spilled basis
+whether its buffer is locked or not, as it did, and the rule that spills
+still does not ask what the host can hold. For 10,456 electrons on one
+device the four buffers are 75.4 GiB, which half of the memory of a node of
+256 GB locks whole, where the former staging reached the high-water mark of
+110.0 GiB with its block of 32 GiB; of the 208 GiB of 19,392 electrons the
+same half locks two buffers of the four (both derived).
+
+The density step leaves CuPy's pinned pool as it is where it was handed a
+sector whose states are on the host (`PARSEC_CUPY_SPILL_PINNED_POOL=keep`,
+the default; `release` empties it after every density, as before). With the
+buffers no basis goes through that pool, which then holds the blocks of
+smaller uploads. With `fresh` named beside the default the staging block
+stays in the pool for the run: the eleven returns of 64.2 s and the
+page-locking that each caused (15.9 to 16.3 s for the block on that node)
+are what keeping it saves by itself, and the host then holds the block
+between the steps as well, at the high-water mark it had, one block for
+every power of two that a basis of the process rounds up to. A process whose
+sectors all stay on their devices empties the pinned pool as it did under
+either value, and the collection before the release is the same.
+
+On a laptop GPU (CuPy 14.0.1 under Windows, which has no `RLIMIT_MEMLOCK`)
+complete calculations with their states on the host gave with the buffers
+every array of the archive and every line of `parsec.out` apart from its
+times as the code before them did: 32 and 176 electrons through the hybrid
+driver and through the MPI runner with one rank under the launch settings
+of the measured runs, with host storage named beside CuPy's pool, and 32
+electrons through that runner spilled by the rule itself, with the direct
+allocator; each with the buffers page-locked by the rule of the host and
+pageable (`PARSEC_CUPY_SPILL_PINNED_BYTES=0`), and through a serial control
+of that runner with the buffers named. With `fresh` and `release` named
+the backend details were those of that code as well, and so with `fresh`
+alone. Every download of the 32 electrons was one
+that the former call made, for C-ordered vectors; of the 176 electrons
+under the launch settings 48 of 52 were direct, and with a CHEBFF first
+solve and the generalized Ritz step named all 44. So it was with every
+sector on a thread and a non-blocking stream of its own
+(`PARSEC_CUPY_SECTOR_SCHEDULER=streams`), where the sectors of one device
+move their states side by side, for 32 electrons through the hybrid driver
+and for 176 through the runner. A shared basis with host storage named took
+no buffer. Half of the available memory was 0.13 to 7.9 GB on that host
+while other work ran on it, and every buffer was locked within it. The
+seconds of that laptop say nothing: its GPU was shared.
+
+None of the three has run on A100 nodes: what was measured there is the one
+array above, on one device with the host to itself. Derived from its rates
+for that run of 10,456 electrons: its 128 transfers, 2,412 GiB, take 98 s
+through page-locked buffers and the page-locking of the four another 38 s
+(38.4 s were measured for four blocks of that size one after another), where
+they took 517 s, so the run about 365 s in place of 745; the solves on the
+device are what they were. That stays above the run whose states fit: the
+same cluster in the sphere of the default rule keeps its states on the
+device and took 205.3 s. The page-locked memory goes back when the process
+ends, outside the reported time (13.9 s for those four blocks). Not
+measured there at all: a buffer that is locked in the context of one device
+and read by another, as the density step of two devices does (the CUDA
+documentation says that memory from `cudaHostAlloc` is page-locked for every
+context under unified addressing); pageable buffers in a complete run; and
+`RLIMIT_MEMLOCK`, which those nodes do not set.
+`spill_staging` of a rank in `timing.json` says what ran: the staging, the
+calls that moved the states of a sector to its device and back with their
+wall seconds, and for the buffers the bound and where it comes from, the
+bytes that are page-locked and pageable, the seconds of the page-locking
+(inside the first download of each sector), what the driver answered where
+it refused, the bytes that went up and down, and the downloads that the
+former call made for vectors of another layout. `density_pool_release`
+counts the uploads of the density step under `host_uploads` and says
+whether the pinned pool is kept (`spill_pinned_pool`, `pinned_kept`). A run
+of the hybrid driver with buffers has the detail
+`orbital_sector_spill_staging`; a run that keeps its states on its devices,
+or stages them as before, has the details it had.
 
 Before that release every rank collects Python's cyclic garbage, so that a
 device array held only by a reference cycle goes back with the cached blocks.
