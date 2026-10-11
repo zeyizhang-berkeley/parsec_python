@@ -498,6 +498,39 @@ class HybridPreparationTests(unittest.TestCase):
             build_atomic_tail=False,
         )
 
+    def test_filter_plan_is_what_the_input_fixes_of_the_filter_work(self) -> None:
+        from parsec_python.models import EigensolverSettings, SCFSettings
+
+        eigensolver = EigensolverSettings(first_filter_degree=30, first_filter_cycles=4)
+
+        def plan(electrons=3480.0, **scf):
+            found = driver_module._filter_plan(
+                SimpleNamespace(
+                    input=SimpleNamespace(scf=SCFSettings(**scf), eigensolver=eigensolver),
+                    electron_count=electrons,
+                )
+            )
+            return found.states, found.buffer, found.applications
+
+        # The states of the input with the buffer of the subspace, and the
+        # applications of four first cycles of degree 30 and eight later
+        # steps at degree ten.
+        self.assertEqual(plan(number_of_states=1746, max_iterations=70), (1746, 6, 200))
+        # Without States_Num: half the electrons and six more, as the SCF
+        # resolves them; an odd count rounds up.
+        self.assertEqual(plan(max_iterations=70), (1746, 6, 200))
+        self.assertEqual(plan(electrons=5.0), (9, 6, 200))
+        # No more later steps than the input allows.
+        self.assertEqual(plan(number_of_states=12, max_iterations=1), (12, 6, 120))
+        self.assertEqual(plan(number_of_states=12, max_iterations=3), (12, 6, 140))
+        # A stand-in that carries no settings has no plan.
+        for system in (
+            SimpleNamespace(),
+            SimpleNamespace(input=SimpleNamespace(hartree=object())),
+            SimpleNamespace(input=SimpleNamespace(scf=SCFSettings())),
+        ):
+            self.assertIsNone(driver_module._filter_plan(system))
+
     def test_absent_cache_key_is_reported_as_text(self) -> None:
         from parsec_python.cli import save_result_archive
 
@@ -1068,6 +1101,11 @@ class MPIRolePreparationTests(unittest.TestCase):
         self.assertEqual(len(worker_call.args), len(root_call.args))
         self.assertIs(worker_call.args[1], worker.reference.negative_laplacian)
         self.assertIs(worker_call.args[2], worker.reference.nonlocal_operator)
+        # Both are handed what the input fixes of the filter work, which
+        # the tiles of their sector stencils are decided by: nothing here,
+        # where the stand-in of the system carries no SCF settings.
+        self.assertIsNone(worker_call.kwargs["filter_plan"])
+        self.assertIsNone(root_call.kwargs["filter_plan"])
         self.assertIs(worker.system.eigenproblem_solver, worker.sector_solver)
         self.assertIs(
             worker.implementation.symmetry_eigensolver, worker.sector_solver
@@ -1094,6 +1132,25 @@ class MPIRolePreparationTests(unittest.TestCase):
         self.assertNotIn("hartree_cg_storage", details)
         self.assertNotIn("hartree_boundary_setup", details)
         self.assertEqual(details["hartree_backend"], "native")
+
+    def test_sector_solver_is_handed_the_filter_plan_of_the_prepared_input(self) -> None:
+        # What the input fixes of the filter work reaches the constructor of
+        # the sector eigensolver on the root, on a sector worker and without
+        # a sector context, made from the system the rank prepared.
+        plan = object()
+        for context in (
+            None,
+            SimpleNamespace(rank=0, root=0, size=2),
+            SimpleNamespace(rank=1, root=0, size=2),
+        ):
+            with self.subTest(context=context), patch.object(
+                driver_module, "_filter_plan", return_value=plan
+            ) as planned:
+                prepared = self.prepare(context)
+                planned.assert_called_once_with(prepared.reference)
+                self.assertIs(
+                    prepared.sector_solver_type.call_args.kwargs["filter_plan"], plan
+                )
 
     def test_gpu_cg_receives_the_packed_sector_stencil(self) -> None:
         for mpi_context in (None, SimpleNamespace(rank=0, root=0, size=2)):
@@ -2725,6 +2782,90 @@ class RealHybridAccuracyTests(unittest.TestCase):
                 )
                 np.testing.assert_array_equal(actual.density, expected.density)
                 self.assertEqual(actual.energies, expected.energies)
+
+    def test_tiles_that_the_filter_work_chooses_leave_the_scf_bitwise_unchanged(
+        self,
+    ) -> None:
+        from parsec_python.acceleration.Eigensolvers import symmetry
+        from parsec_python.acceleration.backends import implicit_stencil
+
+        problem = parse_parsec_input(SMOKE_INPUT).problem
+        problem = replace(problem, scf=replace(problem.scf, max_iterations=3))
+        names = (
+            "PARSEC_CUPY_IMPLICIT_TILE",
+            "PARSEC_CUPY_IMPLICIT_TILE_MIN_ROWS",
+            "PARSEC_CUPY_IMPLICIT_TILE_GROUP_MIN_ROWS",
+        )
+        kept = {
+            name: value
+            for name, value in driver_module.os.environ.items()
+            if name not in names
+        }
+        handed = []
+        choice = symmetry.implicit_tile_for_sector
+
+        def recorded(rows, device_count, float32_filter=False, sectors_on_device=1, work=None):
+            tile = choice(rows, device_count, float32_filter, sectors_on_device, work)
+            handed.append((work, tile))
+            return tile
+
+        def run(**settings):
+            del handed[:]
+            with patch.dict(
+                driver_module.os.environ,
+                {
+                    **kept,
+                    "PARSEC_CUPY_MIXED_FILTER": "off",
+                    "PARSEC_ACCELERATED_RESIDENT": "0",
+                    **settings,
+                },
+                clear=True,
+            ), patch.object(symmetry, "implicit_tile_for_sector", recorded):
+                system = prepare_single_point(problem, backend="auto")
+                details = dict(system.backend_info.details)
+                return run_scf(system), details
+
+        storage = "orbital_sector_finite_difference_storage"
+        # The defaults: the driver hands every sector the filter work of the
+        # input, which for a few states repays no packing.
+        expected, slot_major = run()
+        self.assertEqual(slot_major["orbital_sector_tile_pack_workers"], "no tiles packed")
+        self.assertEqual(len(handed), 8)
+        plan = driver_module._filter_plan(SimpleNamespace(input=problem, electron_count=8.0))
+        for work, tile in handed:
+            self.assertEqual(
+                (work.applications, work.devices, tile), (plan.applications, 1, 0)
+            )
+            self.assertGreaterEqual(work.columns, 1)
+            self.assertLessEqual(work.columns, plan.states // 8 + plan.buffer + 1)
+        self.assertEqual(
+            (plan.states, plan.buffer),
+            (problem.scf.number_of_states, problem.eigensolver.subspace_buffer),
+        )
+        # Packing that costs next to nothing and tiles that save at any
+        # share: the rule itself now asks for tiles, of every sector.
+        with patch.object(implicit_stencil, "PACKING_SECONDS_PER_ROW", 1.0e-18), patch.object(
+            implicit_stencil, "REGULAR_SHARE_WITHOUT_GAIN", -1.0
+        ):
+            actual, details = run()
+            self.assertEqual([tile for _work, tile in handed], [16] * 8)
+            self.assertEqual(details[storage], "implicit_affine_tile_16")
+            # The two row limits at their former values give the choice
+            # before the rule, whatever the rule would say.
+            former, former_details = run(
+                PARSEC_CUPY_IMPLICIT_TILE_MIN_ROWS="650000",
+                PARSEC_CUPY_IMPLICIT_TILE_GROUP_MIN_ROWS="1100000",
+            )
+            self.assertEqual([tile for _work, tile in handed], [0] * 8)
+        self.assertEqual(former_details[storage], slot_major[storage])
+        for result in (actual, former):
+            self.assertEqual(result.iterations, expected.iterations)
+            np.testing.assert_array_equal(result.eigenvalues, expected.eigenvalues)
+            np.testing.assert_array_equal(result.density, expected.density)
+            np.testing.assert_array_equal(
+                result.hartree_potential, expected.hartree_potential
+            )
+            self.assertEqual(result.energies, expected.energies)
 
     def test_a_result_reports_the_filter_graphs_that_its_sectors_recorded(
         self,

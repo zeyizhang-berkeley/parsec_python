@@ -309,6 +309,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     # its seconds belong to the calculation.  None for an input with a radius.
     started = time.perf_counter() - translation.domain_rule_seconds
     run_log = _RunLog(log_path, quiet=arguments.quiet)
+    reporter = None
     try:
         with run_log as log:
             reporter = AcceleratedTextReporter(
@@ -395,6 +396,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                 file=sys.stderr,
             )
         return 1
+    finally:
+        # The reporter may run a host thread beside the SCF: it ends here
+        # where the calculation did not reach its report.
+        if reporter is not None:
+            reporter.close()
 
 
 __all__ = ["main"]

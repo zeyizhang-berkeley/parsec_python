@@ -137,8 +137,14 @@ root estimates after the SCF what the sphere adds to the energy and which
 radius would meet the tolerance, on the host and inside the reported time
 (0.3 to 1.2 s for 39,368 electrons on a workstation host);
 `PARSEC_DOMAIN_REPORT=0` leaves that out for a run that is timed against one
-of an earlier tree, without touching its results. This switch and the
-others added with it, with their defaults, the values that restore the
+of an earlier tree, without touching its results. The estimates of the
+omitted potential that the search for that radius asks for, which were most
+of those seconds, are made by a host thread of the root while the SCF runs
+(`PARSEC_DOMAIN_REPORT_THREAD`, on by default; `0` makes them after the SCF,
+as before): the thread works with NumPy on host arrays of its own, calls
+nothing on a device, and is ended and joined before the root reports. These
+switches and the
+others added with them, with their defaults, the values that restore the
 former behaviour and what first runs on A100 nodes gave for each, are in one
 table in `README.md`.
 

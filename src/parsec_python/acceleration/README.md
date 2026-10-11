@@ -357,24 +357,51 @@ calculation without symmetry sectors, `gpu_later_subspace_filter_precision`,
 is still the statement of the preparation.
 
 The stencil of a symmetry sector is stored as affine tiles of 16 rows
-(`GPU_COMPACT_OPTIMIZATION.md`) where one device filters the basis of the
-sector and the sector has at least 650,000 rows
-(`PARSEC_CUPY_IMPLICIT_TILE_MIN_ROWS`), or that number over the square root
-of the sectors that its device filters one after another: 459,620 rows with
-two sectors on a device, 325,000 with four or more. That is `PARSEC_CUPY_IMPLICIT_TILE=auto`,
-the default; the kernels do the arithmetic of the slot-major stencil in the
-same order, and complete calculations on one device per sector gave the same
-energies to the last bit. A sector whose basis or filter is given several
-devices (8 and 16 GPUs) is packed from a row count of its own, 1,100,000
-(`PARSEC_CUPY_IMPLICIT_TILE_GROUP_MIN_ROWS`): its owner packs the tiles
-and the other devices are given its packed arrays. That row count is
-assumed, not measured against others; complete calculations with a tiled
-group have run on 8 and 16 A100 GPUs since.
+(`GPU_COMPACT_OPTIMIZATION.md`) where the filter work of the run in that
+sector repays the packing of the tiles on the host. That is
+`PARSEC_CUPY_IMPLICIT_TILE=auto`, the default, on every route: a sector that
+one device filters and one whose basis or filter several devices share (8
+and 16 GPUs), where the owner packs the tiles and the other devices are
+given its packed arrays. The rule reads what every calculation has: the
+columns of the sector (its share of `States_Num` with the subspace buffer),
+the Hamiltonian applications that the input fixes per column (`FF_MaxIter`
+times `Chebdav_Degree` of the first solve and eight later steps at the
+lowest degree their filter falls to, 200 for four cycles of degree 30), the
+devices of the process, which wait together while its host packs, and the
+share of the rows that lie in regular tiles, taken from 1,024 tiles of the
+stencil itself. A sector gets tiles where, per row,
+
+```text
+28 ps x (regular share - 0.50) x columns x applications  >=  70 ns x devices
+```
+
+the seconds a device saves per row, column and application against the
+seconds the host takes to pack a row, both measured on A100 nodes. The rows
+cancel. With four devices and 200 applications a sector whose rows are
+regular to two thirds gets tiles from about 300 columns: 3,480 electrons
+(442 columns a sector) do on 4, 8 and 16 GPUs, where their filter took 7%
+fewer seconds. On 8 GPUs that was 0.19 s a sector against 0.18 s more
+before the SCF, next to no gain; the packing of shared sectors took more
+there than the 70 ns a row of the rule, and the larger sectors gained
+(the table of two defaults below, `GPU_COMPACT_OPTIMIZATION.md`). A sector
+with few states gets none at any number of rows,
+and neither does one of many states whose rows lie to half or more in
+tiles that are not regular, as those of a small sector do. The kernels do
+the arithmetic of the slot-major stencil in the same order, and complete
+calculations gave the same energies to the last bit, on one device per
+sector and with a sector shared by two and by four.
+Before the rule `auto` went by rows: 650,000 for a sector that one device
+filters (`PARSEC_CUPY_IMPLICIT_TILE_MIN_ROWS`), over the square root of the
+sectors that its device filters one after another (459,620 rows with two,
+325,000 with four or more), and 1,100,000 for a sector that several devices
+share (`PARSEC_CUPY_IMPLICIT_TILE_GROUP_MIN_ROWS`). Either variable, when it
+is set, is again the row limit of its route, and the two at `650000` and
+`1100000` give every sector the choice it had.
 `0` keeps the slot-major stencil everywhere, as before, and a tile size packs
-every stencil. The limits of one device were measured on A100; `0` is the
-setting for a device whose tile kernels do not gain, where the host packing
-is paid for nothing. `auto` keeps the slot-major stencil for a sector that
-is to hold the FP32 recurrence, and outside symmetry sectors. Tiles that
+every stencil. The constants of the rule were measured on A100 nodes; `0` is
+the setting for a device whose tile kernels do not gain, where the host
+packing is paid for nothing. `auto` keeps the slot-major stencil for a sector
+that is to hold the FP32 recurrence, and outside symmetry sectors. Tiles that
 `auto` chose and that cannot be built leave the sector on the slot-major
 stencil; a tile size named in the environment is built or is an error, and
 the other devices of a group build the tiles of their owner or the
@@ -1142,9 +1169,9 @@ cache) on the same nodes, each with the setting that selects the former one:
 | Environment variable | Default | Former route | Described in |
 |---|---|---|---|
 | `PARSEC_CUPY_MIXED_FILTER` | `off`: every filter in FP64 | `auto`: FP32 later filter for large sectors | above |
-| `PARSEC_CUPY_IMPLICIT_TILE` | `auto`: affine tiles of 16 rows for a sector of at least `PARSEC_CUPY_IMPLICIT_TILE_MIN_ROWS` (650,000) rows that one device filters, of that over the square root of the sectors of the device where it filters several | `0`: the slot-major stencil; `PARSEC_CUPY_IMPLICIT_TILE_MIN_ROWS` at 1,100,000, 1,555,634 or 2,200,000 for one, two or four sectors on every device (4, 2 or 1 GPUs): the former limit of 1,100,000 rows | above, `GPU_COMPACT_OPTIMIZATION.md` |
+| `PARSEC_CUPY_IMPLICIT_TILE` | `auto`: affine tiles of 16 rows for a sector whose filter work repays their packing (columns, counted applications and share of regular tiles against the devices of the process; above), unless `PARSEC_CUPY_IMPLICIT_TILE_MIN_ROWS` names a row limit for the sectors that one device filters | `0`: the slot-major stencil; `PARSEC_CUPY_IMPLICIT_TILE_MIN_ROWS` at `650000` with `PARSEC_CUPY_IMPLICIT_TILE_GROUP_MIN_ROWS` at `1100000`: the row limits before the rule; the first at 1,100,000, 1,555,634 or 2,200,000 for one, two or four sectors on every device (4, 2 or 1 GPUs): the limit of 1,100,000 rows before those | above, `GPU_COMPACT_OPTIMIZATION.md` |
 | `PARSEC_CUPY_IMPLICIT_PACK_WORKERS` | `4`: threads that pack the chunks of a tiled stencil | `1` | `GPU_COMPACT_OPTIMIZATION.md` |
-| `PARSEC_CUPY_IMPLICIT_TILE_GROUP_MIN_ROWS` | `1100000`: under `PARSEC_CUPY_IMPLICIT_TILE=auto`, affine tiles also for a sector of at least that many rows whose basis or filter several devices share (8 and 16 GPUs); the owner packs them and the others read its arrays | `PARSEC_CUPY_IMPLICIT_TILE=0`: the slot-major stencil on every device | above, `GPU_COMPACT_OPTIMIZATION.md` |
+| `PARSEC_CUPY_IMPLICIT_TILE_GROUP_MIN_ROWS` | unset: under `PARSEC_CUPY_IMPLICIT_TILE=auto` a sector whose basis or filter several devices share (8 and 16 GPUs) follows the same rule in filter work; the owner packs the tiles and the others read its arrays. A value is the row count from which such a sector gets them | `1100000`: the row count before the rule; `PARSEC_CUPY_IMPLICIT_TILE=0`: the slot-major stencil on every device | above, `GPU_COMPACT_OPTIMIZATION.md` |
 | `PARSEC_IONIC_GPU_COUNT` | `auto`: the GPU ionic sums run on every device of an MPI rank that solves symmetry sectors, on one device otherwise | `1` | `GPU_SETUP_OPTIMIZATION.md` |
 | `PARSEC_CUPY_FILTER_GRAPH_REUSE` | `1`: one recorded filter graph per block width and degree, kept from plan to plan | `0`: one per block of a plan | `MULTI_GPU.md` |
 | `PARSEC_SECTOR_STENCIL` | `direct`: sector stencils from the grid | `csr`: reduced from the full-grid matrix | above |
@@ -1228,8 +1255,8 @@ them; both have run there since (`result.hartree_boundary` in the
 |---|---|---|---|---|---|
 | `PARSEC_CUPY_STREAMING_RITZ_BYTES` | unset: slabs of at most 2 GiB in the one-block Ritz step of a sector on four or more devices (16 GPUs) | `4294967296`, for 16 GPUs only; the rounds a run had take `PARSEC_CUPY_RITZ_GRAM_MULTIPLE=1` beside it | round-off | `slab_columns` of a shared sector in `timing.json` | above |
 | `PARSEC_CUPY_RITZ_CONDITION_HELPER` | `auto` when these runs were made, `any` since (last table below): another device of a shared sector estimates the condition number of the overlap beside the small solve of its owner, unless it holds the Hartree objects | `off` | same bits | `condition_device` and `condition_seconds` of a shared sector in `timing.json` | its row in the first table above |
-| `PARSEC_CUPY_IMPLICIT_TILE_MIN_ROWS` | `650000`, over the square root of the sectors of the device: the rows from which a sector alone on its device packs affine tiles | `1100000`, `1555634` or `2200000` on 4, 2 or 1 GPUs | same bits | `orbital_sector_finite_difference_storage` | the row of `PARSEC_CUPY_IMPLICIT_TILE` above |
-| `PARSEC_CUPY_IMPLICIT_TILE_GROUP_MIN_ROWS` | `1100000`: the rows from which a sector on several devices (8 and 16 GPUs) packs them | `PARSEC_CUPY_IMPLICIT_TILE=0` | same bits | `stencil_storage` of a shared sector in `timing.json` | its row above |
+| `PARSEC_CUPY_IMPLICIT_TILE_MIN_ROWS` | unset since the rule in filter work (the table of two defaults below); a value is the row count, over the square root of the sectors of the device, from which a sector alone on its device packs affine tiles: `650000` when these runs were made | `1100000`, `1555634` or `2200000` on 4, 2 or 1 GPUs | same bits | `orbital_sector_finite_difference_storage` | the row of `PARSEC_CUPY_IMPLICIT_TILE` above |
+| `PARSEC_CUPY_IMPLICIT_TILE_GROUP_MIN_ROWS` | unset since the rule in filter work (the table of two defaults below); a value is the row count from which a sector on several devices (8 and 16 GPUs) packs them: `1100000` when these runs were made | `PARSEC_CUPY_IMPLICIT_TILE=0` | same bits | `stencil_storage` of a shared sector in `timing.json` | its row above |
 | `PARSEC_CUPY_SECTOR_POOL_RELEASE` | `1`: a finished sector returns the unused pool blocks of its stream where a device solves several sectors in turn (2 GPUs) | `0` | same bits | `sector_pool_release` of a rank in `timing.json` | `MULTI_GPU.md` |
 | `PARSEC_CUPY_DENSITY_COLLECTION` | `changed`: the young generations are collected before the pool release after a density while the bytes in use stay | `full` | same bits | `density_pool_release` of a rank in `timing.json` | `MULTI_GPU.md` |
 | `PARSEC_SYMMETRY_SCF_BUFFERS` | `1`: the wedge sums and the Anderson step of the root in arrays it keeps | `0` | same bits | `scf_scalar_field_buffers` | below |
@@ -1242,7 +1269,28 @@ them; both have run there since (`result.hartree_boundary` in the
 | `PARSEC_HARTREE_ATOMIC_TAIL_VALUES` | `auto`: the values of the atomic tail at the exterior points come from an FP64 device kernel where the orbital backend is CuPy and from host threads elsewhere | `host`: host threads on every backend (the serial control of the MPI runner takes them); there is no former route, the tail is new | round-off | `hartree_atomic_tail_values` | `Hartree/GPU_HARTREE.md` |
 | `PARSEC_HARTREE_BOUNDARY_CHECK` | `0`: off. `n` compares, after the SCF, the boundary values of the final density at a sample of `n` unique exterior points (the innermost, those of the largest atomic tail, those nearest to an atom, random ones) with its direct Coulomb sum on the Hartree device and reports `hartree_boundary_check_*`; the maximum is that of the sample, and `n` at or above the number of points checks all (GPU boundary only; no effect on the results; its seconds are kept out of the SCF wall time) |  | none | `hartree_boundary_check_*` | `Hartree/GPU_HARTREE.md` |
 
-The switches below were added last, the four rows from
+Two defaults came after every table of switches here, the last one below
+included, and stand before it because neither has run on A100 nodes as it
+is: their last column says what did, the stencils that the rule of the tiles
+now chooses, by row limits lowered by hand, and the block after the SCF
+without its thread. With the former values of both rows a calculation is
+that of the code before them bit for bit. So it was on a laptop GPU, every
+array of the archive and `parsec.out` apart from its times: 32 and 176
+electrons through the command line and through the MPI runner, as a run
+and as a serial control, and 176 electrons with every sector basis shared,
+that one GPU named two and four times. The defaults gave the same there:
+the rule chooses no tiles for sectors of so few states, and the thread
+found no estimate to make. For 864 electrons with six first cycles of
+degree 40 the rule gives every sector its tiles on that one device, and
+the calculation was that of the slot-major stencil of the code before, bit
+for bit.
+
+| Switch | Default | Former value | Results | Says what ran | Serial control | A100 nodes |
+|---|---|---|---|---|---|---|
+| `PARSEC_CUPY_IMPLICIT_TILE_MIN_ROWS` with `PARSEC_CUPY_IMPLICIT_TILE_GROUP_MIN_ROWS` | both unset: `PARSEC_CUPY_IMPLICIT_TILE=auto` packs affine tiles for a sector whose filter work repays the packing, whether one device filters it or several share it (the rule above; `GPU_COMPACT_OPTIMIZATION.md`) | `650000` and `1100000`: the row limits of a sector on one device and of a shared one | same bits | `orbital_sector_finite_difference_storage`; `stencil_storage` of a shared sector in `timing.json` | not named: it names `PARSEC_CUPY_IMPLICIT_TILE=0` | limits of 500,000 and 600,000 rows against 650,000 and 1,100,000 in one allocation, first runs, two of each: the filter of a sector took 2.47 against 2.66 s for 3,480 electrons on 8 GPUs and 1.31 against 1.40 on 16, 5.32 against 5.83 and 2.71 against 2.97 for 5,264, 7.65 against 8.38 and 3.92 against 4.29 for 7,120 in the sphere of the default rule; on 4 GPUs the filters of 3,480 electrons in that sphere took 17.7 against 18.9 thread-seconds. The set-up of the sector operators of a rank grew by 0.17 s where it packed four stencils, by 0.09 to 0.15 s for two of 1.0 to 1.1 million rows, by 0.04 s for one of them and by 0.03 s at most at 677,542 rows. The wall time before the SCF grew by more than that timer shows: by 0.11 s on 4 GPUs and by 0.18, 0.25 and 0.26 s on 8, where the filter of a sector saved 0.19, 0.51 and 0.73 s. The time before the SCF and the SCF together fell by 0.17 s on 4 GPUs and by 0.1, 0.2 and 0.5 s on 8: next to nothing for 3,480 electrons on 8 GPUs, a gain for the others. On 16 GPUs the program times cannot be read: the first step of five of six slot-major runs took 0.8 to 10 s longer than in the earlier series and that of no run with tiles, for a reason that was not found; the tiles are judged there by the filter seconds and the bits. The fullest device peaked 52 to 98 MiB lower on 8 and 16 GPUs. The same total energies to the last bit. The rule gives these sectors their tiles and keeps those of the larger ones; it has not run there itself |
+| `PARSEC_DOMAIN_REPORT_THREAD` | on: on the CuPy backend a host thread makes, while the SCF runs, the estimates of the omitted potential that the radius search of the block "Density at the sphere" can ask for, and the block reads them (below) | `0`: the search makes them after the SCF | same bits: every line of the block and every entry of `result.domain.after_scf` that is no time | `after_scf.radius_seconds` beside `estimates`; `post_scf_finalization_reporting_seconds`; `domain_report_thread` of the root in `timing.json` (the estimates the thread made, its seconds, a failure; null without a thread) | not named: a report, no route of the solver | not run with the thread. Without it the search took 1.21 s of the 1.62 s after the SCF of 39,368 electrons on 16 GPUs (five estimates) and 0.17 and 0.20 s for 23,768 and 29,576 (one each) |
+
+The switches below were the last added before those two, the four rows from
 `PARSEC_CUPY_RITZ_GRAM_SLABS` on after the ten before them: what follows is
 about those ten, and the four have a paragraph behind the table. Each of
 the ten ran on A100 nodes against its
@@ -1338,11 +1386,17 @@ collected for and empty the pinned pool as they do alone. The block
 "Density at the sphere" after the SCF reads the density of the result on the
 host and takes nothing from a device, whatever the pools hold then.
 
-Which limit a sector's tiles follow is a matter of its devices. On 1, 2 and 4
+Which sectors get tiles is a matter of their filter work and of the devices
+of their process (the table of two defaults above): one process drives the 1, 2 or 4
+GPUs of a node, and on 8 and 16 GPUs every rank drives the four of its own,
+so the rule weighs a sector alike on 4, 8 and 16. Which row limit a sector
+follows where the limits are named is a matter of its devices. On 1, 2 and 4
 GPUs every sector is alone on a device that filters four, two or one of
-them: 325,000, 459,620 and 650,000 rows. On 8 and 16 GPUs the devices of a
-node share a sector: 1,100,000 rows, whatever the first limit says. `0` and a
-tile size are taken as they are on every route, so the stencils a launch had
+them: 325,000, 459,620 and 650,000 rows at `650000`. On 8 and 16 GPUs the
+devices of a node share a sector: the row count of
+`PARSEC_CUPY_IMPLICIT_TILE_GROUP_MIN_ROWS`, whatever the first limit says.
+`0` and a tile size are taken as they are on every route, so the stencils a
+launch had before either limit was lowered
 are those of `PARSEC_CUPY_IMPLICIT_TILE_MIN_ROWS` at 2,200,000, 1,555,634 or
 1,100,000 on 1, 2 or 4 GPUs and of `PARSEC_CUPY_IMPLICIT_TILE=0` on 8 and 16.
 The serial control keeps the former route of
@@ -1468,7 +1522,7 @@ places:
 | `parsec.out`, real-space setup | the energy the boundary values of the plan in use are estimated to leave; for a radius of the input also the wall estimate of its sphere |
 | `parsec.out`, after the SCF | "Density at the sphere": the estimate from the converged density and the radius and tolerance that would meet the wall share, with what set that radius where the density did not |
 | backend details, result archive | `domain_radius`, `domain_vacuum`, `domain_energy_tolerance`, `domain_wall_estimate`, `domain_boundary_energy`, `domain_wall_after_scf`, `domain_radius_for_wall_share` |
-| `timing.json` of the MPI runner | `result.domain` with the same, the shell sums of the fit and, under `after_scf`, `estimates`, `shell_seconds`, `radius_seconds` and `seconds`; `per_rank[].domain_rule_seconds` |
+| `timing.json` of the MPI runner | `result.domain` with the same, the shell sums of the fit and, under `after_scf`, `estimates`, `shell_seconds`, `radius_seconds` and `seconds`; `per_rank[].domain_rule_seconds`; `per_rank[].domain_report_thread` of the root, what became of the thread of the radius search |
 
 The MPI runner compares, before any rank prepares, the radius and the
 tolerance every rank resolved, bit for bit, and stops where they differ. The
@@ -1487,6 +1541,44 @@ that host, where the whole reporting after its SCF took 0.17 s on 16 A100
 before. An input with a `Hartree_Boundary_Tolerance` line gets
 no estimate. A failure of a report is printed in its place and does not
 reach the result.
+
+The estimates of that search depend on the geometry and a candidate radius
+alone. On the CuPy backend a host thread therefore makes them while the SCF
+runs (`PARSEC_DOMAIN_REPORT_THREAD`, on by default; `0` makes them after the
+SCF, as before). The search starts where the fit of the final density puts
+the wall, at most 2.5 ang from the sphere of the run and not below the
+minimum vacuum: the thread makes the search of the rule from every such
+start, the nearest first, each with the tolerance the rule gives it, and
+keeps what it estimates: 25 estimates for C9449H1572, 8 for 14,680
+electrons and 11 for 23,768 (4.3, 0.7 and 1.4 s on the host of a laptop),
+and none where the series bound of the rule settles every start, as for
+3,480 electrons. After the SCF the same search is made and reads the
+estimates it asks for: the lines of the block and the record are the same,
+`estimates` included, and `radius_seconds` is the time of a search that had
+them (2.5 ms each for C9449H1572 on that host, where the 1,271 estimates of
+432 searches from as many fits had taken 228 s). The search makes for itself
+an estimate that was not prepared, and makes again one whose last bits could
+decide. An estimate is a difference of two potentials of all the charges at
+the sphere (1,130 to 1,290 Ry for C9449H1572, where the tolerance is 2e-4
+Ry), and the order in which a BLAS sums the one product in it moves it by
+spacings of those potentials: by 4 to 9 of them between that product and
+the same sums in other orders, for 3,480 to 39,368 electrons on the host of
+a laptop (2e-12 Ry for the largest). A prepared estimate is therefore read
+only where it lies further from the tolerance than 64 spacings of the
+largest potential the charges can have on the sphere, 1.2e-10 Ry for that
+system. The thread works with NumPy on host arrays of its own and calls
+nothing on a
+device. The reporter ends and joins it before it reports, and both drivers
+end it on every other way out of a calculation. What became of it stays
+with the reporter (`radius_thread_record`), and the MPI runner writes it
+beside the times of the root, `per_rank[].domain_report_thread` in
+`timing.json`: the estimates the thread made, its wall seconds from start
+to end, and the text of what it raised or of what kept it from starting. A
+thread that fails leaves the search to make its estimates after the SCF, as
+before, and that entry is where it shows; the record of the sphere is the
+same either way. A calculation on a host
+backend gets no thread: its SCF works on the cores the thread would take.
+The thread has not run on A100 nodes.
 
 CuPy supports either translated first-SCF path: fixed-cycle CHEBFF or
 locking/restart CHEBDAV. Both retain the complete buffered Ritz space on the

@@ -19,6 +19,7 @@ import time
 _MODULE_STARTED = time.perf_counter()
 
 import argparse
+from contextlib import ExitStack
 import ctypes
 from dataclasses import asdict, is_dataclass
 import hashlib
@@ -77,7 +78,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 # default rule of the parser, and with the Hartree tolerance it is the
 # calculation that both sides share, as the boundary plan is. The report of
 # the sphere (PARSEC_DOMAIN_REPORT) is no route of the solver and stays the
-# launcher's; its seconds after the SCF are recorded apart
+# launcher's, with the host thread that makes the estimates of its radius
+# search beside the SCF (PARSEC_DOMAIN_REPORT_THREAD); its seconds after the
+# SCF are recorded apart
 # (result.domain.after_scf). The turns of four devices on the way to their
 # rows and the slab limit of two belong to a shared basis and have no entry
 # either.
@@ -645,9 +648,12 @@ def execute(args, cp, comm, MPI, initialization_seconds, initial_affinity=None):
     started = time.perf_counter()-translation.domain_rule_seconds
     reporter = None
     log_manager = _RunLog(log_path if rank == 0 else None, quiet=args.quiet or rank != 0)
-    with log_manager as log:
+    with log_manager as log, ExitStack() as leaving:
         if rank == 0:
             reporter = AcceleratedTextReporter(log.write, translation, symmetry_mode=symmetry)
+            # The reporter may run a host thread beside the SCF, which its report ends: it ends here on every
+            # other way out.
+            leaving.callback(reporter.close)
             reporter.header()
             for warning in translation.warnings:
                 log.write(f'WARNING: {warning}')
@@ -794,7 +800,11 @@ def execute(args, cp, comm, MPI, initialization_seconds, initial_affinity=None):
             # 1 GiB, or what a slab takes that is up to an eighth wider where no chunk size is named, which
             # then goes to the rows in one chunk (0 before the first step).
             shared_state[-1].update(exchange_buffer_bytes=group.exchange_buffer_bytes)
+    # What became of the host thread that made the estimates of the radius search beside the SCF of the root
+    # (PARSEC_DOMAIN_REPORT_THREAD): a dict, and none for a rank or a run without that thread.
+    radius_thread = getattr(reporter, 'radius_thread_record', None)
     local = dict(rank=rank, hostname=socket.gethostname(), devices=device_records,
+        domain_report_thread=radius_thread if isinstance(radius_thread, dict) else None,
         environment=_environment(), cpu_affinity=sorted(os.sched_getaffinity(0)) if hasattr(os, 'sched_getaffinity') else None,
         launcher_cpu_affinity=initial_affinity, cpu_affinity_restorations=affinity_restorations,
         cupy=cp.__version__, numpy=np.__version__, mpi_library=MPI.Get_library_version().strip(),
@@ -850,6 +860,7 @@ def execute(args, cp, comm, MPI, initialization_seconds, initial_affinity=None):
                 'Reported program wall matches acceleration.cli boundaries: after imports/input parsing through final reporting, before archive.',
                 'result.hartree_boundary is the Hartree boundary of the run: multipole order in use, Solver_Lpole, tolerance, atomic tail, the kernels that evaluated it and what evaluated the tail (null without one). The PARSEC_HARTREE_* switches change it without changing input_sha256: a comparison of two runs is one of the same calculation only where order, tolerance and tail agree. The kernels and the evaluator of the tail may differ: a serial control has the full-grid kernels and host threads.',
                 'result.domain is the sphere of the run (null for a box, and for an input with a radius under PARSEC_DOMAIN_REPORT=0, which also leaves after_scf out of every run): rule_version, radius_from (input or default rule), radius_bohr, the outermost atom and the vacuum beyond it, and, where the default rule chose the radius, boundary_sphere_radius and hartree_boundary_tolerance, the values of the two input lines that give this domain again, with set_by. wall_estimate_ry is the estimate before the SCF of the energy the sphere adds, from the free atoms: an estimate and not a bound, and meaningless with extra_electrons above zero; its parts by species and the source and charge of every free-atom density are beside it. boundary holds the estimate of the energy that the Hartree boundary values of the plan in use leave: about_ry and bound_ry, null where the plan lies outside the calibration (plan says why); the order, tolerance and tail they belong to are in result.hartree_boundary. after_scf is the estimate from the final density: status (estimated, not converged or no fit), the shell sums, energy_ry, decay_per_bohr, fit_rms and rough, and the radius and tolerance that would meet the wall share of domain_energy_tolerance_ry. The backend details hold the same under domain_*. per_rank[].domain_rule_seconds is what the default rule took in the parser of a rank, the loading of the pseudopotentials included; that of the root is inside reported_program_seconds, and all are zero for an input with a radius.',
+                'per_rank[].domain_report_thread is what became of the host thread of the root that makes, while the SCF runs, the estimates of the omitted potential that the radius search of result.domain.after_scf can ask for (PARSEC_DOMAIN_REPORT_THREAD, on by default): estimates is how many it made, seconds its wall time from its start to its end, the waits for the interpreter included, and failure the text of what it raised or of what kept it from starting, null where nothing did. It is null for the other ranks and where no thread was to run: PARSEC_DOMAIN_REPORT_THREAD=0, a run without after_scf, a box, a Hartree boundary tolerance of the input or none, and the direct sum. after_scf is the same with and without the thread apart from its seconds: estimates there counts what the search asked for, read or made, and radius_seconds is short where the search read them. A thread that failed or made fewer estimates than the search asked for leaves the search to make them, in radius_seconds as before.',
                 'With PARSEC_HARTREE_BOUNDARY_CHECK the check runs after the last SCF step and before run_scf returns. Its seconds are hartree_boundary_check_seconds: outside scf_seconds, inside post_scf_finalization_reporting_seconds and reported_program_seconds, and a phase of their own in the stack. Its device arrays are inside the GPU memory peak, so a run that is measured for time or memory leaves the check off.',
                 'MPI uses NumPy host fields only; MPICH_GPU_SUPPORT_ENABLED=0. CUDA context initialization is inside preparation and reported program time.',
                 'Where cuda_context_initialization_overlapped is true (PARSEC_OVERLAP_CUDA_CONTEXTS, the default) a thread created the contexts beside the static preparation: cuda_context_initialization_seconds_in_preparation is the time of that thread, not a stage of preparation_seconds, and once the contexts existed it started the GPU memory sampler and took the first memory observation, during the preparation.',

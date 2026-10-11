@@ -40,7 +40,11 @@ from .SCF.symmetry_fields import scf_buffers_requested
 # Imported here and not where it is read: the module binds ``require_cupy``
 # when it is first imported, and a preparation may run under a double of it.
 from .V_ion.cupy_ionic import ionic_gpu_count_setting
-from .backends.implicit_stencil import pack_worker_setting
+from .backends.implicit_stencil import (
+    FilterPlan,
+    counted_filter_applications,
+    pack_worker_setting,
+)
 from .backends.scipy import ScipyHamiltonianBackend
 from .backends.selection import BackendSelection, resolve_backend
 from .models import (
@@ -714,6 +718,33 @@ def _reported_pack_workers(storage: str) -> str:
         return str(pack_worker_setting())
     except ValueError:
         return "no tiles packed"
+
+
+def _filter_plan(reference) -> FilterPlan | None:
+    """Return what the input of ``reference`` fixes of the filter work of its run.
+
+    The states are those the SCF resolves: ``States_Num`` or, without it,
+    half the electrons and six more.  The buffer is that of the subspace,
+    and the applications are counted from the eigensolver settings and the
+    SCF steps the input allows
+    (:func:`~.backends.implicit_stencil.counted_filter_applications`).
+    ``None`` for a system that does not carry its input, whose sector
+    stencils then follow the row limits.
+    """
+
+    problem = getattr(reference, "input", None)
+    scf = getattr(problem, "scf", None)
+    eigensolver = getattr(problem, "eigensolver", None)
+    if scf is None or eigensolver is None:
+        return None
+    states = scf.number_of_states
+    if states is None:
+        states = int(np.ceil(0.5 * float(reference.electron_count))) + 6
+    return FilterPlan(
+        states=int(states),
+        buffer=int(eigensolver.subspace_buffer),
+        applications=counted_filter_applications(eigensolver, scf.max_iterations),
+    )
 
 
 def _apply_hartree_boundary_switches(problem):
@@ -1825,6 +1856,9 @@ def prepare_single_point(
                 else symmetry_representation_cache_info.key
             ),
             **({"mpi_context": mpi_context} if mpi_context is not None else {}),
+            # The filter work that the tiles of a sector stencil must repay
+            # their packing with.
+            filter_plan=_filter_plan(reference),
         )
         implementation.symmetry_eigensolver = symmetry_eigensolver
         implementation.eigenproblem_solver = symmetry_eigensolver

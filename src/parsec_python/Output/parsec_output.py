@@ -584,7 +584,7 @@ def _radius_comment(wanted) -> str:
 
 
 def domain_finish_lines(
-    result, translation, hartree=None
+    result, translation, hartree=None, prepared=None
 ) -> tuple[list[str], dict | None]:
     """Estimate from the final density what the sphere adds to the energy.
 
@@ -601,6 +601,11 @@ def domain_finish_lines(
     which takes estimates of the omitted potential (several for clusters of
     20,000 electrons and more): the line then says so, and the record keeps
     their number and the seconds of the shells and of the radius apart.
+    ``prepared`` may hold such estimates, made for the atoms of the result
+    before this is called
+    (:func:`~parsec_python.Hartree.domain.prepare_radius_search`): the lines
+    and the record are the same with and without them, apart from the
+    seconds of the radius, which then count a search that had its estimates.
     """
 
     settings = getattr(getattr(result, "grid", None), "settings", None)
@@ -669,6 +674,7 @@ def domain_finish_lines(
                     else None
                 ),
                 multipole_boundary=multipole,
+                prepared=prepared,
             ),
             None,
         )
@@ -776,6 +782,11 @@ class ParsecTextReporter:
     from the density under ``after_scf``.  With ``PARSEC_DOMAIN_REPORT=0``
     (:func:`domain_report_requested`) it stays ``None`` for an input that
     gives its radius, and nothing is estimated after the SCF.
+
+    ``prepared_estimates`` is ``None`` unless a caller sets it before
+    :meth:`finish`: estimates of the omitted potential that the block after
+    the SCF may read in place of making them (:func:`domain_finish_lines`).
+    This reporter prepares none.
     """
 
     def __init__(
@@ -794,6 +805,7 @@ class ParsecTextReporter:
         self._xc_total = 0.0
         self._mixing_energy_total = 0.0
         self.domain: dict | None = None
+        self.prepared_estimates = None
         self._domain_report = domain_report_requested()
         # The lines of the Hartree boundary are those of an isolated domain.
         self._periodic = getattr(self.problem, "periodic_cell", None) is not None
@@ -1224,6 +1236,7 @@ class ParsecTextReporter:
                 result,
                 self.translation,
                 self.problem.hartree,
+                self.prepared_estimates,
             )
             if self._domain_report
             else ([], None)

@@ -37,7 +37,12 @@ from ..backends.cupy import (
     synchronize,
 )
 from ..backends.cupy_mixed_precision import float32_filter_requested
-from ..backends.implicit_stencil import implicit_tile_for_sector
+from ..backends.implicit_stencil import (
+    FilterPlan,
+    FilterWork,
+    implicit_tile_for_sector,
+    regular_tile_share,
+)
 from .distributed_state import shared_basis_devices, shared_block_bytes
 from .eigval import CuPyEigvalResult, CuPyEigvalSolver, spill_download_order
 from .filter_graph import graph_route_name
@@ -347,6 +352,7 @@ class CuPySymmetrySCFEigensolver:
         kinetic_cache_key: str | None = None,
         decomposition_cache_key: str | None = None,
         mpi_context: Any | None = None,
+        filter_plan: FilterPlan | None = None,
     ) -> None:
         self.full_operator = full_operator
         self.decomposition = decomposition
@@ -582,6 +588,11 @@ class CuPySymmetrySCFEigensolver:
                     decomposition.sector_size(representation)
                 ),
                 sectors_on_device=self._device_sector_count(representation),
+                work=self._sector_filter_work(
+                    representation,
+                    filter_plan,
+                    static_operators.stencil_metadata[representation],
+                ),
             )
             for representation in self._owned_representations
         }
@@ -695,6 +706,32 @@ class CuPySymmetrySCFEigensolver:
             "shared_across_representations"
             if neighbors_are_shared and shared_device_neighbors is not None
             else "private_per_representation"
+        )
+
+    def _sector_filter_work(
+        self,
+        representation: int,
+        filter_plan: FilterPlan | None,
+        stencil_metadata: Any,
+    ) -> FilterWork | None:
+        """Return the filter work of a run in one sector, for the rule of its tiles.
+
+        ``None`` where the caller of the constructor gave no plan: the tiles
+        then follow the row limits.  The columns are those the first solve
+        gives the sector, the devices those of this process, which work side
+        by side while its host packs, and the share of regular tiles is
+        taken from the stencil of the sector when the rule asks for it.
+        """
+
+        if filter_plan is None:
+            return None
+        return FilterWork(
+            columns=self._initial_sector_count(
+                representation, filter_plan.states, filter_plan.buffer
+            ),
+            applications=filter_plan.applications,
+            devices=len(self.device_ids),
+            regular_share=lambda: regular_tile_share(stencil_metadata),
         )
 
     def _filter_device_count(self, representation: int) -> int:
