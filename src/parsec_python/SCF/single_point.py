@@ -367,11 +367,14 @@ def _density_and_energy_stages(
     atomic_density_builder: Callable[..., np.ndarray] | None,
     boundary_plan: HartreeBoundaryPlan | None,
     build_atomic_tail: bool,
+    ion_ion_energy_builder: Callable[..., float] | None = None,
 ) -> tuple[dict[str, object], dict[str, float]]:
     """Run stages 4 to 6 of the preparation.
 
     Returns the fields of :class:`PreparedSinglePointSystem` they build and
     the seconds of each stage under its :class:`PreparationTimings` name.
+    ``ion_ion_energy_builder`` is called in place of
+    :func:`ion_ion_energy`, with its arguments.
     """
     # 4. Initial valence density and nonlinear core-correction density.  SAD
     # remains the PARSEC-compatible default.  A file/ML provider returns the
@@ -418,7 +421,9 @@ def _density_and_energy_stages(
 
     # 5. Geometry-only ion--ion contribution to the total energy.
     stage_start = time.perf_counter()
-    repulsion = ion_ion_energy(atoms, pseudopotentials)
+    repulsion = (
+        ion_ion_energy if ion_ion_energy_builder is None else ion_ion_energy_builder
+    )(atoms, pseudopotentials)
     atomic_reference_correction = float(
         sum(
             problem.pseudopotentials[atom.symbol].atomic_energy_correction
@@ -461,6 +466,7 @@ def complete_single_point(
     local_ionic_builder: Callable[..., np.ndarray] | None = None,
     atomic_density_builder: Callable[..., np.ndarray] | None = None,
     build_atomic_tail: bool = True,
+    ion_ion_energy_builder: Callable[..., float] | None = None,
 ) -> PreparedSinglePointSystem:
     """Add what ``orbital_operators_only`` left out of ``system``.
 
@@ -471,6 +477,12 @@ def complete_single_point(
     None of them reads the kinetic operator or the projectors, and nothing
     before :func:`run_scf` reads them: a caller may run this on another
     thread beside the set-up that follows the preparation.
+
+    ``ion_ion_energy_builder`` stands for :func:`ion_ion_energy` where it is
+    given: it is called with the atoms and the pseudopotentials of ``system``
+    at the place of that stage and must return its value.  A caller that has
+    the energy computed elsewhere meanwhile hands it over through this hook;
+    ``ion_ion_seconds`` is then the time the hook took, not that of the sum.
 
     The static atomic tail of the Hartree boundary is built with them where
     the plan of ``system`` has one, unless ``build_atomic_tail`` is false.
@@ -502,6 +514,7 @@ def complete_single_point(
         atomic_density_builder,
         system.hartree_boundary,
         build_atomic_tail,
+        ion_ion_energy_builder,
     )
     return replace(
         system,

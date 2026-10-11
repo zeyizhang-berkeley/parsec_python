@@ -3,14 +3,14 @@
 from __future__ import annotations
 
 from collections import OrderedDict
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import replace
 from hashlib import sha256
 from importlib.util import find_spec
 import os
 from pathlib import Path
 import sys
-from threading import Lock
+from threading import Lock, current_thread
 from time import perf_counter
 from typing import Callable
 
@@ -23,6 +23,7 @@ from parsec_python.SCF.single_point import (
 from parsec_python.SCF.pbc import (
     prepare_periodic_single_point as prepare_reference_periodic_single_point,
 )
+from parsec_python.V_ion import ion_ion_energy
 from parsec_python.models import (
     PreparationTimings,
     SCFIteration,
@@ -39,7 +40,7 @@ from .Symmetry.axis_reflection import _fast_maps_requested
 from .SCF.symmetry_fields import scf_buffers_requested
 # Imported here and not where it is read: the module binds ``require_cupy``
 # when it is first imported, and a preparation may run under a double of it.
-from .V_ion.cupy_ionic import ionic_gpu_count_setting
+from .V_ion.cupy_ionic import ionic_gpu_count_setting, ionic_sum_grid_setting
 from .backends.implicit_stencil import (
     FilterPlan,
     counted_filter_applications,
@@ -256,6 +257,370 @@ def _remember_reference(cache_key: str, reference, capacity: int) -> None:
             _REFERENCE_CACHE.popitem(last=False)
 
 
+class _PreparationStages:
+    """When every stage of one preparation began and ended.
+
+    Seconds from the entry of :func:`prepare_single_point`, with the name of
+    the thread that ran the stage.  Threads work beside each other and a
+    stage may lie inside another of its thread (the grid inside the
+    reference preparation), so the records are a timeline and not a stack:
+    their seconds must not be added up.  A wait at a join is a stage of the
+    thread that waits.
+    """
+
+    def __init__(self) -> None:
+        self.origin = perf_counter()
+        self._lock = Lock()
+        self._records: list[tuple[str, str, float, float]] = []
+
+    def add(self, name: str, started: float, ended: float | None = None) -> None:
+        """Record stage ``name`` of the calling thread, begun at ``started``.
+
+        ``started`` and ``ended`` are readings of ``perf_counter``; the
+        stage ends now where ``ended`` is omitted.
+        """
+
+        ended = perf_counter() if ended is None else ended
+        record = (
+            name,
+            current_thread().name,
+            started - self.origin,
+            ended - self.origin,
+        )
+        with self._lock:
+            self._records.append(record)
+
+    def timed(self, name, function):
+        """Return ``function`` with every call recorded as stage ``name``.
+
+        ``name`` may be a function of the arguments of the call.  A call
+        that raises is recorded up to the failure.
+        """
+
+        def stage(*arguments, **options):
+            started = perf_counter()
+            try:
+                return function(*arguments, **options)
+            finally:
+                self.add(
+                    name(*arguments, **options) if callable(name) else name,
+                    started,
+                )
+
+        return stage
+
+    def records(self) -> tuple[dict[str, object], ...]:
+        """The stages in the order of their start."""
+
+        with self._lock:
+            records = sorted(self._records, key=lambda record: record[2:])
+        return tuple(
+            dict(stage=name, thread=thread, start_seconds=start, end_seconds=end)
+            for name, thread, start, end in records
+        )
+
+
+class _Published:
+    """One value that a thread of a preparation hands to the others, once.
+
+    A reader waits until the value is there.  Whoever may leave a reader
+    waiting publishes ``None`` on its way out, so that no thread waits for
+    a stage that has failed or was never reached.
+    """
+
+    def __init__(self) -> None:
+        self._future: Future = Future()
+        self._lock = Lock()
+
+    def publish(self, value) -> None:
+        """Hand ``value`` to the readers unless a value is there already."""
+
+        with self._lock:
+            if not self._future.done():
+                self._future.set_result(value)
+
+    def wait(self):
+        """Return the value, once it has been published."""
+
+        return self._future.result()
+
+
+def _symmetry_overlap_requested() -> bool:
+    """``PARSEC_OVERLAP_SYMMETRY_SETUP``: on unless 0, false, no or off.
+
+    On, a rank detects its symmetry and builds the representation phases on
+    a thread that starts when the grid exists, beside the projectors, where
+    its reference preparation builds no ionic field (see
+    :class:`_OverlappedSymmetryMaps`).  Off, both follow the reference
+    preparation on the thread that prepares, as before.  The maps are the
+    values of the same functions of the same grid and atoms either way.
+    """
+
+    return os.environ.get(
+        "PARSEC_OVERLAP_SYMMETRY_SETUP", "1"
+    ).strip().lower() not in {"0", "false", "no", "off"}
+
+
+def _stabilizer_symmetry_disabled() -> bool:
+    """Parse ``PARSEC_ORBITAL_STABILIZER_SYMMETRY``: whether it is off."""
+
+    policy = os.environ.get(
+        "PARSEC_ORBITAL_STABILIZER_SYMMETRY", "auto"
+    ).strip().lower()
+    if policy not in {
+        "auto", "on", "off", "1", "0", "true", "false", "yes", "no"
+    }:
+        raise ValueError(
+            "PARSEC_ORBITAL_STABILIZER_SYMMETRY must be auto, on, or off"
+        )
+    return policy in {"off", "0", "false", "no"}
+
+
+def _orbital_reduction(symmetry_reduction, stabilizer_disabled: bool):
+    """Return the reduction the orbitals take of a detected one, or ``None``.
+
+    With the stabilizer policy off, a group that fixes grid points (orbits
+    of unequal size) is left to the Hartree solver alone and the orbitals
+    use the full grid: an A/B control and a conservative override.
+    """
+
+    if (
+        symmetry_reduction is not None
+        and not np.all(
+            symmetry_reduction.multiplicities == symmetry_reduction.group_order
+        )
+        and stabilizer_disabled
+    ):
+        return None
+    return symmetry_reduction
+
+
+def _same_atoms(left, right) -> bool:
+    """Whether two atom sequences name the same species at the same positions, bit for bit."""
+
+    if len(left) != len(right):
+        return False
+    if any(a.symbol != b.symbol for a, b in zip(left, right)):
+        return False
+    return np.array_equal(
+        np.asarray([atom.position for atom in left], dtype=np.float64),
+        np.asarray([atom.position for atom in right], dtype=np.float64),
+    )
+
+
+class _OverlappedSymmetryMaps:
+    """The symmetry maps of a rank, built on a thread beside its projectors.
+
+    Symmetry detection and the representation phases read the grid and the
+    atoms and nothing else of the reference system, and the projectors do
+    not read them.  The thread starts when the grid exists and calls the
+    two functions the calling thread would call after the reference
+    preparation, with the same arguments: the maps are theirs.  It touches
+    no device and makes no MPI call, so its end leaves an open graph
+    capture valid (``backends/cupy_capture.py``).
+
+    The calling thread takes the reduction and the decomposition where it
+    used to build them, and an error of either is raised there, by the
+    name and in the order it had in line.  Measured on the host of an A100
+    node with 16 OpenMP threads, the projectors beside the maps took 1.02 to
+    1.08 times the longer of the two (3,480 to 39,368 electrons).
+
+    The thread publishes the reduction when it is detected, for a stage of
+    another thread that can use it before the calling thread has joined.
+    """
+
+    def __init__(self, *, cache_directory, reduction_known, stages) -> None:
+        self._cache_directory = cache_directory
+        self._published = reduction_known
+        self._stages = stages
+        self._executor = None
+        self._grid = None
+        self._atoms = None
+        self._reduction: Future = Future()
+        self._decomposition: Future = Future()
+        self.seconds = 0.0
+        self.wait_seconds = 0.0
+
+    @property
+    def started(self) -> bool:
+        return self._executor is not None
+
+    def start(self, grid, atoms, *, decompose: bool) -> None:
+        """Begin the maps of ``grid`` and ``atoms``.
+
+        With ``decompose`` the representation phases follow the detection
+        where the calling thread would build them: for a group with an
+        operation beside the identity that the orbitals take.
+        """
+
+        if self._executor is not None:
+            raise RuntimeError("the symmetry maps of a preparation start once")
+        # Imported by the calling thread, as it imports them in line.
+        from .Symmetry import (
+            load_or_build_reflection_decomposition,
+            load_or_detect_reflection_reduction,
+        )
+
+        self._grid, self._atoms = grid, atoms
+        stages, cache_directory = self._stages, self._cache_directory
+
+        def build():
+            started = perf_counter()
+            try:
+                try:
+                    found = load_or_detect_reflection_reduction(
+                        grid, atoms, cache_directory=cache_directory
+                    )
+                except BaseException as error:
+                    self._reduction.set_exception(error)
+                    return
+                finally:
+                    stages.add("symmetry_reduction", started)
+                self._reduction.set_result(found)
+                candidate, cache_info = found
+                self._published.publish(candidate)
+                if not decompose or candidate.group_order <= 1:
+                    return
+                try:
+                    disabled = _stabilizer_symmetry_disabled()
+                except ValueError:
+                    # The calling thread refuses the value where it reads it.
+                    return
+                if _orbital_reduction(candidate, disabled) is None:
+                    return
+                mark = perf_counter()
+                try:
+                    built = load_or_build_reflection_decomposition(
+                        grid,
+                        candidate,
+                        reduction_key=cache_info.key,
+                        cache_directory=cache_directory,
+                    )
+                except BaseException as error:
+                    self._decomposition.set_exception(error)
+                else:
+                    self._decomposition.set_result((candidate, built))
+                finally:
+                    stages.add("symmetry_decomposition", mark)
+            finally:
+                self.seconds = perf_counter() - started
+                # Whatever happened, nobody is left waiting.
+                self._published.publish(None)
+                for future in (self._reduction, self._decomposition):
+                    if not future.done():
+                        future.set_result(None)
+
+        self._executor = ThreadPoolExecutor(
+            max_workers=1,
+            thread_name_prefix="parsec-symmetry-setup",
+        )
+        self._executor.submit(build)
+        # The thread ends with its task, joined or not.
+        self._executor.shutdown(wait=False)
+
+    def serves(self, grid, atoms) -> bool:
+        """Whether the thread was started on this very grid and these atoms."""
+
+        return (
+            self._executor is not None
+            and grid is self._grid
+            and _same_atoms(atoms, self._atoms)
+        )
+
+    def reduction(self):
+        """Wait for the detection; return what it returned or raise what it raised."""
+
+        started = perf_counter()
+        try:
+            return self._reduction.result()
+        finally:
+            self.wait_seconds += perf_counter() - started
+            self._stages.add("symmetry_reduction_wait", started)
+
+    def decomposition(self, reduction):
+        """Join the thread; return the decomposition it built of ``reduction``.
+
+        ``None`` where it built none, or one of another reduction; an error
+        of the build is raised.
+        """
+
+        started = perf_counter()
+        try:
+            built = self._decomposition.result()
+        finally:
+            self._executor.shutdown(wait=True)
+            self.wait_seconds += perf_counter() - started
+            self._stages.add("symmetry_decomposition_wait", started)
+        if built is None or built[0] is not reduction:
+            return None
+        return built[1]
+
+    def close(self) -> None:
+        """Wait for the thread without reading what it built or raised."""
+
+        if self._executor is not None:
+            self._executor.shutdown(wait=True)
+
+    def details(self) -> tuple[tuple[str, str], ...]:
+        """Report where the maps were built, and for the thread its time and the waits at its joins."""
+
+        if self._executor is None:
+            return (("symmetry_setup", "inline"),)
+        return (
+            ("symmetry_setup", "overlapped with the projectors"),
+            ("symmetry_setup_seconds", f"{self.seconds:.6f}"),
+            ("symmetry_setup_wait_seconds", f"{self.wait_seconds:.6f}"),
+        )
+
+
+class _Preparation:
+    """What the stages of one preparation share.
+
+    ``stages`` is its clock.  A stage that starts a thread says here how to
+    join it, and :meth:`close` joins whatever still runs: the preparation
+    leaves no thread behind, whether it returns or raises.
+
+    ``symmetry_reduction`` is the reduction the preparation has detected,
+    published once it is known: ``None`` where the detection failed and
+    where the preparation looks for none, and possibly a group of the
+    identity alone.  ``symmetry_maps`` is the thread that builds the maps
+    beside the projectors, ``None`` where they are built in line.
+    """
+
+    def __init__(self) -> None:
+        self.stages = _PreparationStages()
+        self.symmetry_reduction = _Published()
+        self.symmetry_maps: _OverlappedSymmetryMaps | None = None
+        self._closers: list[Callable[[], None]] = []
+
+    def join_on_exit(self, close: Callable[[], None]) -> None:
+        """Have ``close()`` called when the preparation is left.
+
+        ``close`` waits for a thread and returns nothing; it is called
+        whether the thread has been joined before or not.
+        """
+
+        self._closers.append(close)
+
+    def close(self) -> None:
+        """Join every thread of the preparation, the last one started first.
+
+        What a thread returned or raised is not read here.  A preparation
+        that returns has joined its threads where their results are read,
+        and one that raises reports its own error, which came first.  A
+        thread that still waits for the symmetry reduction is told that
+        there is none.
+        """
+
+        self.symmetry_reduction.publish(None)
+        while self._closers:
+            close = self._closers.pop()
+            try:
+                close()
+            except Exception:
+                pass
+
+
 def _ionic_overlap_requested() -> bool:
     """Whether the root-only ionic fields may leave the preparing thread.
 
@@ -273,6 +638,78 @@ def _ionic_overlap_requested() -> bool:
     )
 
 
+def _ion_ion_overlap_requested() -> bool:
+    """``PARSEC_OVERLAP_ION_ION_SETUP``: on unless 0, false, no or off.
+
+    It acts where the ionic fields are built on their thread
+    (``PARSEC_OVERLAP_IONIC_SETUP`` with the GPU ionic fields).  On, the
+    ion-ion energy is summed on a thread of its own, started with that
+    thread, and handed to it where its stage comes.  Off, the thread of the
+    fields sums it after its densities, as before.  The energy is the value
+    of the same function of the same atoms either way.
+    """
+
+    return os.environ.get(
+        "PARSEC_OVERLAP_ION_ION_SETUP", "1"
+    ).strip().lower() not in {"0", "false", "no", "off"}
+
+
+class _IonIonEnergyBeside:
+    """The ion-ion energy of a system, summed on a thread of its own.
+
+    The sum is a loop over the atoms in NumPy whose time grows with the
+    square of their number.  It reads the atoms and the ionic charges and
+    nothing else, touches no device and makes no MPI call, so the end of its
+    thread leaves an open graph capture valid (``backends/cupy_capture.py``).
+    The thread calls ``ion_ion_energy`` of the reference package with the
+    atoms and pseudopotentials of the system: the energy is the one the
+    stage of the reference preparation returns.
+
+    It is started once the projectors of the reference preparation are
+    built.  Beside that loop, which like this one runs in the interpreter,
+    both were slower than one after the other on an A100 node; beside the
+    symmetry maps the sum cost nothing.
+    """
+
+    def __init__(self, atoms, pseudopotentials, stages=None) -> None:
+        self._atoms, self._pseudopotentials = atoms, pseudopotentials
+        self.seconds = 0.0
+
+        def evaluate():
+            started = perf_counter()
+            try:
+                return ion_ion_energy(atoms, pseudopotentials)
+            finally:
+                self.seconds = perf_counter() - started
+                if stages is not None:
+                    stages.add("ion_ion_energy", started)
+
+        self._executor = ThreadPoolExecutor(
+            max_workers=1,
+            thread_name_prefix="parsec-ion-ion",
+        )
+        self._future = self._executor.submit(evaluate)
+        # The thread ends with its task, joined or not.
+        self._executor.shutdown(wait=False)
+
+    def energy(self, atoms, pseudopotentials) -> float:
+        """Stand for ``ion_ion_energy`` in ``complete_single_point``.
+
+        Waits for the thread and returns its value, or raises what it
+        raised.  Asked for other atoms than those of the thread, it sums
+        in place.
+        """
+
+        if atoms is not self._atoms or pseudopotentials is not self._pseudopotentials:
+            return ion_ion_energy(atoms, pseudopotentials)
+        return self._future.result()
+
+    def close(self) -> None:
+        """Wait for the thread without reading its value."""
+
+        self._executor.shutdown(wait=True)
+
+
 class _OverlappedIonicFields:
     """The root-only ionic fields, built on a thread beside host set-up.
 
@@ -282,36 +719,87 @@ class _OverlappedIonicFields:
     prepared without them, so each field is the one the in-line stages
     return.  It makes no MPI call and takes no cuBLAS or cuSOLVER handle:
     its end leaves an open graph capture valid (``backends/cupy_capture.py``).
+
+    The ion-ion energy, the last stage of that call, can be summed on a
+    second thread meanwhile (:class:`_IonIonEnergyBeside`).  The thread of
+    the fields takes its value where the stage comes, so both have ended
+    when the fields are joined.
     """
 
     def __init__(self) -> None:
         self._executor = None
         self._future = None
         self._sum_devices = None
+        self._stages = None
+        self._ion_ion = None
         self.seconds = 0.0
         self.wait_seconds = 0.0
         # The devices the sums of the thread ran on, known at the join.
         self.devices: tuple[int, ...] = ()
+        # The grid the sums of the thread ran on, in words, where the thread
+        # was told how to choose it (PARSEC_IONIC_SUM_GRID), and the seconds
+        # it took to choose before its first sum: its wait for the symmetry
+        # reduction and the test of the images.  They are not in ``seconds``.
+        self.sum_grid: str | None = None
+        self.sum_grid_seconds = 0.0
 
     @property
     def started(self) -> bool:
         return self._future is not None
 
-    def start(self, reference, *, sum_devices=None, **builders) -> None:
+    def start(
+        self,
+        reference,
+        *,
+        sum_devices=None,
+        stages=None,
+        ion_ion_beside: bool = False,
+        before_sums=None,
+        after_sums=None,
+        **builders,
+    ) -> None:
         """Begin the fields of ``reference``, a system prepared without them.
 
         ``sum_devices`` is called at the join for the devices the sums of
-        ``builders`` ran on.
+        ``builders`` ran on.  ``stages`` records the thread and the wait at
+        its join (:class:`_PreparationStages`).  With ``ion_ion_beside`` the
+        ion-ion energy of ``reference`` is summed on a thread of its own.
+        ``before_sums`` is called by the thread before its first sum and
+        returns the grid the sums will run on, in words, for ``details``.
+        ``after_sums`` is called by the thread once its sums have returned
+        or raised: it takes back what ``before_sums`` told the builders.
         """
 
         if self._future is not None:
             raise RuntimeError("the ionic fields of a preparation start once")
         self._sum_devices = sum_devices
+        self._stages = stages
+        if ion_ion_beside:
+            self._ion_ion = _IonIonEnergyBeside(
+                reference.atoms, reference.pseudopotentials, stages
+            )
+            builders = {**builders, "ion_ion_energy_builder": self._ion_ion.energy}
 
         def build():
             started = perf_counter()
-            complete = complete_reference_single_point(reference, **builders)
-            return complete, perf_counter() - started
+            first_sum = started
+            try:
+                try:
+                    if before_sums is not None:
+                        self.sum_grid = before_sums()
+                        first_sum = perf_counter()
+                        self.sum_grid_seconds = first_sum - started
+                    complete = complete_reference_single_point(reference, **builders)
+                finally:
+                    if after_sums is not None:
+                        after_sums()
+            finally:
+                if stages is not None:
+                    stages.add("ionic_fields", started)
+            # The seconds of the fields, counted from their first sum as
+            # they were before the thread chose a grid: a thread that waits
+            # for the symmetry reduction does no work that the wait hides.
+            return complete, perf_counter() - first_sum
 
         self._executor = ThreadPoolExecutor(
             max_workers=1,
@@ -335,13 +823,44 @@ class _OverlappedIonicFields:
             complete, self.seconds = self._future.result()
         finally:
             self._executor.shutdown(wait=True)
+            if self._ion_ion is not None:
+                # Its value was taken by the thread of the fields, unless
+                # that thread failed before the stage.
+                self._ion_ion.close()
             self.wait_seconds = perf_counter() - started
+            if self._stages is not None:
+                self._stages.add("ionic_fields_wait", started)
+        if self._ion_ion is not None:
+            # The stage of the thread of the fields only took the value: the
+            # seconds of the sum are those of its own thread.
+            complete = replace(
+                complete,
+                timings=replace(
+                    complete.timings, ion_ion_seconds=self._ion_ion.seconds
+                ),
+            )
         if self._sum_devices is not None:
             self.devices = tuple(self._sum_devices())
         return complete
 
+    def close(self) -> None:
+        """Wait for the threads without reading what they built or raised.
+
+        For a preparation that is left before the join, or after it.
+        """
+
+        if self._executor is not None:
+            self._executor.shutdown(wait=True)
+        if self._ion_ion is not None:
+            self._ion_ion.close()
+
     def details(self) -> tuple[tuple[str, str], ...]:
-        """Report the thread time, the wait at the join and what was hidden."""
+        """Report the time of the fields, the wait at the join and what was hidden.
+
+        The time of the fields runs from the first sum of the thread to its
+        end.  What the thread took before that to choose the grid of its
+        sums has an entry of its own.
+        """
 
         if self._future is None:
             return (("ionic_setup", "inline"),)
@@ -353,7 +872,90 @@ class _OverlappedIonicFields:
                 "ionic_setup_overlapped_seconds",
                 f"{max(0.0, self.seconds - self.wait_seconds):.6f}",
             ),
+            # PARSEC_IONIC_SUM_GRID: the points the sums of the thread ran
+            # on, and the seconds the thread took to choose them (its wait
+            # for the symmetry reduction and the test of the images).
+            *(
+                ()
+                if self.sum_grid is None
+                else (
+                    ("ionic_sum_grid", self.sum_grid),
+                    (
+                        "ionic_sum_grid_choice_seconds",
+                        f"{self.sum_grid_seconds:.6f}",
+                    ),
+                )
+            ),
+            # PARSEC_OVERLAP_ION_ION_SETUP: where the ion-ion energy was
+            # summed, and for a thread of its own the seconds it took.
+            *(
+                (("ion_ion_setup", "last stage of the ionic thread"),)
+                if self._ion_ion is None
+                else (
+                    ("ion_ion_setup", "own thread beside the ionic fields"),
+                    ("ion_ion_setup_seconds", f"{self._ion_ion.seconds:.6f}"),
+                )
+            ),
         )
+
+
+def _choose_ionic_sum_grid(builders, reference, preparation) -> str:
+    """Let the ionic sums of ``builders`` run on the symmetry wedge where that is exact.
+
+    Called by the thread of the ionic fields before its first sum.  The
+    local ionic potential and the atomic densities are sums of one term per
+    atom, totally symmetric under the group of the structure, and the SCF
+    loop of a symmetric structure keeps one value per orbit of them.  Where
+    ``PARSEC_IONIC_SUM_GRID`` allows it (``auto``, the default) and
+    ``Symmetry/exact_images.py`` finds the images of the atoms and of the
+    grid points under the detected group exact in every bit, the builders
+    are told to sum at the representative point of every orbit and to give
+    its value to the whole orbit.  In every other case they sum every grid
+    point, as before, and the text returned says why.  The wedge is an
+    economy and the full grid is always right: a test that cannot be made,
+    or builders that refuse the orbits, are one more such case and do not
+    fail the preparation.
+
+    The thread waits here until the reduction of the preparation is known:
+    the thread of the symmetry maps publishes it when it is detected, the
+    thread that prepares where it detects in line, and a preparation that
+    looks for no symmetry, or fails, publishes that there is none.
+    """
+
+    if ionic_sum_grid_setting() == "full":
+        return "full grid (PARSEC_IONIC_SUM_GRID=full)"
+    restrict = getattr(builders, "sum_on_orbits", None)
+    if restrict is None:
+        return "full grid (these builders sum every point)"
+    stages = preparation.stages
+    started = perf_counter()
+    reduction = preparation.symmetry_reduction.wait()
+    stages.add("ionic_symmetry_wait", started)
+    if reduction is None:
+        return "full grid (no symmetry reduction)"
+    from .Symmetry.exact_images import orbit_sum_points
+
+    started = perf_counter()
+    try:
+        points, obstacle = orbit_sum_points(reference.grid, reference.atoms, reduction)
+        if points is None:
+            return f"full grid ({obstacle})"
+        wedge = (
+            f"symmetry wedge ({int(reduction.wedge_size)} of "
+            f"{int(reduction.full_size)} points)"
+        )
+        restrict(reference.grid, reduction, points)
+        return wedge
+    except Exception as error:
+        # Whatever the builders were told before they refused is taken back.
+        every_point = getattr(builders, "sum_on_full_grid", None)
+        if every_point is not None:
+            every_point()
+        # An entry of the backend report: the first words of the error.
+        words = f"{type(error).__name__}: {error}"[:100]
+        return f"full grid (the test of the images failed: {words})"
+    finally:
+        stages.add("ionic_sum_grid_test", started)
 
 
 def _ionic_field_overlap(mpi_context) -> _OverlappedIonicFields | None:
@@ -371,6 +973,75 @@ def _ionic_field_overlap(mpi_context) -> _OverlappedIonicFields | None:
     return None
 
 
+def _reference_cluster_grid(settings):
+    """Call the grid builder the reference preparation takes when given none."""
+
+    from parsec_python.SCF import single_point
+
+    return single_point.build_cluster_grid(settings)
+
+
+def _timed_builders(options: dict, stages: _PreparationStages) -> dict:
+    """Return ``options`` with the builders of the reference system on the clock.
+
+    Each builder hook of ``prepare_single_point`` and
+    ``complete_single_point`` of the reference package that ``options``
+    names is called through ``stages``, which records its start and end
+    under the name of what it builds.  The grid builder of the reference
+    package is named where the options leave the grid to it, so that the
+    grid has a stage whichever builder makes it.
+    """
+
+    timed = dict(options)
+    timed["grid_builder"] = stages.timed(
+        "grid", options.get("grid_builder", _reference_cluster_grid)
+    )
+    for hook, name in (
+        ("negative_laplacian_builder", "finite_difference"),
+        ("local_ionic_builder", "local_ionic_potential"),
+        ("nonlocal_projector_builder", "projectors"),
+    ):
+        if hook in options:
+            timed[hook] = stages.timed(name, options[hook])
+    if "atomic_density_builder" in options:
+        timed["atomic_density_builder"] = stages.timed(
+            lambda *_arguments, core=False, **_options: (
+                "core_density" if core else "initial_density"
+            ),
+            options["atomic_density_builder"],
+        )
+    return timed
+
+
+def _grid_builder_starting_the_maps(build, problem, selection, symmetry_maps):
+    """Return ``build`` followed by the start of the symmetry maps of its grid.
+
+    The reference preparation calls its grid builder once the atoms are
+    placed and the electrons counted, and builds the finite differences and
+    the projectors after it.  The maps are started on the grid it returns
+    and on the atoms as that preparation places them, by its own
+    expression, and with the representation phases where the selected
+    backend solves in symmetry sectors.
+    """
+
+    from parsec_python.V_ion import center_cluster_geometry
+
+    def build_grid(settings):
+        grid = build(settings)
+        if not symmetry_maps.started:
+            atoms = (
+                center_cluster_geometry(problem.atoms)
+                if problem.recenter_geometry
+                else tuple(problem.atoms)
+            )
+            symmetry_maps.start(
+                grid, atoms, decompose=selection.selected == "cupy"
+            )
+        return grid
+
+    return build_grid
+
+
 def _prepare_reference_physics(
     problem: SinglePointInput,
     selection: BackendSelection,
@@ -381,6 +1052,7 @@ def _prepare_reference_physics(
     ionic_sector_rank: bool = False,
     ionic_report: dict | None = None,
     ionic_field_overlap: _OverlappedIonicFields | None = None,
+    preparation: _Preparation | None = None,
 ):
     """Build the static physics with the builders of the selected backend.
 
@@ -393,6 +1065,16 @@ def _prepare_reference_physics(
     ``ionic_field_overlap``.  The thread of the overlap sums after this call
     has returned, on the devices the process setting gives the calling
     thread, and the overlap holds the devices once it is joined.
+
+    ``preparation`` is the preparation this call is a stage of.  With it the
+    builders of the reference system are called through its clock, which
+    records when each began and ended; they build what they build without.
+    Where it has a thread for the symmetry maps, that thread is started as
+    soon as the grid exists, provided the reference system is built here
+    by the native builders, without ionic fields (a rank that builds none,
+    or fields left to ``ionic_field_overlap``) and without the full-grid
+    matrix (``defer_native_laplacian``): its host work after the grid is
+    then the projectors, beside which the maps were measured.
     """
 
     cache_capacity = _resident_reference_cache_size()
@@ -496,13 +1178,30 @@ def _prepare_reference_physics(
                     ionic_builders.superpose_atomic_density
                 ),
             )
-        if (
+        fields_on_their_thread = (
             ionic_field_overlap is not None
             and gpu_ionic_fields
             and not orbital_operators_only
             # A resident process stores the complete system under its key.
             and not cache_capacity
-        ):
+        )
+        if preparation is not None:
+            builder_options = _timed_builders(builder_options, preparation.stages)
+            if (
+                preparation.symmetry_maps is not None
+                and (fields_on_their_thread or orbital_operators_only)
+                and defer_native_laplacian
+            ):
+                # This preparation builds no ionic field and no full-grid
+                # matrix: after the grid its host work is the projectors,
+                # which the maps may run beside.
+                builder_options["grid_builder"] = _grid_builder_starting_the_maps(
+                    builder_options["grid_builder"],
+                    problem,
+                    selection,
+                    preparation.symmetry_maps,
+                )
+        if fields_on_their_thread:
             reference = prepare_reference_single_point(
                 problem, **builder_options, orbital_operators_only=True
             )
@@ -511,6 +1210,27 @@ def _prepare_reference_physics(
             ionic_field_overlap.start(
                 reference,
                 sum_devices=lambda: ionic_builders.device_ids,
+                **({} if preparation is None else {"stages": preparation.stages}),
+                # The projectors are built: the loop of the ion-ion energy
+                # no longer competes with theirs for the interpreter.
+                ion_ion_beside=_ion_ion_overlap_requested(),
+                # The thread chooses the points of its sums once the
+                # symmetry of the preparation is known.  The orbits were
+                # tested for the atoms of this system and for no others:
+                # the builders sum every point again once the fields of the
+                # thread are built.
+                **(
+                    {}
+                    if preparation is None
+                    else {
+                        "before_sums": lambda: _choose_ionic_sum_grid(
+                            ionic_builders, reference, preparation
+                        ),
+                        "after_sums": getattr(
+                            ionic_builders, "sum_on_full_grid", None
+                        ),
+                    }
+                ),
                 local_ionic_builder=builder_options["local_ionic_builder"],
                 atomic_density_builder=builder_options["atomic_density_builder"],
                 build_atomic_tail=False,
@@ -534,6 +1254,8 @@ def _prepare_reference_physics(
             "unhandled finite-difference builder "
             f"{selection.finite_difference_builder!r}"
         )
+    if preparation is not None:
+        reduced_options = _timed_builders(reduced_options, preparation.stages)
     reference = prepare_reference_single_point(problem, **reduced_options)
     if cache_key is not None:
         _remember_reference(cache_key, reference, cache_capacity)
@@ -1294,6 +2016,7 @@ def _resolve_and_prepare_reference(
     orbital_operators_only: bool = False,
     ionic_sector_rank: bool = False,
     ionic_field_overlap: _OverlappedIonicFields | None = None,
+    preparation: _Preparation | None = None,
 ):
     """Overlap CUDA driver discovery with independent CPU setup.
 
@@ -1320,11 +2043,18 @@ def _resolve_and_prepare_reference(
     ``ionic_sum_devices``, ``None`` if none ran in this call: sums left to
     ``ionic_field_overlap`` run after it, and their devices are read where
     the overlap is joined.
+
+    ``preparation`` is passed on to the reference preparation, and its
+    clock records the backend resolution and the reference preparation.
     """
 
     normalized = str(backend).strip().lower()
     gpu_ionic = os.environ.get("PARSEC_IONIC_BACKEND", "native").lower() == "cupy"
     ionic_report: dict = {}
+
+    def record(name, started):
+        if preparation is not None:
+            preparation.stages.add(name, started)
 
     def prepare_reference(selection, defer):
         options = {}
@@ -1343,7 +2073,12 @@ def _resolve_and_prepare_reference(
             )
         if ionic_field_overlap is not None:
             options.update(ionic_field_overlap=ionic_field_overlap)
-        return _prepare_reference_physics(problem, selection, **options)
+        if preparation is not None:
+            options.update(preparation=preparation)
+        started = perf_counter()
+        reference = _prepare_reference_physics(problem, selection, **options)
+        record("reference_preparation", started)
+        return reference
 
     overlap_requested = os.environ.get(
         "PARSEC_OVERLAP_CUDA_INITIALIZATION", "1"
@@ -1355,6 +2090,7 @@ def _resolve_and_prepare_reference(
         resolution_started = perf_counter()
         selection = _selection_for_problem(resolve_backend(backend, problem), problem)
         resolution_seconds = perf_counter() - resolution_started
+        record("backend_resolution", resolution_started)
         reference_started = perf_counter()
         reference = prepare_reference(
             selection,
@@ -1391,13 +2127,19 @@ def _resolve_and_prepare_reference(
     # is installed at all, so that a host without it prepares the matrix
     # inside the overlap exactly as before.
     defer_provisionally = defer_native_laplacian and _cupy_installed()
+    if preparation is not None:
+        # The probe already runs beside this reference preparation, and the
+        # backend is not known to it: the symmetry maps stay in line.
+        preparation.symmetry_maps = None
 
     overlap_started = perf_counter()
 
     def timed_resolution():
         started = perf_counter()
         selected = _selection_for_problem(resolve_backend(backend, problem), problem)
-        return selected, perf_counter() - started
+        seconds = perf_counter() - started
+        record("backend_resolution", started)
+        return selected, seconds
 
     with ThreadPoolExecutor(
         max_workers=1,
@@ -1468,8 +2210,41 @@ def prepare_single_point(
     With an ``mpi_context`` every rank prepares the symmetry sectors it owns.
     Only the root rank also prepares what the SCF loop itself needs (ionic
     fields, densities, Hartree and XC); on the other ranks those hooks raise.
+
+    Stages that are independent run on threads beside the calling one.
+    Every one of them has ended when this function returns or raises.
+    ``preparation_stages`` of the returned system says when each stage of
+    every thread began and ended.
     """
 
+    preparation = _Preparation()
+    try:
+        return _prepare_single_point(
+            problem,
+            backend=backend,
+            symmetry=symmetry,
+            symmetry_cache_directory=symmetry_cache_directory,
+            mpi_context=mpi_context,
+            preparation=preparation,
+        )
+    finally:
+        # A preparation that returns has joined its threads where it read
+        # their results; one that raises may have left some running.
+        preparation.close()
+
+
+def _prepare_single_point(
+    problem: SinglePointInput,
+    *,
+    backend: BackendName | str,
+    symmetry: SymmetryMode | str,
+    symmetry_cache_directory: os.PathLike[str] | str | None,
+    mpi_context,
+    preparation: _Preparation,
+) -> AcceleratedPreparedSinglePointSystem:
+    """Run the stages of :func:`prepare_single_point`, which joins their threads."""
+
+    stages = preparation.stages
     is_periodic = getattr(problem, "periodic_cell", None) is not None
     # A periodic cell has no Hartree boundary values.  The switches are read
     # for it too, so that a value they do not know is refused in every run,
@@ -1480,8 +2255,11 @@ def prepare_single_point(
     # Read here so that a value they do not know is refused in every run.
     _hartree_boundary_kernel()
     _hartree_boundary_check_count()
+    ionic_sum_grid_setting()
     tail_on_host = _hartree_tail_on_host()
     ionic_fields = _ionic_field_overlap(mpi_context)
+    if ionic_fields is not None:
+        preparation.join_on_exit(ionic_fields.close)
     symmetry_mode = _normalize_symmetry_mode(symmetry)
     if is_periodic and symmetry_mode == "on":
         raise ValueError(
@@ -1515,6 +2293,17 @@ def prepare_single_point(
     # Read here for the same reason: the first filter that records a graph
     # comes after the whole preparation, on every rank.
     shared_filter_graphs = graph_reuse_requested()
+    if is_periodic or symmetry_mode == "off":
+        # No symmetry is looked for: nobody waits for a reduction.
+        preparation.symmetry_reduction.publish(None)
+    elif _symmetry_overlap_requested():
+        # The reference stage starts it at the grid where it may.
+        preparation.symmetry_maps = _OverlappedSymmetryMaps(
+            cache_directory=symmetry_cache_directory,
+            reduction_known=preparation.symmetry_reduction,
+            stages=stages,
+        )
+        preparation.join_on_exit(preparation.symmetry_maps.close)
     selection, reference, preparation_overlap = _resolve_and_prepare_reference(
         problem,
         backend,
@@ -1527,6 +2316,7 @@ def prepare_single_point(
         # Every device of an MPI rank belongs to one of its sector groups.
         ionic_sector_rank=mpi_context is not None,
         **({} if ionic_fields is None else {"ionic_field_overlap": ionic_fields}),
+        preparation=preparation,
     )
     # A few backend-wiring tests use a deliberately minimal reference object.
     # Preserve the historical CA default for such result-like objects while
@@ -1542,6 +2332,8 @@ def prepare_single_point(
     symmetry_representation_cache_info = None
     detected_group_order = 1
     symmetry_detection = "disabled by option"
+    symmetry_maps = preparation.symmetry_maps
+    maps_beside = False
     if is_periodic:
         symmetry_detection = (
             "skipped: periodic cell (space-group symmetry detection is not "
@@ -1550,14 +2342,22 @@ def prepare_single_point(
     elif symmetry_mode != "off":
         from .Symmetry import load_or_detect_reflection_reduction
 
+        # The thread that works on the maps since the grid exists, where the
+        # reference stage started one on this grid and these atoms.
+        maps_beside = symmetry_maps is not None and symmetry_maps.serves(
+            reference.grid, getattr(reference, "atoms", ())
+        )
         try:
-            candidate, symmetry_geometry_cache_info = (
-                load_or_detect_reflection_reduction(
+            if maps_beside:
+                candidate, symmetry_geometry_cache_info = symmetry_maps.reduction()
+            else:
+                candidate, symmetry_geometry_cache_info = stages.timed(
+                    "symmetry_reduction", load_or_detect_reflection_reduction
+                )(
                     reference.grid,
                     getattr(reference, "atoms", ()),
                     cache_directory=symmetry_cache_directory,
                 )
-            )
         except (ValueError, RuntimeError) as error:
             if symmetry_mode == "on":
                 raise ValueError(
@@ -1588,35 +2388,21 @@ def prepare_single_point(
                         "symmetry='on' requested, but only the identity "
                         "operation preserves the labeled atoms and active grid"
                     )
+    # The reduction of this preparation is decided: a thread that waits for
+    # it goes on (the thread of the maps has published it where it ran).
+    preparation.symmetry_reduction.publish(symmetry_reduction)
 
     # Establish whether the orbital problem can use exact representation
     # sectors before constructing the GPU backend.  This ordering matters:
     # a sector calculation never applies the full-grid GPU Hamiltonian, so
     # uploading that duplicate allocation would be pure setup and memory cost.
     orbital_decomposition = None
-    orbital_reduction = symmetry_reduction
-    stabilizer_policy = os.environ.get(
-        "PARSEC_ORBITAL_STABILIZER_SYMMETRY", "auto"
-    ).strip().lower()
-    if stabilizer_policy not in {
-        "auto", "on", "off", "1", "0", "true", "false", "yes", "no"
-    }:
-        raise ValueError(
-            "PARSEC_ORBITAL_STABILIZER_SYMMETRY must be auto, on, or off"
-        )
-    stabilizer_disabled = stabilizer_policy in {
-        "off", "0", "false", "no"
-    }
-    if (
-        orbital_reduction is not None
-        and not np.all(
-            orbital_reduction.multiplicities == orbital_reduction.group_order
-        )
-        and stabilizer_disabled
-    ):
-        # A/B control and conservative architecture override: Hartree retains
-        # the detected scalar reduction, while orbitals use the full grid.
-        orbital_reduction = None
+    # A/B control and conservative architecture override: with the
+    # stabilizer policy off Hartree retains the detected scalar reduction of
+    # a group that fixes grid points, while orbitals use the full grid.
+    orbital_reduction = _orbital_reduction(
+        symmetry_reduction, _stabilizer_symmetry_disabled()
+    )
     orbital_symmetry = "full grid"
     if symmetry_mode == "off":
         orbital_symmetry = "full grid (symmetry disabled)"
@@ -1630,14 +2416,23 @@ def prepare_single_point(
         from .Symmetry import load_or_build_reflection_decomposition
 
         try:
-            orbital_decomposition, symmetry_representation_cache_info = (
-                load_or_build_reflection_decomposition(
+            # The decomposition the thread of the maps built of this very
+            # reduction, where it built one; in line otherwise.
+            built = (
+                symmetry_maps.decomposition(orbital_reduction)
+                if maps_beside
+                else None
+            )
+            if built is None:
+                built = stages.timed(
+                    "symmetry_decomposition", load_or_build_reflection_decomposition
+                )(
                     reference.grid,
                     orbital_reduction,
                     reduction_key=symmetry_geometry_cache_info.key,
                     cache_directory=symmetry_cache_directory,
                 )
-            )
+            orbital_decomposition, symmetry_representation_cache_info = built
         except (ValueError, RuntimeError) as error:
             if symmetry_mode == "on":
                 raise ValueError(
@@ -1656,6 +2451,11 @@ def prepare_single_point(
                 if len(set(sector_sizes)) > 1
                 else "CuPy real one-dimensional reflection representations"
             )
+    if symmetry_maps is not None:
+        # The thread of the maps has ended here at the latest, whether its
+        # decomposition was asked for or not: before the sector operators
+        # are built and long before the first graph capture.
+        symmetry_maps.close()
 
     # Decide the Hartree reduction before constructing the execution backend.
     # This lets the independent boundary-geometry setup overlap the much more
@@ -1785,8 +2585,13 @@ def prepare_single_point(
             max_workers=1,
             thread_name_prefix="parsec-hartree-setup",
         )
+        # A preparation that fails before the join below waits for the
+        # thread on its way out.
+        preparation.join_on_exit(
+            lambda: boundary_setup_executor.shutdown(wait=True)
+        )
         boundary_setup_future = boundary_setup_executor.submit(
-            _build_native_boundary_builder,
+            stages.timed("hartree_boundary_setup", _build_native_boundary_builder),
             reference,
             hartree_reduction,
             symmetry_cache_directory=symmetry_cache_directory,
@@ -1805,7 +2610,7 @@ def prepare_single_point(
     defer_full_gpu_operator = orbital_decomposition is not None and (
         selection.hartree_backend != "cupy" or sector_worker
     )
-    implementation = _build_backend(
+    implementation = stages.timed("backend_build", _build_backend)(
         reference,
         selection,
         defer_cupy_device_operator=defer_full_gpu_operator,
@@ -1832,6 +2637,7 @@ def prepare_single_point(
     if orbital_decomposition is not None:
         from .Eigensolvers import CuPySymmetrySCFEigensolver
 
+        stage_started = perf_counter()
         symmetry_eigensolver = CuPySymmetrySCFEigensolver(
             implementation.eigensolver_operator,
             reference.negative_laplacian,
@@ -1883,6 +2689,7 @@ def prepare_single_point(
         implementation.statistics.initialization_seconds = (
             implementation.timing_stats.initialization_seconds
         )
+        stages.add("sector_eigensolver", stage_started)
 
     if ionic_fields is not None and ionic_fields.started:
         # The XC evaluator below is the first reader of an ionic field, and
@@ -1892,6 +2699,7 @@ def prepare_single_point(
         if ionic_fields.devices:
             preparation_overlap["ionic_sum_devices"] = ionic_fields.devices
 
+    stage_started = perf_counter()
     if sector_worker:
         # The frozen core density was not built on this rank.
         native_xc_evaluator = _root_rank_only("the XC evaluator")
@@ -1930,7 +2738,11 @@ def prepare_single_point(
             )
 
         native_xc_evaluator = symmetry_xc_evaluator
+    stages.add("xc_evaluator", stage_started)
 
+    # The Hartree solver of the selected backend, with its boundary
+    # geometry and, where they are asked for, the resident maps.
+    hartree_started = perf_counter()
     if sector_worker:
         # No Poisson solver, boundary geometry or resident Hartree maps:
         # the root rank solves Hartree and sends the effective potential.
@@ -2065,6 +2877,7 @@ def prepare_single_point(
                 poisson_solver = poisson_factory(
                     concrete_negative_laplacian(reference.negative_laplacian)
                 )
+        stages.add("poisson_solver", hartree_started)
         if boundary_setup_eligible:
             if boundary_setup_future is not None:
                 wait_started = perf_counter()
@@ -2078,6 +2891,7 @@ def prepare_single_point(
                 finally:
                     boundary_setup_wait_seconds = perf_counter() - wait_started
                     boundary_setup_executor.shutdown(wait=True)
+                    stages.add("hartree_boundary_setup_wait", wait_started)
                 boundary_setup_overlapped_seconds = max(
                     0.0,
                     boundary_setup_seconds - boundary_setup_wait_seconds,
@@ -2096,7 +2910,9 @@ def prepare_single_point(
                         native_symmetry_boundary,
                         native_boundary_cache_info,
                         rebuild_seconds,
-                    ) = _build_native_boundary_builder(
+                    ) = stages.timed(
+                        "hartree_boundary_setup", _build_native_boundary_builder
+                    )(
                         reference,
                         None,
                         symmetry_cache_directory=symmetry_cache_directory,
@@ -2122,7 +2938,9 @@ def prepare_single_point(
                     native_symmetry_boundary,
                     native_boundary_cache_info,
                     boundary_setup_seconds,
-                ) = _build_native_boundary_builder(
+                ) = stages.timed(
+                    "hartree_boundary_setup", _build_native_boundary_builder
+                )(
                     reference,
                     hartree_reduction,
                     symmetry_cache_directory=symmetry_cache_directory,
@@ -2256,7 +3074,8 @@ def prepare_single_point(
             raise ValueError("resident Hartree requires GPU boundary/CG and matching scalar/Poisson wedge")
         if resident_policy in {"1", "auto"} and resident_eligible:
             from .Hartree.cupy_resident import CuPyResidentHartree
-            resident_hartree = CuPyResidentHartree(native_boundary_builder,hartree_reduction,
+            resident_hartree = stages.timed("resident_hartree", CuPyResidentHartree)(
+                native_boundary_builder,hartree_reduction,
                 poisson_solver.solver.backend,reference.input.hartree)
             def accelerated_hartree(density,initial_potential=None,**kwargs):
                 started=perf_counter()
@@ -2293,6 +3112,7 @@ def prepare_single_point(
         raise RuntimeError(
             f"unhandled Hartree backend {selection.hartree_backend!r}"
         )
+    stages.add("hartree_solver", hartree_started)
 
     boundary_on_gpu = type(native_boundary_builder).__name__ in _GPU_BOUNDARY_BUILDERS
     boundary_on_wedge_gpu = (
@@ -2375,6 +3195,16 @@ def prepare_single_point(
             "not used"
             if symmetry_mode == "off" or is_periodic
             else "on" if _fast_maps_requested() else "off",
+        ),
+        # PARSEC_OVERLAP_SYMMETRY_SETUP: where the symmetry maps were built,
+        # and for a thread of their own its seconds and the waits at its
+        # joins.
+        *(
+            (("symmetry_setup", "not used"),)
+            if symmetry_mode == "off" or is_periodic
+            else (("symmetry_setup", "inline"),)
+            if symmetry_maps is None
+            else symmetry_maps.details()
         ),
         (
             # The directory the caller named.  Without one, the default of
@@ -2961,6 +3791,12 @@ def prepare_single_point(
                 str(native_build.get("openmp_thread_source", "unknown")),
             ),
         )
+    # The whole preparation last: what follows only composes the system.
+    # The timeline is carried by the prepared system and is no entry of the
+    # backend report: the result archive stores every entry of the report at
+    # the width of the longest, and one line of all stages is several times
+    # as long as any other entry.
+    stages.add("preparation", stages.origin)
     implementation.info = replace(
         implementation.info,
         details=implementation.info.details + component_details,
@@ -2969,6 +3805,7 @@ def prepare_single_point(
         reference=reference,
         backend=implementation,
         backend_info=implementation.info,
+        preparation_stages=stages.records(),
         eigenproblem_solver=getattr(
             implementation, "eigenproblem_solver", None
         ),

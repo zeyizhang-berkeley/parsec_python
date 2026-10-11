@@ -135,8 +135,12 @@ _SERIAL_CONTROL_SETTINGS = {
     'PARSEC_CUPY_RITZ_DENSE_BACKEND': 'host',
     # The ionic fields in line and the CUDA contexts before the preparation, so
     # that a run that builds the fields on their own thread is compared with
-    # fields that were not.
+    # fields that were not. In line the ion-ion energy is a stage of the
+    # preparing thread whatever its own switch says; the entry keeps it the
+    # last stage of the ionic thread where a launcher asks a control for
+    # that thread.
     'PARSEC_OVERLAP_IONIC_SETUP': '0',
+    'PARSEC_OVERLAP_ION_ION_SETUP': '0',
     'PARSEC_OVERLAP_CUDA_CONTEXTS': '0',
     'PARSEC_CUDA_CONTEXT_CREATION': 'runtime',
     'PARSEC_CUPY_ROTATE_COLUMN_COPY': '0',
@@ -147,9 +151,16 @@ _SERIAL_CONTROL_SETTINGS = {
     'PARSEC_CUPY_SPILL_DOWNLOAD_ORDER': 'C',
     'PARSEC_HARTREE_DEVICE': 'off',
     'PARSEC_IONIC_GPU_COUNT': '1',
+    # Every grid point is summed: fields in line are in any case, and a
+    # control that is asked for the ionic thread must not take the sums on
+    # the symmetry wedge that a run takes there.
+    'PARSEC_IONIC_SUM_GRID': 'full',
     'PARSEC_CUPY_IMPLICIT_TILE': '0',
     'PARSEC_SECTOR_STENCIL': 'csr',
     'PARSEC_SYMMETRY_FAST_MAPS': '0',
+    # The maps on the thread that prepares, after the reference system, so
+    # that their thread beside the projectors is not in both sides either.
+    'PARSEC_OVERLAP_SYMMETRY_SETUP': '0',
     'PARSEC_CUPY_FILTER_GRAPH_REUSE': '0',
     'PARSEC_CUPY_DENSITY_COLLECTION': 'full',
     'PARSEC_CUPY_DENSITY_RELEASE': 'serial',
@@ -813,6 +824,8 @@ def execute(args, cp, comm, MPI, initialization_seconds, initial_affinity=None):
         launcher_cpu_affinity=initial_affinity, cpu_affinity_restorations=affinity_restorations,
         cupy=cp.__version__, numpy=np.__version__, mpi_library=MPI.Get_library_version().strip(),
         preparation_seconds=preparation_seconds, preparation_wait_seconds=preparation_wait_seconds,
+        # Stage, thread, start and end of every stage of prepare_single_point on this rank (see the notes).
+        preparation_stages=list(getattr(system, 'preparation_stages', None) or ()),
         domain_rule_seconds=translation.domain_rule_seconds,
         cuda_context_initialization_seconds_in_preparation=cuda_initialization_seconds,
         cuda_context_initialization_overlapped=cuda_contexts['overlapped'],
@@ -870,6 +883,7 @@ def execute(args, cp, comm, MPI, initialization_seconds, initial_affinity=None):
                 'Where cuda_context_initialization_overlapped is true (PARSEC_OVERLAP_CUDA_CONTEXTS, the default) a thread created the contexts beside the static preparation: cuda_context_initialization_seconds_in_preparation is the time of that thread, not a stage of preparation_seconds, and once the contexts existed it started the GPU memory sampler and took the first memory observation, during the preparation.',
                 'cuda_context_driver_devices lists the devices whose context that thread created through the CUDA driver library, outside the interpreter lock (PARSEC_CUDA_CONTEXT_CREATION=driver, the default), and cuda_context_driver_seconds is its time inside those calls, a part of the thread time. A device is missing where the library could not be used or numbers the devices otherwise: CuPy then created its context with the lock held, as with PARSEC_CUDA_CONTEXT_CREATION=runtime and as without the overlap, where the list is empty.',
                 'With that overlap the GPU ionic sums of the root (PARSEC_IONIC_BACKEND=cupy, on their own thread by default) can reach a device before the context thread does. The context is then created inside ionic_setup_seconds, and initial_free_bytes and the first memory observation of that device can include the arrays of the sums. PARSEC_OVERLAP_CUDA_CONTEXTS=0 gives the figures of the contexts alone.',
+                'preparation_stages of a rank lists every stage of its prepare_single_point: stage, thread, start_seconds and end_seconds, counted from the entry of that function (which follows the start of preparation_seconds by the start of the context thread) and ordered by start. Threads work beside each other and a stage may lie inside another of its thread (grid, finite_difference and projectors inside reference_preparation; poisson_solver, hartree_boundary_setup_wait and resident_hartree inside hartree_solver), so the list is a timeline: its seconds must not be added up. A stage whose name ends in _wait is the wait of its thread at the join of another; the stage that ends last before the stage named preparation ends is the critical chain of the rank. The list is in this record and on the prepared system only: the backend report and the result archive do not hold it.',
                 'MPI initialization/imports and provenance hashing precede reported time; external module wall is also recorded and does not include Python interpreter/package-import time before this module.',
                 'All rank readiness, preparation completion and post-worker joins are inside reported program wall time.',
                 'Stack uses only root sequential SCF wall timers and their remainder; concurrent GPU event totals must not be stacked.',

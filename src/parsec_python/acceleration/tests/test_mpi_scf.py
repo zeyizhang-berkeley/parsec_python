@@ -735,6 +735,18 @@ class MPISCFTests(unittest.TestCase):
                 self.assertFalse(driver._ionic_overlap_requested())
                 with patch.dict('os.environ', PARSEC_OVERLAP_IONIC_SETUP='1'):
                     self.assertTrue(driver._ionic_overlap_requested())
+                    # A control that is asked for that thread still sums the ion-ion energy as its last stage.
+                    self.assertFalse(driver._ion_ion_overlap_requested())
+                    with patch.dict('os.environ', PARSEC_OVERLAP_ION_ION_SETUP='1'):
+                        self.assertTrue(driver._ion_ion_overlap_requested())
+            # The symmetry maps after the reference system, on the thread that prepares.
+            self.assertFalse(driver._symmetry_overlap_requested())
+            with patch.dict('os.environ', PARSEC_OVERLAP_SYMMETRY_SETUP='1'):
+                self.assertTrue(driver._symmetry_overlap_requested())
+            # The ionic sums on every grid point, also where a launcher asks for their thread.
+            self.assertEqual(driver.ionic_sum_grid_setting(), 'full')
+            with patch.dict('os.environ', PARSEC_IONIC_SUM_GRID='auto'):
+                self.assertEqual(driver.ionic_sum_grid_setting(), 'auto')
             # The host solve with its SVD, a row-wise copy-back, two arrays even for a marked sector,
             # and the Hartree objects where they were.
             self.assertFalse(ritz.dense_solve_on_device())
@@ -1950,6 +1962,32 @@ class FullSCFRunnerContextTests(unittest.TestCase):
         # The slab limit of two devices is named where the slabs are and where the storage rule counts them.
         self.assertEqual(sum('PARSEC_CUPY_DISTRIBUTED_STATE_PAIR_SLAB_BYTES' in note for note in record['notes']), 2)
         self.assertEqual(len(set(record['notes'])), len(record['notes']))
+
+    def test_timing_record_holds_the_stages_of_the_preparation_of_a_rank(self):
+        import os
+        import shutil
+        from pathlib import Path
+        self.environment('0')
+        directory = Path.cwd() / '.tmp' / f'runner-stage-record-test-{os.getpid()}'
+        stages = (dict(stage='preparation', thread='MainThread', start_seconds=0., end_seconds=2.5),
+                  dict(stage='hartree_boundary_setup', thread='parsec-hartree-setup_0', start_seconds=1.25,
+                       end_seconds=2.))
+        try:
+            record, _, _ = self.run_serial_control(directory / 'staged', preparation_stages=stages)
+            # A prepared system that carries none (a stand-in, an older tree) gives an empty list.
+            plain, _, _ = self.run_serial_control(directory / 'plain')
+        finally:
+            shutil.rmtree(directory, ignore_errors=True)
+        # As the preparation gave them: one entry per stage, with its thread and its two stamps.
+        self.assertEqual(record['per_rank'][0]['preparation_stages'], [dict(stage) for stage in stages])
+        self.assertEqual(plain['per_rank'][0]['preparation_stages'], [])
+        # One note says how the list is read: a timeline of threads, not a sum.
+        (note,) = [note for note in record['notes'] if note.startswith('preparation_stages of a rank')]
+        for words in ('start_seconds and end_seconds', 'must not be added up', '_wait',
+                      'the backend report and the result archive do not hold it'):
+            self.assertIn(words, note)
+        # The entry of the backend report that held the list is gone, and the note does not name it.
+        self.assertNotIn('preparation_stage_seconds', note)
 
     def test_timing_record_says_what_the_bytes_counted_on_a_device_are(self):
         import os

@@ -93,6 +93,15 @@ series did, and leaves the storage of the sector states and their
 allocator unset. Launched through it, six
 configurations of the series, from 3,480 electrons on one GPU to 39,368 on
 16, gave the totals of the measured runs to the last bit.
+Since then the root of such a run sums its GPU ionic fields on the symmetry
+wedge where the images of the atoms are exact
+(`PARSEC_IONIC_SUM_GRID=auto`, see `GPU_SETUP_OPTIMIZATION.md`), which
+changes the fields by the round-off of one sum over the atoms and the
+totals with them; `PARSEC_IONIC_SUM_GRID=full` beside the launch settings
+gives the bits of the series again. That change has run on a laptop GPU
+only: the total energies of small runs under these launch settings (30 to
+176 electrons) moved by 2e-13 to 1.5e-11 Ry with the same number of SCF
+steps (`README.md`).
 
 These are the settings of the measured runs, not the defaults of the code.
 Unset, the ionic backend, the Hartree linear backend and the Hartree boundary
@@ -740,6 +749,9 @@ is spread over ranks, and through
 Record the GPU model, active GPU count, allocated and active CPU counts,
 precision, input hashes, code revision, iterations, and peak memory. Separate
 SCF wall time from startup, preparation, archive writing, and optional forces.
+What a rank spent its preparation on, and which stage the other ranks waited
+for, is in `per_rank[].preparation_stages` of `timing.json`: every stage with
+its thread, its start and its end (`GPU_SETUP_OPTIMIZATION.md`).
 The Fortran code computes forces that the Python single-point comparison omits;
 compare SCF wall time primarily and report external elapsed time separately.
 

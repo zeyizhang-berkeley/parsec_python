@@ -38,6 +38,10 @@ class AcceleratedPreparedSinglePointSystem:
     materialize_final_wavefunctions: bool = True
     # ``max |C_L|`` of the atomic tail the substituted Hartree solver adds.
     boundary_tail_maximum: float | None = None
+    # Stage, thread, start and end of every stage of the preparation, in
+    # seconds from its entry and in the order of the starts.  Stages of
+    # different threads overlap: a timeline, not a sum.
+    preparation_stages: tuple = ()
 
     def __getattr__(self, name: str):
         return getattr(self.reference, name)

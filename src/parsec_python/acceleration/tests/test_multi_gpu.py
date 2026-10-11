@@ -1196,7 +1196,12 @@ class SectorStateStorageTests(unittest.TestCase):
         self.assertEqual(control["PARSEC_CUPY_STREAMING_RITZ_TILE"], "budget")
         # The projection kernel with a CUDA block per projector and column came after them.
         self.assertEqual(control.pop("PARSEC_CUPY_PROJECTOR_BLOCK_COLUMNS"), "1")
-        self.assertEqual(len(control), 26)
+        # And the former values of the three switches of the preparation that came later: the ion-ion
+        # energy, the symmetry maps and the grid of the ionic sums.
+        preparation = {"PARSEC_OVERLAP_ION_ION_SETUP": "0", "PARSEC_OVERLAP_SYMMETRY_SETUP": "0",
+                       "PARSEC_IONIC_SUM_GRID": "full"}
+        self.assertEqual({name: control[name] for name in preparation}, preparation)
+        self.assertEqual(len(control), 26 + len(preparation))
 
     def test_the_former_values_of_the_switches_of_the_round_after_select_every_former_route_together(self):
         import importlib

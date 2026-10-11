@@ -1175,7 +1175,7 @@ cache) on the same nodes, each with the setting that selects the former one:
 | `PARSEC_IONIC_GPU_COUNT` | `auto`: the GPU ionic sums run on every device of an MPI rank that solves symmetry sectors, on one device otherwise | `1` | `GPU_SETUP_OPTIMIZATION.md` |
 | `PARSEC_CUPY_FILTER_GRAPH_REUSE` | `1`: one recorded filter graph per block width and degree, kept from plan to plan | `0`: one per block of a plan | `MULTI_GPU.md` |
 | `PARSEC_SECTOR_STENCIL` | `direct`: sector stencils from the grid | `csr`: reduced from the full-grid matrix | above |
-| `PARSEC_OVERLAP_IONIC_SETUP` | `1`: the GPU ionic fields on a thread beside symmetry and sector set-up | `0`: in line | `GPU_SETUP_OPTIMIZATION.md` |
+| `PARSEC_OVERLAP_IONIC_SETUP` | `1`: the GPU ionic fields on a thread beside symmetry and sector set-up | `0`: in line; fields in line are summed on every grid point and are the former bits, where the thread sums a symmetric structure on its wedge unless `PARSEC_IONIC_SUM_GRID=full` (below) | `GPU_SETUP_OPTIMIZATION.md` |
 | `PARSEC_OVERLAP_CUDA_CONTEXTS` | `1`: `benchmarks/mpi_full_scf.py` creates the CUDA contexts of a rank on a thread beside its preparation | `0`: before it | `GPU_SETUP_OPTIMIZATION.md` |
 | `PARSEC_SYMMETRY_FAST_MAPS` | `1`: symmetry detection and phases without passes over the grid coordinates | `0` | `GPU_SETUP_OPTIMIZATION.md` |
 
@@ -1532,6 +1532,52 @@ of that, 2.5 %; this is derived, not measured in a calculation, and so is
 any gain of a run. The other part of the nonlocal term in a step, the
 scatter `B C` inside the fused kernel (0.081 ms of that step), already
 serves six columns per thread and is unchanged.
+
+Three switches of the preparation of a rank came after those tables. They
+act where the launch profile puts the GPU ionic fields on their thread
+(`PARSEC_IONIC_BACKEND=cupy` with `PARSEC_OVERLAP_IONIC_SETUP`, the root of a
+run) and, the second, on every rank that solves symmetry sectors; a run
+without that profile builds its ionic fields in line and is the same bits
+and the same order of stages as before. With the three former values named
+a calculation is that of the code before them bit for bit, and so it was on
+a laptop GPU, every array of the archive and `parsec.out` apart from its
+times: through the accelerated command line under the launch variables for
+CF4 (32 electrons), benzene (30) and C35H36 (176, with the radius of its
+input and with the one of the default rule), and through the MPI runner
+with one rank for CF4 as a run, as a serial control and with the states of
+the sectors on the host, and for C35H36 as a run and with every sector
+basis shared (that one GPU named twice). With the defaults the serial
+control and a command line without the launch variables stay the same bits;
+the other runs differ by round-off, and by the sums on the wedge alone: the
+thread of the ion-ion energy by itself and the thread of the symmetry maps
+by itself gave the bits of the former values (C35H36 through the command
+line), while the wedge sums by themselves gave the differences of all
+three. The local ionic potential moved by at most 7.1e-15 Ry (CF4,
+benzene) and 5.7e-14 Ry (C35H36), and the total energy by 8.5e-13 Ry for
+CF4 on every route, 2.3e-13 Ry for benzene and 9.1e-13 to 1.5e-11 Ry for
+C35H36 (the largest with its basis shared). The eigenvalues moved by at
+most 7e-14 Ry for CF4 and benzene and 9.3e-12 Ry for C35H36, 1.7e-10 Ry
+with the radius of the default rule, and the density by at most 9e-13
+electrons per cubic bohr, with the same number of SCF steps in every pair
+(11 to 14); states that are degenerate by symmetry can change places in the
+list of eigenvalues. The stages the switches act on were timed on A100
+nodes one by one (last column); complete runs with the switches on and off
+have not been made there, so what they save together before the first SCF
+step is not measured. On the root the three act on one chain, the ionic
+thread and the join that waits for it, so the gains of their stages do not
+add up there (`GPU_SETUP_OPTIMIZATION.md`).
+
+| Switch | Default | Former value | Results | Says what ran | Serial control | Measured |
+|---|---|---|---|---|---|---|
+| `PARSEC_OVERLAP_ION_ION_SETUP` | `1`: the ion-ion energy of a root whose ionic fields are on their thread is summed on a second thread (`parsec-ion-ion`) that starts with it, once the projectors are built, and is handed to the completion of the reference system where its stage stands | `0`: the last stage of the ionic thread | same bits: the same function of the same atoms | `ion_ion_setup` and `ion_ion_setup_seconds`; the stage `ion_ion_energy` of `preparation_stages` | `0`; its fields are in line in any case | host of an A100 node, 16 OpenMP threads, 39,368 electrons (11,021 atoms): the sum takes 1.08 s; beside the symmetry maps both took 1.26 s, the time of the maps alone; beside the loop of the projectors 1.90 s against 1.34 and 1.08 s alone, which is why the thread starts after them. In first runs on 16 GPUs the join of the ionic thread had waited 1.08, 0.63 and 0.44 s for 39,368, 29,576 and 23,768 electrons, never longer than this stage |
+| `PARSEC_OVERLAP_SYMMETRY_SETUP` | `1`: on a rank whose reference preparation builds no ionic field and no full-grid matrix (a sector worker; a root with the ionic fields on their thread), symmetry detection and the representation phases run on a thread (`parsec-symmetry-setup`) that starts when the grid exists, beside the projectors | `0`: after the reference preparation, on the thread that prepares | same bits: the same functions of the same grid and atoms | `symmetry_setup` (`overlapped with the projectors` or `inline`), `symmetry_setup_seconds`, `symmetry_setup_wait_seconds`; the stages `symmetry_reduction` and `symmetry_decomposition` with their thread | `0` | host of an A100 node, 16 OpenMP threads, three runs per case: projectors and maps 1.34 and 1.26 s alone and 1.41 s side by side for 39,368 electrons (1.19 s less than one after the other), 0.37 and 0.42 s alone and 0.43 s together for 10,456, 0.12 and 0.18 s alone and 0.19 s together for 3,480; with the plan of the Hartree boundary as a third stage 1.18 to 1.34 times the longest, so the plan stays in line |
+| `PARSEC_IONIC_SUM_GRID` | `auto`: GPU ionic fields on their thread are summed at the representative point of every symmetry orbit, and the orbit takes that value, where every operation of the detected group maps the atoms and the grid points onto themselves in every bit; every grid point otherwise (atoms that are images within the tolerance of the detector only, as coordinates from a structural relaxation usually are and as a structure can be once the recentering of the input has moved it; no operation beside the identity; fields in line) | `full`: every grid point | round-off: the value at a representative point is the full-grid one in every bit, and the other points of its orbit used to add the same terms in another order of the atoms; `full` gives the former bits | `ionic_sum_grid`: `symmetry wedge (n of N points)`, or `full grid` with the reason; `ionic_sum_grid_choice_seconds`: what the thread took before its first sum to choose (its wait for the symmetry reduction and the test of the images), which is no part of `ionic_setup_seconds`; the stages `ionic_symmetry_wait` and `ionic_sum_grid_test` | `full`; its fields are in line in any case | one A100 node, 39,368 electrons (22,640,800 points, 5,660,200 orbits): both sums 1.38 instead of 4.35 s on four devices and 2.49 instead of 10.37 s on one; the same bits at the representative rows; against the orbit average that the SCF loop kept, at most 4.5e-12 Ry in the potential (1.7e-15 of its largest value) and 1.4e-16 in the density |
+
+They are described in `GPU_SETUP_OPTIMIZATION.md`, with the record that
+shows the chain of stages of a rank (`preparation_stages`, below under
+"Timing and profiling"). The serial control of the runner names the three
+former values, so the line of its routes in `parsec.out` has three settings
+more than it had.
 
 The sphere radius has no environment switch. An input that leaves
 `Boundary_Sphere_Radius` out gets the radius and the Hartree tolerance of
@@ -1977,6 +2023,18 @@ Accelerated backends add coarse execution statistics:
 - host-to-device, synchronized device, and device-to-host time when relevant;
 - accelerated Hartree call, boundary/RHS, linear-solve, and transfer totals;
 - backend selection and fallback provenance.
+
+The accelerated preparation also records when each of its stages ran:
+`preparation_stages` of a prepared system is a list of stage, thread,
+start and end, in seconds from the entry of `prepare_single_point` and in
+the order of the starts. Its stages run on several threads beside each
+other and some lie inside others, so it is a timeline and not a sum; a
+stage whose name ends in `_wait` is the wait of its thread at the join of
+another. The MPI runner writes the list for every rank
+(`per_rank[].preparation_stages` in `timing.json`), where the stage that
+ends last shows what a rank waited for before its first SCF step; the
+backend report and the result archive do not hold it.
+`GPU_SETUP_OPTIMIZATION.md` names the stages.
 
 `--profile-operator` requests one representative synchronized breakdown of
 finite-difference, local-potential, and nonlocal-projector application. It is
