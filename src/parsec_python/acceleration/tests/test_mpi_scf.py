@@ -210,7 +210,8 @@ class MPISCFTests(unittest.TestCase):
         self.assertEqual([index for index, op in enumerate(solver._operators) if op is not None], [1, 3])
         self.assertEqual([op.distributed_filter_devices for op in built], [(0, 1), (2, 3)])
         # No device holds Hartree objects unless the driver names one, and then every sector operator of
-        # the rank is told: a sector that shares its basis gives that device no work beside its own.
+        # the rank is told: a sector that shares its basis gives that device work beside its own only where
+        # it has no other device and the sharing rule counts the room.
         self.assertIsNone(solver.hartree_device)
         self.assertEqual([hasattr(op, 'hartree_device') for op in built], [False, False])
         solver.hartree_device = 3
@@ -668,7 +669,7 @@ class MPISCFTests(unittest.TestCase):
             self.assertFalse({'PARSEC_CUPY_STREAMING_RITZ_BYTES', 'PARSEC_CUPY_RITZ_CONDITION_HELPER',
                               'PARSEC_CUPY_IMPLICIT_TILE_GROUP_MIN_ROWS', 'PARSEC_CUPY_DISTRIBUTED_STATE_BLOCKS',
                               'PARSEC_CUPY_DISTRIBUTED_STATE_PAIR_SLAB_BYTES', 'PARSEC_CUPY_EXCHANGE_PAIRS',
-                              'PARSEC_CUPY_DISTRIBUTED_STATE_POOL_RELEASE',
+                              'PARSEC_CUPY_DISTRIBUTED_STATE_POOL_RELEASE', 'PARSEC_CUPY_EXCHANGE_CHUNK_BYTES',
                               'PARSEC_CUPY_DISTRIBUTED_STATE_OVERLAP_COLUMNS'} & set(names))
             # The count of the slabs of a Gram product stays the launcher's, as it was: the control cuts its
             # projection by it, eight where none is named, and forms the overlap of no row block.
@@ -1441,10 +1442,14 @@ class FullSCFRunnerContextTests(unittest.TestCase):
         # The layout of the stencil the devices of a group filter with, and the seconds their operators took.
         shared.stencil_storage, shared.replica_seconds = 'implicit_affine_tile_16', 0.25
         idle.stencil_storage, idle.replica_seconds = 'slot-major', 0.5
+        # The bytes of the largest exchange buffer that a device of the sector has taken: here one that
+        # follows a slab of 1,086,758,400 bytes, 12 MiB more than the chunk of 1 GiB.
+        shared.exchange_buffer_bytes, idle.exchange_buffer_bytes = 1086758400, 0
         record, _created = self.run_worker_rank(self.cupy(count=2), threading.Event(), operators)
         self.assertEqual([(entry.pop('stencil_storage'), entry.pop('replica_seconds'))
                           for entry in record['distributed_state']],
                          [('implicit_affine_tile_16', 0.25), ('slot-major', 0.5)])
+        self.assertEqual([entry.pop('exchange_buffer_bytes') for entry in record['distributed_state']], [1086758400, 0])
         self.assertEqual(record['distributed_state'], [
             dict(sector=1, devices=[0, 1], ritz_passes=3, seconds=seconds, overlap_seconds=.5, tall_blocks=1, slab_cut='equal',
                  slab_columns=2, projection_columns=4, overlap_columns=10, separate_row_blocks=0, condition_device=1,
@@ -1464,7 +1469,7 @@ class FullSCFRunnerContextTests(unittest.TestCase):
         self.assertEqual((group.passes, group.tall_blocks, group.slab_cut, group.slab_columns, group.projection_columns,
                           group.separate_row_blocks, group.layout), (0, None, None, None, None, 0, None))
         self.assertEqual((group.condition_device, group.condition_seconds, group.to_rows_copies), (None, 0., None))
-        self.assertEqual((group.overlap_seconds, group.overlap_columns), (0., None))
+        self.assertEqual((group.overlap_seconds, group.overlap_columns, group.exchange_buffer_bytes), (0., None, 0))
 
     def test_rank_record_names_the_pool_releases_of_finished_sectors(self):
         # What ``sector_pool_releases`` of the rank's solver says; a solver without it released nothing.
@@ -1710,9 +1715,10 @@ class FullSCFRunnerContextTests(unittest.TestCase):
         (sector,) = worker['distributed_state']
         self.assertEqual({name: sector[name] for name in ('slab_cut', 'slab_columns', 'projection_columns',
                                                           'overlap_seconds', 'overlap_columns', 'to_rows_copies',
-                                                          'tall_blocks')},
+                                                          'tall_blocks', 'exchange_buffer_bytes')},
                          dict(slab_cut=None, slab_columns=None, projection_columns=None, overlap_seconds=0.,
-                              overlap_columns=None, to_rows_copies=None, tall_blocks=None))
+                              overlap_columns=None, to_rows_copies=None, tall_blocks=None,
+                              exchange_buffer_bytes=0))
         self.assertEqual(set(sector['seconds']), set(distributed_state.SectorDeviceGroup.STAGES))
         # One note says how each is read.  They stand on neighbouring lines of the runner, written by
         # different changes: every one of them, once.
@@ -1724,6 +1730,7 @@ class FullSCFRunnerContextTests(unittest.TestCase):
                       'sector_state_fit_bytes gives, per device', 'PARSEC_CUPY_SECTOR_STATE_AUTO_FRACTION',
                       'PARSEC_CUPY_DIRECT_ALLOCATOR_FRACTION', 'PARSEC_CUPY_SPILL_DOWNLOAD_ORDER',
                       'slab_columns is the widest slab', 'to_rows_copies is the order', 'PARSEC_CUPY_EXCHANGE_PAIRS',
+                      'exchange_buffer_bytes is the largest buffer', 'PARSEC_CUPY_EXCHANGE_CHUNK_BYTES',
                       'slab_cut says how that step cut them', 'PARSEC_CUPY_RITZ_GRAM_MULTIPLE columns (64)',
                       'projection_columns is the widest right-hand side', 'overlap_seconds is the part of seconds.gram',
                       'overlap_columns is the widest slab of that overlap',

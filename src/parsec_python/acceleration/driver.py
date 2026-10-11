@@ -1828,8 +1828,9 @@ def prepare_single_point(
         )
         implementation.symmetry_eigensolver = symmetry_eigensolver
         implementation.eigenproblem_solver = symmetry_eigensolver
-        # With the Hartree objects a device is the fullest of the process: a
-        # sector that shares its basis gives it no work beside its own.
+        # A sector that shares its basis gives the device with the Hartree
+        # objects work beside its own only where it has no other device for
+        # it and the sharing rule counts the room for it there.
         symmetry_eigensolver.hartree_device = hartree_device
         # Density and every local scalar potential are totally symmetric.
         # Retain one physical value per orbit for Anderson history, residual

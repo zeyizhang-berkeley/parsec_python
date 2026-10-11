@@ -237,8 +237,13 @@ and no memory in use is read: the count follows from the sizes and the
 devices, so two launches of one calculation decide alike. For a basis on one
 device it is a lower limit of what the device must hold. For a shared basis
 it is not: the sharing rule counts a workspace for slabs as wide as their
-budget allows, and the slabs that are cut can be narrower. The devices of
-10,456 electrons on 16 GPUs count 9,945 MiB each and sampled as little as
+budget allows, and the slabs that are cut can be narrower. It also counts
+the most that an exchange buffer can take which follows a slab, where no
+chunk size is named: up to 128 MiB above the chunk of 1 GiB on four devices,
+from 10.7 GiB of basis and all of it from 12 GiB
+(`PARSEC_CUPY_EXCHANGE_CHUNK_BYTES` in `README.md`). The devices
+of 10,456 electrons on 16 GPUs counted 9,945 MiB each with the chunk of 1 GiB
+that they had (10,073 MiB where none is named) and sampled as little as
 10,005 MiB, 426 of them the CUDA context: 366 MiB less than the count
 outside the context. So it was, by that or less, on 61 of the 208 devices
 with shared blocks in the first runs of one series, all from 14,680
@@ -537,6 +542,10 @@ no later request, the workspace of the passes before where a pass needs a
 larger one, as a trim can bring about by moving the cut of the slabs: the
 group then returns the free blocks of its stream on every device before it
 takes the larger workspace, which is what the release did for that pass.
+The exchange buffer is treated alike: it grows where a later pass sends a
+slab that it is to hold whole and the passes before sent none
+(`PARSEC_CUPY_EXCHANGE_CHUNK_BYTES` in `README.md`), and a device that takes
+a larger buffer than before first returns the free blocks of that stream.
 A process whose sectors are all shared therefore collects nothing and
 empties no pool after a density, the pinned pool included; one that also
 holds a sector as one array of a device empties the pool of that device as

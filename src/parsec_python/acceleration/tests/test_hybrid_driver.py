@@ -2136,8 +2136,9 @@ class HartreeDevicePlacementTests(unittest.TestCase):
     def test_the_sector_eigensolver_is_told_the_device_of_the_hartree_objects(
         self,
     ) -> None:
-        # A sector that shares its basis gives that device, the fullest of
-        # the process, no work beside its own.
+        # A sector that shares its basis gives that device work beside its
+        # own only where it has no other device and the sharing rule counts
+        # the room.
         rank_of_four = SimpleNamespace(rank=0, root=0, size=4)
         for environment, expected in (
             ({}, 3),

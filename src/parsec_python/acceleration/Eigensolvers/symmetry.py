@@ -734,8 +734,9 @@ class CuPySymmetrySCFEigensolver:
         """The device that holds the Hartree objects of this process, as the driver names it.
 
         ``None`` where they share no device.  Every sector operator is told:
-        a sector that shares its basis gives that device, the fullest of the
-        process, no work beside its own
+        a sector that shares its basis gives that device work beside its
+        own only where it has no other device for it and the sharing rule
+        counts the room
         (:meth:`distributed_state.SectorDeviceGroup._condition_helper`).
         """
 
@@ -950,8 +951,14 @@ class CuPySymmetrySCFEigensolver:
         of the rule that shares the basis, whose workspace is that of slabs
         as wide as their budget allows
         (:func:`distributed_state.slab_workspace`); the slabs that are cut
-        can be narrower.  Of 10,456 electrons on 16 GPUs every device counts
-        9,945 MiB, and devices of that run sampled as little as 10,005 MiB,
+        can be narrower.  So is its exchange buffer, the most that a buffer
+        which follows a slab can take where no chunk size is named
+        (:func:`distributed_state.exchange_chunk_limit`): up to 128 MiB above
+        the chunk on four devices, from 10.7 GiB of basis and all of it from
+        12 GiB.  Of 10,456 electrons
+        on 16 GPUs every device counted 9,945 MiB with the chunk of 1 GiB
+        that it had (10,073 MiB where none is named), and devices of that
+        run sampled as little as 10,005 MiB,
         426 of them the CUDA context: 366 MiB less than the count outside
         the context.  So it was, by that or less, on 61 of the 208 devices
         with shared blocks in the first runs of one series, all from 14,680
