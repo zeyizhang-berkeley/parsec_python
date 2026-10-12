@@ -173,6 +173,15 @@ def _digest(path):
     return value.hexdigest()
 
 
+def _iteration_record(item):
+    # The fields of the two spin channels are written for a spin-polarized run only.
+    record = asdict(item)
+    if not item.spin_polarized:
+        for name in [name for name in record if name.startswith('spin_')]:
+            del record[name]
+    return record
+
+
 def _jsonable(value):
     if is_dataclass(value):
         return _jsonable(asdict(value))
@@ -793,7 +802,7 @@ def execute(args, cp, comm, MPI, initialization_seconds, initial_affinity=None):
                 fermi_level_ry=float(result.fermi_level) if np.isfinite(result.fermi_level) else None,
                 backend=asdict(result.backend),
                 backend_statistics=asdict(result.backend_statistics), scf_timings=asdict(result.timings),
-                iteration_history=[asdict(item) for item in result.history],
+                iteration_history=[_iteration_record(item) for item in result.history],
                 reported_program_seconds=reported_seconds, scf_seconds=scf_seconds,
                 pre_scf_setup_reporting_seconds=scf_started-started,
                 post_scf_finalization_reporting_seconds=reporting_completed-scf_completed+check_seconds,

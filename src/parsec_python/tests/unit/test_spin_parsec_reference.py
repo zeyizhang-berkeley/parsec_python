@@ -391,6 +391,19 @@ class SpinInputTests(unittest.TestCase):
             repr(unpolarized.problem.pseudopotentials["O"]),
         )
 
+    def test_initial_spin_polarization_beyond_one_is_refused(self) -> None:
+        """Such a value makes one starting spin density negative."""
+
+        case = dict(self.cases["ch3_ca"])
+        lines = []
+        for line in case["input"]:
+            lines.append(line)
+            if line == "Atom_Type: C":
+                lines.append("Initial_Spin_Polarization: 1.5")
+        case["input"] = lines
+        with self.assertRaisesRegex(ValueError, "between -1 and 1"):
+            parse_parsec_input(write_case(case, self.directory))
+
     def test_initial_spin_polarization_of_each_species(self) -> None:
         """The n-th line goes to the n-th ``Atom_Type``, as ESDF hands them out."""
 

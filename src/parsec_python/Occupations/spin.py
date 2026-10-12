@@ -36,6 +36,10 @@ from .fixed import ELECTRON_COUNT_TOLERANCE
 COUNT_TOLERANCE = 1.0e-12
 EXPONENT_CUTOFF = 35.0
 MAXIMUM_BISECTIONS = 100
+#: Electron count accepted from a bisection whose level double precision can
+#: no longer refine (many levels within kT of the Fermi level), where
+#: ``flevel.f90`` stops with "Fermi level not found".
+STALLED_COUNT_TOLERANCE = 1.0e-8
 
 
 @dataclass(frozen=True)
@@ -141,6 +145,7 @@ def spin_fermi_occupations(
     lower = float(min(up[0], down[0]))
     upper = float(max(up[-1], down[-1]))
     level = upper
+    previous = None
     for _ in range(MAXIMUM_BISECTIONS):
         count = float(
             np.sum(_fermi_function(up, level, beta))
@@ -148,6 +153,9 @@ def spin_fermi_occupations(
         )
         if abs(electron_count - count) < COUNT_TOLERANCE:
             break
+        if level == previous and abs(electron_count - count) < STALLED_COUNT_TOLERANCE:
+            break
+        previous = level
         if count < electron_count:
             lower = level
         else:

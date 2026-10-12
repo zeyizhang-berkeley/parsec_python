@@ -128,6 +128,12 @@ class SpeciesPotential:
         polarization = float(self.initial_spin_polarization)
         if not np.isfinite(polarization):
             raise ValueError("initial_spin_polarization must be finite")
+        if abs(polarization) > 1.0:
+            raise ValueError(
+                "initial_spin_polarization must lie between -1 and 1: the "
+                "starting spin densities are (1 + p) and (1 - p) times the "
+                f"atomic density, got {polarization:g}"
+            )
         object.__setattr__(self, "initial_spin_polarization", polarization)
         object.__setattr__(self, "path", Path(self.path))
         object.__setattr__(self, "local_angular_momentum", local_l)

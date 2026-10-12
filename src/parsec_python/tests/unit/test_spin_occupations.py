@@ -112,6 +112,29 @@ class SpinFermiLevelTests(unittest.TestCase):
         np.testing.assert_array_equal(full.occupations[0], [1.0, 0.0, 0.0, 0.0])
         np.testing.assert_array_equal(full.occupations[1], [1.0, 0.0, 0.0, 0.0])
 
+    def test_many_levels_within_kt_of_the_fermi_level(self) -> None:
+        """Double precision cannot place such a level to 1e-12 of an electron.
+
+        The bisection then stops moving; ``flevel.f90`` runs out of steps and
+        reports "Fermi level not found".
+        """
+
+        for seed in range(10):
+            generator = np.random.default_rng(seed)
+            channels = [
+                np.concatenate(
+                    (
+                        np.sort(generator.uniform(-1.0, -0.5, 2000)),
+                        np.sort(generator.uniform(-0.302, -0.298, 500)),
+                    )
+                )
+                for _ in range(2)
+            ]
+            with self.subTest(seed=seed):
+                result = spin_fermi_occupations(channels[0], channels[1], 4500.0, 80.0)
+                self.assertAlmostEqual(result.electron_count, 4500.0, delta=1.0e-8)
+                self.assertLess(abs(result.fermi_level + 0.3), 2.0e-3)
+
     def test_refusals(self) -> None:
         levels = np.array([-1.0, -0.5])
         with self.assertRaisesRegex(ValueError, "do not fit the 4 states"):
