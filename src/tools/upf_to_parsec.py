@@ -20,9 +20,17 @@ on a pure-exponential mesh, while PARSEC's Martins-new reader requires
 
     r_k = a * (exp(b*k) - 1),  k = 1, ..., nr.
 
-All radial fields are therefore resampled onto that exact shifted-log mesh.
-Potential values remain in Rydbergs and are written as r*V, PP_CHI is already
-the reduced radial function u=rR, and PP_RHOATOM is already 4*pi*r^2*rho.
+All radial fields are therefore resampled onto that exact shifted-log mesh,
+by cubic interpolation in log(r) through the four nearest points of the UPF
+mesh.  Potential values remain in Rydbergs and are written as r*V, PP_CHI is
+already the reduced radial function u=rR, and PP_RHOATOM is already
+4*pi*r^2*rho.
+
+Until October 2026 the resampling was linear in log(r).  At the points it
+inserts between those of the UPF mesh a potential was then off by up to
+5e-3 Ry in the core region (oxygen, Troullier-Martins), which lowered the
+total energy of that atom by 7e-4 Ry.  ``--interpolation linear`` writes the
+files of that version.
 
 The UPF local channel is retained.  The generated file must be paired with
 ``Local_Component`` set to that channel in parsec.in.
@@ -559,6 +567,46 @@ def log_linear_interpolate(
     return values[lower] + fraction * (values[index] - values[lower])
 
 
+def log_cubic_interpolate(
+    radius: Sequence[float],
+    log_radius: Sequence[float],
+    values: Sequence[float],
+    target: float,
+) -> float:
+    """Cubic interpolation in log(r) through the four nearest mesh points.
+
+    The Lagrange polynomial of the two points on either side of ``target``
+    (of the first or last four points at an end of the mesh).  A tabulated
+    radius returns its tabulated value.
+    """
+
+    index = bisect.bisect_right(radius, target)
+    if index == 0:
+        raise ConversionError("internal interpolation error below source mesh")
+    if index >= len(radius):
+        return values[-1]
+    if len(radius) < 4:
+        return log_linear_interpolate(radius, log_radius, values, target)
+    start = min(max(index - 2, 0), len(radius) - 4)
+    position = math.log(target)
+    result = 0.0
+    for node in range(start, start + 4):
+        weight = 1.0
+        for other in range(start, start + 4):
+            if other != node:
+                weight *= (position - log_radius[other]) / (
+                    log_radius[node] - log_radius[other]
+                )
+        result += weight * values[node]
+    return result
+
+
+INTERPOLATIONS = {
+    "cubic": log_cubic_interpolate,
+    "linear": log_linear_interpolate,
+}
+
+
 def find_coulomb_tail_start(
     radius: Sequence[float],
     potentials: Sequence[Sequence[float]],
@@ -589,6 +637,7 @@ def convert_data(
     source_name: str,
     xc_code: str,
     grid_refinement: int = 2,
+    interpolation: str = "cubic",
 ) -> ParsecData:
     """Resample supported UPF fields into PARSEC storage conventions."""
 
@@ -599,6 +648,12 @@ def convert_data(
         )
     if grid_refinement not in {1, 2}:
         raise ConversionError("grid refinement must be 1 or 2")
+    if interpolation not in INTERPOLATIONS:
+        raise ConversionError(
+            f"invalid interpolation {interpolation!r}; choose from "
+            + ", ".join(INTERPOLATIONS)
+        )
+    interpolate = INTERPOLATIONS[interpolation]
 
     # The source mesh is r_i=a*exp((i-1)*b).  Reusing its a and b gives
     # PARSEC's required shifted mesh a*expm1(k*b).  One midpoint subdivision
@@ -640,7 +695,7 @@ def convert_data(
                 if target >= tail_start:
                     potential_value = -2.0 * upf.z_valence / target
                 else:
-                    potential_value = log_linear_interpolate(
+                    potential_value = interpolate(
                         upf.radius,
                         log_source_radius,
                         channel.potential,
@@ -649,7 +704,7 @@ def convert_data(
                 if target > upf.radius[-1]:
                     wavefunction_value = 0.0
                 else:
-                    wavefunction_value = log_linear_interpolate(
+                    wavefunction_value = interpolate(
                         upf.radius,
                         log_source_radius,
                         channel.wavefunction,
@@ -680,12 +735,21 @@ def convert_data(
         elif target > upf.radius[-1]:
             value = 0.0
         else:
-            value = log_linear_interpolate(
+            value = interpolate(
                 upf.radius,
                 log_source_radius,
                 upf.radial_valence_charge,
                 target,
             )
+            if value < 0.0:
+                # A cubic through a tail that ends in zeros may dip below
+                # zero; the linear value between two tabulated ones cannot.
+                value = log_linear_interpolate(
+                    upf.radius,
+                    log_source_radius,
+                    upf.radial_valence_charge,
+                    target,
+                )
         # Linear interpolation preserves positivity; remove only negative
         # roundoff from a nominally zero tail.
         if value < 0.0 and abs(value) < 1.0e-14:
@@ -706,12 +770,19 @@ def convert_data(
             elif target > upf.radius[-1]:
                 density = 0.0
             else:
-                density = log_linear_interpolate(
+                density = interpolate(
                     upf.radius,
                     log_source_radius,
                     upf.core_density,
                     target,
                 )
+                if density < 0.0:
+                    density = log_linear_interpolate(
+                        upf.radius,
+                        log_source_radius,
+                        upf.core_density,
+                        target,
+                    )
             if density < 0.0 and abs(density) < 1.0e-12:
                 density = 0.0
             if density < 0.0:
@@ -1184,6 +1255,15 @@ def build_parser() -> argparse.ArgumentParser:
             "(default: 2; finer meshes improve PARSEC's KB quadrature)"
         ),
     )
+    parser.add_argument(
+        "--interpolation",
+        choices=tuple(INTERPOLATIONS),
+        default="cubic",
+        help=(
+            "resampling in log(r) onto the PARSEC mesh (default: cubic; "
+            "linear writes the files of the versions before October 2026)"
+        ),
+    )
     return parser
 
 
@@ -1212,6 +1292,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             args.input.name,
             xc_code,
             grid_refinement=args.grid_refinement,
+            interpolation=args.interpolation,
         )
         validate_converted_data(converted)
         write_validated_parsec(args.output, converted)
