@@ -166,10 +166,10 @@ energies, the atomic energy correction, cutoff radii, core radius, the shift of
 the reference energies, the plane-wave cutoff at which the kinetic energy is
 converged to 1 meV, and whether a core hole is matched to its ground state.
 
-The ground-state library and the core-hole potentials of H–Kr are in this
-branch. The core-hole potentials of the heavier elements are in the branch
-`pseudopotential` (they would add about 320 MB here); both manifests list
-every potential. `python -m pp_generation library --jobs 16` rebuilds
+This branch, `pseudopotential`, holds both libraries completely. The default
+branch holds the ground-state library and the core-hole potentials of H–Kr
+(the heavier elements add about 320 MB); both manifests list every
+potential. `python -m pp_generation library --jobs 16` rebuilds
 everything in about ten minutes;
 `--elements Si P S`, `--xc pbe`, `--no-core-holes` and `--format parsec`
 restrict it.
