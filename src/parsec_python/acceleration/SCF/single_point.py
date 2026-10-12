@@ -136,8 +136,8 @@ def materialize_wavefunctions(system, result) -> None:
             synchronize()
             channels = getattr(result, "spin", None)
             if channels is not None:
-                # The channels of a spin-polarized result are views of the
-                # joined block: point them at the host copy.
+                # The channels of a spin-polarized result held the device
+                # blocks: point them at their columns of the host copy.
                 count = channels[0].eigenvalues.size
                 host = result.wavefunctions
                 result.spin = (

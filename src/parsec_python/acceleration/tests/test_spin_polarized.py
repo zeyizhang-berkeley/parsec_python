@@ -104,6 +104,15 @@ class SciPyBackendTests(_BackendCases, unittest.TestCase):
         _, _, result = self.assert_case("o2_ca", forces=True)
         self.assertAlmostEqual(abs(result.net_magnetic_moment), 2.0, places=10)
 
+    def test_core_corrected_radical_with_forces(self) -> None:
+        """GeH3: half of the core density of Ge enters each spin channel."""
+
+        _, system, result = self.assert_case("geh3_nlcc_ca", forces=True)
+        self.assertGreater(float(np.max(system.core_density)), 0.1)
+        self.assertAlmostEqual(abs(result.net_magnetic_moment), 1.0, places=10)
+        forces = driver.compute_forces(system, result)
+        self.assertGreater(float(np.max(np.abs(forces.local.core_correction))), 1.0e-2)
+
     def test_oxygen_atom_with_fractional_fixed_occupations(self) -> None:
         _, _, result = self.assert_case("o_spherical_ca")
         np.testing.assert_allclose(

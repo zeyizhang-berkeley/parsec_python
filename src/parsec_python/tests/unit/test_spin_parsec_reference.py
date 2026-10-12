@@ -34,13 +34,14 @@ from parsec_python.SCF import (
     update_geometry,
     warm_start_for_moved_atoms,
 )
+from parsec_python.SCF.spin_polarized import SpinOrbitalBlocks
 from parsec_python.cli import save_result_archive
 from parsec_python.models import Atom
 from parsec_python.tests.spin_reference import (
-    LIBRARY,
     assert_forces_match,
     assert_matches_fortran,
     load_cases,
+    pseudopotential_file,
     write_case,
 )
 
@@ -324,6 +325,37 @@ class EmptyChannelTests(unittest.TestCase):
             run_spin_scf(unprepared)
 
 
+class OrbitalBlockTests(unittest.TestCase):
+    """Orbitals a backend keeps on a device are joined on the host only."""
+
+    def test_device_blocks_are_downloaded_into_one_host_array(self) -> None:
+        class DeviceArray:
+            def __init__(self, values):
+                self.values = values
+                self.shape = values.shape
+                self.downloads = 0
+
+            def get(self):
+                self.downloads += 1
+                return self.values
+
+        generator = np.random.default_rng(3)
+        up = DeviceArray(generator.normal(size=(7, 3)))
+        down = DeviceArray(generator.normal(size=(7, 2)))
+        blocks = SpinOrbitalBlocks(up, down)
+        self.assertEqual(blocks.shape, (7, 5))
+        self.assertEqual(blocks.ndim, 2)
+        host = blocks.to_full_host()
+        np.testing.assert_array_equal(host[:, :3], up.values)
+        np.testing.assert_array_equal(host[:, 3:], down.values)
+        self.assertEqual((up.downloads, down.downloads), (1, 1))
+        # NumPy blocks are joined by NumPy itself.
+        joined = SpinOrbitalBlocks(up.values, down.values).to_full_device()
+        np.testing.assert_array_equal(joined, host)
+        with self.assertRaisesRegex(TypeError, "cannot join orbital blocks"):
+            blocks.to_full_device()
+
+
 class SpinInputTests(unittest.TestCase):
     """What ``parsec.in`` says about spin, and what is refused."""
 
@@ -415,10 +447,10 @@ class SpinInputTests(unittest.TestCase):
         with self.assertRaisesRegex(NotImplementedError, "holds no spin densities"):
             prepare_single_point(translation.problem)
 
-    def test_library_holds_the_pseudopotentials(self) -> None:
+    def test_pseudopotentials_of_the_fixture_exist(self) -> None:
         for case in self.cases.values():
             for source in case["pseudopotentials"].values():
-                self.assertTrue((LIBRARY / source).is_file(), source)
+                self.assertTrue(pseudopotential_file(source).is_file(), source)
 
 
 if __name__ == "__main__":

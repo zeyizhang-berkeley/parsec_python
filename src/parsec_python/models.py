@@ -944,7 +944,10 @@ class SinglePointResult:
     ``wavefunctions`` list the states of the up channel followed by those of
     the down channel; ``eigensolver_state`` holds the states of both
     channels.  The occupations are electrons per state divided by
-    :attr:`spin_degeneracy`.
+    :attr:`spin_degeneracy`.  A backend that keeps the orbitals on a device
+    leaves ``wavefunctions`` as the two blocks of
+    :class:`parsec_python.SCF.spin_polarized.SpinOrbitalBlocks` until they
+    are brought to the host.
     """
 
     converged: bool

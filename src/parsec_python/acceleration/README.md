@@ -280,8 +280,8 @@ channel.
 - On a GPU the channels share one Hamiltonian allocation, whose local
   potential is bound before each solve, and each keeps its own buffered
   subspace on the device (`CuPySCFEigensolver.for_spin_channel`). The device
-  holds two subspaces, and at the end of a loop the joined orbitals of both
-  channels once more.
+  holds two subspaces; the orbitals of the result stay those two blocks and
+  are joined only on the host, where they are asked for.
 - The exchange-correlation potentials are evaluated by the NumPy functionals
   of the readable package on the host (`xc_implementation` says so); the C++
   CA evaluator is unpolarized.

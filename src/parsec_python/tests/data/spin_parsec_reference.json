@@ -1,5 +1,5 @@
 {
- "comment": "Fortran PARSEC (development version 1.4.x, gfortran 13.3) for small spin-polarized isolated systems (Spin_Polarization: .true.), read from parsec.out with Output_Level 2 in bohr, Ry and Ry/bohr with the digits Fortran prints. Every SCF loop is converged to 1e-8 Ry; 'iterations' is the number of SCF steps it took. 'eigenvalues', 'occupations', 'electrons' and 'energies' are those of the last step, per spin channel where there are two. 'initial_magnetic_moment' is what initchrg.f90 prints. 'forces' holds the tables of the structure: 'local' is \"local force components\" (ion-ion plus the local pseudopotential terms), 'ionic', 'sc' and 'core' its three pseudopotential terms. Pseudopotential files are named relative to src/pp_generation. One case is a structural relaxation, with the steps of its atom.cor. A Python run needs Hartree_Boundary_Tolerance: off to use PARSEC's Hartree boundary values. With PBE the two programs differ beyond round-off: this package uses the potential of the discrete energy and Fortran the continuum expression (V_xc/pbe.py).",
+ "comment": "Fortran PARSEC (development version 1.4.x, gfortran 13.3) for small spin-polarized isolated systems (Spin_Polarization: .true.), read from parsec.out with Output_Level 2 in bohr, Ry and Ry/bohr with the digits Fortran prints. Every SCF loop is converged to 1e-8 Ry; 'iterations' is the number of SCF steps it took. 'eigenvalues', 'occupations', 'electrons' and 'energies' are those of the last step, per spin channel where there are two. 'initial_magnetic_moment' is what initchrg.f90 prints. 'forces' holds the tables of the structure: 'local' is \"local force components\" (ion-ion plus the local pseudopotential terms), 'ionic', 'sc' and 'core' its three pseudopotential terms. Pseudopotential files are named relative to src/pp_generation, or as tests/data/<file> for those of the test data. One case is a structural relaxation, with the steps of its atom.cor. A Python run needs Hartree_Boundary_Tolerance: off to use PARSEC's Hartree boundary values. With PBE the two programs differ beyond round-off: this package uses the potential of the discrete energy and Fortran the continuum expression (V_xc/pbe.py).",
  "cases": {
   "h_fixed_ca": {
    "comment": "Hydrogen atom with 0.7 electrons up and 0.3 down from occup.in (Fermi_Temp: -1), CA.",
@@ -1509,6 +1509,282 @@
       0.047953,
       0.0,
       0.062491
+     ]
+    ]
+   }
+  },
+  "geh3_nlcc_ca": {
+   "comment": "GeH3 radical without any symmetry, doublet, CA, with the nonlinear core correction of the Ge pseudopotential: half of the core density enters each spin channel, and the core-correction force reads the average of the two exchange-correlation potentials.",
+   "input": [
+    "# GeH3 radical without symmetry, core-corrected Ge, spin polarized (doublet)",
+    "Boundary_Sphere_Radius: 7.0",
+    "Grid_Spacing: 0.5",
+    "States_Num: 8",
+    "Max_Iter: 300",
+    "Convergence_Criterion: 1.0e-8",
+    "Eigensolver: chebff",
+    "Correlation_Type: ca",
+    "Spin_Polarization: .true.",
+    "Atom_Types_Num: 2",
+    "Atom_Type: Ge",
+    "Local_Component: p",
+    "begin Atom_Coord",
+    "   0.050000  -0.020000   0.100000",
+    "end Atom_Coord",
+    "Atom_Type: H",
+    "Local_Component: s",
+    "begin Atom_Coord",
+    "   2.900000   0.100000  -0.100000",
+    "  -1.500000   2.500000   0.050000",
+    "  -1.400000  -2.500000  -0.200000",
+    "end Atom_Coord",
+    "Output_Level: 2"
+   ],
+   "pseudopotentials": {
+    "Ge_POTRE.DAT": "tests/data/Ge_POTRE.DAT",
+    "H_POTRE.DAT": "tests/data/water_H_POTRE.DAT"
+   },
+   "iterations": 21,
+   "initial_magnetic_moment": 1.4,
+   "energy": -29.76962086,
+   "energies": {
+    "eigenvalue": -4.80729964,
+    "hartree": 17.13541499,
+    "integral_vxc_rho": -6.03093677,
+    "exchange_correlation": -23.32508117,
+    "electron_ion": -38.95782215,
+    "ion_ion": 9.46723819
+   },
+   "fermi_level": -0.2686,
+   "electrons": [
+    4.0,
+    3.0
+   ],
+   "net_magnetic_moment": 1.0,
+   "eigenvalues": {
+    "up": [
+     -1.0166214108,
+     -0.6398579796,
+     -0.6217471379,
+     -0.3032119155,
+     -0.0423337045,
+     0.071709655,
+     0.0966977613,
+     0.2024659607
+    ],
+    "down": [
+     -0.9867513868,
+     -0.6284408114,
+     -0.6106690026,
+     -0.2261268543,
+     -0.0186566707,
+     0.0868800467,
+     0.1119027956,
+     0.2432753662
+    ]
+   },
+   "occupations": {
+    "up": [
+     1.0,
+     1.0,
+     1.0,
+     1.0,
+     0.0,
+     0.0,
+     0.0,
+     0.0
+    ],
+    "down": [
+     1.0,
+     1.0,
+     1.0,
+     0.0,
+     0.0,
+     0.0,
+     0.0,
+     0.0
+    ]
+   },
+   "forces": {
+    "positions": [
+     [
+      -0.65,
+      -0.02,
+      0.15
+     ],
+     [
+      2.2,
+      0.1,
+      -0.05
+     ],
+     [
+      -2.2,
+      2.5,
+      0.1
+     ],
+     [
+      -2.1,
+      -2.5,
+      -0.15
+     ]
+    ],
+    "ionic": [
+     [
+      -0.011871,
+      0.019163,
+      -0.156582
+     ],
+     [
+      -1.1075,
+      -0.044215,
+      0.060003
+     ],
+     [
+      0.575619,
+      -0.943838,
+      0.005761
+     ],
+     [
+      0.559762,
+      0.971873,
+      0.106226
+     ]
+    ],
+    "sc": [
+     [
+      -0.0,
+      -0.0,
+      0.0
+     ],
+     [
+      0.0,
+      -0.0,
+      0.0
+     ],
+     [
+      -0.0,
+      -0.0,
+      0.0
+     ],
+     [
+      -0.0,
+      0.0,
+      0.0
+     ]
+    ],
+    "core": [
+     [
+      -0.01045,
+      -0.008058,
+      0.013372
+     ],
+     [
+      0.0,
+      0.0,
+      0.0
+     ],
+     [
+      0.0,
+      0.0,
+      0.0
+     ],
+     [
+      0.0,
+      0.0,
+      0.0
+     ]
+    ],
+    "local": [
+     [
+      -0.037415,
+      0.015189,
+      0.040252
+     ],
+     [
+      0.005149,
+      -0.000273,
+      -0.00923
+     ],
+     [
+      0.025585,
+      -0.047937,
+      -0.003316
+     ],
+     [
+      0.01224,
+      0.027945,
+      0.001073
+     ]
+    ],
+    "nonlocal": [
+     [
+      -0.004081,
+      0.000907,
+      -0.013258
+     ],
+     [
+      0.0,
+      0.0,
+      0.0
+     ],
+     [
+      0.0,
+      0.0,
+      0.0
+     ],
+     [
+      0.0,
+      0.0,
+      0.0
+     ]
+    ],
+    "symmetrized": [
+     [
+      -0.041496,
+      0.016096,
+      0.026994
+     ],
+     [
+      0.005149,
+      -0.000273,
+      -0.00923
+     ],
+     [
+      0.025585,
+      -0.047937,
+      -0.003316
+     ],
+     [
+      0.01224,
+      0.027945,
+      0.001073
+     ]
+    ],
+    "net": [
+     0.001478,
+     -0.004169,
+     0.015521
+    ],
+    "total": [
+     [
+      -0.041866,
+      0.017138,
+      0.023114
+     ],
+     [
+      0.004779,
+      0.00077,
+      -0.01311
+     ],
+     [
+      0.025216,
+      -0.046895,
+      -0.007197
+     ],
+     [
+      0.011871,
+      0.028987,
+      -0.002807
      ]
     ]
    }

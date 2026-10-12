@@ -5,7 +5,8 @@ the input Fortran PARSEC was run with (``Spin_Polarization: .true.``) and
 what its ``parsec.out`` reports for the last SCF step: the energy terms, the
 levels and occupations of each spin channel, the electrons per channel, the
 Fermi level and the force tables.  The pseudopotentials are those of the
-library under ``src/pp_generation``.
+library under ``src/pp_generation`` and, for one core-corrected case, of the
+test data.
 
 The helpers write such an input with its files into a directory and compare
 a result of this package with the Fortran numbers.  Two solutions that
@@ -42,6 +43,19 @@ def load_cases() -> dict:
     return json.loads((DATA / "spin_parsec_reference.json").read_text())["cases"]
 
 
+def pseudopotential_file(source: str) -> Path:
+    """Locate a pseudopotential the fixture names.
+
+    A name that starts with ``tests/data/`` is a file of the test data; any
+    other is relative to the library under ``src/pp_generation``.
+    """
+
+    prefix = "tests/data/"
+    if source.startswith(prefix):
+        return DATA / source[len(prefix) :]
+    return LIBRARY / source
+
+
 def write_case(
     case: dict,
     directory: Path,
@@ -63,7 +77,7 @@ def write_case(
     lines.extend(extra)
     (directory / "parsec.in").write_text("\n".join(lines) + "\n")
     for target, source in case["pseudopotentials"].items():
-        shutil.copyfile(LIBRARY / source, directory / target)
+        shutil.copyfile(pseudopotential_file(source), directory / target)
     if "occup" in case:
         (directory / "occup.in").write_text("\n".join(case["occup"]) + "\n")
     return directory / "parsec.in"

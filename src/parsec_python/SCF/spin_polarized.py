@@ -79,19 +79,64 @@ def _channel_solvers(eigenproblem_solver) -> tuple[Callable[..., object], ...]:
     return (for_channel(0), for_channel(1))
 
 
-def _stack_columns(up, down):
-    """Join the orbitals of the two channels column-wise, up first."""
+class SpinOrbitalBlocks:
+    """Orbitals of two spin channels that an execution backend keeps apart.
+
+    A backend may hand the SCF loop orbitals that live on a device.  Joining
+    them there would hold every orbital twice, so the result keeps the two
+    blocks as they are and joins them where they are wanted:
+    :meth:`to_full_host` returns one host array with the columns of the up
+    channel followed by those of the down channel.
+    """
+
+    def __init__(self, up, down) -> None:
+        self.blocks = (up, down)
+
+    @property
+    def shape(self) -> tuple[int, int]:
+        up, down = self.blocks
+        return (int(up.shape[0]), int(up.shape[1]) + int(down.shape[1]))
+
+    @property
+    def ndim(self) -> int:
+        return 2
+
+    def to_full_host(self) -> np.ndarray:
+        """Download both blocks into one host array, up first."""
+
+        host = np.empty(self.shape, dtype=np.float64)
+        column = 0
+        for block in self.blocks:
+            download = getattr(block, "get", None)
+            values = download() if callable(download) else np.asarray(block)
+            host[:, column : column + values.shape[1]] = values
+            column += values.shape[1]
+        return host
+
+    def to_full_device(self):
+        """Join the two blocks with the array library they belong to."""
+
+        up, down = self.blocks
+        library = sys.modules.get(type(up).__module__.split(".")[0])
+        stack = getattr(library, "hstack", None)
+        if stack is None:
+            raise TypeError(f"cannot join orbital blocks of type {type(up).__name__}")
+        return stack((up, down))
+
+
+def _join_orbitals(up, down):
+    """Return the orbitals of both channels and a view of each channel.
+
+    Host arrays are joined column-wise, up first, and the channels are views
+    of the joined array.  Other arrays stay apart in
+    :class:`SpinOrbitalBlocks` and are the channels themselves.
+    """
 
     if isinstance(up, np.ndarray) and isinstance(down, np.ndarray):
-        return np.hstack((up, down))
-    # Device arrays stay where they are: their own library joins them.
-    library = sys.modules.get(type(up).__module__.split(".")[0])
-    stack = getattr(library, "hstack", None)
-    if stack is None:
-        raise TypeError(
-            f"cannot join orbital blocks of type {type(up).__name__}"
-        )
-    return stack((up, down))
+        joined = np.hstack((up, down))
+        count = up.shape[1]
+        return joined, (joined[:, :count], joined[:, count:])
+    return SpinOrbitalBlocks(up, down), (up, down)
 
 
 def run_spin_scf(
@@ -426,16 +471,14 @@ def run_spin_scf(
         ionic_potential + hartree_potential + xc_potential
         for xc_potential in xc_potentials
     ]
-    stacked = _stack_columns(wavefunctions[0], wavefunctions[1])
-    state_count = eigenvalues[0].size
+    # The orbitals are stored once: host channels are views of the joined
+    # array, device channels the blocks the backend returned.
+    stacked, channel_orbitals = _join_orbitals(wavefunctions[0], wavefunctions[1])
     channels = tuple(
         SpinChannelResult(
             eigenvalues=eigenvalues[spin],
             occupations=occupations[spin],
-            # Views of the joined block: the orbitals are stored once.
-            wavefunctions=(
-                stacked[:, :state_count] if spin == 0 else stacked[:, state_count:]
-            ),
+            wavefunctions=channel_orbitals[spin],
             representations=representations[spin],
             density=densities[spin],
             xc_potential=xc_potentials[spin],
@@ -479,4 +522,4 @@ def run_spin_scf(
     )
 
 
-__all__ = ["SPIN_NAMES", "run_spin_scf"]
+__all__ = ["SPIN_NAMES", "SpinOrbitalBlocks", "run_spin_scf"]
