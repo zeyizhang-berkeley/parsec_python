@@ -465,6 +465,82 @@ before the rule to the last bit, and so did the default, whose slabs no
 sector that small reaches; a multiple of 8 named for it moved the total
 energy by 1e-10 Ry in the same nine steps.
 
+On that GPU the number of columns of `B` also selects the kernel. cuBLAS
+12.9.1 runs a tall `A.T @ B` (CuPy 14.0.1 passes `B` as the transposed
+operand of one DGEMM) in one of two ways, by whether `B` has an odd or an
+even number of columns, whatever `A` has. Timed one product at a time on the
+idle device at 1,065,944 rows:
+
+| Columns of `B` | Time of a product |
+|---|---|
+| odd | 6.2 to 13.9 ms up to 63 columns of `B` by 31 of `A`, 24.8 ms by 64 |
+| even | 221.7 ms (208 ns per row) for every size from 2 by 2 to 66 by 64 |
+| one | 0.1 to 1.7 ms |
+
+The time of the even kernel follows the rows alone (4.2 ms at 20,000 rows,
+55.2 at 266,486, 441 at 2,131,888) until the operands are wide, and then
+grows in whole multiples of that: 110, 221 and 331 ms at 266,486 rows for
+64, 128 and 256 columns of `B` by 665 of `A`, where 63, 127 and 255 columns
+took 68, 147 and 276 ms. The call returns at once and the device is busy
+that long. cuSOLVER runs into the same kernel inside its Householder QR: 80
+ms for 23 columns at 1,065,944 rows, 285 for 22, 292 for 24, 771 for 38 and
+2.1 s for 54.
+
+A basis of 30 columns, the 24 states and 6 buffer states of a small
+molecule, forms each of its two Gram matrices from seven slabs of 4 columns
+and one of 2: sixteen even products, 3.54 of the 3.68 s that an SCF step
+took, where the 38 columns of 32 states, in slabs of 5 and 3, took 0.32 s
+for the whole step. A product `A.T @ B` of two tall arrays whose `B` has an
+even number of columns below 64 is therefore formed in two pieces, from the
+columns of `B` but the last and from its last column
+(`Eigensolvers/tall_product.py`): in the slabs and full products of the Ritz
+step on one device, in the Gram matrices and projections of the
+orthogonalization and in the projection of CHEBDAV, whose block is six
+columns wide by default. From 64 columns on a product is handed over whole,
+as before: the slabs of a large basis are whole multiples of 64 by the rule
+above, and neither an odd width nor a single column beside each slab has
+been timed on A100 nodes. The products that the devices of a shared basis
+form for its projection round by round are handed over whole at every
+width as well; they run on those nodes only. The two pieces are other sums
+than the one product, so results differ by round-off;
+`PARSEC_CUPY_TALL_PRODUCT_SPLIT=0` hands every product over whole and gives
+the former bits. The serial control of the runner does not name it.
+
+Measured with CF4 on 1,065,944 grid points (`Eigensolver: chebff`,
+`Matvec_Blocksize: 16`, `Subspace_Buffer_Size: 6`, FP64, idle RTX 5070,
+first runs; seconds of "Diagonalization time" in each of SCF steps 3 to 6,
+and of step 1):
+
+| `States_Num` | Columns | Slabs | Step before | Step now | First step before | First step now |
+|---|---|---|---|---|---|---|
+| 17 | 23 | 3 and 2 | 0.65 | 0.20 | 0.84 | 0.86 |
+| 24 | 30 | 4 and 2 | 3.68 | 0.25 | 1.89 | 1.44 |
+| 31 | 37 | 5 and 2 | 0.74 | 0.30 | 2.20 | 2.24 |
+| 32 | 38 | 5 and 3 | 0.32 | 0.32 | 2.98 | 2.59 |
+| 40 | 46 | 6 and 4 | 3.79 | 0.39 | 3.26 | 2.86 |
+| 48 | 54 | 7 and 5 | 0.40 | 0.40 | 3.93 | 3.53 |
+
+The energies of all six steps (eight decimals) are the same in every case,
+and so are the eigenvalues but for one unit in the tenth decimal of seven of
+them and of one residual, in four of the six runs. With
+`PARSEC_CUPY_TALL_PRODUCT_SPLIT=0` every printed number and the times are
+those of the code before. The largest part of what is left of the first
+step is the QR of its two cycles: 0.69 of 1.51 s for 24 states and 1.60 of
+2.61 s for 32, with the stage timing on. The first solve by CHEBDAV of the
+24 states took 5.4 instead of 34.5 s with blocks of 6 columns and 6.7
+instead of 25.7 s with blocks of 14; with blocks of 15 it took 12.9 and
+13.1 s.
+
+Two switches that exist shorten a basis of fewer than 64 columns further on
+that GPU, with the same total energies: `PARSEC_CUPY_RITZ_GRAM_SLABS=1`
+forms each Gram matrix from one product instead of eight (0.17 instead of
+0.25 s per step for 24 states, 0.31 instead of 0.40 for 48), and
+`PARSEC_CUPY_CHEBFF_GENERALIZED_RITZ=1` spares the first solve its QR where
+the audits pass (with both, a first step of 0.91 instead of 1.44 s for 24
+states and of 1.79 instead of 3.53 s for 48). Neither default is changed:
+the slab count is set for large bases on A100 nodes, and the generalized
+first solve is an opt-in.
+
 The steps of that solve, and the placement of the sector bases and of the
 GPU Hartree objects, take by default the routes that measured fastest or
 smallest on A100 80 GB nodes (nanodiamond sectors of 19 to 84 GiB). Each has

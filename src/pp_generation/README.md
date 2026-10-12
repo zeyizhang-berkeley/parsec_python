@@ -30,6 +30,19 @@ correction, cutoff radii, core radius, the shift of the reference energies,
 the plane-wave cutoff at which the kinetic energy is converged to 1 meV, and
 whether a core hole is matched to its ground state.
 
+A `_POTRE.DAT` file is the UPF file of the same potential, resampled onto the
+radial mesh of the solver by `src/tools/upf_to_parsec.py`; `report.json` holds
+the SHA-256 of both. Since 12 October 2026 that resampling is cubic. The files
+of the repository before that date were resampled linearly and differ from the
+present ones at the radii between those of the UPF mesh, by up to 5e-3 Ry in
+the potentials of the light elements (the heaviest change most, up to
+0.03 Ry bohr in `r V`). With the former files the total energy of the atom
+was off by -6.8e-4 Ry for O, -0.8e-4 Ry for C, +3.3e-4 Ry for Si and
++8.7e-4 Ry for Cl (PBE, pseudo-atom solved on a radial mesh); with the
+present ones it agrees with the generation within 1e-6 Ry. Energy differences
+between structures with the same potentials change much less.
+`upf_to_parsec.py --interpolation linear` writes the former files.
+
 This branch, `pseudopotential`, holds both libraries completely. The default
 branch holds the ground-state library and the core-hole potentials of H–Kr
 (the heavier elements add about 320 MB); both manifests list every

@@ -11,6 +11,7 @@ from scipy.linalg import solve_triangular
 
 from ..backends.cupy import device_stage, require_cupy
 from .small_dense import symmetric_eigh
+from .tall_product import transposed_product
 
 
 _DEFAULT_GENERALIZED_RITZ_WORK_THRESHOLD = 100_000_000
@@ -272,17 +273,23 @@ def _lower_triangle_product(left: Any, right: Any):
     triangles of ``X.T X`` and ``X.T (H X)`` only, so each slab of columns of
     ``right`` is multiplied by the columns of ``left`` from its own first one
     onwards.  Entries above the diagonal slabs stay zero.
+
+    A slab of an even number of columns below 64 is multiplied in two
+    pieces (:func:`tall_product.transposed_product`), as is every other
+    product of two tall arrays in this module.
     """
 
     cp, _ = require_cupy()
     columns = int(left.shape[1])
     width = _gram_slab_width(columns)
     if width >= columns:
-        return left.T @ right
+        return transposed_product(cp, left, right)
     product = cp.zeros((columns, columns), dtype=cp.float64, order="F")
     for start in range(0, columns, width):
         stop = min(columns, start + width)
-        product[start:, start:stop] = left[:, start:].T @ right[:, start:stop]
+        product[start:, start:stop] = transposed_product(
+            cp, left[:, start:], right[:, start:stop]
+        )
     return product
 
 
@@ -304,7 +311,7 @@ def _symmetric_overlap(matrix: Any):
             "PARSEC_CUPY_RITZ_SYRK must be auto, on, off, or slabs"
         )
     if policy in {"off", "0", "false"}:
-        return matrix.T @ matrix
+        return transposed_product(cp, matrix, matrix)
     if policy in {"auto", "slabs"}:
         # DSYRK does half the operations of the full product but stays below
         # the GEMM rate (8 to 9 against 13 to 17 Tflop/s on an A100); the
@@ -515,7 +522,9 @@ def _streamed_projection(operator: Any, matrix: Any, slab: Any | None = None):
             else:
                 applied[...] = operator @ block
         with device_stage(operator, "subspace_ritz_projection_seconds"):
-            projection[start:, start:stop] = matrix[:, start:].T @ applied
+            projection[start:, start:stop] = transposed_product(
+                cp, matrix[:, start:], applied
+            )
     return projection
 
 
@@ -1035,7 +1044,7 @@ def rayleigh_ritz(
     applied_basis = operator @ basis
     if applied_basis.shape != basis.shape:
         raise ValueError("operator must preserve the basis shape")
-    raw_projection = basis.T @ applied_basis
+    raw_projection = transposed_product(cp, basis, applied_basis)
     lower = cp.tril(raw_projection)
     projected = lower + cp.tril(lower, -1).T
     eigenvalues, rotations = symmetric_eigh(projected)
