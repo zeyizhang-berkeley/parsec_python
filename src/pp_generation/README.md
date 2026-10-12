@@ -107,9 +107,10 @@ October 2026 this package generated "ca" potentials with `iexc = 8`, which is
 **PBE(B3LYP)** of the binding-energy papers needs no potential of its own. It
 is a PBE calculation with PBE potentials followed by one evaluation of the
 B3LYP exchange-correlation energy on the PBE orbitals; the atomic energy
-correction stays the PBE one. The refinement step for the solver (input line
-`Energy_Refinement: b3lyp`) is in the branch `one-shot-double-hybrid`, with
-the example `examples/0_CH4_CF4/python_pbe_b3lyp`.
+correction stays the PBE one. In the solver it is the input line
+`Energy_Refinement: b3lyp`; see `examples/0_CH4_CF4/python_pbe_b3lyp`. (The
+refinement step is in this branch, `one-shot-double-hybrid`, not yet in the
+default branch.)
 
 ## Core-hole potentials
 

@@ -973,6 +973,17 @@ class ParsecTextReporter:
                 if xc_name == "ca"
                 else " GGA, Perdew-Burke-Ernzerhof parametrization"
             ),
+            # Only where Energy_Refinement asks for it.
+            *(
+                ()
+                if getattr(self.translation, "energy_refinement", None) is None
+                else (
+                    " Post-SCF energy refinement: "
+                    f"{self.translation.energy_refinement.upper()} "
+                    "exchange-correlation energy of the converged orbitals "
+                    "(one non-self-consistent evaluation)",
+                )
+            ),
             "",
             " Other input data:",
             " -----------------",

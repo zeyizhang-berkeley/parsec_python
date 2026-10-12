@@ -27,7 +27,11 @@ from parsec_python.Relaxation.run import (
     run_single_point_with_forces,
     symmetry_decision,
 )
-from parsec_python.cli import relaxation_exit_code, save_result_archive
+from parsec_python.cli import (
+    refinement_progress,
+    relaxation_exit_code,
+    save_result_archive,
+)
 
 from .Output import AcceleratedTextReporter
 from .backends.selection import resolve_backend
@@ -201,6 +205,18 @@ def _build_parser() -> argparse.ArgumentParser:
         help="include wavefunctions in the result archive",
     )
     parser.add_argument(
+        "--energy-refinement",
+        choices=("b3lyp", "none"),
+        default=None,
+        help=(
+            "after the SCF, evaluate the exchange-correlation energy of this "
+            "hybrid functional once on the converged orbitals and report the "
+            "refined total energy (PP-PBE(B3LYP) with a PBE input; ARES "
+            "Lrefine); overrules Energy_Refinement of the input, none "
+            "switches it off"
+        ),
+    )
+    parser.add_argument(
         "--profile-operator",
         action="store_true",
         help=(
@@ -258,6 +274,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     except (ParsecInputError, ValueError) as error:
         print(f"Input error: {error}", file=sys.stderr)
         return 2
+    if arguments.energy_refinement is not None:
+        from parsec_python.Energy.refinement import apply_refinement_option
+
+        try:
+            translation = apply_refinement_option(
+                translation, arguments.energy_refinement
+            )
+        except ValueError as error:
+            print(f"Input error: {error}", file=sys.stderr)
+            return 2
 
     try:
         translation, relax_restart, restart_notes = restart_structure(
@@ -470,6 +496,29 @@ def main(argv: Sequence[str] | None = None) -> int:
                 check_seconds = hartree_boundary_check_seconds(result)
                 reporter.finish(result, scf_completed - scf_started - check_seconds)
             reporting_completed = time.perf_counter()
+            refinement = None
+            if getattr(translation, "energy_refinement", None) is not None:
+                # One non-self-consistent evaluation on the converged
+                # orbitals, after everything the SCF reports; of the last
+                # structure where the atoms moved.
+                from parsec_python.Energy.refinement import refinement_report_lines
+                from parsec_python.Output import RYDBERG_TO_EV
+
+                from .refinement import refine_energy
+
+                announce, progress = refinement_progress(
+                    log.write, translation.energy_refinement
+                )
+                announce()
+                refinement = refine_energy(
+                    system if outcome is None else outcome.system,
+                    result,
+                    translation.energy_refinement,
+                    progress=progress,
+                )
+                log.write(
+                    "\n".join(refinement_report_lines(refinement, RYDBERG_TO_EV))
+                )
             log.write(
                 f" Pre-SCF setup/reporting wall time [sec] : "
                 f"{scf_started - started:11.6f}"
@@ -478,6 +527,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                 f" Post-SCF finalization/reporting [sec] : "
                 f"{reporting_completed - scf_completed + check_seconds:11.6f}"
             )
+            if refinement is not None:
+                log.write(
+                    f" Post-SCF energy refinement [sec] : "
+                    f"{time.perf_counter() - reporting_completed:11.6f}"
+                )
             log.write(
                 f" Total accelerated Python wall time [sec] : "
                 f"{time.perf_counter() - started:11.2f}"
@@ -497,6 +551,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                             ("forces", forces),
                             ("relaxation", outcome),
                             ("dynamics", dynamics),
+                            ("refinement", refinement),
                         )
                         if value is not None
                     },

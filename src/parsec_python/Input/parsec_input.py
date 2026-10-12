@@ -84,6 +84,11 @@ class ParsecInputTranslation:
     use_symmetry: bool = True
     # Molecular dynamics (``Molecular_Dynamics``), ``None`` when it is off.
     molecular_dynamics: "MolecularDynamicsSettings | None" = None
+    # ``Energy_Refinement``: the hybrid functional whose exchange-correlation
+    # energy is evaluated once on the converged orbitals after the SCF
+    # (:mod:`parsec_python.Energy.refinement`), ``None`` when it is off.  It
+    # is a reporting step and is not part of the problem the SCF solves.
+    energy_refinement: str | None = None
 
 
 @dataclass(frozen=True)
@@ -622,6 +627,10 @@ def _parse_parsec_input(
         "ml_density_chunk_size",
         "normalize_initial_density",
         "lattice_vector_scale",
+        # PARSEC.py extension: one post-SCF evaluation of a hybrid functional
+        # on the converged orbitals (ARES ``Lrefine``).  It changes nothing
+        # of the SCF.
+        "energy_refinement",
     }
     unknown_scalars = sorted(set(scalar).difference(species_keys | accepted_global))
     unknown_blocks = sorted(set(blocks).difference(block_keys))
@@ -1354,6 +1363,20 @@ def _parse_parsec_input(
             "isolated systems only; this periodic run reports energies only."
         )
 
+    energy_refinement = None
+    if "energy_refinement" in scalar:
+        from ..Energy.refinement import check_refinement_request, normalize_refinement
+
+        try:
+            energy_refinement = normalize_refinement(one("energy_refinement"))
+            check_refinement_request(
+                energy_refinement,
+                periodic=is_periodic,
+                molecular_dynamics=molecular_dynamics.enabled,
+            )
+        except ValueError as error:
+            raise UnsupportedParsecOptionError(str(error)) from error
+
     if ignore_symmetry and not is_periodic:
         warnings.append(
             "Ignore_Symmetry=true reproduces PARSEC's zero grid shift and "
@@ -1483,6 +1506,7 @@ def _parse_parsec_input(
         compute_forces=compute_forces,
         use_symmetry=use_symmetry,
         molecular_dynamics=molecular_dynamics if molecular_dynamics.enabled else None,
+        energy_refinement=energy_refinement,
     )
 
 
@@ -1590,6 +1614,15 @@ def summarize_translation(translation: ParsecInputTranslation) -> str:
         (
             f"Output: level={translation.output_level}, "
             f"all_states={translation.output_all_states}"
+        ),
+        # Only where the refinement is requested: other summaries keep their text.
+        *(
+            ()
+            if translation.energy_refinement is None
+            else (
+                f"Energy refinement: {translation.energy_refinement} "
+                "(one post-SCF evaluation on the converged orbitals)",
+            )
         ),
     ]
     for symbol, potential in problem.pseudopotentials.items():

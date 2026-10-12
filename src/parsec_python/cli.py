@@ -129,6 +129,7 @@ def save_result_archive(
     forces=None,
     relaxation=None,
     dynamics=None,
+    refinement=None,
 ) -> Path:
     """Save a portable NumPy result archive without wavefunctions by default.
 
@@ -140,7 +141,9 @@ def save_result_archive(
     ``dynamics`` (a
     :class:`parsec_python.MolecularDynamics.run.MolecularDynamicsOutcome`)
     the structures, energies and temperatures of a molecular dynamics run
-    under ``dynamics_*``.
+    under ``dynamics_*``; ``refinement`` (an
+    :class:`parsec_python.Energy.refinement.EnergyRefinement`) the energies
+    of a post-SCF refinement under ``refinement_*``.
     """
     output = _npz_path(Path(path).expanduser().resolve())
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -351,6 +354,23 @@ def save_result_archive(
             [item.conserved_energy for item in steps]
         )
         payload["dynamics_next_positions"] = np.asarray(dynamics.positions)
+    if refinement is not None:
+        payload["refinement_functional"] = np.asarray(refinement.functional)
+        for name in (
+            "exact_exchange",
+            "slater_exchange",
+            "b88_exchange",
+            "vwn_correlation",
+            "lyp_correlation",
+            "exchange_correlation",
+            "scf_exchange_correlation",
+            "scf_total",
+            "total",
+            "all_electron_total",
+        ):
+            payload[f"refinement_{name}_ry"] = np.asarray(getattr(refinement, name))
+        payload["refinement_pair_solves"] = np.asarray(refinement.exchange.pair_solves)
+        payload["refinement_seconds"] = np.asarray(refinement.seconds)
     # Almost all bytes are full-grid coordinates and scalar fields.  Deflating
     # them runs zlib on one core (about 30 s for a 1.3 GB archive), so the
     # members are written as they are.
@@ -373,6 +393,35 @@ def relaxation_exit_code(result, outcome, *, manual: bool = False) -> int:
     if outcome.error:
         return 4
     return 0 if (manual or outcome.minimum_force_found) else 4
+
+
+def refinement_progress(write, functional: str, interval: float = 60.0):
+    """Return ``(announce, progress)`` for a post-SCF energy refinement.
+
+    ``announce()`` writes that the refinement started; ``progress`` is the
+    callback of :func:`parsec_python.Energy.refinement.refine_energy` and
+    writes one line per ``interval`` seconds of pair-density Poisson solves,
+    so that a long refinement is seen to advance and a short one adds none.
+    """
+
+    name = functional.upper()
+    last = [0.0]
+
+    def announce() -> None:
+        write(
+            f" Energy refinement: evaluating the {name} exchange-correlation "
+            "energy of the converged orbitals"
+        )
+
+    def progress(done: int, total: int, seconds: float) -> None:
+        if done < total and seconds - last[0] >= interval:
+            last[0] = seconds
+            write(
+                f" Energy refinement: {done} of {total} pair-density Poisson "
+                f"solves done after {seconds:.1f} s"
+            )
+
+    return announce, progress
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -427,6 +476,18 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--energy-refinement",
+        choices=("b3lyp", "none"),
+        default=None,
+        help=(
+            "after the SCF, evaluate the exchange-correlation energy of this "
+            "hybrid functional once on the converged orbitals and report the "
+            "refined total energy (PP-PBE(B3LYP) with a PBE input; ARES "
+            "Lrefine); overrules Energy_Refinement of the input, none "
+            "switches it off"
+        ),
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="parse, validate, and print the translated input without building the grid",
@@ -455,6 +516,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     except (ParsecInputError, ValueError) as error:
         print(f"Input error: {error}", file=sys.stderr)
         return 2
+    if arguments.energy_refinement is not None:
+        from .Energy.refinement import apply_refinement_option
+
+        try:
+            translation = apply_refinement_option(
+                translation, arguments.energy_refinement
+            )
+        except ValueError as error:
+            print(f"Input error: {error}", file=sys.stderr)
+            return 2
 
     is_periodic = translation.problem.periodic_cell is not None
 
@@ -590,6 +661,27 @@ def main(argv: Sequence[str] | None = None) -> int:
                 result = run_scf(system, callback=reporter.iteration)
                 scf_elapsed = time.perf_counter() - scf_start
                 reporter.finish(result, scf_elapsed)
+            refinement = None
+            if getattr(translation, "energy_refinement", None) is not None:
+                # One non-self-consistent evaluation on the converged
+                # orbitals, after everything the SCF reports; of the last
+                # structure where the atoms moved.
+                from .Energy.refinement import refine_energy, refinement_report_lines
+                from .Output import RYDBERG_TO_EV
+
+                announce, progress = refinement_progress(
+                    log.write, translation.energy_refinement
+                )
+                announce()
+                refinement = refine_energy(
+                    system if outcome is None else outcome.system,
+                    result,
+                    translation.energy_refinement,
+                    progress=progress,
+                )
+                log.write(
+                    "\n".join(refinement_report_lines(refinement, RYDBERG_TO_EV))
+                )
             total_elapsed = time.perf_counter() - start
             log.write(f" Total Python wall time [sec] : {total_elapsed:11.2f}")
 
@@ -608,6 +700,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                             ("forces", forces),
                             ("relaxation", outcome),
                             ("dynamics", dynamics),
+                            ("refinement", refinement),
                         )
                         if value is not None
                     },
@@ -637,4 +730,4 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 1
 
 
-__all__ = ["main", "save_result_archive"]
+__all__ = ["main", "refinement_progress", "save_result_archive"]

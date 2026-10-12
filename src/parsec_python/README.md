@@ -145,6 +145,9 @@ Currently supported:
 - separable Kleinman--Bylander nonlocal projectors;
 - optional nonlinear core correction;
 - CA/PZ LDA and spin-unpolarized PBE;
+- one post-SCF evaluation of the B3LYP energy on the converged orbitals of an
+  isolated system (`Energy_Refinement: b3lyp`), see
+  [Energy refinement by a hybrid functional](#energy-refinement-by-a-hybrid-functional);
 - potential-mixed SCF with PARSEC-style occupations and eigensolver policy;
 - exact automatic reflection/signed-permutation representation reduction
   where supported;
@@ -161,7 +164,7 @@ Not currently supported as production physics:
 - periodic boundary conditions;
 - spin polarization or spin--orbit coupling;
 - forces, relaxation and molecular dynamics of periodic cells;
-- hybrid/meta-GGA functionals and DFT+U;
+- self-consistent hybrid functionals, meta-GGA functionals and DFT+U;
 - PARSEC restart files other than `relax_restart.dat` and `mdinit.dat`;
 - Ono--Hirose double-grid order greater than one.
 
@@ -438,6 +441,56 @@ Mixing_Backoff: 0.5
 These controls alter only the nonlinear convergence path.  They do not alter
 the Kohn--Sham equations, energy functional, or convergence criterion.  Leave
 `Mixing_Safeguard` absent or false for a line-by-line PARSEC mixer comparison.
+
+### Energy refinement by a hybrid functional
+
+```text
+Energy_Refinement: b3lyp
+```
+
+(or `--energy-refinement b3lyp` on the command line, which overrules the
+input; `none` switches it off) adds one evaluation after the SCF: the
+exchange-correlation energy of the converged orbitals and density is
+computed with B3LYP and replaces the one of the self-consistent functional
+in the total energy,
+
+```text
+E_refined = E_total - E_xc[Correlation_Type] + E_xc[B3LYP].
+```
+
+This is the refinement step of Xu, Prendergast and Qian, *J. Chem. Theory
+Comput.* **18**, 5471 (2022) ("PP-PBE(B3LYP)" after a PBE SCF; `Lrefine=T`
+in ARES). It is not a B3LYP SCF: nothing of the SCF changes, and without the
+line a calculation is what it was, to the last bit. `parsec.out` gains a
+block "Energy refinement" after the SCF report with the five parts, both
+exchange-correlation energies, the refined total and, where the species
+have an `Atomic_Energy_Correction`, the refined all-electron total (the
+correction is that of the pseudopotentials of the SCF functional). The
+result archive gains `refinement_*` members.
+
+The B3LYP energy is that of Gaussian, libxc and ARES:
+`0.20 E_x(HF) + 0.08 E_x(Slater) + 0.72 E_x(B88) + 0.19 E_c(VWN-RPA)
++ 0.81 E_c(LYP)`, with the RPA parametrization of VWN. The four density
+functionals ([V_xc/b3lyp.py](V_xc/b3lyp.py)) use the gradient of the
+self-consistent PBE. The exact exchange
+([V_xc/exact_exchange.py](V_xc/exact_exchange.py)) is `-sum_ij f_i f_j
+(ij|ij)` over the occupied orbitals: one open-boundary Poisson solve per
+pair with the Hartree solver of the calculation, on the full grid, with the
+boundary values of the pair density at the order in use and without the
+atomic tail, which belongs to the total density. Its cost is
+`N (N + 1) / 2` Poisson solves for `N` occupied orbitals; with
+`PARSEC_HARTREE_LINEAR_BACKEND=cupy` they run on the GPU like those of the
+SCF.
+
+Limits, each stated in the output where it applies: isolated systems only
+(a periodic input and molecular dynamics refuse the keyword, as does the
+multi-node runner); spin-unpolarized, so with fractional occupations the
+exchange is that of the spin-restricted ensemble density matrix; with a
+nonlinear core correction the density functionals see valence plus core
+density and the exact exchange the valence orbitals, a combination that no
+reference has checked. The refined energy is not variational and follows
+the error of the density to first order. Example, validation against ARES
+and timings: [`examples/0_CH4_CF4/python_pbe_b3lyp`](../../examples/0_CH4_CF4/python_pbe_b3lyp/README.md).
 
 ## Pseudopotentials
 
