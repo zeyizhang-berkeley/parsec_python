@@ -15,6 +15,50 @@ The former implementation is preserved in the Git branch
 `old_architecture` and is intentionally absent from the default `main`
 branch.
 
+## Contents
+
+**Getting started**
+
+- [Quick start](#quick-start)
+- [Linux installation](#linux-installation)
+  - [1. Create a Python environment (CPU-only is sufficient)](#1-create-a-python-environment-cpu-only-is-sufficient)
+  - [2. Add the C++/OpenMP CPU kernels (recommended)](#2-add-the-copenmp-cpu-kernels-recommended)
+  - [3. Add NVIDIA GPU acceleration (optional)](#3-add-nvidia-gpu-acceleration-optional)
+  - [4. Threads, new terminals and clusters](#4-threads-new-terminals-and-clusters)
+  - [5. Several GPUs and several nodes](#5-several-gpus-and-several-nodes)
+  - [Troubleshooting](#troubleshooting)
+- [Optional native extension](#optional-native-extension)
+
+**Pseudopotentials**
+
+- [Pseudopotentials](#pseudopotentials)
+  - [Libraries in this repository](#libraries-in-this-repository)
+  - [Using a library potential](#using-a-library-potential)
+  - [Generating a potential](#generating-a-potential)
+  - [Core-hole potentials](#core-hole-potentials)
+  - [Converting a UPF file](#converting-a-upf-file)
+  - [Origin, citation and validation](#origin-citation-and-validation)
+
+**How the solver works**
+
+- [Scientific flow](#scientific-flow)
+- [Acceleration policy](#acceleration-policy)
+- [Optional ML initial densities](#optional-ml-initial-densities)
+  - [Run directly with ChargE3Net](#run-directly-with-charge3net)
+  - [Run directly with SCDP](#run-directly-with-scdp)
+  - [Run from an existing `.npz` or `.npy`](#run-from-an-existing-npz-or-npy)
+
+**The code**
+
+- [Source layout](#source-layout)
+- [Modular Python API](#modular-python-api)
+- [Tests](#tests)
+
+**Reference**
+
+- [Documentation](#documentation)
+- [License](#license)
+
 ## Quick start
 
 Linux users: see [Linux installation](#linux-installation) below for Bash commands,
@@ -303,62 +347,119 @@ settings and says which ones the solver chooses for itself.
 - **Out of GPU memory:** try the CPU/native backend or a machine with more memory.
   Do not silently coarsen the grid or loosen convergence to make a job fit.
 
-## Source layout
+## Optional native extension
 
-```text
-examples/                          runnable calculations and benchmark data
-├── README.md                      case guide and execution commands
-├── h2_canonical_nodg/
-├── h2_full_nonlocal/
-├── 0d_benzene/
-├── 0d_naphthalene/
-├── 0d_Si28H36/
-└── 0_CH4_CF4/
-scripts/
-└── run_multi_gpu_scf.sh           launch script for several GPUs and nodes
-src/
-├── parsec_python/                 canonical DFT package
-│   ├── main.py                    default command-line launcher
-│   ├── __main__.py                python -m parsec_python
-│   ├── driver.py                  readable preparation/reference workflow
-│   ├── reference_main.py          explicit readable CLI launcher
-│   ├── models.py                  shared physical/settings/result data
-│   ├── Input/                     parsec.in translation and validation
-│   ├── MLDensity/                 optional SCDP/ChargE3Net initial guesses
-│   ├── Grid/                      isolated real-space domains
-│   ├── Laplacian/                 high-order finite differences
-│   ├── Pseudopotential/           PARSEC POTRE reader and radial splines
-│   ├── V_ion/                     local potential and nonlocal projectors
-│   ├── Hartree/                   Poisson solve and open-boundary data
-│   ├── V_xc/                      CA/PZ LDA and spin-unpolarized PBE
-│   ├── Hamiltonian/               matrix-free Kohn--Sham operator
-│   ├── Eigensolvers/              PARSEC-style ChebFF/CHEBDAV/subspace code
-│   ├── Occupations/               Fermi level, occupations, and density
-│   ├── Mixer/                     SCF potential mixing
-│   ├── Energy/                    total-energy bookkeeping
-│   ├── SCF/                       self-consistent single-point loop
-│   ├── Forces/                    atomic forces of isolated systems
-│   ├── Relaxation/                BFGS, steepest descent, manual movements
-│   ├── MolecularDynamics/         PARSEC molecular dynamics
-│   ├── Output/                    PARSEC-shaped text reporting
-│   ├── acceleration/              internal optimized implementation
-│   │   ├── backends/              SciPy, CuPy, and native adapters
-│   │   ├── Eigensolvers/          device-resident GPU eigensolvers
-│   │   ├── Symmetry/              automatic representation decomposition
-│   │   ├── native/                optional C++/OpenMP extension
-│   │   ├── resident.py            warmed-process execution
-│   │   └── tests/                 backend, parity, and GPU tests
-│   └── tests/                     scientific and architecture tests
-├── pp_generation/                 general FHI98PP generation package
-└── tools/
-    └── upf_to_parsec.py           UPF-to-PARSEC converter
+The C++/OpenMP extension is optional but recommended for fastest automatic
+execution. Its source is in `src/parsec_python/acceleration/native`. A built
+wheel can be installed into `.venv312` with:
+
+```powershell
+python -m pip install --force-reinstall --no-deps `
+  src\parsec_python\acceleration\native\dist\parsec_accelerated_native-*.whl
 ```
 
-There are no longer separate `new_architecture` and
-`accelerated_architecture` packages. `parsec_python.acceleration` is an
-internal implementation layer, not a second public solver.
-Runnable inputs and benchmark reference data are deliberately outside the
-importable package under [`examples/`](examples/README.md).
+Verify the loaded binary:
+
+```powershell
+python -c "import parsec_accelerated_native as n; print(n.__file__); print(n.build_info())"
+```
+
+The OpenMP default uses detected logical processors minus four unless
+`OMP_NUM_THREADS` explicitly overrides it.
+
+## Pseudopotentials
+
+PARSEC.py reads norm-conserving pseudopotentials in PARSEC's `*_POTRE.DAT`
+format. The repository ships a library of them for the whole periodic table
+and the program that generated it, in
+[`src/pp_generation`](src/pp_generation/README.md). The generator runs in
+Python with NumPy only; no Fortran program is needed.
+
+### Libraries in this repository
+
+| Library | Content | Location |
+|---|---|---|
+| Ground state | 102 elements (H–No) for PBE, 101 for LDA (CA) | `src/pp_generation/NCPPs/{PBE,CA}/<Element>/` |
+| Core hole | One potential per core shell, generated with one electron removed from that shell. H–Kr are in this branch (256 potentials); all elements (1704) are in the branch `pseudopotential`. | `src/pp_generation/CoreHole_NCPPs/{PBE,CA}/<Element>/<Element>-<shell>/` |
+
+Every potential comes in three formats: `PARSEC/` for this solver, `UPF/` for
+Quantum ESPRESSO and ARES, and `FHI/` (the FHI98PP table). Its input, log and
+test reports are in `diagnostics/`. Each library has a `manifest.csv` with one
+row per potential and a README that says what was chosen and what was checked:
+[ground state](src/pp_generation/NCPPs/README.md),
+[core hole](src/pp_generation/CoreHole_NCPPs/README.md).
+
+### Using a library potential
+
+Point `--pp-dir` at the `PARSEC` folder of each species (or copy the
+`*_POTRE.DAT` files beside `parsec.in`) and paste the lines of
+`PARSEC/parsec_atom_type.in` into the species block of `parsec.in`:
+
+```text
+Atom_Type: Si
+Element_Symbol: Si
+Pseudopotential_Format: martins_new
+Local_Component: d
+Atomic_Energy_Correction: -572.190341 Ry
+```
+
+`Local_Component` is the channel that passed the ghost-state test; do not
+replace it by another one without testing. Use `Correlation_Type: pbe` with
+the potentials of `PBE/` and `Correlation_Type: ca` with those of `CA/`.
+
+### Generating a potential
+
+```powershell
+$env:PYTHONPATH = (Resolve-Path src).Path
+
+python -m pp_generation gui                          # periodic table, press Generate
+python -m pp_generation Si -o pp-output\Si           # silicon, PBE, ground state
+python -m pp_generation Si --xc ca --core-hole 2p -o pp-output\Si-2p
+python -m pp_generation library --jobs 16            # rebuild both libraries
+```
+
+On Linux use `export PYTHONPATH=$PWD/src`. A ground-state potential takes
+about one second. Functional, construction scheme, cutoff radii, core
+correction and output formats are options; see
+[the generator's README](src/pp_generation/README.md).
+
+### Core-hole potentials
+
+A core-hole potential describes the atom whose core electron has been
+removed, for the calculation of core-level binding energies. It is generated
+with the same `lmax`, cutoff radii and local channel as the ground-state
+potential of the element, so the two differ only by the hole. In `parsec.in`
+the excited atom gets its own `Atom_Type` (for example `Si-2p`) with
+`Element_Symbol: Si`; with the photoelectron removed, add `1 e` to
+`Net_Charges`. The binding energy is the difference of the two
+reference-corrected all-electron totals that the solver prints.
+
+### Converting a UPF file
+
+```powershell
+python src\tools\upf_to_parsec.py input.UPF output_POTRE.DAT
+```
+
+### Origin, citation and validation
+
+The generator in `src/pp_generation/pyfhi98pp` is a Python translation of
+**FHI98PP**, the pseudopotential package written by Martin Fuchs at the
+Fritz-Haber-Institut der Max-Planck-Gesellschaft, and the element templates
+for Z = 1–56 and 72–80 are FHI98PP's element database. For potentials made
+with it, cite
+
+> M. Fuchs and M. Scheffler, Comput. Phys. Commun. **119**, 67 (1999)
+
+together with the references listed in
+[`src/pp_generation/pyfhi98pp/README.md`](src/pp_generation/pyfhi98pp/README.md).
+
+Every potential of the two libraries (1907 in all) was regenerated with the
+Fortran FHI98PP from the same input: all are reproduced, with tables agreeing
+to 4e-9 and identical ghost-state verdicts. The potentials themselves have
+been used in a molecule only for H, C and F; those of the lanthanides and
+actinides, which have the f shell in the valence, are untested starting
+points. The library READMEs list what is missing (Lr; Ho for CA; some core
+holes of Ce, Th, Es, Fm and No).
 
 ## Scientific flow
 
@@ -396,42 +497,6 @@ their positions are rebuilt on the same grid, and the next SCF loop continues
 from the previous wavefunctions. `Skip_Force: false` adds the forces to a
 single point. See
 [Forces, relaxation and molecular dynamics](src/parsec_python/FORCES_AND_RELAXATION.md).
-
-## Modular Python API
-
-With `src` on `PYTHONPATH`, individual scientific pieces can be used without
-running SCF:
-
-```python
-from parsec_python import (
-    build_cluster_grid,
-    build_negative_laplacian,
-    ca_lda,
-    pbe,
-    read_parsec_pseudopotential,
-    solve_hartree,
-)
-```
-
-The public workflow functions use accelerated execution by default:
-
-```python
-from parsec_python import prepare_single_point, run_scf, run_single_point
-
-system = prepare_single_point("calculation/parsec.in", backend="auto")
-result = run_scf(system)
-```
-
-For audits and algorithm study, explicit aliases retain the readable SciPy
-path:
-
-```python
-from parsec_python import (
-    prepare_reference_single_point,
-    run_reference_scf,
-    run_reference_single_point,
-)
-```
 
 ## Acceleration policy
 
@@ -539,25 +604,106 @@ and a complete start-to-finish example, see the
 [42-case regression suite](examples/ml_initial_density/README.md) contains
 runnable SAD, ChargE3Net, and SCDP comparisons with stored predictions.
 
-## Optional native extension
+## Source layout
 
-The C++/OpenMP extension is optional but recommended for fastest automatic
-execution. Its source is in `src/parsec_python/acceleration/native`. A built
-wheel can be installed into `.venv312` with:
-
-```powershell
-python -m pip install --force-reinstall --no-deps `
-  src\parsec_python\acceleration\native\dist\parsec_accelerated_native-*.whl
+```text
+examples/                          runnable calculations and benchmark data
+├── README.md                      case guide and execution commands
+├── h2_canonical_nodg/
+├── h2_full_nonlocal/
+├── 0d_benzene/
+├── 0d_naphthalene/
+├── 0d_Si28H36/
+└── 0_CH4_CF4/
+scripts/
+└── run_multi_gpu_scf.sh           launch script for several GPUs and nodes
+src/
+├── parsec_python/                 canonical DFT package
+│   ├── main.py                    default command-line launcher
+│   ├── __main__.py                python -m parsec_python
+│   ├── driver.py                  readable preparation/reference workflow
+│   ├── reference_main.py          explicit readable CLI launcher
+│   ├── models.py                  shared physical/settings/result data
+│   ├── Input/                     parsec.in translation and validation
+│   ├── MLDensity/                 optional SCDP/ChargE3Net initial guesses
+│   ├── Grid/                      isolated real-space domains
+│   ├── Laplacian/                 high-order finite differences
+│   ├── Pseudopotential/           PARSEC POTRE reader and radial splines
+│   ├── V_ion/                     local potential and nonlocal projectors
+│   ├── Hartree/                   Poisson solve and open-boundary data
+│   ├── V_xc/                      CA/PZ LDA and spin-unpolarized PBE
+│   ├── Hamiltonian/               matrix-free Kohn--Sham operator
+│   ├── Eigensolvers/              PARSEC-style ChebFF/CHEBDAV/subspace code
+│   ├── Occupations/               Fermi level, occupations, and density
+│   ├── Mixer/                     SCF potential mixing
+│   ├── Energy/                    total-energy bookkeeping
+│   ├── SCF/                       self-consistent single-point loop
+│   ├── Forces/                    atomic forces of isolated systems
+│   ├── Relaxation/                BFGS, steepest descent, manual movements
+│   ├── MolecularDynamics/         PARSEC molecular dynamics
+│   ├── Output/                    PARSEC-shaped text reporting
+│   ├── acceleration/              internal optimized implementation
+│   │   ├── backends/              SciPy, CuPy, and native adapters
+│   │   ├── Eigensolvers/          device-resident GPU eigensolvers
+│   │   ├── Symmetry/              automatic representation decomposition
+│   │   ├── native/                optional C++/OpenMP extension
+│   │   ├── resident.py            warmed-process execution
+│   │   └── tests/                 backend, parity, and GPU tests
+│   └── tests/                     scientific and architecture tests
+├── pp_generation/                 pseudopotential generation and libraries
+│   ├── pyfhi98pp/                 FHI98PP translated to Python
+│   ├── converters/                FHI, UPF and PARSEC file formats
+│   ├── elements/                  element templates (H to Lr)
+│   ├── NCPPs/                     ground-state library, PBE and CA
+│   ├── CoreHole_NCPPs/            core-hole library, PBE and CA
+│   ├── gui.py                     graphical front end
+│   ├── library.py                 builder of the two libraries
+│   └── tests/                     tests with Fortran reference files
+└── tools/
+    └── upf_to_parsec.py           UPF-to-PARSEC converter
 ```
 
-Verify the loaded binary:
+There are no longer separate `new_architecture` and
+`accelerated_architecture` packages. `parsec_python.acceleration` is an
+internal implementation layer, not a second public solver.
+Runnable inputs and benchmark reference data are deliberately outside the
+importable package under [`examples/`](examples/README.md).
 
-```powershell
-python -c "import parsec_accelerated_native as n; print(n.__file__); print(n.build_info())"
+## Modular Python API
+
+With `src` on `PYTHONPATH`, individual scientific pieces can be used without
+running SCF:
+
+```python
+from parsec_python import (
+    build_cluster_grid,
+    build_negative_laplacian,
+    ca_lda,
+    pbe,
+    read_parsec_pseudopotential,
+    solve_hartree,
+)
 ```
 
-The OpenMP default uses detected logical processors minus four unless
-`OMP_NUM_THREADS` explicitly overrides it.
+The public workflow functions use accelerated execution by default:
+
+```python
+from parsec_python import prepare_single_point, run_scf, run_single_point
+
+system = prepare_single_point("calculation/parsec.in", backend="auto")
+result = run_scf(system)
+```
+
+For audits and algorithm study, explicit aliases retain the readable SciPy
+path:
+
+```python
+from parsec_python import (
+    prepare_reference_single_point,
+    run_reference_scf,
+    run_reference_single_point,
+)
+```
 
 ## Tests
 
@@ -573,20 +719,6 @@ python -m unittest discover -s src\pp_generation\tests -p "test_*.py" -v
 The acceleration suite includes real CUDA tests when CuPy and a CUDA device
 are available; otherwise those runtime-specific tests skip cleanly.
 
-## Pseudopotential utilities
-
-`src/pp_generation` is a general FHI98PP orchestration package, independent of
-the DFT solver. It supports ordinary and core-hole configurations within the
-capabilities of the installed generator. Generated potentials must still be
-validated for ghost states, transferability, exchange-correlation consistency,
-and relativistic requirements before production use.
-
-Convert a norm-conserving UPF file to PARSEC format with:
-
-```powershell
-python src\tools\upf_to_parsec.py input.UPF output_POTRE.DAT
-```
-
 ## Documentation
 
 - [PARSEC algorithm map](src/parsec_python/PARSEC_ALGORITHM.md)
@@ -596,6 +728,9 @@ python src\tools\upf_to_parsec.py input.UPF output_POTRE.DAT
 - [Acceleration implementation](src/parsec_python/acceleration/README.md)
 - [ML initial-density interface](src/parsec_python/MLDensity/README.md)
 - [Pseudopotential generation](src/pp_generation/README.md)
+- [Ground-state pseudopotential library](src/pp_generation/NCPPs/README.md)
+- [Core-hole pseudopotential library](src/pp_generation/CoreHole_NCPPs/README.md)
+- [Origin of the pseudopotential generator (FHI98PP)](src/pp_generation/pyfhi98pp/README.md)
 
 ## License
 
@@ -603,3 +738,9 @@ PARSEC.py is distributed under the GNU General Public License, version 3 or
 (at your option) any later version. See [LICENSE](LICENSE) for the Berkeley Lab
 license notice, [COPYING](COPYING) for the complete GNU GPL v3 text, and
 [COPYRIGHT](COPYRIGHT) for the copyright notice and U.S. Government rights.
+
+The pseudopotential generator in `src/pp_generation/pyfhi98pp` and the element
+templates for Z = 1–56 and 72–80 in `src/pp_generation/elements` are derived
+from FHI98PP by Martin Fuchs (Fritz-Haber-Institut der Max-Planck-Gesellschaft).
+Their origin, the terms stated by FHI98PP and the references to cite are in
+[`src/pp_generation/pyfhi98pp/README.md`](src/pp_generation/pyfhi98pp/README.md).

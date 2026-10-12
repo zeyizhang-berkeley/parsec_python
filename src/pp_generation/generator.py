@@ -4,12 +4,12 @@ import hashlib
 import json
 import os
 import tempfile
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
 
 from .backends import AtomBackend, Fhi98ppBackend, GeneratorBackend
 from .errors import ConfigurationError
-from .models import BackendName, GenerationRequest, GenerationResult
+from .models import DEFAULT_FORMATS, BackendName, GenerationRequest, GenerationResult
 
 
 ELEMENTS = {
@@ -47,13 +47,15 @@ def _write_report(result: GenerationResult) -> Path:
             return str(resolved)
 
     payload = {
-        "schema_version": 1,
+        "schema_version": 2,
         "element": request.element,
         "prefix": result.prefix,
         "backend": request.backend.value,
         "family": request.family.value,
         "xc": request.xc,
         "scheme": request.scheme.value,
+        "relativistic": "scalar" if request.relativistic else "no",
+        "variant": request.variant,
         "core_hole": asdict(request.core_hole) if request.core_hole else None,
         "ionic_charge": result.ionic_charge,
         "reference_electrons": result.reference_electrons,
@@ -64,6 +66,17 @@ def _write_report(result: GenerationResult) -> Path:
         ),
         "ae_energy_hartree": result.ae_energy_hartree,
         "pseudo_energy_hartree": result.pseudo_energy_hartree,
+        # All-electron minus pseudo atomic energy: ``Atomic_Energy_Correction``.
+        "atomic_energy_correction_rydberg": (
+            2.0 * (result.ae_energy_hartree - result.pseudo_energy_hartree)
+            if result.ae_energy_hartree is not None and result.pseudo_energy_hartree is not None
+            else None
+        ),
+        "lmax": result.lmax,
+        "channels": [asdict(channel) for channel in result.channels],
+        "core_radius": result.core_radius,
+        "reference_shift_ev": result.reference_shift_ev,
+        "kinetic_cutoff_rydberg": {str(k): v for k, v in sorted(result.kinetic_cutoff_ry.items())},
         "ghost_free": result.ghost_free,
         "selected_local_channel": result.selected_local_channel,
         "local_channel_results": [
@@ -89,7 +102,7 @@ def _write_report(result: GenerationResult) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     descriptor, temporary_name = tempfile.mkstemp(prefix=path.name, suffix=".tmp", dir=path.parent)
     try:
-        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as stream:
             json.dump(payload, stream, indent=2)
             stream.write("\n")
         os.replace(temporary_name, path)
@@ -109,10 +122,20 @@ def generate(request: GenerationRequest) -> GenerationResult:
         )
     if element not in ELEMENTS:
         raise ConfigurationError(f"unknown chemical element {element!r}")
-    backends: dict[BackendName, GeneratorBackend] = {
-        BackendName.FHI98PP: Fhi98ppBackend(),
-        BackendName.ATOM: AtomBackend(),
-    }
-    result = backends[request.backend].generate(request)
+    if request.formats is None:
+        request = replace(request, formats=DEFAULT_FORMATS[request.backend])
+    result = _backend(request.backend).generate(request)
     result.artifacts["report"] = _write_report(result)
     return result
+
+
+def _backend(name: BackendName) -> GeneratorBackend:
+    if name is BackendName.PYFHI98PP:
+        # Imported on demand: the built-in port needs numpy, the adapters
+        # around external programs do not.
+        from .backends.pyfhi98pp import PyFhi98ppBackend
+
+        return PyFhi98ppBackend()
+    if name is BackendName.FHI98PP:
+        return Fhi98ppBackend()
+    return AtomBackend()
