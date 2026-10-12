@@ -229,12 +229,36 @@ class NegativeFermiTemperatureInputTests(unittest.TestCase):
         self.assertIsNone(translation.problem.scf.fixed_occupations)
         self.assertIn("T=80 K", summarize_translation(translation))
 
-    def test_spin_polarization_stays_refused(self) -> None:
-        # With two spin channels both sections of occup.in would be read.
+    def test_spin_polarization_reads_both_sections(self) -> None:
+        """With two spin channels ``initial.f90`` reads a section for each."""
+
         case = dict(self.cases["sina4"])
         case["input"] = list(case["input"]) + ["Spin_Polarization: .true."]
-        with self.assertRaises(UnsupportedParsecOptionError):
-            parse_parsec_input(write_case(case, self.directory))
+        translation = parse_parsec_input(write_case(case, self.directory))
+        scf = translation.problem.scf
+        self.assertTrue(scf.spin_polarized)
+        self.assertEqual(scf.fixed_occupations, (1.0,) * 4 + (0.0,) * 4)
+        # The "spin down" section of the example spreads one electron over
+        # the levels 4 and 5.
+        self.assertEqual(
+            scf.fixed_occupations_down, (1.0,) * 3 + (0.5, 0.5) + (0.0,) * 3
+        )
+        self.assertFalse(any("occup.in" in text for text in translation.warnings))
+        # One electron per state: the two sections hold the eight electrons.
+        self.assertEqual(prepare_single_point(translation.problem).electron_count, 8.0)
+
+    def test_spin_polarization_needs_both_sections(self) -> None:
+        case = dict(self.cases["sina4"])
+        case["input"] = list(case["input"]) + ["Spin_Polarization: .true."]
+        path = write_case(case, self.directory)
+        (self.directory / "occup.in").write_text("spin up\n 4\n 0\n")
+        with self.assertRaisesRegex(ParsecInputError, "section of spin channel 2"):
+            parse_parsec_input(path)
+        # initial.f90 error 233: the two sections hold six of eight electrons.
+        (self.directory / "occup.in").write_text("up\n 4\n 0\ndown\n 2\n 0\n")
+        translation = parse_parsec_input(path)
+        with self.assertRaisesRegex(ValueError, "hold 6.000000 electrons"):
+            prepare_single_point(translation.problem)
 
 
 if __name__ == "__main__":

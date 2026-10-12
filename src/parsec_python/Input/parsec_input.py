@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Iterable
 import numpy as np
 
 from ..models import (
+    DEFAULT_INITIAL_SPIN_POLARIZATION,
     DEFAULT_RELAXATION_MAXIMUM_STEP,
     Atom,
     EigensolverSettings,
@@ -543,6 +544,7 @@ def _parse_parsec_input(
         "move_flag",
         "potential_num",
         "core_cutoff_radius",
+        "initial_spin_polarization",
     }
     block_keys = {
         "atom_coord",
@@ -700,8 +702,13 @@ def _parse_parsec_input(
             "Periodic_System=true requires Boundary_Conditions=bulk, and "
             "Boundary_Conditions=cluster requires Periodic_System=false"
         )
-    if optional_bool("spin_polarization"):
-        raise UnsupportedParsecOptionError("spin-polarized calculations are not supported")
+    spin_polarized = optional_bool("spin_polarization")
+    if spin_polarized and is_periodic:
+        raise UnsupportedParsecOptionError(
+            "Spin_Polarization with Boundary_Conditions=bulk: spin-polarized "
+            "calculations are implemented for isolated systems "
+            "(Boundary_Conditions: cluster) only"
+        )
     if optional_bool("dynamic_diag_tol"):
         raise UnsupportedParsecOptionError("Dynamic_Diag_Tol is not supported")
     if optional_bool("old_interpolation_format"):
@@ -717,6 +724,14 @@ def _parse_parsec_input(
     if electric_field != 0.0:
         raise UnsupportedParsecOptionError("nonzero Electric_Field is not supported")
 
+    if spin_polarized and "correlation_type" not in scalar:
+        # usrinputfile.F90: without the line a spin-polarized run takes the
+        # Perdew-Wang LSDA ("pl"), an unpolarized one CA.
+        raise UnsupportedParsecOptionError(
+            "Spin_Polarization without Correlation_Type: PARSEC then uses the "
+            "Perdew-Wang LSDA (pl), which is not implemented; give "
+            "Correlation_Type: ca or pbe"
+        )
     correlation = _normalize_label(one("correlation_type", "ca"))
     if correlation in {"ca", "pz", "lda"}:
         xc_functional = "ca"
@@ -938,6 +953,16 @@ def _parse_parsec_input(
             species_value("atomic_energy_correction", species_index, "0 Ry"),
             label=f"{symbol} Atomic_Energy_Correction",
         )
+        # usrinputfile.F90 reads it for every species, whatever the spin
+        # setting; initchrg.f90 uses it in a spin-polarized run only.
+        polarization = _strict_float(
+            species_value(
+                "initial_spin_polarization",
+                species_index,
+                repr(DEFAULT_INITIAL_SPIN_POLARIZATION),
+            ),
+            label=f"{symbol} Initial_Spin_Polarization",
+        )
         specifications[symbol] = SpeciesPotential(
             potential_path,
             local_map[local_label],
@@ -945,6 +970,7 @@ def _parse_parsec_input(
             use_spline=use_spline,
             element_symbol=element_symbol,
             atomic_energy_correction=correction,
+            initial_spin_polarization=polarization,
             **format_input,
         )
 
@@ -1208,7 +1234,20 @@ def _parse_parsec_input(
         one("fermi_temp", "80"), label="Fermi_Temp"
     )
     fixed_occupations = None
-    if fermi_temperature < 0:
+    fixed_occupations_down = None
+    if fermi_temperature < 0 and spin_polarized:
+        # initial.f90 reads one section per spin channel, the up one first.
+        from ..Occupations import read_spin_occupation_file
+
+        spin_file = read_spin_occupation_file(source.parent / "occup.in", states)
+        fixed_occupations = spin_file.occupations_up
+        fixed_occupations_down = spin_file.occupations_down
+        if spin_file.unread_lines:
+            warnings.append(
+                f"{spin_file.source.name}: {spin_file.unread_lines} line(s) "
+                "after the sections of the two spin channels are ignored."
+            )
+    elif fermi_temperature < 0:
         # initial.f90: a negative temperature reads the occupations from the
         # file occup.in of the run directory.
         from ..Occupations import read_occupation_file
@@ -1230,6 +1269,8 @@ def _parse_parsec_input(
         ),
         fermi_temperature_kelvin=fermi_temperature,
         fixed_occupations=fixed_occupations,
+        spin_polarized=spin_polarized,
+        fixed_occupations_down=fixed_occupations_down,
         number_of_states=states,
         net_charge=_charge_electrons(
             one("net_charges", "0"), label="Net_Charges"
@@ -1614,6 +1655,18 @@ def summarize_translation(translation: ParsecInputTranslation) -> str:
         (
             f"Output: level={translation.output_level}, "
             f"all_states={translation.output_all_states}"
+        ),
+        # Only for a spin-polarized run: other summaries keep their text.
+        *(
+            (
+                "Spin: polarized, initial polarization "
+                + ", ".join(
+                    f"{symbol} {potential.initial_spin_polarization:g}"
+                    for symbol, potential in problem.pseudopotentials.items()
+                ),
+            )
+            if problem.scf.spin_polarized
+            else ()
         ),
         # Only where the refinement is requested: other summaries keep their text.
         *(

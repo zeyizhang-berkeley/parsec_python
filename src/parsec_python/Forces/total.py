@@ -114,6 +114,13 @@ def compute_forces(
     input structure, and a relaxation passes those at every step.
     ``symmetrize=False`` keeps the raw forces apart from the removal of the
     net force.
+
+    A spin-polarized result needs no other formulas.  ``forcloc.f90`` reads
+    the total density and the averages over the two channels of the
+    potential difference and of the exchange-correlation potential, which
+    are the fields of such a result; ``forcnloc.f90`` sums the nonlocal term
+    over the states of both channels with the weight ``4/nspin``, which is
+    that of the unpolarized case for half the occupations.
     """
 
     from time import perf_counter
@@ -141,7 +148,11 @@ def compute_forces(
         system.nonlocal_operator,
         gradients,
         result.wavefunctions,
-        result.occupations,
+        (
+            result.occupations
+            if getattr(result, "spin", None) is None
+            else 0.5 * np.asarray(result.occupations)
+        ),
         len(atoms),
     )
     if not symmetrize:

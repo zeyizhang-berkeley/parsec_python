@@ -240,6 +240,54 @@ def save_result_archive(
     }
     for name, value in energy.items():
         payload[f"energy_{name}_ry"] = np.asarray(value)
+    # A spin-polarized result adds its two channels, up first.  The members
+    # above then describe both together (SinglePointResult): the total
+    # density, the averages of the potentials, and the states of the up
+    # channel followed by those of the down channel.  Other archives keep
+    # the members they had.
+    channels = getattr(result, "spin", None)
+    if channels is not None:
+        payload["spin_polarized"] = np.asarray(True)
+        payload["spin_electrons"] = np.asarray(
+            [channel.electron_count for channel in channels]
+        )
+        payload["net_magnetic_moment"] = np.asarray(result.net_magnetic_moment)
+        for name, member in (
+            ("eigenvalues", "spin_eigenvalues_ry"),
+            ("occupations", "spin_occupations"),
+            ("representations", "spin_representations"),
+            ("density", "spin_density_e_per_bohr3"),
+            ("xc_potential", "spin_xc_potential_ry"),
+            ("input_effective_potential", "spin_input_effective_potential_ry"),
+            ("output_effective_potential", "spin_output_effective_potential_ry"),
+            ("next_effective_potential", "spin_next_effective_potential_ry"),
+        ):
+            payload[member] = np.asarray(
+                [getattr(channel, name) for channel in channels]
+            )
+        payload["scf_spin_history"] = np.asarray(
+            [
+                [
+                    item.iteration,
+                    *item.spin_weighted_residuals,
+                    *item.spin_plain_residuals,
+                    *item.spin_electrons,
+                ]
+                for item in result.history
+            ],
+            dtype=float,
+        ).reshape(-1, 7)
+        payload["scf_spin_history_columns"] = np.asarray(
+            [
+                "iteration",
+                "weighted_sre_up_ry",
+                "weighted_sre_down_ry",
+                "plain_sre_up",
+                "plain_sre_down",
+                "electrons_up",
+                "electrons_down",
+            ]
+        )
     # Timing metadata is additive: archives from result-like objects created by
     # older callers still save successfully, while native results expose both
     # aggregate SCF and preparation values as named scalar keys.

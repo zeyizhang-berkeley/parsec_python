@@ -31,6 +31,8 @@ DensityUnits = Literal[
     "electrons_per_voxel",
 ]
 DensityNegativePolicy = Literal["clip", "error", "allow"]
+# ``Initial_Spin_Polarization`` default of ``usrinputfile.F90``.
+DEFAULT_INITIAL_SPIN_POLARIZATION = 0.1
 
 
 @dataclass(frozen=True)
@@ -76,6 +78,12 @@ class SpeciesPotential:
     charge) and ``core_cutoff_radius`` (``Core_Cutoff_Radius`` in bohr, the
     radius of the nonlocal projectors).  All three are required for an old
     file and refused for a new one, which holds its own.
+
+    ``initial_spin_polarization`` is PARSEC's ``Initial_Spin_Polarization``
+    of the species, read only by a spin-polarized calculation: the atomic
+    starting density of the species is multiplied by one plus it for the
+    up channel and by one minus it for the down channel
+    (``initchrg.f90``).  The default is that of ``usrinputfile.F90``.
     """
 
     path: str | Path
@@ -88,6 +96,18 @@ class SpeciesPotential:
     number_of_channels: int | None = None
     electrons_per_orbital: tuple[float, ...] | None = None
     core_cutoff_radius: float | None = None
+    initial_spin_polarization: float = DEFAULT_INITIAL_SPIN_POLARIZATION
+
+    def __repr__(self) -> str:
+        # A species that leaves the starting polarization at PARSEC's default
+        # prints what it printed before the field existed.
+        shown = [
+            f"{item.name}={getattr(self, item.name)!r}"
+            for item in fields(self)
+            if item.name != "initial_spin_polarization"
+            or self.initial_spin_polarization != DEFAULT_INITIAL_SPIN_POLARIZATION
+        ]
+        return f"{type(self).__qualname__}({', '.join(shown)})"
 
     def __post_init__(self) -> None:
         local_l = int(self.local_angular_momentum)
@@ -105,6 +125,10 @@ class SpeciesPotential:
         correction = float(self.atomic_energy_correction)
         if not np.isfinite(correction):
             raise ValueError("atomic_energy_correction must be finite")
+        polarization = float(self.initial_spin_polarization)
+        if not np.isfinite(polarization):
+            raise ValueError("initial_spin_polarization must be finite")
+        object.__setattr__(self, "initial_spin_polarization", polarization)
         object.__setattr__(self, "path", Path(self.path))
         object.__setattr__(self, "local_angular_momentum", local_l)
         object.__setattr__(
@@ -471,13 +495,21 @@ class MixingSettings:
 
 @dataclass(frozen=True)
 class SCFSettings:
-    """Spin-unpolarized, isolated single-point SCF controls.
+    """Isolated single-point SCF controls.
 
     ``fixed_occupations`` holds one occupation per state of
     ``number_of_states``, in ascending order of energy and with one standing
     for a doubly occupied orbital.  It is what PARSEC reads from ``occup.in``
     for a negative ``Fermi_Temp``; when given, no Fermi level is searched and
     the temperature is not used.
+
+    ``spin_polarized`` is PARSEC's ``Spin_Polarization``: two spin channels,
+    each with its own potential, eigenproblem and ``number_of_states``
+    states, and one Fermi level for both.  A state of a channel holds one
+    electron, so an occupation of one stands for one electron there.
+    ``fixed_occupations`` are then those of the up channel (the first
+    section of ``occup.in``) and ``fixed_occupations_down`` those of the
+    down channel (its second section).
     """
 
     max_iterations: int = 50
@@ -489,16 +521,24 @@ class SCFSettings:
     normalize_initial_density: bool = True
     xc_functional: XCFunctional = "ca"
     fixed_occupations: tuple[float, ...] | None = None
+    spin_polarized: bool = False
+    fixed_occupations_down: tuple[float, ...] | None = None
 
     def __repr__(self) -> str:
         # The text of these settings is hashed by the cache keys of the
         # accelerated driver and stored in test records.  Occupations that
-        # are not set print nothing, so that the text of every calculation
-        # with a Fermi level stays what it was before the field existed.
+        # are not set and spin polarization that is off print nothing, so
+        # that the text of every calculation without them stays what it was
+        # before the fields existed.
+        hidden = {
+            "fixed_occupations": self.fixed_occupations is None,
+            "spin_polarized": not self.spin_polarized,
+            "fixed_occupations_down": self.fixed_occupations_down is None,
+        }
         shown = [
             f"{item.name}={getattr(self, item.name)!r}"
             for item in fields(self)
-            if item.name != "fixed_occupations" or self.fixed_occupations is not None
+            if not hidden.get(item.name, False)
         ]
         return f"{type(self).__qualname__}({', '.join(shown)})"
 
@@ -539,6 +579,25 @@ class SCFSettings:
                     "number_of_states"
                 )
             object.__setattr__(self, "fixed_occupations", fixed)
+        object.__setattr__(self, "spin_polarized", bool(self.spin_polarized))
+        if self.fixed_occupations_down is not None:
+            if not self.spin_polarized or self.fixed_occupations is None:
+                raise ValueError(
+                    "fixed_occupations_down belongs to a spin-polarized "
+                    "calculation with fixed_occupations for the up channel"
+                )
+            down = tuple(float(value) for value in self.fixed_occupations_down)
+            if len(down) != self.number_of_states or not np.all(np.isfinite(down)):
+                raise ValueError(
+                    "fixed_occupations_down needs one finite value per state "
+                    "of number_of_states"
+                )
+            object.__setattr__(self, "fixed_occupations_down", down)
+        elif self.spin_polarized and self.fixed_occupations is not None:
+            raise ValueError(
+                "a spin-polarized calculation with fixed occupations needs "
+                "them for both channels: give fixed_occupations_down"
+            )
         object.__setattr__(self, "max_iterations", max_iterations)
 
 
@@ -821,11 +880,72 @@ class SCFIteration:
     xc_seconds: float = 0.0
     mixing_energy_seconds: float = 0.0
     total_seconds: float = 0.0
+    # Spin-polarized calculations only, one entry per channel, up first.
+    # ``eigenvalues``, ``occupations`` and ``representations`` then hold the
+    # states of the up channel followed by those of the down channel, the
+    # two residuals above are the larger of the two channels (the values
+    # PARSEC tests), and the density extrema are those of the total density.
+    spin_plain_residuals: tuple[float, ...] = ()
+    spin_weighted_residuals: tuple[float, ...] = ()
+    spin_electrons: tuple[float, ...] = ()
+    spin_density_minimum: tuple[float, ...] = ()
+    spin_density_maximum: tuple[float, ...] = ()
+
+    @property
+    def spin_polarized(self) -> bool:
+        return len(self.spin_electrons) == 2
+
+    @property
+    def net_magnetic_moment(self) -> float:
+        """Electrons up minus electrons down, in Bohr magnetons."""
+
+        if not self.spin_polarized:
+            return 0.0
+        return float(self.spin_electrons[0] - self.spin_electrons[1])
+
+
+@dataclass(frozen=True)
+class SpinChannelResult:
+    """One spin channel of a spin-polarized result.
+
+    ``occupations`` are electrons per state, between zero and one.
+    ``density`` is the valence density of the channel; the two channels add
+    up to the density of the result.  The three effective potentials and
+    ``xc_potential`` are those of the channel, with the meaning of the
+    fields of the same names of :class:`SinglePointResult`.
+    ``electron_count`` is the sum of the occupations (``totel`` of
+    ``flevel.f90``).  ``eigensolver_state`` is the buffered eigensubspace of
+    the channel.
+    """
+
+    eigenvalues: np.ndarray
+    occupations: np.ndarray
+    wavefunctions: np.ndarray
+    representations: np.ndarray
+    density: np.ndarray
+    xc_potential: np.ndarray
+    input_effective_potential: np.ndarray
+    output_effective_potential: np.ndarray
+    next_effective_potential: np.ndarray
+    electron_count: float
+    eigensolver_state: object | None = None
 
 
 @dataclass
 class SinglePointResult:
-    """Result of a modular isolated single-point calculation."""
+    """Result of a modular isolated single-point calculation.
+
+    A spin-polarized calculation fills ``spin`` with its two channels, up
+    first.  The other fields then describe both channels together:
+    ``density`` is the total valence density; ``xc_potential`` and the three
+    effective potentials are the averages of the two channels, which is what
+    the local forces of ``forcloc.f90`` read; ``eigenvalues``,
+    ``occupations``, ``representations`` and the columns of
+    ``wavefunctions`` list the states of the up channel followed by those of
+    the down channel; ``eigensolver_state`` holds the states of both
+    channels.  The occupations are electrons per state divided by
+    :attr:`spin_degeneracy`.
+    """
 
     converged: bool
     iterations: int
@@ -856,9 +976,29 @@ class SinglePointResult:
     # Buffered eigensubspace of the last eigenproblem.  An ionic step hands
     # it to the SCF loop of the next structure; nothing else reads it.
     eigensolver_state: object | None = None
+    # The two channels of a spin-polarized calculation, up first.
+    spin: tuple[SpinChannelResult, SpinChannelResult] | None = None
 
     @property
     def all_electron_total(self) -> float:
         """Pseudo total plus optional atomic reference corrections, in Ry."""
 
         return float(self.energies.total + self.atomic_reference_correction)
+
+    @property
+    def spin_polarized(self) -> bool:
+        return self.spin is not None
+
+    @property
+    def spin_degeneracy(self) -> int:
+        """Electrons a state with occupation one holds: two, or one with spin."""
+
+        return 2 if self.spin is None else 1
+
+    @property
+    def net_magnetic_moment(self) -> float:
+        """Electrons up minus electrons down, in Bohr magnetons."""
+
+        if self.spin is None:
+            return 0.0
+        return float(self.spin[0].electron_count - self.spin[1].electron_count)

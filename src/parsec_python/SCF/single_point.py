@@ -1,7 +1,9 @@
-"""Isolated, spin-unpolarized PARSEC-style SCF preparation and iteration.
+"""Isolated PARSEC-style SCF preparation and iteration.
 
 ``prepare_single_point`` constructs all density-independent objects.  The
-nonlinear work happens in ``run_scf``:
+nonlinear work happens in ``run_scf``, here for a calculation without spin
+polarization and in :mod:`parsec_python.SCF.spin_polarized` for one with two
+spin channels:
 
 ``V_in -> eigensolver -> occupations -> rho -> (V_H,V_xc) -> V_out``
 
@@ -17,7 +19,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
 import time
-from typing import Callable
+from typing import Callable, Mapping
 
 import numpy as np
 import scipy.sparse as sp
@@ -46,6 +48,7 @@ from ..Laplacian import build_negative_laplacian
 from ..Mixer import AndersonMixer, potential_residual_metrics
 from ..Occupations import (
     check_fixed_occupations,
+    check_spin_fixed_occupations,
     density_from_orbitals,
     fermi_occupations,
     fixed_occupations,
@@ -71,7 +74,7 @@ from ..models import (
     SinglePointInput,
     SinglePointResult,
 )
-from ..V_xc import XCResult, ca_lda, pbe
+from ..V_xc import SpinXCResult, XCResult, ca_lda, ca_lda_spin, pbe, pbe_spin
 
 
 @dataclass(frozen=True)
@@ -88,6 +91,10 @@ class PreparedSinglePointSystem:
     from the geometry (:mod:`parsec_python.Hartree.boundary`), and
     ``hartree_boundary_tail`` the static atomic tail where the plan has one.
     A system built without a plan has PARSEC's multipole boundary.
+
+    ``initial_spin_densities`` are the starting densities of the up and the
+    down channel of a spin-polarized calculation and ``None`` otherwise
+    (:func:`initial_spin_densities`).
     """
 
     input: SinglePointInput
@@ -106,6 +113,7 @@ class PreparedSinglePointSystem:
     timings: PreparationTimings = field(default_factory=PreparationTimings)
     hartree_boundary: HartreeBoundaryPlan | None = None
     hartree_boundary_tail: AtomicTail | None = None
+    initial_spin_densities: tuple[np.ndarray, np.ndarray] | None = None
 
     @property
     def hartree_boundary_tail_maximum(self) -> float | None:
@@ -176,6 +184,25 @@ class PreparedSinglePointSystem:
             f"unsupported XC functional {self.input.scf.xc_functional!r}"
         )
 
+    def evaluate_spin_xc(
+        self, density_up: np.ndarray, density_down: np.ndarray
+    ) -> SpinXCResult:
+        """Evaluate the selected spin-polarized XC functional.
+
+        Each channel sees its valence density plus half of the frozen NLCC
+        density (``rho_hart.F90``).
+        """
+
+        if self.input.scf.xc_functional == "ca":
+            return ca_lda_spin(
+                density_up, density_down, self.grid.volume_element, self.core_density
+            )
+        if self.input.scf.xc_functional == "pbe":
+            return pbe_spin(density_up, density_down, self.grid, self.core_density)
+        raise ValueError(
+            f"unsupported XC functional {self.input.scf.xc_functional!r}"
+        )
+
 
 @dataclass(frozen=True)
 class SCFWarmStart:
@@ -192,6 +219,10 @@ class SCFWarmStart:
     ``input_potential`` and ``hartree_potential`` are full-grid fields in Ry.
     ``eigensolver_state`` is the state object of the eigensolver that will be
     used; ``None`` asks for a first solve with the given potential.
+
+    A spin-polarized loop takes ``input_potential`` and
+    ``eigensolver_state`` as pairs, the up channel first; the Hartree
+    potential is common to both channels.
     """
 
     input_potential: np.ndarray
@@ -227,9 +258,25 @@ def warm_start_for_moved_atoms(
     """Build the warm start of ``system`` from the run before the move.
 
     ``parsec.F90`` after ``domove``: ``vnew = vnew - vion_old`` and then
-    ``vnew = vnew + vion_new``, with ``vnew`` the potential the mixer left.
+    ``vnew = vnew + vion_new``, with ``vnew`` the potential the mixer left,
+    for each spin channel where there are two.
     """
 
+    channels = getattr(previous_result, "spin", None)
+    if channels is not None:
+        return SCFWarmStart(
+            input_potential=tuple(
+                np.asarray(channel.next_effective_potential)
+                - np.asarray(previous_system.ionic_potential)
+                + np.asarray(system.ionic_potential)
+                for channel in channels
+            ),
+            hartree_potential=np.asarray(previous_result.hartree_potential),
+            eigensolver_state=tuple(
+                state_for_new_potential(channel.eigensolver_state)
+                for channel in channels
+            ),
+        )
     return SCFWarmStart(
         input_potential=(
             np.asarray(previous_result.next_effective_potential)
@@ -255,6 +302,87 @@ def _require_atoms_inside_domain(settings: GridSettings, atoms) -> None:
             )
         if not inside:
             raise ValueError(f"atom {atom.symbol} at {coordinate} lies outside the domain")
+
+
+def _require_spin_support(problem: SinglePointInput) -> None:
+    """Refuse what a spin-polarized calculation cannot start from."""
+
+    if problem.initial_density_settings.method != "sad":
+        raise NotImplementedError(
+            "a spin-polarized calculation starts from the superposition of "
+            "atomic densities with the Initial_Spin_Polarization of each "
+            "species; an imported or ML starting density "
+            f"(Initial_Density: {problem.initial_density_settings.method}) "
+            "holds no spin densities"
+        )
+
+
+def initial_spin_densities(
+    total: np.ndarray,
+    species_densities: Mapping[str, np.ndarray],
+    polarizations: Mapping[str, float],
+    scale: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Starting densities of the up and the down channel (``initchrg.f90``).
+
+    ``total`` is the superposition of the atomic valence densities before
+    normalization, ``species_densities`` its part from the atoms of each
+    species, ``polarizations`` the ``Initial_Spin_Polarization`` ``p`` of
+    each species and ``scale`` the factor that normalizes ``total`` to the
+    electron count.  ``initchrg.f90`` accumulates
+
+    ``rho_up = sum_species (1 + p) rho_species``,
+    ``rho_down = sum_species (1 - p) rho_species``
+
+    and scales both by the factor of the total density.  The two channels
+    therefore add up to twice the total density: the first exchange-
+    correlation potential, and it alone, is evaluated at that doubled
+    density, while the first Hartree potential is that of the total density
+    itself.  The starting magnetic moment PARSEC prints, the integral of
+    ``rho_up - rho_down``, is ``2 p N_e`` for one species.  This is kept as
+    it is in the Fortran: it changes the path of the SCF loop, not the
+    self-consistent state.
+    """
+
+    total = np.asarray(total, dtype=np.float64)
+    magnetization = np.zeros_like(total)
+    for symbol, density in species_densities.items():
+        magnetization += float(polarizations[symbol]) * np.asarray(
+            density, dtype=np.float64
+        )
+    return (scale * (total + magnetization), scale * (total - magnetization))
+
+
+def _species_densities(
+    total: np.ndarray,
+    build_atomic_density: Callable[..., np.ndarray],
+    grid: RealSpaceGrid,
+    atoms: tuple,
+    pseudopotentials: dict[str, ParsecPseudopotential],
+    specifications,
+) -> dict[str, np.ndarray]:
+    """Split the superposed atomic density into the parts of the species.
+
+    Only species with atoms are returned.  Where they all start with the
+    same polarization the split is not needed and the total stands for one
+    of them; otherwise the density of each species is superposed on its own.
+    """
+
+    symbols = list(dict.fromkeys(atom.symbol for atom in atoms))
+    polarizations = {
+        specifications[symbol].initial_spin_polarization for symbol in symbols
+    }
+    if len(polarizations) == 1:
+        return {symbols[0]: total}
+    return {
+        symbol: build_atomic_density(
+            grid,
+            tuple(atom for atom in atoms if atom.symbol == symbol),
+            pseudopotentials,
+            specifications,
+        )
+        for symbol in symbols
+    }
 
 
 def _require_core_radius_support(
@@ -353,10 +481,19 @@ def prepare_single_point(
     electron_count = ionic_charge(atoms, pseudopotentials) - problem.scf.net_charge
     if electron_count <= 0:
         raise ValueError("the requested system has no valence electrons")
+    if problem.scf.spin_polarized:
+        _require_spin_support(problem)
     if problem.scf.fixed_occupations is not None:
         # initial.f90 stops before any setup when the occupations of
         # occup.in do not hold the electrons of the system.
-        check_fixed_occupations(problem.scf.fixed_occupations, electron_count)
+        if problem.scf.spin_polarized:
+            check_spin_fixed_occupations(
+                problem.scf.fixed_occupations,
+                problem.scf.fixed_occupations_down,
+                electron_count,
+            )
+        else:
+            check_fixed_occupations(problem.scf.fixed_occupations, electron_count)
     boundary_plan = plan_hartree_boundary(
         problem.hartree,
         problem.grid,
@@ -515,10 +652,34 @@ def _density_and_energy_stages(
         if atomic_density_builder is None
         else atomic_density_builder
     )
+    spin_densities = None
     if problem.initial_density_settings.method == "sad":
         initial_density = build_atomic_density(
             grid, atoms, pseudopotentials, problem.pseudopotentials
         )
+        if problem.scf.spin_polarized:
+            # initchrg.f90 scales the two channels with the factor of the
+            # total density, here also where that factor is left at one.
+            spin_densities = initial_spin_densities(
+                initial_density,
+                _species_densities(
+                    initial_density,
+                    build_atomic_density,
+                    grid,
+                    atoms,
+                    pseudopotentials,
+                    problem.pseudopotentials,
+                ),
+                {
+                    symbol: specification.initial_spin_polarization
+                    for symbol, specification in problem.pseudopotentials.items()
+                },
+                (
+                    electron_count / grid.integrate(initial_density)
+                    if problem.scf.normalize_initial_density
+                    else 1.0
+                ),
+            )
     else:
         # Imported lazily: default SAD calculations do not import or initialize
         # an ML framework.  The model itself runs in an isolated subprocess.
@@ -575,6 +736,7 @@ def _density_and_energy_stages(
             ion_ion_energy=repulsion,
             atomic_reference_correction=atomic_reference_correction,
             hartree_boundary_tail=boundary_tail,
+            initial_spin_densities=spin_densities,
         ),
         dict(
             initial_density_seconds=initial_density_seconds,
@@ -791,6 +953,54 @@ def _number_of_states(system: PreparedSinglePointSystem) -> int:
     return requested
 
 
+def eigval_settings_for(eigensolver_settings, filter_degree: int) -> EigvalSettings:
+    """Assemble the eigensolver policy of one SCF iteration.
+
+    ``filter_degree`` is the present later-SCF SUBSPACE degree, which the
+    SCF loop lowers near convergence; everything else comes from the input.
+    """
+
+    return EigvalSettings(
+        safety_buffer=eigensolver_settings.subspace_buffer,
+        initial_method=eigensolver_settings.method,
+        chebff=ChebFFSettings(
+            polynomial_degree=eigensolver_settings.first_filter_degree,
+            filter_cycles=eigensolver_settings.first_filter_cycles,
+            # chebff.f90z requests ten steps; the non-BETA bound routine
+            # then applies its own PARSEC clamp to eight.
+            lanczos_steps=10,
+            block_size=eigensolver_settings.matvec_block_size,
+            reset_recurrence_per_block=False,
+            random_seed=eigensolver_settings.random_seed,
+        ),
+        chebdav=(
+            ChebDavSettings(
+                polynomial_degree=eigensolver_settings.first_filter_degree,
+                convergence_tolerance=eigensolver_settings.tolerance,
+                block_size=eigensolver_settings.matvec_block_size,
+                # create_eigen_solver fixes winsize=12 for CHEBDAV.
+                workspace_window=12,
+                lanczos_steps=5,
+                max_outer_restarts=2,
+                random_seed=eigensolver_settings.random_seed,
+            )
+            if eigensolver_settings.method == "chebdav"
+            # A CHEBFF degree of 10 is valid.  Do not feed that unrelated
+            # setting through CHEBDAV's stricter >=15 validation merely
+            # because EigvalSettings stores both explicit choices.
+            else ChebDavSettings()
+        ),
+        subspace=SubspaceSettings(
+            polynomial_degree=filter_degree,
+            degree_delta=eigensolver_settings.filter_degree_delta,
+            lanczos_steps=eigensolver_settings.lanczos_steps,
+            block_size=eigensolver_settings.matvec_block_size,
+            reset_recurrence_per_block=False,
+            random_seed=eigensolver_settings.random_seed,
+        ),
+    )
+
+
 def run_scf(
     system: PreparedSinglePointSystem,
     *,
@@ -809,6 +1019,10 @@ def run_scf(
     :class:`SCFWarmStart`); without it the loop starts from the prepared
     initial density.
 
+    A spin-polarized system (``Spin_Polarization``) is handed to
+    :func:`parsec_python.SCF.spin_polarized.run_spin_scf`, which runs the
+    same loop with one potential and one eigenproblem per spin channel.
+
     At iteration ``k`` the eigensolver sees
 
     ``H[V_in^k] = -nabla_FD^2 + diag(V_in^k) + V_NL``
@@ -821,6 +1035,20 @@ def run_scf(
     The mixer constructs ``V_in^(k+1)`` from these two local fields.  Kinetic
     and nonlocal terms are never mixed because they are density independent.
     """
+    if getattr(system.input.scf, "spin_polarized", False):
+        from .spin_polarized import run_spin_scf
+
+        return run_spin_scf(
+            system,
+            callback=callback,
+            eigenproblem_solver=eigenproblem_solver,
+            orbital_density_builder=orbital_density_builder,
+            mixer_factory=mixer_factory,
+            residual_metrics_evaluator=residual_metrics_evaluator,
+            total_energy_evaluator=total_energy_evaluator,
+            scalar_field_adapter=scalar_field_adapter,
+            warm_start=warm_start,
+        )
     scf_start = time.perf_counter()
     # The validated reference path always selects ``solve_eigval`` here.  The
     # optional callable is a narrow execution hook used by the sibling
@@ -964,45 +1192,7 @@ def run_scf(
         # Rebuild the small policy object so a degree reduced by the SCF logic
         # below is used by the next SUBSPACE call.  solve_eigval dispatches on
         # eigval_state, not on the nonlinear iteration number itself.
-        eigval_settings = EigvalSettings(
-            safety_buffer=eigensolver_settings.subspace_buffer,
-            initial_method=eigensolver_settings.method,
-            chebff=ChebFFSettings(
-                polynomial_degree=eigensolver_settings.first_filter_degree,
-                filter_cycles=eigensolver_settings.first_filter_cycles,
-                # chebff.f90z requests ten steps; the non-BETA bound routine
-                # then applies its own PARSEC clamp to eight.
-                lanczos_steps=10,
-                block_size=eigensolver_settings.matvec_block_size,
-                reset_recurrence_per_block=False,
-                random_seed=eigensolver_settings.random_seed,
-            ),
-            chebdav=(
-                ChebDavSettings(
-                    polynomial_degree=eigensolver_settings.first_filter_degree,
-                    convergence_tolerance=eigensolver_settings.tolerance,
-                    block_size=eigensolver_settings.matvec_block_size,
-                    # create_eigen_solver fixes winsize=12 for CHEBDAV.
-                    workspace_window=12,
-                    lanczos_steps=5,
-                    max_outer_restarts=2,
-                    random_seed=eigensolver_settings.random_seed,
-                )
-                if eigensolver_settings.method == "chebdav"
-                # A CHEBFF degree of 10 is valid.  Do not feed that unrelated
-                # setting through CHEBDAV's stricter >=15 validation merely
-                # because EigvalSettings stores both explicit choices.
-                else ChebDavSettings()
-            ),
-            subspace=SubspaceSettings(
-                polynomial_degree=filter_degree,
-                degree_delta=eigensolver_settings.filter_degree_delta,
-                lanczos_steps=eigensolver_settings.lanczos_steps,
-                block_size=eigensolver_settings.matvec_block_size,
-                reset_recurrence_per_block=False,
-                random_seed=eigensolver_settings.random_seed,
-            ),
-        )
+        eigval_settings = eigval_settings_for(eigensolver_settings, filter_degree)
         # This is the Hamiltonian assembly/handoff point.  The lightweight
         # object combines the current mixed V_in with the static kinetic and
         # KB terms; LinearOperator routes all Lanczos and Chebyshev H@Q calls

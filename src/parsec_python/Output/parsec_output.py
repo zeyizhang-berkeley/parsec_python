@@ -798,6 +798,8 @@ class ParsecTextReporter:
         self._domain_report = domain_report_requested()
         # The lines of the Hartree boundary are those of an isolated domain.
         self._periodic = getattr(self.problem, "periodic_cell", None) is not None
+        # Two spin channels change the header and the report of every step.
+        self._spin = bool(getattr(self.problem.scf, "spin_polarized", False))
 
     def header(self) -> None:
         grid = self.problem.grid
@@ -988,7 +990,19 @@ class ParsecTextReporter:
             " Other input data:",
             " -----------------",
             f" output level [1 - 6] = {self.translation.output_level:2d}",
-            " No spin effects!",
+            *(
+                (
+                    " Spin-polarized computation!",
+                    "",
+                    " Initial spin polarization: ",
+                    *(
+                        f"  {symbol:<2s}     {potential.initial_spin_polarization:11.4f}"
+                        for symbol, potential in self.problem.pseudopotentials.items()
+                    ),
+                )
+                if self._spin
+                else (" No spin effects!",)
+            ),
             " No minimization!",
             "",
         ]
@@ -1072,6 +1086,7 @@ class ParsecTextReporter:
                     " Initial density integral = "
                     f"{system.grid.integrate(system.initial_density):14.8f}"
                 ),
+                *self._initial_moment_lines(system),
                 *hartree_boundary_lines(system, self.problem.hartree),
                 *domain_lines,
                 "",
@@ -1118,6 +1133,81 @@ class ParsecTextReporter:
             )
         self.write("\n".join(lines))
 
+    def _initial_moment_lines(self, system) -> list[str]:
+        """The starting magnetic moment, as ``initchrg.f90`` prints it."""
+
+        channels = getattr(system, "initial_spin_densities", None)
+        if channels is None:
+            return []
+        moment = system.grid.integrate(channels[0]) - system.grid.integrate(channels[1])
+        return [f" Initial magnetic moment [Bohr magnetons] = {moment:12.5f}"]
+
+    @staticmethod
+    def _state_lines(eigenvalues, occupations, representations) -> list[str]:
+        """One line per state, in the format of ``flevel.f90``."""
+
+        return [
+            f"{index:5d}   {eigenvalue:18.10f}"
+            f"   {eigenvalue * RYDBERG_TO_EV:18.10f}"
+            f" {occupation:9.4f}   {representation:6d}"
+            for index, (eigenvalue, occupation, representation) in enumerate(
+                zip(eigenvalues, occupations, representations), start=1
+            )
+        ]
+
+    def _spin_level_lines(self, step: SCFIteration) -> list[str]:
+        """Electrons, moment, Fermi level and the levels of both channels."""
+
+        count = len(step.eigenvalues) // 2
+        representations = (
+            step.representations
+            if len(step.representations) == len(step.eigenvalues)
+            else (1,) * len(step.eigenvalues)
+        )
+        lines = [
+            (
+                " Electrons in up, down spins: "
+                f"{step.spin_electrons[0]:7.2f} {step.spin_electrons[1]:7.2f}"
+            ),
+            (
+                " Net magnetic moment (in Bohr magnetons): "
+                f"{step.net_magnetic_moment:7.2f}"
+            ),
+            "",
+            # No Fermi level is searched with the occupations of occup.in.
+            *(
+                (f" Fermi level at {step.fermi_level:10.4f} [Ry]", "")
+                if self.problem.scf.fixed_occupations is None
+                else ()
+            ),
+        ]
+        for label, channel in (("up", slice(0, count)), ("dn", slice(count, None))):
+            lines.extend(
+                [
+                    f"{label} State   Eigenvalue [Ry]      Eigenvalue [eV]"
+                    "    Occup.     Repr.",
+                    "",
+                    *self._state_lines(
+                        step.eigenvalues[channel],
+                        step.occupations[channel],
+                        representations[channel],
+                    ),
+                    "",
+                    "",
+                ]
+            )
+        for label, maximum, minimum in zip(
+            ("up", "dn"), step.spin_density_maximum, step.spin_density_minimum
+        ):
+            lines.extend(
+                [
+                    " Max and min values of charge density [e/bohr^3]:"
+                    f" {maximum:12.4E} {minimum:12.4E}   {label}",
+                    "",
+                ]
+            )
+        return lines
+
     def iteration(self, step: SCFIteration) -> None:
         self._diagonalization_total += step.diagonalization_seconds
         self._hartree_total += step.hartree_seconds
@@ -1143,39 +1233,43 @@ class ParsecTextReporter:
                 f"      tdiag_sum = {self._diagonalization_total:11.2f}"
             ),
             "",
-            # flevel.f90 reports no Fermi level with the occupations of
-            # occup.in: none is searched.
-            *(
-                (f" Fermi level at {step.fermi_level:10.4f} [Ry]", "")
-                if self.problem.scf.fixed_occupations is None
-                else ()
-            ),
-            "   State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.",
-            "",
         ]
-        representations = (
-            step.representations
-            if len(step.representations) == len(step.eigenvalues)
-            else (1,) * len(step.eigenvalues)
-        )
-        for index, (eigenvalue, occupation, representation) in enumerate(
-            zip(step.eigenvalues, step.occupations, representations),
-            start=1,
-        ):
-            lines.append(
-                f"{index:5d}   {eigenvalue:18.10f}"
-                f"   {eigenvalue * RYDBERG_TO_EV:18.10f}"
-                f" {occupation:9.4f}   {representation:6d}"
+        if getattr(step, "spin_polarized", False):
+            # flevel.f90 and rho_hart.F90 report each channel.
+            lines.extend(self._spin_level_lines(step))
+        else:
+            lines.extend(
+                [
+                    # flevel.f90 reports no Fermi level with the occupations
+                    # of occup.in: none is searched.
+                    *(
+                        (f" Fermi level at {step.fermi_level:10.4f} [Ry]", "")
+                        if self.problem.scf.fixed_occupations is None
+                        else ()
+                    ),
+                    "   State   Eigenvalue [Ry]      Eigenvalue [eV]"
+                    "    Occup.     Repr.",
+                    "",
+                    *self._state_lines(
+                        step.eigenvalues,
+                        step.occupations,
+                        (
+                            step.representations
+                            if len(step.representations) == len(step.eigenvalues)
+                            else (1,) * len(step.eigenvalues)
+                        ),
+                    ),
+                    "",
+                    (
+                        " Max and min values of charge density [e/bohr^3]:"
+                        f" {step.density_maximum:12.4E}"
+                        f" {step.density_minimum:12.4E}"
+                    ),
+                    "",
+                ]
             )
         lines.extend(
             [
-                "",
-                (
-                    " Max and min values of charge density [e/bohr^3]:"
-                    f" {step.density_maximum:12.4E}"
-                    f" {step.density_minimum:12.4E}"
-                ),
-                "",
                 f" Hartree potential time [sec]: {step.hartree_seconds:10.2f}",
                 "",
                 f"   Eigenvalue Energy             = {energies.eigenvalue:20.8f} [Ry]",
@@ -1214,15 +1308,35 @@ class ParsecTextReporter:
                 f"   Total Energy = {energies.total:22.8f} [Ry]",
                 f"   Energy/atom  = {energy_per_atom_ev:22.8f} [eV]",
                 "",
-                (
-                    f"  0-{step.iteration:3d}    "
-                    "SRE of pot. & charge weighted pot = "
-                    f"{step.plain_residual:14.10f}"
-                    f" {step.weighted_residual:14.10f}"
-                ),
-                "",
             ]
         )
+        if getattr(step, "spin_polarized", False):
+            # getsre.f90 prints the residuals of each channel.
+            for label, plain, weighted in zip(
+                ("up", "dn"), step.spin_plain_residuals, step.spin_weighted_residuals
+            ):
+                lines.extend(
+                    [
+                        (
+                            f"  0-{step.iteration:3d} {label} "
+                            "SRE of pot. & charge weighted pot = "
+                            f"{plain:14.10f} {weighted:14.10f}"
+                        ),
+                        "",
+                    ]
+                )
+        else:
+            lines.extend(
+                [
+                    (
+                        f"  0-{step.iteration:3d}    "
+                        "SRE of pot. & charge weighted pot = "
+                        f"{step.plain_residual:14.10f}"
+                        f" {step.weighted_residual:14.10f}"
+                    ),
+                    "",
+                ]
+            )
         self._previous_total = energies.total
         self.write("\n".join(lines))
 
