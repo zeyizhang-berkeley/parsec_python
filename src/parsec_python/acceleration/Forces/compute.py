@@ -60,6 +60,9 @@ def _nonlocal_forces(system, result, clock: dict) -> np.ndarray:
     if operator.projectors.shape[1] == 0:
         return np.zeros((atom_count, 3), dtype=np.float64)
     occupations = np.asarray(result.occupations, dtype=np.float64)
+    channels = getattr(result, "spin", None)
+    if channels is not None:
+        return _spin_nonlocal_forces(system, channels, operator, atom_count)
 
     sectors = getattr(system.backend, "symmetry_eigensolver", None)
     if sectors is not None:
@@ -94,6 +97,50 @@ def _nonlocal_forces(system, result, clock: dict) -> np.ndarray:
     return nonlocal_forces(
         operator, gradients, result.wavefunctions, occupations, atom_count
     )
+
+
+def _spin_nonlocal_forces(system, channels, operator, atom_count: int) -> np.ndarray:
+    """Nonlocal forces of the two channels of a spin-polarized result.
+
+    ``forcnloc.f90`` weights a state by four over the number of spin
+    channels: each channel enters the unpolarized contraction with half its
+    occupations.  The orbitals are read where the channel keeps them, on
+    its device or in the result.
+    """
+
+    gradients = system.projector_gradients()
+    for_channel = getattr(system.eigenproblem_solver, "for_spin_channel", None)
+    device_operator = getattr(system.backend, "device_operator", None)
+    forces = np.zeros((atom_count, 3), dtype=np.float64)
+    transposes = None
+    for index, channel in enumerate(channels):
+        occupations = 0.5 * np.asarray(channel.occupations, dtype=np.float64)
+        occupied = np.flatnonzero(occupations != 0.0)
+        if not occupied.size:
+            continue
+        device_solver = (
+            getattr(for_channel(index), "solver", None)
+            if callable(for_channel)
+            else None
+        )
+        state = None if device_solver is None else device_solver.device_state
+        if state is not None and device_operator is not None:
+            from .nonlocal_device import gradient_transposes, projector_force_terms
+
+            if transposes is None:
+                transposes = gradient_transposes(gradients.components)
+            terms = projector_force_terms(
+                device_operator,
+                state.subspace.vectors,
+                occupations[: int(occupied[-1]) + 1],
+                transposes,
+            )
+            forces += _atom_sums(terms, operator.labels, atom_count)
+        else:
+            forces += nonlocal_forces(
+                operator, gradients, channel.wavefunctions, occupations, atom_count
+            )
+    return forces
 
 
 def compute_forces(

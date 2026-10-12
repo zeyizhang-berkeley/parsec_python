@@ -46,6 +46,22 @@ class CuPySCFEigensolver:
     def __init__(self, operator: CuPyHamiltonian) -> None:
         self.operator = operator
         self.solver: CuPyEigvalSolver | None = None
+        self._spin_channels: tuple["CuPySCFEigensolver", ...] | None = None
+
+    def for_spin_channel(self, index: int) -> "CuPySCFEigensolver":
+        """Return the eigensolver of one channel of a spin-polarized loop.
+
+        The two channels share the Hamiltonian allocation of this solver,
+        whose local potential the SCF loop binds before each solve, and each
+        keeps a buffered eigensubspace of its own on the device.
+        """
+
+        if self._spin_channels is None:
+            self._spin_channels = (
+                CuPySCFEigensolver(self.operator),
+                CuPySCFEigensolver(self.operator),
+            )
+        return self._spin_channels[index]
 
     def __call__(
         self,

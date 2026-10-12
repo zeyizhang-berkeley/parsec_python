@@ -134,6 +134,16 @@ def materialize_wavefunctions(system, result) -> None:
             else:
                 result.wavefunctions = np.asarray(cp.asnumpy(wavefunctions), dtype=np.float64)
             synchronize()
+            channels = getattr(result, "spin", None)
+            if channels is not None:
+                # The channels of a spin-polarized result are views of the
+                # joined block: point them at the host copy.
+                count = channels[0].eigenvalues.size
+                host = result.wavefunctions
+                result.spin = (
+                    replace(channels[0], wavefunctions=host[:, :count]),
+                    replace(channels[1], wavefunctions=host[:, count:]),
+                )
             timing_stats = getattr(system.backend, "timing_stats", None)
             if timing_stats is not None:
                 timing_stats.final_wavefunction_download_seconds += (

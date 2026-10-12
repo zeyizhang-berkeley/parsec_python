@@ -175,6 +175,13 @@ def _reference_cache_key(
                 specification.electrons_per_orbital,
                 specification.core_cutoff_radius,
             )).encode("utf-8"))
+        if getattr(problem.scf, "spin_polarized", False):
+            # The starting polarization of the species shapes the starting
+            # spin densities of the prepared system.  Nothing is hashed
+            # without spin polarization, whose key stays what it was.
+            digest.update(
+                np.float64(specification.initial_spin_polarization).tobytes()
+            )
         with path.open("rb") as stream:
             while chunk := stream.read(1024 * 1024):
                 digest.update(chunk)
@@ -1518,6 +1525,19 @@ def prepare_single_point(
     """
 
     is_periodic = getattr(problem, "periodic_cell", None) is not None
+    # Two spin channels are solved on the full grid: the representation
+    # sectors, and with them the wedge fields of the SCF loop and the MPI
+    # ranks that divide the sectors, keep one subspace per representation.
+    spin_polarized = bool(
+        getattr(getattr(problem, "scf", None), "spin_polarized", False)
+    )
+    if spin_polarized and mpi_context is not None:
+        raise NotImplementedError(
+            "a spin-polarized calculation (Spin_Polarization: true) cannot run "
+            "as an MPI SCF: the ranks divide the symmetry sectors, which are "
+            "not implemented for two spin channels. Run it in one process "
+            "(--serial-control)"
+        )
     # A periodic cell has no Hartree boundary values.  The switches are read
     # for it too, so that a value they do not know is refused in every run,
     # and leave its input as it is.
@@ -1672,6 +1692,11 @@ def prepare_single_point(
     elif selection.selected != "cupy":
         orbital_symmetry = (
             "full grid (representation decomposition is currently a CuPy path)"
+        )
+    elif spin_polarized:
+        orbital_symmetry = (
+            "full grid (spin-polarized: the representation sectors are not "
+            "implemented for two spin channels)"
         )
     else:
         from .Symmetry import load_or_build_reflection_decomposition
@@ -2503,7 +2528,15 @@ def prepare_single_point(
         (
             "xc_implementation",
             (
-                "cached C++/OpenMP float64 CA/PZ-LDA"
+                # The SCF loop of two spin channels evaluates the readable
+                # spin functionals on the full grid.
+                (
+                    "vectorized NumPy discrete-variational spin-polarized PBE"
+                    if xc_functional == "pbe"
+                    else "vectorized NumPy CA/PZ local spin density"
+                )
+                if spin_polarized
+                else "cached C++/OpenMP float64 CA/PZ-LDA"
                 if xc_functional == "ca"
                 and native_xc_evaluator is not None
                 else (
@@ -3280,6 +3313,25 @@ def warm_start_for_moved_atoms(previous_system, previous_result, system):
     from parsec_python.SCF import SCFWarmStart, state_for_new_potential
 
     solver = system.eigenproblem_solver
+    channels = getattr(previous_result, "spin", None)
+    if channels is not None:
+        # One potential and one saved subspace per spin channel.
+        for_channel = getattr(solver, "for_spin_channel", None)
+        return SCFWarmStart(
+            input_potential=tuple(
+                np.asarray(channel.next_effective_potential)
+                - np.asarray(previous_system.ionic_potential)
+                + np.asarray(system.ionic_potential)
+                for channel in channels
+            ),
+            hartree_potential=np.asarray(previous_result.hartree_potential),
+            eigensolver_state=tuple(
+                for_channel(index).start_new_scf_loop()
+                if callable(for_channel)
+                else state_for_new_potential(channel.eigensolver_state)
+                for index, channel in enumerate(channels)
+            ),
+        )
     restart = getattr(solver, "start_new_scf_loop", None)
     state = (
         restart()

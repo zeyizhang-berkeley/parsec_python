@@ -618,6 +618,10 @@ def execute(args, cp, comm, MPI, initialization_seconds, initial_affinity=None):
         # Refused rather than ignored: the orbitals of this runner stay divided among ranks and devices.
         raise ValueError('Energy_Refinement is not available in the full-SCF runner, whose orbitals stay divided '
                          'among ranks: run the refinement with parsec_python/main.py')
+    if translation.problem.scf.spin_polarized and not args.serial_control:
+        # The ranks of this runner divide the symmetry sectors, which hold one subspace per representation.
+        raise ValueError('a spin-polarized calculation solves its two channels on the full grid and so cannot be '
+                         'divided among ranks: run it with parsec_python/main.py or with --serial-control')
     # Relax_Restart, or --restart-from, replaces the coordinates of the input on every rank alike.
     translation, relax_restart, restart_notes = restart_structure(
         translation, translation.source.parent,
