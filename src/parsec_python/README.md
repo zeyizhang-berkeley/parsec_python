@@ -78,7 +78,7 @@ python src\parsec_python\reference_main.py calculation\parsec.in --no-archive
 | `Pseudopotential/` | Read Martins-new `POTRE.DAT` and old-format `POTR.DAT`, integrate radial data, and reproduce PARSEC splines. |
 | `V_ion/` | Assemble local ionic fields, KB nonlocal factors, initial atomic density, and ion-ion energy. |
 | `Hartree/` | Construct open-boundary data and solve the finite-difference Poisson equation. |
-| `V_xc/` | Evaluate CA/PZ LDA or spin-unpolarized PBE and their energy terms. |
+| `V_xc/` | Evaluate CA/PZ LDA or PBE, without or with spin polarization, and their energy terms. |
 | `Hamiltonian/` | Apply the matrix-free Kohn--Sham operator. |
 | `Eigensolvers/` | Readable CHEBFF, CHEBDAV, subspace, filtering, orthogonalization, and Ritz primitives. |
 | `Occupations/` | Determine Fermi occupations and rebuild the density. |
@@ -144,7 +144,9 @@ Currently supported:
   Fermi distribution;
 - separable Kleinman--Bylander nonlocal projectors;
 - optional nonlinear core correction;
-- CA/PZ LDA and spin-unpolarized PBE;
+- CA/PZ LDA and PBE;
+- collinear spin polarization of isolated systems (`Spin_Polarization: true`)
+  with both functionals, see [Spin polarization](#spin-polarization);
 - one post-SCF evaluation of the B3LYP energy on the converged orbitals of an
   isolated system (`Energy_Refinement: b3lyp`), see
   [Energy refinement by a hybrid functional](#energy-refinement-by-a-hybrid-functional);
@@ -162,7 +164,8 @@ Currently supported:
 Not currently supported as production physics:
 
 - periodic boundary conditions;
-- spin polarization or spin--orbit coupling;
+- spin polarization of periodic cells, spin--orbit coupling and
+  non-collinear magnetism;
 - forces, relaxation and molecular dynamics of periodic cells;
 - self-consistent hybrid functionals, meta-GGA functionals and DFT+U;
 - PARSEC restart files other than `relax_restart.dat` and `mdinit.dat`;
@@ -484,13 +487,64 @@ SCF.
 
 Limits, each stated in the output where it applies: isolated systems only
 (a periodic input and molecular dynamics refuse the keyword, as does the
-multi-node runner); spin-unpolarized, so with fractional occupations the
-exchange is that of the spin-restricted ensemble density matrix; with a
+multi-node runner); with fractional occupations the exchange is that of
+the ensemble density matrix, of each spin channel in a spin-polarized
+calculation and spin-restricted otherwise; with a
 nonlinear core correction the density functionals see valence plus core
 density and the exact exchange the valence orbitals, a combination that no
 reference has checked. The refined energy is not variational and follows
 the error of the density to first order. Example, validation against ARES
 and timings: [`examples/0_CH4_CF4/python_pbe_b3lyp`](../../examples/0_CH4_CF4/python_pbe_b3lyp/README.md).
+
+## Spin polarization
+
+`Spin_Polarization: true` solves an isolated system with two collinear spin
+channels, as PARSEC does: one potential and one eigenproblem per channel,
+one Fermi level, and the exchange-correlation functional of the two spin
+densities. `Correlation_Type` must be given, `ca` (local spin density,
+Perdew-Zunger) or `pbe`; without the line PARSEC uses the Perdew-Wang LSDA,
+which is not implemented.
+
+```text
+Spin_Polarization: true
+Correlation_Type: pbe
+States_Num: 12                   # states of each spin channel
+
+Atom_Type: O
+Local_Component: p
+Initial_Spin_Polarization: 0.3   # of this species; default 0.1
+begin Atom_Coord
+  0.0  0.0   1.1414
+  0.0  0.0  -1.1414
+end Atom_Coord
+```
+
+`Initial_Spin_Polarization` scales the atomic starting density of a species
+by one plus it for the up channel and one minus it for the down channel. The
+SCF loop then finds the moment: `parsec.out` reports the electrons of each
+channel, the net magnetic moment, the Fermi level and the levels of each
+channel at every step, in PARSEC's layout. With `Fermi_Temp` negative,
+`occup.in` holds one section per channel, the up channel first, and an
+occupation of one is one electron. Forces, relaxation, molecular dynamics and
+`Energy_Refinement: b3lyp` work as without spin.
+
+Every execution path runs it: `reference_main.py`, and `main.py` with the
+SciPy, native and CuPy backends. The two channels are solved on the full
+grid: a GPU run does not use the symmetry representations, and the
+multi-node runner refuses a spin-polarized input unless it runs in one
+process (`--serial-control`). Periodic cells are refused.
+
+With `ca`, energies, levels and forces agree with Fortran PARSEC to the
+digits it prints. With `pbe` they differ as they do without spin, because
+this package uses the potential of the discrete energy. A state with an
+empty spin channel (a hydrogen atom, any one-electron system) is an ordinary
+calculation here; in Fortran PARSEC it does not converge with `ca` and loses
+its exchange energy with `pbe`. Two things are not unique in either program:
+the sign of the moment, and the orientation of a partly filled degenerate
+shell such as the oxygen atom at the default temperature, for which
+occupations fixed in `occup.in` give a reproducible state. Details:
+[`PYTHON_IMPLEMENTATION.md`](PYTHON_IMPLEMENTATION.md#spin-polarized-calculations)
+and [`PARSEC_ALGORITHM.md`](PARSEC_ALGORITHM.md#spin-polarized-calculations).
 
 ## Pseudopotentials
 

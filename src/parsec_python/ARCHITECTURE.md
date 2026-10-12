@@ -60,7 +60,7 @@ import the SCF driver. Physics components must remain independently callable.
 | `Pseudopotential` | POTRE and old-format POTR parsing, radial data, interpolation-ready models | placement on a molecular grid |
 | `V_ion` | local potential, KB projectors, atomic density, ion-ion energy | SCF state |
 | `Hartree` | isolated boundary values and Poisson solution | density mixing |
-| `V_xc` | CA/PZ-LDA and spin-unpolarized PBE potentials and energy densities | total-energy assembly |
+| `V_xc` | CA/PZ-LDA and PBE potentials and energy densities, unpolarized and spin-polarized | total-energy assembly |
 | `Hamiltonian` | composition and block matrix-vector products | choosing an eigensolver |
 | `Eigensolvers` | PARSEC-selected eigensolver control flow and reusable subspaces | occupations or SCF mixing |
 | `Occupations` | Fermi level, occupations (searched, or fixed by `occup.in`), and density from orbitals | eigensolution |

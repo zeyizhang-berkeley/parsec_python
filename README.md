@@ -624,7 +624,7 @@ src/
 │   ├── Pseudopotential/           PARSEC POTRE reader and radial splines
 │   ├── V_ion/                     local potential and nonlocal projectors
 │   ├── Hartree/                   Poisson solve and open-boundary data
-│   ├── V_xc/                      CA/PZ LDA and spin-unpolarized PBE
+│   ├── V_xc/                      CA/PZ LDA and PBE, also spin-polarized
 │   ├── Hamiltonian/               matrix-free Kohn--Sham operator
 │   ├── Eigensolvers/              PARSEC-style ChebFF/CHEBDAV/subspace code
 │   ├── Occupations/               Fermi level, occupations, and density

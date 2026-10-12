@@ -11,10 +11,14 @@ Units are PARSEC's throughout: bohr, Rydberg, Ry/bohr.
 ## Scope
 
 - Isolated systems (`Boundary_Conditions: cluster`), sphere or box domain,
-  CA/PZ LDA or spin-unpolarized PBE, with or without nonlinear core
-  correction, projectors through `l = 3`.
+  CA/PZ LDA or PBE, without or with spin polarization, with or without
+  nonlinear core correction, projectors through `l = 3`.
 - Periodic cells are refused for relaxation, molecular dynamics and forces.
-- Not translated from `forcloc.f90` and `forcnloc.f90`: spin, point charges,
+- A spin-polarized calculation uses the same routines: `forcloc.f90` reads
+  the total density and the averages over the two channels of the potential
+  difference and of the exchange-correlation potential, and `forcnloc.f90`
+  sums over the states of both channels with the weight `4/nspin`.
+- Not translated from `forcloc.f90` and `forcnloc.f90`: point charges,
   LDA+U, van der Waals corrections, spin-orbit and non-collinear terms.
 - Every execution path computes the same numbers: the readable NumPy path
   (`reference_main.py`), the accelerated single-node path (`main.py`, CPU or

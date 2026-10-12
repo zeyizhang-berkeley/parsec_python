@@ -264,6 +264,39 @@ CuPy. If only one accelerator is available, `auto` uses the compatible
 combination and records each choice. Explicit `scipy`, `native`, and `cupy`
 remain clean end-to-end comparison modes rather than hybrid aliases.
 
+### Spin-polarized calculations
+
+`Spin_Polarization: true` runs on every backend. The SCF loop is the one of
+`SCF/spin_polarized.py`; a backend supplies the Hamiltonian application, the
+Hartree solver and, on a GPU, the eigensolver and the density of each
+channel.
+
+- The two channels are solved on the full grid. With symmetry `auto` or `on`
+  a GPU run reports `orbital_symmetry = full grid (spin-polarized: ...)`
+  and keeps its scalar fields on the full grid; the Hartree solver still
+  uses the symmetry wedge where it does without spin. The representation
+  eigensolver (`CuPySymmetrySCFEigensolver`) keeps one subspace per
+  representation and is not used.
+- On a GPU the channels share one Hamiltonian allocation, whose local
+  potential is bound before each solve, and each keeps its own buffered
+  subspace on the device (`CuPySCFEigensolver.for_spin_channel`). The device
+  holds two subspaces, and at the end of a loop the joined orbitals of both
+  channels once more.
+- The exchange-correlation potentials are evaluated by the NumPy functionals
+  of the readable package on the host (`xc_implementation` says so); the C++
+  CA evaluator is unpolarized.
+- The MPI SCF (`mpi_context`, the multi-node runner without
+  `--serial-control`) refuses a spin-polarized input: its ranks divide the
+  symmetry sectors.
+- An eigensolver hook that keeps a subspace of its own and has no
+  `for_spin_channel` is refused by the SCF loop, as are the symmetry-reduced
+  scalar-field hooks.
+
+Forces, relaxation, molecular dynamics and the B3LYP refinement take a
+spin-polarized result on every backend.
+`acceleration/tests/test_spin_polarized.py` compares complete calculations
+on the three backends with Fortran PARSEC.
+
 ### SciPy
 
 The SciPy backend retains the same sparse finite-difference matrix and
