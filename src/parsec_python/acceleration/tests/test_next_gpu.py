@@ -246,8 +246,11 @@ class PartitionTests(unittest.TestCase):
                 slab=np.empty((61,min(17,start+width)-start),order='F');slab[...]=right(start,start+width)
                 product[start:,start:start+width]=left[:,start:].T@slab
             return product
+        # Each slab is one product here: the slabs are 4 and 6 columns wide, and an even width below 64 would
+        # be multiplied in two pieces, which test_tall_product covers.
         with patch.object(ritz,'require_cupy',return_value=(shim,None)), \
-                patch.dict(os.environ,PARSEC_CUPY_RITZ_GRAM_SLABS='3',PARSEC_CUPY_STREAMING_RITZ_BYTES=str(8*61*6)):
+                patch.dict(os.environ,PARSEC_CUPY_RITZ_GRAM_SLABS='3',PARSEC_CUPY_STREAMING_RITZ_BYTES=str(8*61*6),
+                           PARSEC_CUPY_TALL_PRODUCT_SPLIT='0'):
             for value,width in (('4',4),('1',6),('64',6),(None,6)):
                 os.environ.pop(name,None)
                 if value is not None:os.environ[name]=value
