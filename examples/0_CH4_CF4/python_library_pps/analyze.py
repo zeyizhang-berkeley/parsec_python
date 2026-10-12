@@ -4,8 +4,7 @@
     BE    = E_AE(FS_1s) - E_AE(IS)        reference-corrected all-electron totals
     shift = BE(CF4) - BE(CH4)
 
-Compared with the same calculation done with the pseudopotentials of the paper
-(``../python_pbe``), with ARES, with all-electron calculations and with experiment.
+Compared with all-electron calculations and with experiment.
 Energies of the solver logs are converted from Rydberg with the CODATA factor.
 """
 
@@ -18,7 +17,6 @@ HERE = Path(__file__).resolve().parent
 RY_EV = 13.605693122994
 TOTAL = re.compile(r"Reference-corrected all-electron total\s*:\s*([-+0-9.Ee]+)\s*\[Ry\]")
 EXPERIMENT = {"CH4": 290.80, "CF4": 301.85}
-ARES_PBE = {"CH4": 297.1476, "CF4": 307.7151}      # ../0_ARES_CH4_CF4, PP-PBE
 
 # All-electron references of this study: PySCF 2.14, spin-free X2C, aug-cc-pwCVQZ on C
 # and aug-cc-pVQZ on H and F, grid level 5, geometries of the IS inputs (see README.md).
@@ -66,8 +64,6 @@ def main() -> None:
     print("PBE")
     print(row("  library potentials", binding(HERE / "pbe")))
     print(row("  all-electron, unpolarized hole", AE["pbe"]["unpolarized"]))
-    print(row("  paper potentials (../python_pbe)", binding(HERE.parent / "python_pbe")))
-    print(row("  ARES, paper potentials", ARES_PBE))
     print(row("  all-electron, polarized hole", AE["pbe"]["polarized"]))
     print("LDA (CA)")
     print(row("  library potentials", binding(HERE / "ca")))

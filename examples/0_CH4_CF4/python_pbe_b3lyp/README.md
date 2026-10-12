@@ -24,7 +24,6 @@ python_pbe_b3lyp/
   pseudopotentials/            the four POTRE files of ../python_pbe
   analyze.py                   tables against ../0_ARES_CH4_CF4/test_CH4_CF4/b3lyp
                                (its numbers are also kept inside the script)
-  ares_potential_check.py      diagnostic, see "Why the two codes differ"
 ```
 
 The four inputs are those of `../python_pbe` (same geometry, grid,
@@ -36,7 +35,7 @@ The refinement needs no pseudopotential of its own: the PBE potentials and
 their atomic all-electron-minus-pseudo reference energies are reused, as in
 ARES.
 
-Each case folder holds the logs of up to three runs. A run writes the first
+Each case folder holds the logs of up to two runs. A run writes the first
 name; the copy kept with the example has the second, as `parsec_python.out`
 in `../python_pbe`, and `analyze.py` reads it where the first is absent:
 
@@ -44,7 +43,6 @@ in `../python_pbe`, and `analyze.py` reads it where the first is absent:
 |---|---|---|
 | `parsec_gpu_hartree.out` | `parsec_gpu_hartree_python.out` | the command below with `PARSEC_HARTREE_LINEAR_BACKEND=cupy` (Poisson solves on the GPU); all four cases |
 | `parsec.out` | `parsec_python.out` | the command below with default settings (Poisson solves on the CPU); CH4 IS, CH4 FS_1s and CF4 IS |
-| `parsec_ares_potential.out` | `parsec_ares_potential_python.out` | the diagnostic of `ares_potential_check.py`; not a PBE result |
 
 The default-settings run of CF4 FS_1s was stopped during its refinement,
 when other jobs on the machine had slowed its CPU Poisson solves to more
@@ -181,95 +179,6 @@ The refined ones agree within 24 meV and the CF4-CH4 shift within 21 meV;
 against experiment the shift is +0.12 eV here and +0.14 eV in ARES, where
 PBE gives -0.50 eV and -0.48 eV.
 
-The refinement itself is reproduced far more closely than that. The 12 to
-19 meV by which the B3LYP correction of a binding energy differs from ARES
-come from the orbitals it is evaluated on, not from the evaluation, as the
-next section shows.
-
-## Why the two codes differ: the SCF potential of ARES
-
-The totals of the two codes agree to 0.06 eV (CH4) and 0.26 eV (CF4), but
-their parts do not: the PBE exchange-correlation energy differs by 0.4 to
-0.5 eV (CH4) and 2.7 to 2.8 eV (CF4), the Hartree energy by 0.8 to 1.2 eV
-(CH4) and 12.5 to 14.3 eV (CF4), and the occupied eigenvalues of ARES lie
-0.4 to 0.7 eV above the Python ones. A PBE total
-energy is stationary in the density, so it hides a difference of the
-density that the parts show; the B3LYP energy of PBE orbitals is not
-stationary and shows it too.
-
-The difference is in the exchange-correlation potential of the SCF. For
-any Kohn-Sham code `band - total = E_H + integral(v_xc n) - E_xc - E_ii`,
-which gives the integral of ARES's potential from its log:
-
-| case | ARES `integral(v_xc n) / E_xc` | Python PBE | Python, `v_xc = df/dn` only |
-|---|---:|---:|---:|
-| CH4 IS | 1.2378 | 1.2943 | 1.2378 |
-| CH4 FS_1s | 1.2403 | 1.2957 | 1.2403 |
-| CF4 IS | 1.2436 | 1.2986 | 1.2436 |
-| CF4 FS_1s | 1.2433 | 1.2986 | 1.2433 |
-
-With `f(n, |grad n|^2)` the PBE energy per volume, the PBE potential is
-`df/dn - div(2 df/d|grad n|^2 grad n)`. The numbers of ARES are those of a
-potential without the second, gradient term. `ares_potential_check.py`
-runs the Python solver with exactly that potential (and the unchanged PBE
-energy), inside its own process and without touching the solver:
-
-```powershell
-.venv312\Scripts\python.exe examples\0_CH4_CF4\python_pbe_b3lyp\ares_potential_check.py `
-  examples\0_CH4_CF4\python_pbe_b3lyp\CH4\IS\parsec.in `
-  --pp-dir examples\0_CH4_CF4\python_pbe_b3lyp\pseudopotentials `
-  --log parsec_ares_potential.out --no-archive
-.venv312\Scripts\python.exe examples\0_CH4_CF4\python_pbe_b3lyp\analyze.py `
-  --log parsec_ares_potential.out --parts
-```
-
-Eigenvalues in eV (lowest valence level / highest occupied level):
-
-| case | ARES | Python, `v_xc = df/dn` | Python PBE |
-|---|---:|---:|---:|
-| CH4 IS | -16.515 / -8.916 | -16.515 / -8.918 | -16.970 / -9.414 |
-| CH4 FS_1s | -28.147 / -19.837 | -28.147 / -19.841 | -28.718 / -20.442 |
-| CF4 IS | -34.197 / -9.779 | -34.194 / -9.784 | -34.622 / -10.417 |
-| CF4 FS_1s | -44.199 / -18.235 | -44.199 / -18.243 | -44.656 / -18.957 |
-
-All-electron PBE calculations at these geometries (PySCF 2.14) give
--17.007 / -9.422 eV for CH4 (aug-cc-pVQZ) and -34.642 / -10.441 eV for CF4
-(aug-cc-pVTZ): the Python PBE levels are those of PBE within what a
-pseudopotential changes, the ARES levels are 0.4 to 0.7 eV too high.
-
-With that potential the Python solver reproduces the ARES logs part by
-part (Python minus ARES, eV):
-
-| case | HF-X | Slater-X | B88-X | VWN1RPA-C | LYP-C | PBE XC | B3LYP XC | PBE total | refined total | B3LYP XC - PBE XC |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| CH4 IS | -0.0030 | -0.0024 | -0.0027 | -0.0002 | -0.0001 | -0.0028 | -0.0028 | -0.0224 | -0.0225 | -0.00004 |
-| CH4 FS_1s | -0.0017 | -0.0012 | -0.0014 | -0.0001 | -0.0000 | -0.0014 | -0.0014 | -0.0265 | -0.0265 | -0.00003 |
-| CF4 IS | -0.0103 | -0.0037 | -0.0030 | -0.0006 | -0.0001 | -0.0041 | -0.0047 | -0.1323 | -0.1330 | -0.00064 |
-| CF4 FS_1s | -0.0038 | 0.0016 | 0.0028 | -0.0002 | 0.0000 | 0.0017 | 0.0013 | -0.1401 | -0.1405 | -0.00035 |
-
-and its binding energies (eV):
-
-| quantity | Python, `v_xc = df/dn` | ARES | Python - ARES |
-|---|---:|---:|---:|
-| PP-PBE BE(CH4) | 297.1436 | 297.1476 | -0.0040 |
-| PP-PBE BE(CF4) | 307.7074 | 307.7151 | -0.0077 |
-| PP-PBE CF4-CH4 shift | 10.5638 | 10.5675 | -0.0037 |
-| PP-PBE(B3LYP) BE(CH4) | 297.2289 | 297.2329 | -0.0040 |
-| PP-PBE(B3LYP) BE(CF4) | 308.4179 | 308.4253 | -0.0074 |
-| PP-PBE(B3LYP) CF4-CH4 shift | 11.1890 | 11.1924 | -0.0034 |
-| B3LYP correction of BE(CH4) | 0.0853 | 0.0853 | 0.0000 |
-| B3LYP correction of BE(CF4) | 0.7105 | 0.7102 | 0.0003 |
-
-So the definition of the refinement and its implementation here are those
-of ARES: on the same orbitals every part of the B3LYP energy (6 to 527 eV)
-agrees within 4 meV, the exact exchange of CF4 IS within 10 meV, and the
-B3LYP correction of a binding energy within 0.3 meV. What remains between
-the two codes in the "Results" above is that ARES evaluates B3LYP on
-orbitals of an incomplete PBE potential, which moves the refined binding
-energies by 12 to 19 meV and leaves the PBE ones within a few meV. This is
-inferred from the logs and from this experiment, not read in the ARES
-source, which is not available here.
-
 ## Time and memory
 
 First calculations (no symmetry cache, no restart) in double precision on
@@ -319,9 +228,8 @@ What the refinement adds to the host memory is the orbitals: for CF4 the 65
 states come to the host once (1.5 GiB) and the 16 occupied ones are copied
 (0.4 GiB). In the runs of the final code, which print the high-water mark
 of the process before that download and after the refinement, it rose by
-0.10 GiB for CH4 IS (2.03 to 2.13), not at all for CF4 IS (11.48, set
-during the SCF) and by 1.04 GiB in the diagnostic run of CF4 FS_1s (12.38
-to 13.42). GPU memory peaked at 2.2 to 2.3 GiB (CH4) and at 7.7 of the
+0.10 GiB for CH4 IS (2.03 to 2.13) and not at all for CF4 IS (11.48, set
+during the SCF). GPU memory peaked at 2.2 to 2.3 GiB (CH4) and at 7.7 of the
 8.0 GiB of the card (CF4, mostly the memory pool of the eigensolver); the
 GPU pair solver holds 0.5 GiB of it for CF4.
 

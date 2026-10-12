@@ -17,8 +17,6 @@ initial state. In eV:
 | **PBE** | | | |
 | library potentials | 297.098 | 307.340 | 10.242 |
 | all-electron, spin-unpolarized hole | 297.019 | 307.290 | 10.272 |
-| paper's potentials (`../python_pbe`) | 297.152 | 307.706 | 10.554 |
-| ARES with the paper's potentials | 297.148 | 307.715 | 10.567 |
 | all-electron, spin-polarized hole | 289.999 | 300.207 | 10.208 |
 | **LDA (CA)** | | | |
 | library potentials | 293.902 | 304.449 | 10.547 |
@@ -34,34 +32,6 @@ initial state. In eV:
 - Spin polarization of the core hole lowers the binding energies by 7.02 eV
   (CH4) and 7.08 eV (CF4) with PBE: the offset the papers describe, constant to
   0.06 eV between these two molecules.
-- With the paper's potentials the shift is 0.28 eV larger than the all-electron
-  PBE shift, and CF4 is 0.42 eV above the all-electron binding energy.
-
-## Where the paper's potentials differ
-
-The paper's potentials differ from the library ones in two ways: slightly
-smaller cutoff radii, and `lmax` 1 with the p channel local instead of `lmax` 2
-with the d channel local (`../paper_pp_inputs`). The four combinations, PBE,
-CH4 / CF4 / shift in eV:
-
-| cutoff radii | `lmax` 2, d local | `lmax` 1, p local |
-|---|---|---|
-| library (C 1.50; F 1.35; H 1.30) | 297.098 / 307.340 / 10.242 | 297.205 / 307.754 / 10.549 |
-| paper (C s 1.47, p 1.50; F 1.28; H 1.13) | 297.045 / 307.332 / 10.287 | 297.152 / 307.706 / 10.554 |
-| all-electron | 297.019 / 307.290 / 10.272 | |
-
-The form decides: with `lmax` 1 and p local the binding energy is 0.11 eV
-higher for CH4 and 0.37–0.41 eV higher for CF4, for either set of radii. The
-radii change it by 0.01 to 0.05 eV. With p local, every angular momentum above
-s feels the p potential of carbon and fluorine; with d local, p is treated by
-its own projector.
-
-What this does and does not show: it is one core level in two molecules, and
-the all-electron reference is the one computed here, not the Q-Chem values of
-the paper. For these two molecules, the PP-PBE shift of 10.57 eV owes about
-0.3 eV of its closeness to experiment (11.05 eV) to the p-local form and not to
-the functional. Whether that holds for the other molecules of the paper would
-need the same comparison for them.
 
 ## Reproducing
 
@@ -82,16 +52,11 @@ and finally `python examples\0_CH4_CF4\python_library_pps\analyze.py`, which
 prints the first table. The kept logs are `parsec_python.out`. `setup.py` copies
 the potentials from the two libraries and takes `Local_Component` and
 `Atomic_Energy_Correction` of each species from the `parsec_atom_type.in` file
-beside the potential; the libraries have to be built first
-(`python -m pp_generation library --elements H C F`).
+beside the potential.
 
 On the laptop these were first runs without cache, double precision, with the
 Poisson solves on the GPU (`PARSEC_HARTREE_LINEAR_BACKEND=cupy`): 20–33 s per
 CH4 case, 336–402 s per CF4 case (3.1 million grid points).
-
-The two mixed combinations of the second table were generated with
-`python -m pp_generation` (`--radius`, `--lmax`, `--local-channel`) and run the
-same way; their inputs are not kept here.
 
 ## All-electron reference
 
