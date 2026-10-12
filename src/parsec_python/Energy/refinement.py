@@ -37,11 +37,13 @@ from ..V_xc.b3lyp import (
     B3LYPSemilocalEnergies,
     b3lyp_exchange_correlation_energy,
     b3lyp_semilocal_energies,
+    b3lyp_spin_semilocal_energies,
 )
 from ..V_xc.exact_exchange import (
     ExactExchangeResult,
     exact_exchange_energy,
     reference_pair_poisson,
+    spin_exact_exchange_energy,
 )
 
 
@@ -153,6 +155,10 @@ class EnergyRefinement:
     # refinement, in bytes; ``None`` where the system does not tell.
     memory_before: int | None = None
     memory_after: int | None = None
+    # True for the orbitals and densities of two spin channels: the exact
+    # exchange is then that of each channel and the density functionals are
+    # the spin-polarized ones.
+    spin_polarized: bool = False
 
     @property
     def all_electron_total(self) -> float:
@@ -253,6 +259,14 @@ def refine_energy(
     The nonlinear core correction, where the pseudopotentials have one,
     enters as in the SCF: the four density functionals see valence plus core
     density, the exact exchange the valence orbitals alone.
+
+    A spin-polarized result (``result.spin``) is refined with the orbitals
+    and densities of its two channels: the exact exchange of each channel
+    (:func:`parsec_python.V_xc.exact_exchange.spin_exact_exchange_energy`)
+    and the spin-polarized density functionals
+    (:func:`parsec_python.V_xc.b3lyp.b3lyp_spin_semilocal_energies`), each
+    channel with half of the core density.  Two identical channels give the
+    unpolarized refinement.
     """
 
     functional = normalize_refinement(functional)
@@ -272,32 +286,59 @@ def refine_energy(
     density = np.asarray(result.density, dtype=np.float64)
     core_density = np.asarray(result.core_density, dtype=np.float64)
     core_correction = bool(np.any(core_density != 0.0))
+    # The two channels of a spin-polarized result, each with its orbitals,
+    # one electron per state, and its density.
+    channels = getattr(result, "spin", None)
 
     semilocal_started = perf_counter()
-    semilocal: B3LYPSemilocalEnergies = b3lyp_semilocal_energies(
-        density, grid, core_density if core_correction else None
+    semilocal: B3LYPSemilocalEnergies = (
+        b3lyp_semilocal_energies(
+            density, grid, core_density if core_correction else None
+        )
+        if channels is None
+        else b3lyp_spin_semilocal_energies(
+            np.asarray(channels[0].density, dtype=np.float64),
+            np.asarray(channels[1].density, dtype=np.float64),
+            grid,
+            core_density if core_correction else None,
+        )
     )
     semilocal_seconds = perf_counter() - semilocal_started
 
-    wavefunctions = result.wavefunctions
-    if (
-        isinstance(wavefunctions, np.ndarray)
-        and not np.iscomplexobj(wavefunctions)
-        and wavefunctions.ndim == 2
-        and wavefunctions.shape[0] == density.shape[0]
-        and np.shape(result.occupations) == (wavefunctions.shape[1],)
-    ):
-        # Other shapes and types are refused by the exact exchange itself.
-        deviation = orbital_density_deviation(
-            wavefunctions, result.occupations, density, grid.volume_element
-        )
-        if not deviation <= ORBITAL_DENSITY_TOLERANCE:
-            raise ValueError(
-                "the orbitals of the result do not give its density (largest "
-                f"deviation {deviation:.3e} of the largest density): the "
-                "refinement needs the orbitals and occupations of the last "
-                "SCF step"
+    # (orbitals, occupations in the convention of the exact exchange, the
+    # density twice those occupations give).  A state of a spin channel
+    # holds one electron, half of what the unpolarized convention counts.
+    orbital_sets = (
+        [(result.wavefunctions, result.occupations, density)]
+        if channels is None
+        else [
+            (
+                channel.wavefunctions,
+                0.5 * np.asarray(channel.occupations, dtype=np.float64),
+                np.asarray(channel.density, dtype=np.float64),
             )
+            for channel in channels
+        ]
+    )
+    for wavefunctions, occupations, orbital_density in orbital_sets:
+        if (
+            isinstance(wavefunctions, np.ndarray)
+            and not np.iscomplexobj(wavefunctions)
+            and wavefunctions.ndim == 2
+            and wavefunctions.shape[0] == density.shape[0]
+            and np.shape(occupations) == (wavefunctions.shape[1],)
+        ):
+            # Other shapes and types are refused by the exact exchange itself.
+            deviation = orbital_density_deviation(
+                wavefunctions, occupations, orbital_density, grid.volume_element
+            )
+            if not deviation <= ORBITAL_DENSITY_TOLERANCE:
+                raise ValueError(
+                    "the orbitals of the result do not give its density (largest "
+                    f"deviation {deviation:.3e} of the largest density): the "
+                    "refinement needs the orbitals and occupations of the last "
+                    "SCF step"
+                )
 
     if pair_poisson is None:
         pair_poisson = reference_pair_poisson(
@@ -305,13 +346,22 @@ def refine_energy(
         )
         if pair_solver is None:
             pair_solver = "SciPy conjugate gradients on the full grid"
-    exchange = exact_exchange_energy(
-        result.wavefunctions,
-        result.occupations,
-        grid.volume_element,
-        pair_poisson,
-        progress=progress,
-    )
+    if channels is None:
+        exchange = exact_exchange_energy(
+            result.wavefunctions,
+            result.occupations,
+            grid.volume_element,
+            pair_poisson,
+            progress=progress,
+        )
+    else:
+        exchange = spin_exact_exchange_energy(
+            [channel.wavefunctions for channel in channels],
+            [channel.occupations for channel in channels],
+            grid.volume_element,
+            pair_poisson,
+            progress=progress,
+        )
     exchange_correlation = b3lyp_exchange_correlation_energy(
         exchange.energy, semilocal
     )
@@ -341,6 +391,7 @@ def refine_energy(
         seconds=perf_counter() - started,
         memory_before=memory_before,
         memory_after=memory_probe(),
+        spin_polarized=channels is not None,
     )
 
 
@@ -420,7 +471,8 @@ def refinement_report_lines(
         [
             "",
             (
-                f" Exact exchange: {len(exchange.orbitals)} occupied orbitals, "
+                f" Exact exchange: {len(exchange.orbitals)} occupied orbitals"
+                f"{' of the two spin channels' if refinement.spin_polarized else ''}, "
                 f"{exchange.pair_solves} pair-density Poisson solves"
                 + (
                     f", {exchange.poisson_iterations} CG iterations"
@@ -431,7 +483,20 @@ def refinement_report_lines(
             f" Pair-density Poisson solver: {refinement.pair_solver}",
         ]
     )
-    if exchange.fractional:
+    if refinement.spin_polarized:
+        lines.append(
+            " Spin-polarized: the orbitals of each spin channel exchange among "
+            "themselves, -1/2 sum_ij f_i f_j (ij|ij) per channel; the density "
+            "functionals are those of the two spin densities."
+        )
+    if exchange.fractional and refinement.spin_polarized:
+        lines.append(
+            " NOTE: fractional occupations (largest distance from 0 or 1: "
+            f"{exchange.largest_fractional_deviation:.3e}). The exact exchange "
+            "is that of the ensemble density matrix of each spin channel; it "
+            "is not the energy of one determinant."
+        )
+    elif exchange.fractional:
         lines.append(
             " NOTE: fractional occupations (largest distance from 0 or 1: "
             f"{exchange.largest_fractional_deviation:.3e}). The exact exchange "

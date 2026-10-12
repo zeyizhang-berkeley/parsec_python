@@ -19,10 +19,11 @@ The exact (Hartree-Fock) exchange is the subject of
 density functionals.
 
 All four are written for a spin-unpolarized density ``n = n_up + n_down``
-with ``n_up = n_down``, the only case the solver has.  Their gradient
-variable is ``sigma = |D n|**2`` with the same centered finite-difference
-first derivative ``D`` of the active grid, extended by zero outside the
-domain, that :mod:`parsec_python.V_xc.pbe` uses.
+with ``n_up = n_down``, and again, as the functions named ``*_spin``, for two
+different spin densities.  Their gradient variables are ``sigma = |D n|**2``
+of the total and of each spin density, with the same centered
+finite-difference first derivative ``D`` of the active grid, extended by
+zero outside the domain, that :mod:`parsec_python.V_xc.pbe` uses.
 
 Densities are in electrons/bohr**3.  Pointwise functions return energies per
 volume in Hartree atomic units; :func:`b3lyp_semilocal_energies` integrates
@@ -64,6 +65,15 @@ _VWN_PARAMETERS = {
     "rpa": (0.0310907, -0.409286, 13.0720, 42.7198),
     "vwn5": (0.0310907, -0.10498, 3.72744, 12.9352),
 }
+# The same fits for the ferromagnetic (fully polarized) gas, and the fit of
+# the spin stiffness alpha_c that the Monte Carlo functional interpolates
+# with; f''(0) of the interpolation function.
+_VWN_FERROMAGNETIC = {
+    "rpa": (0.01554535, -0.743294, 20.1231, 101.578),
+    "vwn5": (0.01554535, -0.32500, 7.06042, 18.0578),
+}
+_VWN_SPIN_STIFFNESS = (-1.0 / (6.0 * np.pi * np.pi), -0.0047584, 1.13107, 13.0045)
+_VWN_F_SECOND = 4.0 / (9.0 * (2.0 ** (1.0 / 3.0) - 1.0))
 # The vacuum branch of pbe.py: below it every energy density is zero.
 _DENSITY_THRESHOLD = 1.0e-20
 
@@ -136,7 +146,7 @@ def vwn_correlation_energy_density(
     """
 
     try:
-        a, x0, b, c = _VWN_PARAMETERS[parametrization]
+        parameters = _VWN_PARAMETERS[parametrization]
     except KeyError:
         raise ValueError("VWN parametrization must be 'rpa' or 'vwn5'") from None
     density, _ = _checked(density)
@@ -144,11 +154,19 @@ def vwn_correlation_energy_density(
     positive = density > _DENSITY_THRESHOLD
     n = density[positive]
     x = np.sqrt(np.cbrt(3.0 / (4.0 * np.pi * n)))
+    energy[positive] = n * _vwn_epsilon(x, parameters)
+    return energy
+
+
+def _vwn_epsilon(x: np.ndarray, parameters: tuple[float, float, float, float]) -> np.ndarray:
+    """VWN Eq. 4.4 for one set ``(A, x0, b, c)``, with ``x = sqrt(r_s)``."""
+
+    a, x0, b, c = parameters
     big_x = x * x + b * x + c
     big_x0 = x0 * x0 + b * x0 + c
     q = np.sqrt(4.0 * c - b * b)
     arctangent = np.arctan(q / (2.0 * x + b))
-    epsilon = a * (
+    return a * (
         np.log(x * x / big_x)
         + (2.0 * b / q) * arctangent
         - (b * x0 / big_x0)
@@ -157,7 +175,157 @@ def vwn_correlation_energy_density(
             + (2.0 * (b + 2.0 * x0) / q) * arctangent
         )
     )
+
+
+def _spin_checked(density_up: np.ndarray, density_down: np.ndarray):
+    up, _ = _checked(density_up)
+    down, _ = _checked(density_down)
+    if up.shape != down.shape:
+        raise ValueError("the two spin densities must have the same shape")
+    return np.maximum(up, 0.0), np.maximum(down, 0.0)
+
+
+def slater_exchange_energy_density_spin(
+    density_up: np.ndarray, density_down: np.ndarray
+) -> np.ndarray:
+    """Slater exchange energy per volume of two spin densities.
+
+    Exchange obeys ``E_x[n_up, n_down] = (E_x[2 n_up] + E_x[2 n_down]) / 2``
+    with the unpolarized functional on the right.
+    """
+
+    up, down = _spin_checked(density_up, density_down)
+    return 0.5 * (
+        slater_exchange_energy_density(2.0 * up)
+        + slater_exchange_energy_density(2.0 * down)
+    )
+
+
+def b88_exchange_energy_density_spin(
+    density_up: np.ndarray,
+    density_down: np.ndarray,
+    sigma_up: np.ndarray,
+    sigma_down: np.ndarray,
+) -> np.ndarray:
+    """Becke 1988 exchange energy per volume of two spin densities.
+
+    ``sigma_up`` and ``sigma_down`` are ``|grad n_up|**2`` and
+    ``|grad n_down|**2``.  The spin scaling of the exchange turns each
+    channel into an unpolarized density ``2 n_s`` with gradient
+    ``4 sigma_ss``.
+    """
+
+    up, down = _spin_checked(density_up, density_down)
+    return 0.5 * (
+        b88_exchange_energy_density(2.0 * up, 4.0 * np.asarray(sigma_up))
+        + b88_exchange_energy_density(2.0 * down, 4.0 * np.asarray(sigma_down))
+    )
+
+
+def vwn_correlation_energy_density_spin(
+    density_up: np.ndarray,
+    density_down: np.ndarray,
+    parametrization: str = "rpa",
+) -> np.ndarray:
+    """Vosko-Wilk-Nusair correlation energy per volume of two spin densities.
+
+    With ``zeta = (n_up - n_down)/n`` and
+    ``f(zeta) = [(1+zeta)**(4/3) + (1-zeta)**(4/3) - 2] / (2**(4/3) - 2)``:
+
+    * ``"rpa"``, the local correlation of B3LYP, interpolates the RPA fits
+      of the paramagnetic and the ferromagnetic gas with ``f`` alone,
+      ``eps = eps_P + (eps_F - eps_P) f(zeta)`` (``LDA_C_VWN_RPA`` of libxc,
+      the VWN of Gaussian's B3LYP);
+    * ``"vwn5"`` is their Eq. 4.15 with the fit of the spin stiffness,
+      ``eps = eps_P + alpha_c f (1 - zeta**4)/f''(0)
+      + (eps_F - eps_P) f zeta**4``.
+    """
+
+    if parametrization not in _VWN_PARAMETERS:
+        raise ValueError("VWN parametrization must be 'rpa' or 'vwn5'")
+    up, down = _spin_checked(density_up, density_down)
+    density = up + down
+    energy = np.zeros_like(density)
+    positive = density > _DENSITY_THRESHOLD
+    n = density[positive]
+    zeta = (up[positive] - down[positive]) / n
+    f = (
+        np.maximum(1.0 + zeta, 0.0) ** (4.0 / 3.0)
+        + np.maximum(1.0 - zeta, 0.0) ** (4.0 / 3.0)
+        - 2.0
+    ) / (2.0 ** (4.0 / 3.0) - 2.0)
+    x = np.sqrt(np.cbrt(3.0 / (4.0 * np.pi * n)))
+    paramagnetic = _vwn_epsilon(x, _VWN_PARAMETERS[parametrization])
+    ferromagnetic = _vwn_epsilon(x, _VWN_FERROMAGNETIC[parametrization])
+    if parametrization == "rpa":
+        epsilon = paramagnetic + (ferromagnetic - paramagnetic) * f
+    else:
+        z4 = zeta**4
+        epsilon = (
+            paramagnetic
+            + _vwn_epsilon(x, _VWN_SPIN_STIFFNESS) * f * (1.0 - z4) / _VWN_F_SECOND
+            + (ferromagnetic - paramagnetic) * f * z4
+        )
     energy[positive] = n * epsilon
+    return energy
+
+
+def lyp_correlation_energy_density_spin(
+    density_up: np.ndarray,
+    density_down: np.ndarray,
+    sigma_up: np.ndarray,
+    sigma_down: np.ndarray,
+    sigma_total: np.ndarray,
+) -> np.ndarray:
+    """Lee-Yang-Parr correlation energy per volume of two spin densities.
+
+    Eq. 2 of Miehlich, Savin, Stoll and Preuss with ``a`` and ``b`` the two
+    spin densities, ``n`` their sum and the squared gradients of all three:
+
+    ``e_c = -4 a_LYP a b / (n (1 + d n**(-1/3)))
+            - a_LYP b_LYP omega { a b [ 2**(11/3) C_F (a**(8/3) + b**(8/3))
+                + (47/18 - 7 delta/18) |grad n|**2
+                - (5/2 - delta/18) (|grad a|**2 + |grad b|**2)
+                - (delta - 11)/9 (a |grad a|**2 + b |grad b|**2)/n ]
+              - (2/3) n**2 |grad n|**2
+              + (2/3 n**2 - a**2) |grad b|**2
+              + (2/3 n**2 - b**2) |grad a|**2 }``,
+
+    ``omega = exp(-c n**(-1/3)) n**(-11/3) / (1 + d n**(-1/3))``.  A channel
+    without electrons has no LYP correlation.
+    """
+
+    up, down = _spin_checked(density_up, density_down)
+    gradients = [np.asarray(value, dtype=np.float64) for value in (sigma_up, sigma_down, sigma_total)]
+    if any(value.shape != up.shape for value in gradients):
+        raise ValueError("densities and squared gradients must have the same shape")
+    if any(np.any(value < -1.0e-14) for value in gradients):
+        raise ValueError("the functional requires nonnegative squared gradients")
+    density = up + down
+    energy = np.zeros_like(density)
+    positive = density > _DENSITY_THRESHOLD
+    n = density[positive]
+    a = up[positive]
+    b = down[positive]
+    grad_a, grad_b, grad_n = (np.maximum(value[positive], 0.0) for value in gradients)
+    inverse_cube_root = 1.0 / np.cbrt(n)
+    denominator = 1.0 + _LYP_D * inverse_cube_root
+    delta = _LYP_C * inverse_cube_root + _LYP_D * inverse_cube_root / denominator
+    omega = (
+        np.exp(-_LYP_C * inverse_cube_root) / denominator * inverse_cube_root**11
+    )
+    bracket = (
+        2.0 ** (11.0 / 3.0) * _LYP_CF * (a ** (8.0 / 3.0) + b ** (8.0 / 3.0))
+        + (47.0 / 18.0 - 7.0 * delta / 18.0) * grad_n
+        - (2.5 - delta / 18.0) * (grad_a + grad_b)
+        - (delta - 11.0) / 9.0 * (a * grad_a + b * grad_b) / n
+    )
+    energy[positive] = -_LYP_A * 4.0 / denominator * a * b / n - _LYP_A * _LYP_B * omega * (
+        a * b * bracket
+        - (2.0 / 3.0) * n * n * grad_n
+        + ((2.0 / 3.0) * n * n - a * a) * grad_b
+        + ((2.0 / 3.0) * n * n - b * b) * grad_a
+    )
     return energy
 
 
@@ -283,6 +451,62 @@ def b3lyp_semilocal_energies(
     )
 
 
+def b3lyp_spin_semilocal_energies(
+    valence_up: np.ndarray,
+    valence_down: np.ndarray,
+    grid: RealSpaceGrid,
+    core_density: np.ndarray | None = None,
+    *,
+    vwn_parametrization: str = "rpa",
+) -> B3LYPSemilocalEnergies:
+    """Integrate Slater, B88, VWN and LYP for two spin densities of the grid.
+
+    Half of the frozen core density is added to each channel, as the
+    self-consistent spin functionals add it
+    (:func:`parsec_python.V_xc.pbe_spin`).  For equal spin densities the
+    energies are those of :func:`b3lyp_semilocal_energies`.
+    """
+
+    up = np.asarray(valence_up, dtype=np.float64)
+    down = np.asarray(valence_down, dtype=np.float64)
+    if up.shape != (grid.size,) or down.shape != (grid.size,):
+        raise ValueError("spin densities do not match the active real-space grid")
+    if core_density is not None:
+        core = np.asarray(core_density, dtype=np.float64)
+        if core.shape != up.shape:
+            raise ValueError("core and valence densities must have the same shape")
+        up = up + 0.5 * core
+        down = down + 0.5 * core
+    if np.any(up < -1.0e-14) or np.any(down < -1.0e-14):
+        raise ValueError("the functional requires nonnegative spin densities")
+    up = np.maximum(up, 0.0)
+    down = np.maximum(down, 0.0)
+    sigma_up = density_gradient_squared(up, grid)
+    sigma_down = density_gradient_squared(down, grid)
+    # The gradient is linear: this is |D n_up + D n_down|**2.
+    sigma_total = density_gradient_squared(up + down, grid)
+    scale = 2.0 * grid.volume_element
+
+    def integral(values: np.ndarray) -> float:
+        return float(scale * np.sum(values))
+
+    return B3LYPSemilocalEnergies(
+        slater_exchange=integral(slater_exchange_energy_density_spin(up, down)),
+        b88_exchange=integral(
+            b88_exchange_energy_density_spin(up, down, sigma_up, sigma_down)
+        ),
+        vwn_correlation=integral(
+            vwn_correlation_energy_density_spin(up, down, vwn_parametrization)
+        ),
+        lyp_correlation=integral(
+            lyp_correlation_energy_density_spin(
+                up, down, sigma_up, sigma_down, sigma_total
+            )
+        ),
+        vwn_parametrization=vwn_parametrization,
+    )
+
+
 def b3lyp_exchange_correlation_energy(
     exact_exchange: float,
     semilocal: B3LYPSemilocalEnergies,
@@ -312,9 +536,14 @@ __all__ = [
     "B3LYPSemilocalEnergies",
     "b3lyp_exchange_correlation_energy",
     "b3lyp_semilocal_energies",
+    "b3lyp_spin_semilocal_energies",
     "b88_exchange_energy_density",
+    "b88_exchange_energy_density_spin",
     "density_gradient_squared",
     "lyp_correlation_energy_density",
+    "lyp_correlation_energy_density_spin",
     "slater_exchange_energy_density",
+    "slater_exchange_energy_density_spin",
     "vwn_correlation_energy_density",
+    "vwn_correlation_energy_density_spin",
 ]

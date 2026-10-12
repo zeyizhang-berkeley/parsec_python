@@ -21,8 +21,10 @@ occupations this is the Hartree-Fock exchange energy of the determinant.
 For fractional occupations it is the exchange energy of the ensemble density
 matrix ``sum_i f_i |i><i|`` of each spin channel (the Fermi-smeared
 generalization used with hybrid functionals for metals); it is not the
-energy of a spin-polarized open shell, which this solver cannot represent.
-:class:`ExactExchangeResult` reports whether that happened.
+energy of a spin-polarized open shell.
+:class:`ExactExchangeResult` reports whether that happened.  The orbitals of
+a spin-polarized calculation, two sets with one electron per state, go to
+:func:`spin_exact_exchange_energy`.
 
 The orbitals are the columns of the solver's wavefunction array: Euclidean
 normalized grid vectors ``q = sqrt(h**3) psi``.  Energies and potentials are
@@ -33,7 +35,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from time import perf_counter
-from typing import Callable
+from typing import Callable, Sequence
 
 import numpy as np
 import scipy.sparse as sp
@@ -202,6 +204,74 @@ def exact_exchange_energy(
     )
 
 
+def spin_exact_exchange_energy(
+    wavefunctions: Sequence[np.ndarray],
+    occupations: Sequence[np.ndarray],
+    volume_element: float,
+    solve_pair_potential: Callable[[np.ndarray], object],
+    *,
+    occupation_threshold: float = OCCUPATION_THRESHOLD,
+    progress: Callable[[int, int, float], None] | None = None,
+) -> ExactExchangeResult:
+    """Exact exchange energy of the orbitals of two spin channels.
+
+    Only orbitals of the same spin exchange.  With occupations ``f`` in
+    ``[0, 1]`` that count one electron per state,
+
+    ``E_x = -(1/2) sum_s sum_ij f_s,i f_s,j (ij|ij)_s``
+
+    in Hartree atomic units: each channel contributes half of what
+    :func:`exact_exchange_energy` gives for its orbitals and occupations,
+    and two identical channels give the unpolarized energy.  For one
+    electron the exchange energy cancels the Hartree energy.
+
+    ``wavefunctions`` and ``occupations`` hold the two channels, up first.
+    The returned ``orbitals`` number the columns of the up channel followed
+    by those of the down channel; the counts and times are sums over both.
+    """
+
+    if len(wavefunctions) != 2 or len(occupations) != 2:
+        raise ValueError("the orbitals and occupations of two spin channels are needed")
+    started = perf_counter()
+    pair_counts = []
+    for channel_occupations in occupations:
+        occupied = occupied_columns(channel_occupations, occupation_threshold).size
+        pair_counts.append(occupied * (occupied + 1) // 2)
+    total_pairs = sum(pair_counts)
+    results: list[ExactExchangeResult] = []
+    for index in range(2):
+        offset = sum(pair_counts[:index])
+
+        def channel_progress(done: int, _total: int, _seconds: float) -> None:
+            progress(offset + done, total_pairs, perf_counter() - started)
+
+        results.append(
+            exact_exchange_energy(
+                wavefunctions[index],
+                occupations[index],
+                volume_element,
+                solve_pair_potential,
+                occupation_threshold=occupation_threshold,
+                progress=None if progress is None else channel_progress,
+            )
+        )
+    up_states = int(np.shape(occupations[0])[0])
+    return ExactExchangeResult(
+        energy=0.5 * (results[0].energy + results[1].energy),
+        orbitals=results[0].orbitals
+        + tuple(up_states + column for column in results[1].orbitals),
+        pair_solves=results[0].pair_solves + results[1].pair_solves,
+        poisson_iterations=results[0].poisson_iterations + results[1].poisson_iterations,
+        poisson_seconds=results[0].poisson_seconds + results[1].poisson_seconds,
+        seconds=perf_counter() - started,
+        fractional=results[0].fractional or results[1].fractional,
+        largest_fractional_deviation=max(
+            results[0].largest_fractional_deviation,
+            results[1].largest_fractional_deviation,
+        ),
+    )
+
+
 def pair_hartree_settings(settings: HartreeSettings) -> HartreeSettings:
     """Hartree settings of a system as a pair density needs them.
 
@@ -244,4 +314,5 @@ __all__ = [
     "occupied_columns",
     "pair_hartree_settings",
     "reference_pair_poisson",
+    "spin_exact_exchange_energy",
 ]
