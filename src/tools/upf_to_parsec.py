@@ -42,6 +42,7 @@ import argparse
 import bisect
 import math
 import os
+import re
 import sys
 import tempfile
 import xml.etree.ElementTree as ET
@@ -52,6 +53,9 @@ from typing import Iterable, Sequence, TextIO
 
 ANGULAR_LABELS = ("s", "p", "d", "f")
 PARSEC_XC_CODES = ("ca", "pl", "pw", "pb", "xa", "wi", "hl")
+# Fortran drops the exponent letter of a real whose exponent has three digits
+# (1.234-100), as in the far tail of a wavefunction of a heavy atom.
+_BARE_EXPONENT_RE = re.compile(r"(?<=[0-9.])([-+][0-9]{3})$")
 
 
 class ConversionError(ValueError):
@@ -112,7 +116,13 @@ class ParsecData:
 def parse_float(token: str) -> float:
     """Parse Fortran-style E or D exponent notation."""
 
-    return float(token.replace("D", "E").replace("d", "e"))
+    normalized = token.replace("D", "E").replace("d", "e")
+    try:
+        return float(normalized)
+    except ValueError:
+        if "e" in normalized.lower():
+            raise
+        return float(_BARE_EXPONENT_RE.sub(r"E\g<1>", normalized))
 
 
 def parse_bool(value: str | None) -> bool:

@@ -86,6 +86,15 @@ class ResamplingTests(unittest.TestCase):
             ),
         )
 
+    def test_reals_without_an_exponent_letter(self) -> None:
+        self.assertEqual(tool.parse_float("1.5D-03"), 1.5e-3)
+        self.assertEqual(tool.parse_float("0.123456789012-103"), 0.123456789012e-103)
+        self.assertEqual(tool.parse_float("-4.2+101"), -4.2e101)
+        with self.assertRaises(ValueError):
+            tool.parse_float("1.0E-0x")
+        with self.assertRaises(ValueError):
+            tool.parse_float("abc")
+
     def test_both_interpolations_are_offered(self) -> None:
         self.assertEqual(set(tool.INTERPOLATIONS), {"cubic", "linear"})
         arguments = tool.build_parser().parse_args(["in.UPF", "out_POTRE.DAT"])
