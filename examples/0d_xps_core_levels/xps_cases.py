@@ -119,9 +119,13 @@ def enclosing_sphere(points) -> tuple[tuple[float, ...], float]:
     return tuple(centre), max(math.dist(p, centre) for p in points)
 
 
-def write_case(folder: Path, atoms, species: dict, *, hole: tuple[int, str] | None = None,
+def write_case(folder: Path, atoms, species: dict, *, hole: tuple[int, str] | None = None, charge: int = 0,
                spacing: float = SPACING_ANGSTROM, margin: float = MARGIN_ANGSTROM) -> dict:
-    """Write ``folder/parsec.in``; ``hole`` is (atom number from 0, species label such as ``C-1s``)."""
+    """Write ``folder/parsec.in``.
+
+    ``hole`` is (atom number from 0, species label such as ``C-1s``); ``charge``
+    is the net charge of the molecule before the core electron is removed.
+    """
 
     centre, extent = enclosing_sphere([xyz for _, xyz in atoms])
     radius = extent + margin
@@ -132,7 +136,7 @@ def write_case(folder: Path, atoms, species: dict, *, hole: tuple[int, str] | No
             raise ValueError(f"{folder}: atom {number} is {symbol}, not {species[label]['element']}")
         groups.setdefault(label, []).append(tuple(a - c for a, c in zip(xyz, centre)))
     # a core-hole potential has one more unit of ionic charge, not one more electron
-    electrons = sum(species[label]["valence_electrons"] * len(rows) for label, rows in groups.items())
+    electrons = sum(species[label]["valence_electrons"] * len(rows) for label, rows in groups.items()) - charge
     if abs(electrons - 2 * round(electrons / 2)) > 1e-9:
         raise ValueError(f"{folder}: odd number of valence electrons")
     occupied = round(electrons / 2)
@@ -166,7 +170,7 @@ def write_case(folder: Path, atoms, species: dict, *, hole: tuple[int, str] | No
             "end Atom_Coord",
             "",
         ]
-    text.append(CONTROLS.format(states=states, charge=1 if hole else 0))
+    text.append(CONTROLS.format(states=states, charge=charge + (1 if hole else 0)))
     folder.mkdir(parents=True, exist_ok=True)
     (folder / "parsec.in").write_text("\n".join(text), encoding="utf-8", newline="\n")
     points = 4.0 / 3.0 * math.pi * (radius / spacing) ** 3
