@@ -8,6 +8,8 @@ of this repository:
   Method for the Calculation of 1s Core-Level Binding Energies*, J. Chem.
   Theory Comput. **18**, 5471 (2022). B, C, N and O 1s of 54 molecules
   (Tables 1, 2, 3, S1 and S2).
+- `jctc2022_atoms`: the pseudo-atoms of Table 1 of the same paper. B, C, N and
+  O and their ions with a 1s hole, without and with spin polarization.
 - `jctc2022_protonated_water`: Figure 5(a) of the same paper. O 1s of the
   hydronium oxygen in the clusters H3O+(H2O)n, n = 1 to 20, relative to the
   water molecule.
@@ -33,6 +35,11 @@ reference.
     paper/table_s1.csv                    Table S1
     cases/<set>/<nn>/{IS,FS}/parsec.in    neutral molecule and 1s core hole
     reference_energies.csv                totals of every case
+    setup.py  run.py  analyze.py
+    RESULTS.md
+  jctc2022_atoms/
+    cases/<B|C|N|O>/<atom|ion>/<unpolarized|polarized>/parsec.in, occup.in
+    reference_energies.csv
     setup.py  run.py  analyze.py
     RESULTS.md
   jctc2022_protonated_water/
@@ -70,8 +77,8 @@ N, O and F, d for Si, P, S, Cl and Br, s for H. A potential with a core hole
 
 ## Running
 
-From `jctc2022_1s`, `jctc2022_protonated_water` or `jctc2024_third_row`, with
-the Python environment of the repository:
+From `jctc2022_1s`, `jctc2022_atoms`, `jctc2022_protonated_water` or
+`jctc2024_third_row`, with the Python environment of the repository:
 
 ```powershell
 python run.py              # all cases; --sets C, --only C/02 C/15, ... select some
@@ -99,6 +106,10 @@ script).
 
 `setup.py` rewrites the inputs, for example with another `--spacing`.
 
+The cases of `jctc2022_atoms` have no refinement. Their occupations are fixed
+(`Fermi_Temp` negative, `occup.in` beside each input, one section per spin
+channel) and the energy read is the last `Total Energy` of the log.
+
 The protonated-water clusters were run on GPUs with 80 GB; on the 8 GB GPU of
 the tested laptop only the two smallest were run. `run.py --largest 3e6`
 selects the cases up to that many grid points.
@@ -119,9 +130,17 @@ at most when the wall is moved from 4 Å to 8 Å beyond the outermost
 nucleus. `States_Num` is the number of occupied states plus at least 8,
 rounded up to a multiple of 16.
 
+With `Spin_Polarization: true` the runs of CO and of CO with a C 1s hole end
+without a magnetic moment and with the totals of the unpolarized runs, PBE and
+refined, in all eight printed decimals (both converged to 1e-7 Ry).
+
+An atom of `jctc2022_atoms` is alone in a sphere of 7 Å, on the same grid,
+with 16 states per spin channel and `Spin_Polarization: true` in the polarized
+cases.
+
 ## Results
 
-All 208 runs converged. Energies in eV; "PBE / refined" stands for PP-PBE /
+All 224 runs converged. Energies in eV; "PBE / refined" stands for PP-PBE /
 PP-PBE(B3LYP). The complete tables are `RESULTS.md` in each folder.
 
 2022 set:
@@ -147,6 +166,30 @@ PP-PBE(B3LYP). The complete tables are `RESULTS.md` in each folder.
 - The errors of Table 3 count the reference molecule of each set.
 - Table S2 is evaluated from the parts of the B3LYP energy that every case
   lists; it needs no further runs.
+
+Atoms of Table 1 of the 2022 paper, total energy of the pseudo-atom without
+and with spin polarization and their difference:
+
+| | unpolarized, here | paper | polarized, here | paper | spin polarization, here | paper |
+|---|---:|---:|---:|---:|---:|---:|
+| B atom | -70.484 | -70.483 | -70.798 | -70.796 | -0.313 | -0.313 |
+| B ion, 1s hole | -128.688 | -128.688 | -129.236 | -129.236 | -0.548 | -0.548 |
+| C atom | -145.950 | -145.943 | -147.321 | -147.314 | -1.371 | -1.371 |
+| C ion, 1s hole | -240.674 | -240.665 | -242.730 | -242.723 | -2.056 | -2.058 |
+| N atom | -262.458 | -262.446 | -265.834 | -265.824 | -3.376 | -3.378 |
+| N ion, 1s hole | -401.755 | -401.742 | -406.417 | -406.408 | -4.662 | -4.666 |
+| O atom | -428.184 | -428.168 | -429.780 | -429.765 | -1.596 | -1.597 |
+| O ion, 1s hole | -619.409 | -619.405 | -621.457 | -621.455 | -2.048 | -2.050 |
+
+- An atom has its 2s orbital filled and its 2p electrons spread evenly over
+  the three 2p orbitals; with spin polarization the 2p shell is filled by
+  Hund's rule (1, 2, 3 and 2 Bohr magnetons for B, C, N and O). An ion is the
+  atom in the potential with a 1s hole, with the charge +1.
+- Largest difference: 0.016 in a total energy (O atom), 0.004 in an energy of
+  spin polarization (N ion). The table of the paper comes from the radial
+  program that generates the potentials. Here the atom is solved on the grid
+  of 0.10 Å in a sphere of 7 Å, with the potentials as the solver reads them:
+  resampled onto its radial mesh, in their separable form.
 
 Protonated water (Figure 5(a) of the 2022 paper), binding energy of the 1s
 level of the hydronium oxygen relative to the water molecule of the 2022 set:
@@ -198,6 +241,7 @@ First calculations (no cache, no restart) in double precision on a laptop with
 |---|---:|---:|---:|---:|---:|
 | 2022, 54 molecules | 108 | 5.2 h | 95 s | 26 s (CO) | 1410 s (B(OC2H5)3) |
 | 2024, 21 molecules | 60 | 2.8 h | 142 s | 41 s (H2S) | 804 s (P(CF3)3) |
+| 2022, atoms of Table 1 | 16 | 19 min | 72 s | 29 s (N ion) | 150 s (B atom, polarized) |
 
 | run | grid points | occupied / computed states | SCF steps | SCF [s] | pair solves | refinement [s] | whole run [s] | host memory [GiB] |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
@@ -209,6 +253,10 @@ First calculations (no cache, no restart) in double precision on a laptop with
 The refinement is one Poisson solve per pair of occupied orbitals, 0.3 s on
 0.7 million points and 1.8 s on 3.2 million, and takes about half of the total
 time. The GPU held 7.7 of its 8.0 GiB during B(OC2H5)3.
+
+An atom has 1,436,528 grid points and no refinement. The oxygen atom takes 33
+SCF steps and 61 s without spin polarization (3.6 GiB of host memory, 2.9 GiB
+on the GPU) and 25 steps and 88 s with it (3.8 and 3.3 GiB).
 
 The protonated-water clusters ran on A100 GPUs with 80 GB (Perlmutter, one run
 per GPU, solver defaults): 40 runs, 13.9 GPU hours, 56 minutes on 16 GPUs.

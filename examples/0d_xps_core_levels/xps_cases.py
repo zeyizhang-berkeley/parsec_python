@@ -188,12 +188,16 @@ def read_index(cases: Path) -> list[dict]:
 
 # ---------------------------------------------------------------- runs
 
-def finished(log: Path) -> bool:
-    return log.is_file() and DONE in log.read_text(encoding="utf-8", errors="replace")
+def finished(log: Path, marker: str = DONE) -> bool:
+    return log.is_file() and marker in log.read_text(encoding="utf-8", errors="replace")
 
 
-def run_queue(cases: Path, *, select=None, largest: float | None = None, cpu_poisson: bool = False) -> None:
-    """Run the cases of ``cases/index.json``, cheapest first; finished ones are skipped."""
+def run_queue(cases: Path, *, select=None, largest: float | None = None, cpu_poisson: bool = False,
+              marker: str = DONE) -> None:
+    """Run the cases of ``cases/index.json``, cheapest first; finished ones are skipped.
+
+    ``marker`` is the text of a log that tells a finished run.
+    """
 
     queue = []
     for entry in read_index(cases):
@@ -213,7 +217,7 @@ def run_queue(cases: Path, *, select=None, largest: float | None = None, cpu_poi
         folder = cases / entry["folder"]
         log = folder / "parsec.out"
         label = f"[{number}/{len(queue)}] {entry['folder']} {entry['molecule']}"
-        if finished(log):
+        if finished(log, marker):
             print(f"{label}: done before", flush=True)
             continue
         started = time.time()
@@ -223,7 +227,7 @@ def run_queue(cases: Path, *, select=None, largest: float | None = None, cpu_poi
                  "--backend", "auto", "--symmetry", "auto", "--log", "parsec.out", "--no-archive"],
                 cwd=folder, env=environment, stdout=console, stderr=subprocess.STDOUT,
             ).returncode
-        status = "ok" if code == 0 and finished(log) else f"FAILED (exit {code})"
+        status = "ok" if code == 0 and finished(log, marker) else f"FAILED (exit {code})"
         line = f"{label}: {status}, {time.time() - started:.0f} s"
         print(line, flush=True)
         with open(cases / "progress.log", "a", encoding="utf-8") as handle:
