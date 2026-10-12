@@ -271,10 +271,12 @@ remain clean end-to-end comparison modes rather than hybrid aliases.
 Hartree solver and, on a GPU, the eigensolver and the density of each
 channel.
 
-- The two channels are solved on the full grid. With symmetry `auto` or `on`
-  a GPU run reports `orbital_symmetry = full grid (spin-polarized: ...)`
-  and keeps its scalar fields on the full grid; the Hartree solver still
-  uses the symmetry wedge where it does without spin. The representation
+- The two channels and the Hartree potential are solved on the full grid.
+  With symmetry `auto` a run reports `orbital_symmetry = full grid
+  (spin-polarized: ...)` and `hartree_symmetry = full grid (spin-polarized:
+  ...)`: a partly filled degenerate level may take a density that the point
+  group does not leave invariant, which the symmetry wedge of the Hartree
+  solver would average away. Symmetry `on` is refused. The representation
   eigensolver (`CuPySymmetrySCFEigensolver`) keeps one subspace per
   representation and is not used.
 - On a GPU the channels share one Hamiltonian allocation, whose local

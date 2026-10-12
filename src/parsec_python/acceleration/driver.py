@@ -1769,6 +1769,21 @@ def prepare_single_point(
             "PARSEC_HARTREE_SYMMETRY requests reduction, but no nontrivial "
             "supported symmetry was detected"
         )
+    hartree_full_grid_for_spin = False
+    if spin_polarized and hartree_reduction is not None:
+        # The orbitals of the two channels are solved on the full grid, where
+        # a partly filled degenerate level may take a density that the point
+        # group does not leave invariant (the oxygen atom).  The wedge solver
+        # would average that density over the symmetry orbits and return the
+        # Hartree potential of another density.
+        if legacy_hartree_forced:
+            raise ValueError(
+                "PARSEC_HARTREE_SYMMETRY requests the symmetry-reduced Hartree "
+                "solver, which a spin-polarized calculation cannot use: its "
+                "density need not keep the symmetry of the structure"
+            )
+        hartree_reduction = None
+        hartree_full_grid_for_spin = True
     if (
         symmetry_mode == "on"
         and orbital_decomposition is None
@@ -2978,7 +2993,15 @@ def prepare_single_point(
             ),
         )
         if hartree_reduction is None:
-            component_details += (("hartree_symmetry", "full grid"),)
+            component_details += (
+                (
+                    "hartree_symmetry",
+                    "full grid (spin-polarized: the density need not keep "
+                    "the symmetry of the structure)"
+                    if hartree_full_grid_for_spin
+                    else "full grid",
+                ),
+            )
         else:
             component_details += (
                 (

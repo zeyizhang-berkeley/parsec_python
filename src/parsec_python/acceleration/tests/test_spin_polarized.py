@@ -96,6 +96,40 @@ class _BackendCases:
         _, _, result = self.assert_case("n_ca")
         self.assertAlmostEqual(abs(result.net_magnetic_moment), 3.0, places=10)
 
+    def test_density_that_breaks_the_symmetry_of_the_structure(self) -> None:
+        """The oxygen atom at 80 K: the fourth p electron takes one orbital.
+
+        Its density is not invariant under the mirror planes of the atom, so
+        the Hartree potential must be that of the full grid: the symmetry
+        wedge of the Hartree solver would average the density over the orbits.
+        """
+
+        case = dict(load_cases()["o_spherical_ca"])
+        case["input"] = [
+            line for line in case["input"] if not line.startswith("Fermi_Temp")
+        ]
+        del case["occup"]
+        totals = {}
+        for symmetry in ("auto", "off"):
+            with tempfile.TemporaryDirectory() as directory:
+                translation = parse_parsec_input(write_case(case, Path(directory)))
+                system = driver.prepare_single_point(
+                    translation.problem, backend=self.backend, symmetry=symmetry
+                )
+            result = driver.run_scf(system)
+            self.assertTrue(result.converged)
+            self.assertAlmostEqual(abs(result.net_magnetic_moment), 2.0, places=6)
+            # One of the three down p levels is filled and lies below the others.
+            down = result.spin[1] if result.net_magnetic_moment > 0 else result.spin[0]
+            self.assertGreater(down.eigenvalues[2] - down.eigenvalues[1], 1.0e-2)
+            self.assertTrue(
+                dict(result.backend.details)
+                .get("hartree_symmetry", "full grid")
+                .startswith("full grid")
+            )
+            totals[symmetry] = result.energies.total
+        self.assertAlmostEqual(totals["auto"], totals["off"], delta=1.0e-7)
+
 
 class SciPyBackendTests(_BackendCases, unittest.TestCase):
     backend = "scipy"
@@ -327,7 +361,7 @@ class SciPyBackendTests(_BackendCases, unittest.TestCase):
             )
             self.assertAlmostEqual(float(force), structure["maximum_force"], delta=1.5e-5)
         self.assertIn(" Local minimum of total energy was found", record)
-        # Every structure stays a triplet.
+        # The report shows the triplet.
         moments = set(re.findall(r"Net magnetic moment \(in Bohr magnetons\):\s+(\S+)", report))
         self.assertIn("2.00", moments)
 
