@@ -15,6 +15,9 @@ Energy_Refinement: b3lyp
 or the command-line option `--energy-refinement b3lyp`. The native Python
 solver does everything; ARES and PARSEC are not called.
 
+The full sets of molecules of the paper and of its successor for the third
+row are in [`../../0d_xps_core_levels`](../../0d_xps_core_levels/README.md).
+
 ## Directory correspondence
 
 ```text
