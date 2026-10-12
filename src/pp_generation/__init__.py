@@ -1,13 +1,11 @@
 """User-facing pseudopotential generation and validation tools.
 
-The default backend is ``pyfhi98pp``, a port of FHI98PP to Python shipped in
-this package (numpy only).  The ``fhi98pp`` and ``atom`` backends drive the
-external programs of those names and exist for cross-checks.
+The current numerical backends are the independently validated FHI98PP and
+ATOM executables.  This package is not yet a pure-Python radial solver.
 """
 
 from .models import (
     BackendName,
-    ChannelSummary,
     ConstructionScheme,
     CoreHole,
     GenerationRequest,
@@ -21,7 +19,7 @@ from .models import (
 from .generator import generate
 
 __all__ = [
-    "BackendName", "ChannelSummary", "ConstructionScheme", "CoreHole", "GenerationRequest",
+    "BackendName", "ConstructionScheme", "CoreHole", "GenerationRequest",
     "GenerationResult", "GhostChannel", "GhostStatus", "LocalChannelResult",
     "OutputFormat", "PseudopotentialFamily", "generate",
 ]

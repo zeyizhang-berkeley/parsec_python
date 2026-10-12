@@ -34,10 +34,10 @@ branch.
 - [Pseudopotentials](#pseudopotentials)
   - [Libraries in this repository](#libraries-in-this-repository)
   - [Using a library potential](#using-a-library-potential)
-  - [Generating a potential](#generating-a-potential)
+  - [Generating further potentials](#generating-further-potentials)
   - [Core-hole potentials](#core-hole-potentials)
   - [Converting a UPF file](#converting-a-upf-file)
-  - [Origin, citation and validation](#origin-citation-and-validation)
+  - [How the libraries were made, and what to cite](#how-the-libraries-were-made-and-what-to-cite)
 
 **How the solver works**
 
@@ -370,10 +370,8 @@ The OpenMP default uses detected logical processors minus four unless
 ## Pseudopotentials
 
 PARSEC.py reads norm-conserving pseudopotentials in PARSEC's `*_POTRE.DAT`
-format. The repository ships a library of them for the whole periodic table
-and the program that generated it, in
-[`src/pp_generation`](src/pp_generation/README.md). The generator runs in
-Python with NumPy only; no Fortran program is needed.
+format. The repository ships libraries of them for the whole periodic table
+in [`src/pp_generation`](src/pp_generation/README.md).
 
 ### Libraries in this repository
 
@@ -407,21 +405,19 @@ Atomic_Energy_Correction: -572.190341 Ry
 replace it by another one without testing. Use `Correlation_Type: pbe` with
 the potentials of `PBE/` and `Correlation_Type: ca` with those of `CA/`.
 
-### Generating a potential
+### Generating further potentials
+
+`pp_generation` is an interface to an installed FHI98PP or ATOM for generating
+and ghost-checking a potential and converting it; neither program is
+distributed here. The input of every library potential is in its
+`diagnostics` folder.
 
 ```powershell
 $env:PYTHONPATH = (Resolve-Path src).Path
-
-python -m pp_generation gui                          # periodic table, press Generate
-python -m pp_generation Si -o pp-output\Si           # silicon, PBE, ground state
-python -m pp_generation Si --xc ca --core-hole 2p -o pp-output\Si-2p
-python -m pp_generation library --jobs 16            # rebuild both libraries
+python -m pp_generation Ni --backend fhi98pp --xc pbe --format parsec -o generated/Ni
 ```
 
-On Linux use `export PYTHONPATH=$PWD/src`. A ground-state potential takes
-about one second. Functional, construction scheme, cutoff radii, core
-correction and output formats are options; see
-[the generator's README](src/pp_generation/README.md).
+See [its README](src/pp_generation/README.md).
 
 ### Core-hole potentials
 
@@ -440,26 +436,23 @@ reference-corrected all-electron totals that the solver prints.
 python src\tools\upf_to_parsec.py input.UPF output_POTRE.DAT
 ```
 
-### Origin, citation and validation
+### How the libraries were made, and what to cite
 
-The generator in `src/pp_generation/pyfhi98pp` is a Python translation of
-**FHI98PP**, the pseudopotential package written by Martin Fuchs at the
-Fritz-Haber-Institut der Max-Planck-Gesellschaft, and the element templates
-for Z = 1–56 and 72–80 are FHI98PP's element database. For potentials made
-with it, cite
+The potentials are Troullier–Martins potentials in the scheme of **FHI98PP**.
+They were generated with a Python port of that program, which is not part of
+this repository, and every one (1907 in all) was regenerated with the FHI98PP
+program itself from the same input: all are reproduced, with tables agreeing
+to 4e-9 and identical ghost-state verdicts. For work that uses them, cite
 
 > M. Fuchs and M. Scheffler, Comput. Phys. Commun. **119**, 67 (1999)
 
 together with the references listed in
-[`src/pp_generation/pyfhi98pp/README.md`](src/pp_generation/pyfhi98pp/README.md).
+[`src/pp_generation/README.md`](src/pp_generation/README.md#citing).
 
-Every potential of the two libraries (1907 in all) was regenerated with the
-Fortran FHI98PP from the same input: all are reproduced, with tables agreeing
-to 4e-9 and identical ghost-state verdicts. The potentials themselves have
-been used in a molecule only for H, C and F; those of the lanthanides and
-actinides, which have the f shell in the valence, are untested starting
-points. The library READMEs list what is missing (Lr; Ho for CA; some core
-holes of Ce, Th, Es, Fm and No).
+The potentials have been used in a molecule only for H, C and F; those of the
+lanthanides and actinides, which have the f shell in the valence, are untested
+starting points. The library READMEs list what is missing (Lr; Ho for CA; some
+core holes of Ce, Th, Es, Fm and No).
 
 ## Scientific flow
 
@@ -650,15 +643,11 @@ src/
 │   │   ├── resident.py            warmed-process execution
 │   │   └── tests/                 backend, parity, and GPU tests
 │   └── tests/                     scientific and architecture tests
-├── pp_generation/                 pseudopotential generation and libraries
-│   ├── pyfhi98pp/                 FHI98PP translated to Python
-│   ├── converters/                FHI, UPF and PARSEC file formats
-│   ├── elements/                  element templates (H to Lr)
+├── pp_generation/                 pseudopotential libraries and generation interface
 │   ├── NCPPs/                     ground-state library, PBE and CA
 │   ├── CoreHole_NCPPs/            core-hole library, PBE and CA
-│   ├── gui.py                     graphical front end
-│   ├── library.py                 builder of the two libraries
-│   └── tests/                     tests with Fortran reference files
+│   ├── backends/                  drivers of an installed FHI98PP or ATOM
+│   └── tests/
 └── tools/
     └── upf_to_parsec.py           UPF-to-PARSEC converter
 ```
@@ -727,10 +716,9 @@ are available; otherwise those runtime-specific tests skip cleanly.
 - [Forces, relaxation and molecular dynamics](src/parsec_python/FORCES_AND_RELAXATION.md)
 - [Acceleration implementation](src/parsec_python/acceleration/README.md)
 - [ML initial-density interface](src/parsec_python/MLDensity/README.md)
-- [Pseudopotential generation](src/pp_generation/README.md)
+- [Pseudopotentials: libraries, citation and generation interface](src/pp_generation/README.md)
 - [Ground-state pseudopotential library](src/pp_generation/NCPPs/README.md)
 - [Core-hole pseudopotential library](src/pp_generation/CoreHole_NCPPs/README.md)
-- [Origin of the pseudopotential generator (FHI98PP)](src/pp_generation/pyfhi98pp/README.md)
 
 ## License
 
@@ -739,8 +727,8 @@ PARSEC.py is distributed under the GNU General Public License, version 3 or
 license notice, [COPYING](COPYING) for the complete GNU GPL v3 text, and
 [COPYRIGHT](COPYRIGHT) for the copyright notice and U.S. Government rights.
 
-The pseudopotential generator in `src/pp_generation/pyfhi98pp` and the element
-templates for Z = 1–56 and 72–80 in `src/pp_generation/elements` are derived
-from FHI98PP by Martin Fuchs (Fritz-Haber-Institut der Max-Planck-Gesellschaft).
-Their origin, the terms stated by FHI98PP and the references to cite are in
-[`src/pp_generation/pyfhi98pp/README.md`](src/pp_generation/pyfhi98pp/README.md).
+The pseudopotential libraries in `src/pp_generation` were generated in the
+scheme of FHI98PP by Martin Fuchs and Matthias Scheffler
+(Fritz-Haber-Institut der Max-Planck-Gesellschaft); the references to cite are
+in [`src/pp_generation/README.md`](src/pp_generation/README.md#citing).
+FHI98PP itself is not part of this repository.

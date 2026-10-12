@@ -8,18 +8,11 @@ from pathlib import Path
 from .errors import ConfigurationError
 from .models import ConstructionScheme, CoreHole
 
-# FHI98PP iexc codes.  "ca" is Ceperley--Alder in the Perdew--Zunger 1981
-# parametrization, the functional behind ``Correlation_Type ca`` of the solver;
-# "pw92" is the Perdew--Wang 1992 parametrization (FHI98PP's own LDA default).
-XC_CODES = {"pbe": 6, "ca": 3, "pw92": 8}
+# FHI98PP iexc: 6 is PBE; 3 is the LDA of Ceperley and Alder as parametrized by Perdew
+# and Zunger, the "ca" of the solver.  Until October 2026 "ca" was 8 here (Perdew-Wang).
+XC_CODES = {"pbe": 6, "ca": 3}
 L_LABELS = "spdfgh"
 ORBITAL_RE = re.compile(r"^\s*(\d+)\s+(\d+)\s+([-+0-9.eEdD]+)")
-# FHI98PP reads a reference energy below this magnitude as "use the default".
-REFERENCE_ENERGY_THRESHOLD_EV = 0.5e-2
-
-
-def _real(text: str) -> float:
-    return float(text.replace("D", "E").replace("d", "e"))
 
 
 @dataclass(frozen=True)
@@ -31,9 +24,6 @@ class ParsedInput:
     orbitals: tuple[tuple[int, int, float], ...]
     lmax: int
     default_scheme: str
-    core_radius: float = 0.0
-    # Optional per-channel records: (l, cutoff radius, reference energy in eV, scheme).
-    channel_lines: tuple[tuple[int, float, float, str], ...] = ()
 
     @property
     def ionic_charge(self) -> float:
@@ -78,17 +68,7 @@ def parse(text: str) -> ParsedInput:
     lmax, default_scheme = int(config[0]), config[1].lower()
     if lmax < 0 or lmax >= len(L_LABELS):
         raise ConfigurationError(f"unsupported generated angular momentum lmax={lmax}")
-    channel_lines = []
-    for line in records[2 + nc + nv :]:
-        fields = line.split(":", 1)[0].split()
-        try:
-            channel_lines.append((int(fields[0]), _real(fields[1]), _real(fields[2]), fields[3].lower()))
-        except (IndexError, ValueError):
-            break  # FHI98PP stops reading channel records at the first one it cannot read
-    return ParsedInput(
-        z, nc, nv, xc_code, tuple(orbitals), lmax, default_scheme,
-        core_radius=_real(head[4]), channel_lines=tuple(channel_lines),
-    )
+    return ParsedInput(z, nc, nv, xc_code, tuple(orbitals), lmax, default_scheme)
 
 
 def find_template(root: Path, element: str, scheme: ConstructionScheme) -> Path:
@@ -105,31 +85,13 @@ def find_template(root: Path, element: str, scheme: ConstructionScheme) -> Path:
 
 
 def customize(text: str, *, xc: str, scheme: ConstructionScheme,
-              core_hole: CoreHole | None, cutoff_radius: float | None,
-              lmax: int | None = None,
-              channel_radii: dict[int, float] | None = None,
-              reference_energies_ev: dict[int, float] | None = None,
-              core_radius: float | None = None,
-              reference_shift_ev: float = 0.0) -> str:
-    """Apply the request to a template and return the FHI98PP input text.
-
-    ``reference_shift_ev`` is added to every explicit reference energy of the
-    template (used for core holes, where all valence levels move down);
-    ``reference_energies_ev`` sets a channel's reference energy outright.
-    Apart from the functional code, the template text is left as it is when
-    none of the optional controls is used.
-    """
-
+              core_hole: CoreHole | None, cutoff_radius: float | None) -> str:
     lines = text.splitlines()
     head_data, sep, comment = lines[0].partition(":")
     fields = head_data.split()
     if xc not in XC_CODES:
-        raise ConfigurationError(f"unsupported XC {xc!r}; choose one of {', '.join(XC_CODES)}")
+        raise ConfigurationError(f"unsupported XC {xc!r}; choose pbe or ca")
     fields[3] = str(XC_CODES[xc])
-    if core_radius is not None:
-        if not math.isfinite(core_radius) or core_radius < 0:
-            raise ConfigurationError("core radius must be finite and non-negative")
-        fields[4] = f"{core_radius:.4f}"
     lines[0] = "  ".join(fields) + ((" :" + comment) if sep else "")
 
     parsed = parse("\n".join(lines))
@@ -163,42 +125,10 @@ def customize(text: str, *, xc: str, scheme: ConstructionScheme,
     config[1] = scheme_token
     lines[config_index] = f"{config[0]}  {config[1]} : lmax  s_pp_def"
 
-    if lmax is not None:
-        if not 0 <= lmax <= 4:
-            raise ConfigurationError("lmax must lie between 0 and 4")
-        config[0] = str(lmax)
-        lines[config_index] = f"{config[0]}  {config[1]} : lmax  s_pp_def"
-    final_lmax = int(config[0])
-
-    rebuild = (
-        lmax is not None or bool(channel_radii) or bool(reference_energies_ev)
-        or abs(reference_shift_ev) > 0.0
-    )
     if cutoff_radius is not None:
         if not math.isfinite(cutoff_radius) or cutoff_radius <= 0:
             raise ConfigurationError("cutoff radius must be finite and positive")
-        channels = {ell: (cutoff_radius, 0.0) for ell in range(final_lmax + 1)}
-    elif rebuild:
-        channels = {ell: (radius, energy) for ell, radius, energy, _ in parsed.channel_lines}
-    else:
-        return "\n".join(lines) + "\n"
-
-    for ell, radius in (channel_radii or {}).items():
-        if not math.isfinite(radius) or radius < 0:
-            raise ConfigurationError("channel cutoff radii must be finite and non-negative")
-        channels[ell] = (radius, channels.get(ell, (0.0, 0.0))[1])
-    if abs(reference_shift_ev) > 0.0:
-        channels = {
-            ell: (radius, energy + reference_shift_ev
-                  if abs(energy) >= REFERENCE_ENERGY_THRESHOLD_EV else energy)
-            for ell, (radius, energy) in channels.items()
-        }
-    for ell, energy in (reference_energies_ev or {}).items():
-        channels[ell] = (channels.get(ell, (0.0, 0.0))[0], energy)
-    lines = lines[: config_index + 1]
-    lines.extend(
-        f"{ell}  {radius:.8f}  {energy:.4f}  {scheme_token}" if rebuild
-        else f"{ell}  {radius:.8f}  0.00  {scheme_token}"
-        for ell, (radius, energy) in sorted(channels.items()) if ell <= final_lmax
-    )
+        lmax = int(config[0])
+        lines = lines[: config_index + 1]
+        lines.extend(f"{ell}  {cutoff_radius:.8f}  0.00  {scheme_token}" for ell in range(lmax + 1))
     return "\n".join(lines) + "\n"
