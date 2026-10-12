@@ -4,9 +4,11 @@
 the input Fortran PARSEC was run with (``Spin_Polarization: .true.``) and
 what its ``parsec.out`` reports for the last SCF step: the energy terms, the
 levels and occupations of each spin channel, the electrons per channel, the
-Fermi level and the force tables.  The pseudopotentials are those of the
-library under ``src/pp_generation`` and, for one core-corrected case, of the
-test data.
+Fermi level and the force tables.  The pseudopotentials are files of the test
+data: ``spin_*_POTRE.DAT`` are the potentials of the library under
+``src/pp_generation`` as the Fortran runs read them (written while the
+converter still resampled linearly), the others belong to a core-corrected
+case.
 
 The helpers write such an input with its files into a directory and compare
 a result of this package with the Fortran numbers.  Two solutions that
@@ -25,7 +27,7 @@ import numpy as np
 
 
 DATA = Path(__file__).resolve().parent / "data"
-#: The pseudopotential library the fixture names its files in.
+#: The pseudopotential library, for cases that are not compared with Fortran.
 LIBRARY = Path(__file__).resolve().parents[2] / "pp_generation"
 
 #: Fortran prints eight decimals of an energy and ten of a level; both SCF
