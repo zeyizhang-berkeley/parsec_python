@@ -4,8 +4,9 @@ One pseudopotential for every core shell of every element, generated from the
 atom with one electron removed from that shell, for PBE and for LDA (CA). They
 describe the core-excited atom in a calculation of a core-level binding energy
 (Xu, Prendergast, Qian, J. Chem. Theory Comput. **18**, 5471 (2022); Liu et
-al., J. Chem. Theory Comput. **20**, 6134 (2024)). Built with
-`python -m pp_generation library`; this README describes the build of
+al., J. Chem. Theory Comput. **20**, 6134 (2024)). Generated in the scheme of
+FHI98PP and regenerated with that program for comparison (`../README.md`,
+which also lists what to cite); this README describes the build of
 12 October 2026.
 
 | folder | functional | potentials | elements | elements with every core shell |
@@ -18,7 +19,7 @@ functional). Those of the heavier elements are in the branch
 `pseudopotential`, to keep the default branch small; `manifest.csv` lists
 all of them in either branch.
 
-The core shells of an element are the ones its template keeps in the core:
+The core shells of an element are the ones its generation input keeps in the core:
 1s for Li–Ne; 1s, 2s, 2p for Na–Ar; up to 15 shells (1s … 6p) for the
 actinides. `manifest.csv` lists every shell with its status.
 
@@ -90,11 +91,11 @@ The rules are in `../README.md`. In this build:
 
 ## Checks
 
-- Every potential was regenerated with the Fortran FHI98PP from the input in
+- Every potential was regenerated with the FHI98PP program from the input in
   its `diagnostics` folder: 1704 of 1704 reproduced; tables agree to 4e-9,
-  total energies to the five decimals the Fortran log prints, and the ghost
+  total energies to the five decimals the FHI98PP log prints, and the ghost
   verdicts of the selected local channel agree in all cases. (For Z > 80 a
-  copy of the Fortran program with one array bound corrected was used.)
+  copy of the program with one array bound corrected was used.)
 - For every potential marked matched, the cutoff radii, `lmax` and local
   channel in the manifest equal those of the ground-state row.
 - One molecular test, C 1s in CH4 and CF4 (`examples/0_CH4_CF4/python_library_pps`
@@ -104,11 +105,11 @@ The rules are in `../README.md`. In this build:
   CF4–CH4 shift within 0.03 eV (PBE) and 0.003 eV (CA).
 
 What has not been checked: any other element, shell or molecule. The radii are
-the generator's defaults, not the radii of the published calculations of the
+the defaults of FHI98PP, not the radii of the published calculations of the
 group (`examples/0_CH4_CF4/paper_pp_inputs` in the branch
 `one-shot-double-hybrid`), and deep core levels of heavy
 elements are outside what a scalar-relativistic, spin-averaged atom describes
 well.
 
-Rebuild the library with `python -m pp_generation library`, or generate one
-potential with `python -m pp_generation Si --core-hole 2p`.
+The `.ini` file in a `diagnostics` folder is the FHI98PP input of that
+potential; FHI98PP regenerates the potential from it.

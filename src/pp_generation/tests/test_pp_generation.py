@@ -90,7 +90,7 @@ class FhiIntegrationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             result = generate(
                 GenerationRequest(
-                    "Si", Path(directory), backend=BackendName.FHI98PP, fhi_root=FHI,
+                    "Si", Path(directory), fhi_root=FHI,
                     core_hole=CoreHole("2p"), cutoff_radius=2.5,
                     prefix="si_2p_ch_pbe_rc250", formats=(OutputFormat.FHI,),
                 )
@@ -115,8 +115,7 @@ class FhiIntegrationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             result = generate(
                 GenerationRequest(
-                    "P", Path(directory), backend=BackendName.FHI98PP, fhi_root=FHI,
-                    core_hole=CoreHole("1s"),
+                    "P", Path(directory), fhi_root=FHI, core_hole=CoreHole("1s"),
                     cutoff_radius=1.95, prefix="p_1s_ch_pbe_rc195",
                     formats=(OutputFormat.FHI, OutputFormat.UPF, OutputFormat.PARSEC),
                     qe_converter=qe, potre_converter=converter,
@@ -173,7 +172,6 @@ class FhiIntegrationTests(unittest.TestCase):
                     GenerationRequest(
                         element,
                         Path(directory) / element,
-                        backend=BackendName.FHI98PP,
                         fhi_root=FHI,
                         formats=(OutputFormat.UPF, OutputFormat.PARSEC),
                         qe_converter=qe,
