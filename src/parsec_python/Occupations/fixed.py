@@ -16,10 +16,12 @@ The file holds one section per spin channel::
 
 Everything is read with list-directed statements, so text after the numbers
 of a record is a comment.  ``initial.f90`` reads ``nspin`` sections, hence
-only the first one in a calculation without spin polarization, the only kind
-this package runs: whatever follows the first section is not read.  There an
-occupation of one stands for the two electrons of a doubly occupied orbital,
-the convention of :func:`fermi_occupations`.
+only the first one in a calculation without spin polarization: whatever
+follows the first section is not read.  There an occupation of one stands
+for the two electrons of a doubly occupied orbital, the convention of
+:func:`fermi_occupations`.  A spin-polarized calculation reads two
+sections, the up channel first, and an occupation of one stands for one
+electron (:mod:`parsec_python.Occupations.spin`).
 """
 
 from __future__ import annotations
@@ -56,6 +58,20 @@ class OccupationFile:
     source: Path
 
 
+@dataclass(frozen=True)
+class SpinOccupationFile:
+    """Occupations of the two spin sections of an ``occup.in``, up first.
+
+    An occupation of one stands for one electron there.  ``unread_lines``
+    counts the nonblank lines after the second section.
+    """
+
+    occupations_up: tuple[float, ...]
+    occupations_down: tuple[float, ...]
+    unread_lines: int
+    source: Path
+
+
 def read_occupation_file(path: str | Path, number_of_states: int) -> OccupationFile:
     """Read the occupations a spin-unpolarized PARSEC run takes from ``path``.
 
@@ -63,6 +79,29 @@ def read_occupation_file(path: str | Path, number_of_states: int) -> OccupationF
     unless set by hand.  An index outside ``1..number_of_states`` writes
     beyond the occupation array in ``initial.f90`` and is refused here.
     """
+
+    sections, unread, source = _read_sections(path, number_of_states, 1)
+    return OccupationFile(sections[0], unread, source)
+
+
+def read_spin_occupation_file(
+    path: str | Path, number_of_states: int
+) -> SpinOccupationFile:
+    """Read the occupations a spin-polarized PARSEC run takes from ``path``.
+
+    ``initial.f90`` reads one section per spin channel, the up channel
+    first, each with its title line.  Every channel has ``number_of_states``
+    states.
+    """
+
+    sections, unread, source = _read_sections(path, number_of_states, 2)
+    return SpinOccupationFile(sections[0], sections[1], unread, source)
+
+
+def _read_sections(
+    path: str | Path, number_of_states: int, count: int
+) -> tuple[list[tuple[float, ...]], int, Path]:
+    """Read the first ``count`` spin sections of an ``occup.in``."""
 
     source = Path(path)
     states = int(number_of_states)
@@ -94,42 +133,54 @@ def read_occupation_file(path: str | Path, number_of_states: int) -> OccupationF
             raise ValueError(f"{source}: expected an integer for {what}, found {token!r}")
         return int(token)
 
-    # The title line is passed whatever it holds.
     if not lines:
         raise ValueError(f"{source} is empty")
-    position = 1
-    highest_full = integer(
-        record(1, "the number of fully occupied states")[0],
-        "the number of fully occupied states",
-    )
-    if not 0 <= highest_full <= states:
-        raise ValueError(
-            f"{source}: {highest_full} fully occupied states do not fit "
-            f"States_Num = {states}"
+    sections: list[tuple[float, ...]] = []
+    for section in range(count):
+        # The title line is passed whatever it holds.
+        if position >= len(lines):
+            raise ValueError(
+                f"{source} ends before the section of spin channel "
+                f"{section + 1}; a spin-polarized calculation reads one "
+                "section per channel"
+            )
+        position += 1
+        highest_full = integer(
+            record(1, "the number of fully occupied states")[0],
+            "the number of fully occupied states",
         )
-    occupations = [1.0] * highest_full + [0.0] * (states - highest_full)
-    overrides = integer(
-        record(1, "the number of occupations set by hand")[0],
-        "the number of occupations set by hand",
-    )
-    for _ in range(overrides):
-        index_token, value_token = record(2, "an occupation set by hand")
-        index = integer(index_token, "a state index")
-        if not 1 <= index <= states:
+        if not 0 <= highest_full <= states:
             raise ValueError(
-                f"{source}: state index {index} lies outside 1..{states} (States_Num)"
+                f"{source}: {highest_full} fully occupied states do not fit "
+                f"States_Num = {states}"
             )
-        if _REAL_RE.fullmatch(value_token) is None:
-            raise ValueError(
-                f"{source}: expected an occupation for state {index}, "
-                f"found {value_token!r}"
-            )
-        value = float(value_token.replace("D", "E").replace("d", "e"))
-        if not np.isfinite(value):
-            raise ValueError(f"{source}: the occupation of state {index} is not finite")
-        occupations[index - 1] = value
+        occupations = [1.0] * highest_full + [0.0] * (states - highest_full)
+        overrides = integer(
+            record(1, "the number of occupations set by hand")[0],
+            "the number of occupations set by hand",
+        )
+        for _ in range(overrides):
+            index_token, value_token = record(2, "an occupation set by hand")
+            index = integer(index_token, "a state index")
+            if not 1 <= index <= states:
+                raise ValueError(
+                    f"{source}: state index {index} lies outside 1..{states} "
+                    "(States_Num)"
+                )
+            if _REAL_RE.fullmatch(value_token) is None:
+                raise ValueError(
+                    f"{source}: expected an occupation for state {index}, "
+                    f"found {value_token!r}"
+                )
+            value = float(value_token.replace("D", "E").replace("d", "e"))
+            if not np.isfinite(value):
+                raise ValueError(
+                    f"{source}: the occupation of state {index} is not finite"
+                )
+            occupations[index - 1] = value
+        sections.append(tuple(occupations))
     unread = sum(1 for line in lines[position:] if line.strip())
-    return OccupationFile(tuple(occupations), unread, source)
+    return sections, unread, source
 
 
 def check_fixed_occupations(
@@ -184,7 +235,9 @@ def fixed_occupations(
 __all__ = [
     "ELECTRON_COUNT_TOLERANCE",
     "OccupationFile",
+    "SpinOccupationFile",
     "check_fixed_occupations",
     "fixed_occupations",
     "read_occupation_file",
+    "read_spin_occupation_file",
 ]
