@@ -93,12 +93,18 @@ class DistributedFilter:
             projectors=sp.csr_matrix((cp.asnumpy(values),cp.asnumpy(columns),cp.asnumpy(offsets)),
                                     shape=(operator.shape[0],operator.projector_count))
             signs=cp.asnumpy(operator.projector_signs)
+        # The devices of a sector form the projector coefficients with one kernel, as they read one stencil
+        # layout: the columns per block of the owner's tree projection, whatever
+        # PARSEC_CUPY_PROJECTOR_BLOCK_COLUMNS says by now. An owner without a projection of its own leaves the
+        # switch to the replicas.
+        block_columns=getattr(getattr(operator,'custom_projector_projection',None),'block_columns',None)
         for device in devices:
             with cp.cuda.Device(device):
                 self.streams[device]=cp.cuda.Stream(non_blocking=True)
                 if device!=self.owner:
                     self.replicas[device]=CuPyHamiltonian(None,np.zeros(operator.shape[0]),(projectors,signs),
-                        retain_generic_laplacian=False,finite_difference_metadata=metadata,implicit_tile=tile)
+                        retain_generic_laplacian=False,finite_difference_metadata=metadata,implicit_tile=tile,
+                        projection_block_columns=block_columns)
                 self.graphs[device]=BlockFilterGraphs(operator if device==self.owner else self.replicas[device])
         # Wall time of the downloads from the owner and of the replicas, for reports.
         self.replica_seconds=perf_counter()-started

@@ -19,6 +19,7 @@ import time
 _MODULE_STARTED = time.perf_counter()
 
 import argparse
+from contextlib import ExitStack
 import ctypes
 from dataclasses import asdict, is_dataclass, replace
 import hashlib
@@ -39,11 +40,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 # compared with the control, so it must not move with them. DSYRK is required
 # here, where it used to fall back to one full product. The switches of a
 # shared sector basis have no entry: the tall blocks of its Ritz step, the
-# bytes of the slabs of that step, the device that estimates the condition
-# number beside its small solve and the row count from which its devices read
-# tiles. Without a sector context nothing is shared. The slab budget
-# (PARSEC_CUPY_STREAMING_RITZ_BYTES) is the one-array route's as well and is
-# left to the launcher for that reason too.
+# bytes of the slabs of that step, the columns of the slabs of its overlap
+# (PARSEC_CUPY_DISTRIBUTED_STATE_OVERLAP_COLUMNS), the device that estimates
+# the condition number beside its small solve and the row count from which
+# its devices read tiles. Without a sector context nothing is shared. The
+# slab budget (PARSEC_CUPY_STREAMING_RITZ_BYTES) is the one-array route's as
+# well and is left to the launcher for that reason too.
 # The ionic sums give the same fields bit for bit on one device as on all. The
 # control has no sector context and so sums on one by default; the entry keeps
 # its preparation what it was should that default come to take more. The
@@ -57,6 +59,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 # in both sides of a comparison. PARSEC_NATIVE_SECTOR_ASSEMBLY, which chooses
 # the reduction of that matrix, stays the launcher's, and the filter stays
 # FP64: its former default, the FP32 later filter, is no reference.
+# The projector coefficients of the control come from the kernel with one
+# CUDA block per projector and column, for the same reason: a run forms them
+# with a block per projector and six columns, the same sums to the last bit.
 # A control on two or three devices solves several sectors of a device one
 # after another like any run: their unused pool blocks stay until the density
 # step, as before.
@@ -68,6 +73,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 # on a device what the control cannot hold there. A control that spills
 # downloads a basis by the former call, so that the download in the order of
 # the array is not in both sides of a comparison with a run that spills.
+# Such a control also stages by the former calls, a new host array for every
+# download and CuPy's pinned pool for every upload
+# (PARSEC_CUPY_SPILL_BUFFERS=fresh), and empties that pool after every density
+# (PARSEC_CUPY_SPILL_PINNED_POOL=release), so that the host buffers of a
+# spilled sector and their direct copies are not in both sides either.
 # Neither is read where the launcher names both values, as the measured ones
 # do. The contexts of the control are CuPy's: without the overlap they are in
 # any case, and a launcher that asks a control for the overlap gets it with
@@ -76,7 +86,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 # default rule of the parser, and with the Hartree tolerance it is the
 # calculation that both sides share, as the boundary plan is. The report of
 # the sphere (PARSEC_DOMAIN_REPORT) is no route of the solver and stays the
-# launcher's; its seconds after the SCF are recorded apart
+# launcher's, with the host thread that makes the estimates of its radius
+# search beside the SCF (PARSEC_DOMAIN_REPORT_THREAD); its seconds after the
+# SCF are recorded apart
 # (result.domain.after_scf). The turns of four devices on the way to their
 # rows and the slab limit of two belong to a shared basis and have no entry
 # either.
@@ -110,7 +122,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 # names another policy. Its projection is formed with the slabs of
 # PARSEC_CUPY_RITZ_GRAM_SLABS, and with those of the streaming budget where
 # its launcher asks it for one array, so the control reads the multiple on
-# either route.
+# either route. The count of those slabs stays the launcher's and eight where
+# it names none: only the overlap of a shared basis has left the count.
+# A control whose launcher asks it for one array keeps the buffer that such a
+# sector took, an eighth of its basis within 1 and 4 GiB: a run takes 2 GiB at
+# most, which cuts the projection of a basis above 16 GiB into other slabs.
+# The limit is named for that and not the budget, which would give every basis
+# 4 GiB. The rotation tile of such a control keeps the bytes of the budget,
+# which is the default of a run as well: named, it stays so.
 # No entry for the release that a shared basis no longer takes after a density
 # (PARSEC_CUPY_DISTRIBUTED_STATE_POOL_RELEASE): only a sector context gives an
 # operator the devices of a group, the control has none, and so no basis of it
@@ -121,8 +140,12 @@ _SERIAL_CONTROL_SETTINGS = {
     'PARSEC_CUPY_RITZ_DENSE_BACKEND': 'host',
     # The ionic fields in line and the CUDA contexts before the preparation, so
     # that a run that builds the fields on their own thread is compared with
-    # fields that were not.
+    # fields that were not. In line the ion-ion energy is a stage of the
+    # preparing thread whatever its own switch says; the entry keeps it the
+    # last stage of the ionic thread where a launcher asks a control for
+    # that thread.
     'PARSEC_OVERLAP_IONIC_SETUP': '0',
+    'PARSEC_OVERLAP_ION_ION_SETUP': '0',
     'PARSEC_OVERLAP_CUDA_CONTEXTS': '0',
     'PARSEC_CUDA_CONTEXT_CREATION': 'runtime',
     'PARSEC_CUPY_ROTATE_COLUMN_COPY': '0',
@@ -131,19 +154,31 @@ _SERIAL_CONTROL_SETTINGS = {
     'PARSEC_CUPY_SECTOR_POOL_RELEASE': '0',
     'PARSEC_CUPY_DIRECT_ALLOCATOR_FRACTION': '0.5',
     'PARSEC_CUPY_SPILL_DOWNLOAD_ORDER': 'C',
+    'PARSEC_CUPY_SPILL_BUFFERS': 'fresh',
+    'PARSEC_CUPY_SPILL_PINNED_POOL': 'release',
     'PARSEC_HARTREE_DEVICE': 'off',
     'PARSEC_IONIC_GPU_COUNT': '1',
+    # Every grid point is summed: fields in line are in any case, and a
+    # control that is asked for the ionic thread must not take the sums on
+    # the symmetry wedge that a run takes there.
+    'PARSEC_IONIC_SUM_GRID': 'full',
     'PARSEC_CUPY_IMPLICIT_TILE': '0',
     'PARSEC_SECTOR_STENCIL': 'csr',
     'PARSEC_SYMMETRY_FAST_MAPS': '0',
+    # The maps on the thread that prepares, after the reference system, so
+    # that their thread beside the projectors is not in both sides either.
+    'PARSEC_OVERLAP_SYMMETRY_SETUP': '0',
     'PARSEC_CUPY_FILTER_GRAPH_REUSE': '0',
     'PARSEC_CUPY_DENSITY_COLLECTION': 'full',
     'PARSEC_CUPY_DENSITY_RELEASE': 'serial',
     'PARSEC_CUPY_RITZ_GRAM_MULTIPLE': '1',
+    'PARSEC_CUPY_STREAMING_RITZ_LIMIT_BYTES': '4294967296',
+    'PARSEC_CUPY_STREAMING_RITZ_TILE': 'budget',
     'PARSEC_SYMMETRY_SCF_BUFFERS': '0',
     'PARSEC_FAST_GRID': '0',
     'PARSEC_HARTREE_BOUNDARY_KERNEL': 'full',
     'PARSEC_HARTREE_ATOMIC_TAIL_VALUES': 'host',
+    'PARSEC_CUPY_PROJECTOR_BLOCK_COLUMNS': '1',
 }
 
 
@@ -684,9 +719,12 @@ def execute(args, cp, comm, MPI, initialization_seconds, initial_affinity=None):
     started = time.perf_counter()-translation.domain_rule_seconds
     reporter = None
     log_manager = _RunLog(log_path if rank == 0 else None, quiet=args.quiet or rank != 0)
-    with log_manager as log:
+    with log_manager as log, ExitStack() as leaving:
         if rank == 0:
             reporter = AcceleratedTextReporter(log.write, translation, symmetry_mode=symmetry)
+            # The reporter may run a host thread beside the SCF, which its report ends: it ends here on every
+            # other way out.
+            leaving.callback(reporter.close)
             reporter.header()
             for warning in translation.warnings:
                 log.write(f'WARNING: {warning}')
@@ -853,7 +891,8 @@ def execute(args, cp, comm, MPI, initialization_seconds, initial_affinity=None):
     # multiple where a step with one tall block cut rounds of whole multiples of
     # PARSEC_CUPY_RITZ_GRAM_MULTIPLE columns), how many columns its widest slab had and how many the widest
     # right-hand side of a product of its projection, a round with one tall block and a slab with two (None
-    # with three tall blocks, which cut none), and the row blocks that Ritz steps with one tall block per
+    # with three tall blocks, which cut none), the columns of the widest slab of its overlap (None where the
+    # overlap has no slabs), and the row blocks that Ritz steps with one tall block per
     # device had to take from the pool because the block of the columns had no room for them. Also the
     # device that estimated the condition number of the overlap in the last device small solve (the owner, or
     # the device that did so beside the solve; None before the first and for host solves), and the seconds
@@ -871,6 +910,7 @@ def execute(args, cp, comm, MPI, initialization_seconds, initial_affinity=None):
                                      tall_blocks=group.tall_blocks,
                                      slab_cut=group.slab_cut, slab_columns=group.slab_columns,
                                      projection_columns=group.projection_columns,
+                                     overlap_columns=group.overlap_columns,
                                      separate_row_blocks=group.separate_row_blocks,
                                      condition_device=group.condition_device,
                                      condition_seconds=group.condition_seconds,
@@ -879,11 +919,21 @@ def execute(args, cp, comm, MPI, initialization_seconds, initial_affinity=None):
             # The layout of the stencil that the devices filtered with, and the wall time in which the operators
             # of the devices beside the owner were built: it lies in the first solve, outside the stages.
             shared_state[-1].update(stencil_storage=group.stencil_storage, replica_seconds=group.replica_seconds)
+            # The bytes of the largest exchange buffer that a device of the sector has taken: the chunk of
+            # 1 GiB, or what a slab takes that is up to an eighth wider where no chunk size is named, which
+            # then goes to the rows in one chunk (0 before the first step).
+            shared_state[-1].update(exchange_buffer_bytes=group.exchange_buffer_bytes)
+    # What became of the host thread that made the estimates of the radius search beside the SCF of the root
+    # (PARSEC_DOMAIN_REPORT_THREAD): a dict, and none for a rank or a run without that thread.
+    radius_thread = getattr(reporter, 'radius_thread_record', None)
     local = dict(rank=rank, hostname=socket.gethostname(), devices=device_records,
+        domain_report_thread=radius_thread if isinstance(radius_thread, dict) else None,
         environment=_environment(), cpu_affinity=sorted(os.sched_getaffinity(0)) if hasattr(os, 'sched_getaffinity') else None,
         launcher_cpu_affinity=initial_affinity, cpu_affinity_restorations=affinity_restorations,
         cupy=cp.__version__, numpy=np.__version__, mpi_library=MPI.Get_library_version().strip(),
         preparation_seconds=preparation_seconds, preparation_wait_seconds=preparation_wait_seconds,
+        # Stage, thread, start and end of every stage of prepare_single_point on this rank (see the notes).
+        preparation_stages=list(getattr(system, 'preparation_stages', None) or ()),
         domain_rule_seconds=translation.domain_rule_seconds,
         cuda_context_initialization_seconds_in_preparation=cuda_initialization_seconds,
         cuda_context_initialization_overlapped=cuda_contexts['overlapped'],
@@ -912,7 +962,10 @@ def execute(args, cp, comm, MPI, initialization_seconds, initial_affinity=None):
         # by PARSEC_CUPY_DIRECT_ALLOCATOR_FRACTION).
         orbital_sector_state_storage=getattr(solver, 'sector_state_storage', None),
         orbital_memory_allocator=getattr(solver, 'memory_allocator_policy', None),
-        sector_state_fit_bytes=getattr(solver, 'state_fit_bytes', None))
+        sector_state_fit_bytes=getattr(solver, 'state_fit_bytes', None),
+        # How sector states that the rank keeps on the host went there and back (PARSEC_CUPY_SPILL_BUFFERS);
+        # None where they stay on their devices.
+        spill_staging=getattr(solver, 'spill_staging', None))
     ranks = comm.gather(local, root=0)
     exit_code = None
     if rank == 0:
@@ -937,19 +990,22 @@ def execute(args, cp, comm, MPI, initialization_seconds, initial_affinity=None):
                 'Reported program wall matches acceleration.cli boundaries: after imports/input parsing through final reporting, before archive.',
                 'result.hartree_boundary is the Hartree boundary of the run: multipole order in use, Solver_Lpole, tolerance, atomic tail, the kernels that evaluated it and what evaluated the tail (null without one). The PARSEC_HARTREE_* switches change it without changing input_sha256: a comparison of two runs is one of the same calculation only where order, tolerance and tail agree. The kernels and the evaluator of the tail may differ: a serial control has the full-grid kernels and host threads.',
                 'result.domain is the sphere of the run (null for a box, and for an input with a radius under PARSEC_DOMAIN_REPORT=0, which also leaves after_scf out of every run): rule_version, radius_from (input or default rule), radius_bohr, the outermost atom and the vacuum beyond it, and, where the default rule chose the radius, boundary_sphere_radius and hartree_boundary_tolerance, the values of the two input lines that give this domain again, with set_by. wall_estimate_ry is the estimate before the SCF of the energy the sphere adds, from the free atoms: an estimate and not a bound, and meaningless with extra_electrons above zero; its parts by species and the source and charge of every free-atom density are beside it. boundary holds the estimate of the energy that the Hartree boundary values of the plan in use leave: about_ry and bound_ry, null where the plan lies outside the calibration (plan says why); the order, tolerance and tail they belong to are in result.hartree_boundary. after_scf is the estimate from the final density: status (estimated, not converged or no fit), the shell sums, energy_ry, decay_per_bohr, fit_rms and rough, and the radius and tolerance that would meet the wall share of domain_energy_tolerance_ry. The backend details hold the same under domain_*. per_rank[].domain_rule_seconds is what the default rule took in the parser of a rank, the loading of the pseudopotentials included; that of the root is inside reported_program_seconds, and all are zero for an input with a radius.',
+                'per_rank[].domain_report_thread is what became of the host thread of the root that makes, while the SCF runs, the estimates of the omitted potential that the radius search of result.domain.after_scf can ask for (PARSEC_DOMAIN_REPORT_THREAD, on by default): estimates is how many it made, seconds its wall time from its start to its end, the waits for the interpreter included, and failure the text of what it raised or of what kept it from starting, null where nothing did. It is null for the other ranks and where no thread was to run: PARSEC_DOMAIN_REPORT_THREAD=0, a run without after_scf, a box, a Hartree boundary tolerance of the input or none, and the direct sum. after_scf is the same with and without the thread apart from its seconds: estimates there counts what the search asked for, read or made, and radius_seconds is short where the search read them. A thread that failed or made fewer estimates than the search asked for leaves the search to make them, in radius_seconds as before.',
                 'With PARSEC_HARTREE_BOUNDARY_CHECK the check runs after the last SCF step and before run_scf returns. Its seconds are hartree_boundary_check_seconds: outside scf_seconds, inside post_scf_finalization_reporting_seconds and reported_program_seconds, and a phase of their own in the stack. Its device arrays are inside the GPU memory peak, so a run that is measured for time or memory leaves the check off.',
                 'MPI uses NumPy host fields only; MPICH_GPU_SUPPORT_ENABLED=0. CUDA context initialization is inside preparation and reported program time.',
                 'Where cuda_context_initialization_overlapped is true (PARSEC_OVERLAP_CUDA_CONTEXTS, the default) a thread created the contexts beside the static preparation: cuda_context_initialization_seconds_in_preparation is the time of that thread, not a stage of preparation_seconds, and once the contexts existed it started the GPU memory sampler and took the first memory observation, during the preparation.',
                 'cuda_context_driver_devices lists the devices whose context that thread created through the CUDA driver library, outside the interpreter lock (PARSEC_CUDA_CONTEXT_CREATION=driver, the default), and cuda_context_driver_seconds is its time inside those calls, a part of the thread time. A device is missing where the library could not be used or numbers the devices otherwise: CuPy then created its context with the lock held, as with PARSEC_CUDA_CONTEXT_CREATION=runtime and as without the overlap, where the list is empty.',
                 'With that overlap the GPU ionic sums of the root (PARSEC_IONIC_BACKEND=cupy, on their own thread by default) can reach a device before the context thread does. The context is then created inside ionic_setup_seconds, and initial_free_bytes and the first memory observation of that device can include the arrays of the sums. PARSEC_OVERLAP_CUDA_CONTEXTS=0 gives the figures of the contexts alone.',
+                'preparation_stages of a rank lists every stage of its prepare_single_point: stage, thread, start_seconds and end_seconds, counted from the entry of that function (which follows the start of preparation_seconds by the start of the context thread) and ordered by start. Threads work beside each other and a stage may lie inside another of its thread (grid, finite_difference and projectors inside reference_preparation; poisson_solver, hartree_boundary_setup_wait and resident_hartree inside hartree_solver), so the list is a timeline: its seconds must not be added up. A stage whose name ends in _wait is the wait of its thread at the join of another; the stage that ends last before the stage named preparation ends is the critical chain of the rank. The list is in this record and on the prepared system only: the backend report and the result archive do not hold it.',
                 'MPI initialization/imports and provenance hashing precede reported time; external module wall is also recorded and does not include Python interpreter/package-import time before this module.',
                 'All rank readiness, preparation completion and post-worker joins are inside reported program wall time.',
                 'Stack uses only root sequential SCF wall timers and their remainder; concurrent GPU event totals must not be stacked.',
                 'Backend eigensolver counters are rank-local sector statistics; root counters alone do not represent all GPUs, and their sum is not critical-path wall time.',
                 'memory_observations are endpoint samples before/after preparation, at root iteration callbacks and after workers stop.',
                 'command_seconds is the wall time of each MPI command on a rank, from its receipt through its collective calls, waits for other ranks included. density_pool_release counts, for the density builder of the rank, the pool releases after a density, their full and young collections (PARSEC_CUPY_DENSITY_COLLECTION) and the unreachable objects those found, with the seconds of the collections, of the release of the pools and of the whole sector-wise density of the rank (sector_density_seconds, both included). release names how the pools of several devices are emptied (PARSEC_CUPY_DENSITY_RELEASE): by the threads of the devices, side by side, or serial, one after another in the thread that built the density. release_seconds are those of that thread, its wait for the device threads included, which an MPI rank spends behind the collective calls of its density command; device_release_seconds are the sum of what the device threads took, 0 where none released. shared says whether the pools of the devices of a shared sector basis are emptied as well (PARSEC_CUPY_DISTRIBUTED_STATE_POOL_RELEASE): keep, the default, or release; shared_kept counts the densities after which they were left, and calls only those after which a pool was emptied, 0 for a rank whose sectors are all shared. sector_pool_release counts, per device, the releases of the unused pool blocks of a finished sector (PARSEC_CUPY_SECTOR_POOL_RELEASE) and the bytes that went back to the driver; it is empty where no device of the rank solves several sectors in turn, each on a stream of its own. Both follow PARSEC_CUPY_POOL_RELEASE_ORBITAL_BYTES.',
-                'orbital_sector_state_storage and orbital_memory_allocator of a rank are what its own solver decided at its first eigensolve (PARSEC_CUPY_SECTOR_STATE_STORAGE, PARSEC_CUPY_LARGE_PROBLEM_ALLOCATOR); result.backend holds those of the root alone. sector_state_fit_bytes gives, per device, the bytes that auto of either held against PARSEC_CUPY_SECTOR_STATE_AUTO_FRACTION (0.978) of the memory of the device: the vectors of the sectors whose basis lies on it with one buffer of the Ritz step, or the blocks of a shared basis. For a basis on one device it is a lower limit of what the device must hold, without operators, graph buffers, small matrices and the CUDA context. For a shared basis it is what the rule that shares it counts, with a workspace for slabs as wide as their budget allows (two slabs of at most PARSEC_CUPY_DISTRIBUTED_STATE_PAIR_SLAB_BYTES for a sector on two devices): a device can hold less outside its context (366 MiB less were sampled for 10,456 electrons on 16 GPUs). It is null where no auto asked, and where auto decided by the former rule that PARSEC_CUPY_DIRECT_ALLOCATOR_FRACTION under environment names: the vectors of the sectors of a device against that fraction of its memory. A serial control names 0.5 where its launcher names none, and PARSEC_CUPY_SPILL_DOWNLOAD_ORDER=C beside it: a basis that it spills to the host is downloaded by the former call, in C order, and that of a run in the order it has.',
-                'distributed_state lists the sectors whose basis the devices of the rank share. slab_columns is the widest slab of H X that the last Ritz step of a sector cut: in the step with one tall block and no PARSEC_CUPY_STREAMING_RITZ_BYTES set, at most PARSEC_CUPY_DISTRIBUTED_STATE_PAIR_SLAB_BYTES (2 GiB; 4294967296 gives the former slabs) on two devices and an even share of 8 GiB on four or more. slab_cut says how that step cut them. With one tall block: multiple where every device gave the same slab to a whole round, so that the round is a multiple of PARSEC_CUPY_RITZ_GRAM_MULTIPLE columns (64) and what the blocks hold beyond those rounds went first, or equal where no such slab exists and under a multiple of 1, which gives the former rounds beside the former slabs. With two: equal or full (PARSEC_CUPY_DISTRIBUTED_STATE_SLABS), a slab of that many columns and more cut down to a whole multiple either way; null with three, which cut none. projection_columns is the widest right-hand side of a product of the projection, a round with one tall block and a slab with two. overlap_seconds is the part of seconds.gram that the overlap took, whose slabs the same multiple cuts: what is left of gram is the projection (0 before the first step and with three tall blocks, which form both matrices in one call). A sector on one device has no entry here: the multiple cuts the slabs of its two Gram matrices, inside subspace_ritz_projection_seconds of the backend statistics. to_rows_copies is the order in which the devices issued the copies between them on the last way to their rows: pairs (four devices take a chunk that all of them send in three turns of two pairs, PARSEC_CUPY_EXCHANGE_PAIRS), together, or queued on the one stream of each (PARSEC_CUPY_EXCHANGE_CONCURRENT=0). It names the order that the switches chose, not what every chunk did, and is null before the first.',
+                'orbital_sector_state_storage and orbital_memory_allocator of a rank are what its own solver decided at its first eigensolve (PARSEC_CUPY_SECTOR_STATE_STORAGE, PARSEC_CUPY_LARGE_PROBLEM_ALLOCATOR); result.backend holds those of the root alone. sector_state_fit_bytes gives, per device, the bytes that auto of either held against PARSEC_CUPY_SECTOR_STATE_AUTO_FRACTION (0.974) of the memory of the device: the vectors of the sectors whose basis lies on it with one buffer of the Ritz step (at most 2 GiB, or 64 columns of all rows where 2 GiB hold fewer, where neither PARSEC_CUPY_STREAMING_RITZ_BYTES nor PARSEC_CUPY_STREAMING_RITZ_LIMIT_BYTES is set; 4294967296 for the limit and 0.978 for the share give the former count and decision), or the blocks of a shared basis. For a basis on one device it is a lower limit of what the device must hold, without operators, graph buffers, small matrices and the CUDA context. For a shared basis it is what the rule that shares it counts, with a workspace for slabs as wide as their budget allows (two slabs of at most PARSEC_CUPY_DISTRIBUTED_STATE_PAIR_SLAB_BYTES for a sector on two devices): a device can hold less outside its context (366 MiB less were sampled for 10,456 electrons on 16 GPUs). It is null where no auto asked, and where auto decided by the former rule that PARSEC_CUPY_DIRECT_ALLOCATOR_FRACTION under environment names: the vectors of the sectors of a device against that fraction of its memory. A serial control names 0.5 where its launcher names none, and PARSEC_CUPY_SPILL_DOWNLOAD_ORDER=C beside it: a basis that it spills to the host is downloaded by the former call, in C order, and that of a run in the order it has.',
+                'spill_staging of a rank says how sector states that it keeps on the host went there and back; it is null where they stay on their devices. buffers is the staging (PARSEC_CUPY_SPILL_BUFFERS): persistent, one host buffer per sector that lasts and direct copies both ways, or fresh, a new host array for every download and a block of CuPy\'s pinned pool for every upload, as before. restores and offloads count the calls that moved the states of a sector to its device before a solve and to the host behind it, with their wall seconds; under fresh the seconds of a restore end where cupy.asarray returns, which can be before its copy to the device has completed. With persistent, bound_bytes is the most that the buffers page-lock and bound_from where that comes from (half of the available host memory, RLIMIT_MEMLOCK where that is less, or PARSEC_CUPY_SPILL_PINNED_BYTES); page_locked_bytes and pageable_bytes are what the buffers hold of each kind, lock_seconds the page-locking, which lies inside the first offload of each sector, lock_failures what the driver said where it refused, upload_bytes and download_bytes what went through the buffers around the solves, and sectors the buffer of each sector. The uploads of the density step are under density_pool_release: host_uploads counts the orbitals that the device builder was handed on the host, their bytes and the wall seconds of the calls (direct says whether they were copied directly), spill_pinned_pool says whether the pinned pool is emptied where sector states are on the host (PARSEC_CUPY_SPILL_PINNED_POOL: keep, the default, or release), and pinned_kept counts the densities after which it was left. A serial control names fresh and release where its launcher names neither.',
+                'distributed_state lists the sectors whose basis the devices of the rank share. slab_columns is the widest slab of H X that the last Ritz step of a sector cut: in the step with one tall block and no PARSEC_CUPY_STREAMING_RITZ_BYTES set, at most PARSEC_CUPY_DISTRIBUTED_STATE_PAIR_SLAB_BYTES (2 GiB; 4294967296 gives the former slabs) on two devices and an even share of 8 GiB on four or more. slab_cut says how that step cut them. With one tall block: multiple where every device gave the same slab to a whole round, so that the round is a multiple of PARSEC_CUPY_RITZ_GRAM_MULTIPLE columns (64) and what the blocks hold beyond those rounds went first, or equal where no such slab exists and under a multiple of 1, which gives the former rounds beside the former slabs. With two: equal or full (PARSEC_CUPY_DISTRIBUTED_STATE_SLABS), a slab of that many columns and more cut down to a whole multiple either way; null with three, which cut none. projection_columns is the widest right-hand side of a product of the projection, a round with one tall block and a slab with two. overlap_seconds is the part of seconds.gram that the overlap took: what is left of gram is the projection (0 before the first step and with three tall blocks, which form both matrices in one call). overlap_columns is the widest slab of that overlap in the last step: 128 columns (PARSEC_CUPY_DISTRIBUTED_STATE_OVERLAP_COLUMNS), cut down to a whole multiple like every slab, or the whole basis where it has no more, and the columns that a count of slabs gives where PARSEC_CUPY_RITZ_GRAM_SLABS names one (8 gives the former slabs, an eighth of the columns); null before the first step and where PARSEC_CUPY_RITZ_SYRK forms the overlap without slabs. A sector on one device has no entry here: its overlap keeps the count of slabs, and the multiple cuts the slabs of its two Gram matrices, inside subspace_ritz_projection_seconds of the backend statistics. to_rows_copies is the order in which the devices issued the copies between them on the last way to their rows: pairs (four devices take a chunk that all of them send in three turns of two pairs, PARSEC_CUPY_EXCHANGE_PAIRS), together, or queued on the one stream of each (PARSEC_CUPY_EXCHANGE_CONCURRENT=0). It names the order that the switches chose, not what every chunk did, and is null before the first. exchange_buffer_bytes is the largest buffer through which a device of the sector has sent the rows of its columns to the others: a chunk of PARSEC_CUPY_EXCHANGE_CHUNK_BYTES where that is set (1073741824 for the former chunks), and where it is not 1 GiB or what a slab needs that is up to an eighth wider outside the rows of its device, which then goes to the rows in one chunk; less where a whole block is less, and 0 before the first step.',
                 'gpu_memory holds per-rank peaks from continuous nvidia-smi sampling (default every 200 ms) from CUDA initialization to the final join; it includes CUDA contexts and CuPy pool caches. A peak shorter than the interval can be missed.',
                 'Process RSS high water uses OS ru_maxrss; default CuPy pool observations exclude alternate/async allocators. Device-used observations include CUDA/library allocations.',
                 'Memory callback overhead is inside SCF wall time. CPU/thread resources per rank are recorded; total host CPU allocation can increase with node count.',

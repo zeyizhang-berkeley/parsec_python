@@ -40,6 +40,8 @@ from .cupy_mixed_precision import (
 from .cupy_projectors import (
     CuPySparseProjectorFactors,
     CuPySparseProjectorProjection,
+    projection_reduction,
+    projector_block_columns,
 )
 from .implicit_stencil import (
     PackedTileHostMetadata,
@@ -302,6 +304,7 @@ class CuPyHamiltonian:
         shared_stencil_neighbors: Any | None = None,
         shared_effective_potential: Any | None = None,
         implicit_tile: int | None = None,
+        projection_block_columns: int | None = None,
     ) -> None:
         self.timing_stats = timing_stats or CuPyTimingStats()
 
@@ -448,6 +451,7 @@ class CuPyHamiltonian:
                 else None
             )
             self._retain_generic_laplacian = bool(retain_generic_laplacian)
+            self._projection_block_columns = projection_block_columns
             self._install_projectors(host_b, host_signs, host_potential)
             if shared_effective_potential is None:
                 self.effective_potential = cp.asarray(
@@ -501,6 +505,18 @@ class CuPyHamiltonian:
         custom_projection_requested = os.environ.get(
             "PARSEC_CUPY_CUSTOM_PROJECTOR_DOT", "1"
         ).strip().lower() not in {"0", "false", "no", "off"}
+        # The columns that a block of the tree projection carries: those
+        # the caller names, as a sector group names those of its owner
+        # for the other devices, else the switch.  Read and checked
+        # here, outside the fallbacks below: a value that is neither 6
+        # nor 1 is an error of the operator and no reason to give the
+        # projection to cuSPARSE.
+        block_columns = (
+            projector_block_columns()
+            if self._projection_block_columns is None
+            else int(self._projection_block_columns)
+        )
+        projection_reduction(True, block_columns)
         self._projector_count = projector_count
         self.raw_projector_factors = None
         self.projectors = None
@@ -519,7 +535,10 @@ class CuPyHamiltonian:
         if raw_factor_path:
             try:
                 self.raw_projector_factors = CuPySparseProjectorFactors(
-                    cp, host_b, self.projector_signs
+                    cp,
+                    host_b,
+                    self.projector_signs,
+                    block_columns=block_columns,
                 )
                 self.custom_projector_projection = (
                     self.raw_projector_factors.projection
@@ -564,6 +583,7 @@ class CuPyHamiltonian:
                             self.projectors_transpose,
                             self.projector_signs,
                             max_row_entries=max_projector_entries,
+                            block_columns=block_columns,
                         )
                     )
                 except Exception:
@@ -607,6 +627,7 @@ class CuPyHamiltonian:
                         host_b,
                         host_signs,
                         host_potential,
+                        block_columns=block_columns,
                     )
                 )
                 self.mixed_precision_filter_reason = None
