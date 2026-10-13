@@ -15,11 +15,11 @@ initial state. In eV:
 | | CH4 | CF4 | shift |
 |---|---:|---:|---:|
 | **PBE** | | | |
-| library potentials | 297.098 | 307.340 | 10.242 |
+| library potentials | 297.102 | 307.349 | 10.246 |
 | all-electron, spin-unpolarized hole | 297.019 | 307.290 | 10.272 |
 | all-electron, spin-polarized hole | 289.999 | 300.207 | 10.208 |
 | **LDA (CA)** | | | |
-| library potentials | 293.902 | 304.449 | 10.547 |
+| library potentials | 293.905 | 304.442 | 10.537 |
 | all-electron, spin-unpolarized hole | 293.832 | 304.382 | 10.550 |
 | all-electron, spin-polarized hole | 287.074 | 297.547 | 10.473 |
 | experiment | 290.80 | 301.85 | 11.05 |
@@ -27,8 +27,8 @@ initial state. In eV:
 - The pseudopotential calculation works with spin-unpolarized atoms and
   molecules, so its all-electron counterpart is the calculation with occupation
   1 in the C 1s orbital of a spin-restricted molecule. The library potentials
-  agree with it to 0.05–0.08 eV in the binding energies and to 0.03 eV (PBE)
-  and 0.003 eV (CA) in the shift.
+  agree with it to 0.06–0.08 eV in the binding energies and to 0.03 eV (PBE)
+  and 0.01 eV (CA) in the shift.
 - Spin polarization of the core hole lowers the binding energies by 7.02 eV
   (CH4) and 7.08 eV (CF4) with PBE: the offset the papers describe, constant to
   0.06 eV between these two molecules.
@@ -49,14 +49,18 @@ then in each of `pbe\{CH4,CF4}\{IS,FS_1s}` and `ca\...`:
 ```
 
 and finally `python examples\0_CH4_CF4\python_library_pps\analyze.py`, which
-prints the first table. The kept logs are `parsec_python.out`. `setup.py` copies
+prints the first table. The kept logs are `parsec_python.out` (their file paths
+are shortened to the repository root). `setup.py` copies
 the potentials from the two libraries and takes `Local_Component` and
 `Atomic_Energy_Correction` of each species from the `parsec_atom_type.in` file
 beside the potential.
 
-On the laptop these were first runs without cache, double precision, with the
-Poisson solves on the GPU (`PARSEC_HARTREE_LINEAR_BACKEND=cupy`): 20–33 s per
-CH4 case, 336–402 s per CF4 case (3.1 million grid points).
+The kept logs are first runs without cache, double precision, with the Poisson
+solves on the GPU (`PARSEC_HARTREE_LINEAR_BACKEND=cupy`), on A100 GPUs with
+80 GB, one run per GPU: 10–20 s per CH4 case, 59–120 s per CF4 case
+(3.1 million grid points). On a laptop with an RTX 5070 Laptop GPU (8 GB) the
+same cases took 20–33 s and 336–402 s with the library files as they were
+before 12 October 2026 (see `src/pp_generation/README.md`).
 
 ## All-electron reference
 

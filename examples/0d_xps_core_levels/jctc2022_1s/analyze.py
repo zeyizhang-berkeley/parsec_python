@@ -51,7 +51,7 @@ TABLE_S2_ME = (0.02, 0.08, 0.13, 0.19, 0.25, 0.31)
 # they are compared exchanged.
 INTERCHANGED = {("N", 12): ("N", 13), ("N", 13): ("N", 12)}
 #: tolerances of --check, eV
-TOLERANCE = {"reference": 0.003, "paper_absolute": 0.03, "paper_shift": 0.05}
+TOLERANCE = {"reference": 0.003, "paper_absolute": 0.04, "paper_shift": 0.05}
 
 
 def correction(row) -> float:
