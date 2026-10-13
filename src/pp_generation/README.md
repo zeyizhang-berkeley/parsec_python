@@ -43,9 +43,7 @@ present ones it agrees with the generation within 1e-6 Ry. Energy differences
 between structures with the same potentials change much less.
 `upf_to_parsec.py --interpolation linear` writes the former files.
 
-This branch, `pseudopotential`, holds both libraries completely. The default
-branch holds the ground-state library and the core-hole potentials of H–Kr
-(the heavier elements add about 320 MB); both manifests list every
+Both libraries are complete in this branch; each manifest lists every
 potential.
 
 ### Using a potential
@@ -98,9 +96,7 @@ Prendergast, Qian, J. Chem. Theory Comput. **18**, 5471 (2022)); binding-energy
 is a PBE calculation with PBE potentials followed by one evaluation of the
 B3LYP exchange-correlation energy on the PBE orbitals; the atomic energy
 correction stays the PBE one. In the solver it is the input line
-`Energy_Refinement: b3lyp`; see `examples/0_CH4_CF4/python_pbe_b3lyp`. (The
-refinement step is in this branch, `one-shot-double-hybrid`, not yet in the
-default branch.)
+`Energy_Refinement: b3lyp`; see `examples/0_CH4_CF4/python_pbe_b3lyp`.
 
 ### How the libraries were made
 

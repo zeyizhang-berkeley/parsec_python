@@ -378,7 +378,7 @@ in [`src/pp_generation`](src/pp_generation/README.md).
 | Library | Content | Location |
 |---|---|---|
 | Ground state | 102 elements (H–No) for PBE, 101 for LDA (CA) | `src/pp_generation/NCPPs/{PBE,CA}/<Element>/` |
-| Core hole | One potential per core shell, generated with one electron removed from that shell. All elements are in this branch, `pseudopotential` (1704 potentials); the default branch has H–Kr (256). | `src/pp_generation/CoreHole_NCPPs/{PBE,CA}/<Element>/<Element>-<shell>/` |
+| Core hole | One potential per core shell, generated with one electron removed from that shell. All elements, 1704 potentials. | `src/pp_generation/CoreHole_NCPPs/{PBE,CA}/<Element>/<Element>-<shell>/` |
 
 Every potential comes in three formats: `PARSEC/` for this solver, `UPF/` for
 Quantum ESPRESSO and ARES, and `FHI/` (the FHI98PP table). Its input, log and

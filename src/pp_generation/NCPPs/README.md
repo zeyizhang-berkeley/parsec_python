@@ -88,8 +88,8 @@ PARSEC files to 1e-12); K differs in the s radius as stated above.
 
 What has not been checked: the potentials in molecules or solids, apart from
 H, C and F in a CH4/CF4 test, where C 1s binding energies agree with
-all-electron calculations to 0.08 eV (`examples/0_CH4_CF4/python_library_pps`
-in the branch `one-shot-double-hybrid`). The potentials
+all-electron calculations to 0.08 eV (`examples/0_CH4_CF4/python_library_pps`).
+The potentials
 of Z = 57–71 and 81–102 come from inputs written for this library
 (`../README.md`); those with an f shell in the valence (Ce–Lu, Pa–No)
 are hard, and none of them has been used in a calculation here.

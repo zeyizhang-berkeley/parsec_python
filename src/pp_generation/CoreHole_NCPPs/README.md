@@ -14,9 +14,7 @@ which also lists what to cite); this README describes the build of
 | `PBE/` | Perdew–Burke–Ernzerhof | 864 | 100 | 96 |
 | `CA/` | LDA, Ceperley–Alder / Perdew–Zunger | 840 | 99 | 93 |
 
-**Where the files are.** This branch, `pseudopotential`, holds all of them.
-The default branch holds only H–Kr (128 per functional), to stay small;
-`manifest.csv` lists all of them in either branch.
+`manifest.csv` lists all of them.
 
 The core shells of an element are the ones its generation input keeps in the core:
 1s for Li–Ne; 1s, 2s, 2p for Na–Ar; up to 15 shells (1s … 6p) for the
@@ -97,16 +95,15 @@ The rules are in `../README.md`. In this build:
   copy of the program with one array bound corrected was used.)
 - For every potential marked matched, the cutoff radii, `lmax` and local
   channel in the manifest equal those of the ground-state row.
-- One molecular test, C 1s in CH4 and CF4 (`examples/0_CH4_CF4/python_library_pps`
-  in the branch `one-shot-double-hybrid`): with these potentials and their
-  ground-state partners the binding energies are within 0.05–0.08 eV of
-  all-electron calculations with a spin-unpolarized core hole, and the
-  CF4–CH4 shift within 0.03 eV (PBE) and 0.003 eV (CA).
+- One molecular test, C 1s in CH4 and CF4 (`examples/0_CH4_CF4/python_library_pps`):
+  with these potentials and their ground-state partners the binding energies
+  are within 0.06–0.08 eV of all-electron calculations with a
+  spin-unpolarized core hole, and the CF4–CH4 shift within 0.03 eV (PBE) and
+  0.01 eV (CA).
 
 What has not been checked: any other element, shell or molecule. The radii are
 the defaults of FHI98PP, not the radii of the published calculations of the
-group (`examples/0_CH4_CF4/paper_pp_inputs` in the branch
-`one-shot-double-hybrid`), and deep core levels of heavy
+group (`examples/0_CH4_CF4/paper_pp_inputs`), and deep core levels of heavy
 elements are outside what a scalar-relativistic, spin-averaged atom describes
 well.
 
