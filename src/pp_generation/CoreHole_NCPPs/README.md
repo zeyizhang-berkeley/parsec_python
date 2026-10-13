@@ -14,10 +14,9 @@ which also lists what to cite); this README describes the build of
 | `PBE/` | Perdew–Burke–Ernzerhof | 864 | 100 | 96 |
 | `CA/` | LDA, Ceperley–Alder / Perdew–Zunger | 840 | 99 | 93 |
 
-**Where the files are.** This branch holds the potentials of H–Kr (128 per
-functional). Those of the heavier elements are in the branch
-`pseudopotential`, to keep the default branch small; `manifest.csv` lists
-all of them in either branch.
+**Where the files are.** This branch, `pseudopotential`, holds all of them.
+The default branch holds only H–Kr (128 per functional), to stay small;
+`manifest.csv` lists all of them in either branch.
 
 The core shells of an element are the ones its generation input keeps in the core:
 1s for Li–Ne; 1s, 2s, 2p for Na–Ar; up to 15 shells (1s … 6p) for the

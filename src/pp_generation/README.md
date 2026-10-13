@@ -43,10 +43,10 @@ present ones it agrees with the generation within 1e-6 Ry. Energy differences
 between structures with the same potentials change much less.
 `upf_to_parsec.py --interpolation linear` writes the former files.
 
-The ground-state library and the core-hole potentials of H–Kr are in this
-branch. The core-hole potentials of the heavier elements are in the branch
-`pseudopotential` (they would add about 320 MB here); both manifests list
-every potential.
+This branch, `pseudopotential`, holds both libraries completely. The default
+branch holds the ground-state library and the core-hole potentials of H–Kr
+(the heavier elements add about 320 MB); both manifests list every
+potential.
 
 ### Using a potential
 
