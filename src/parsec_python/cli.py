@@ -1192,7 +1192,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 outcome = run_recorded_relaxation(
                     translation,
                     system,
-                    reference_backend(),
+                    reference_backend(translation.potential_extrapolation),
                     reporter,
                     log.write,
                     directory=input_directory,
@@ -1205,7 +1205,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 dynamics = run_recorded_molecular_dynamics(
                     translation,
                     system,
-                    reference_backend(),
+                    reference_backend(translation.potential_extrapolation),
                     reporter,
                     log.write,
                     directory=input_directory,

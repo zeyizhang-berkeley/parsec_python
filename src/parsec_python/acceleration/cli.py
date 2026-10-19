@@ -858,7 +858,7 @@ def _run(arguments: argparse.Namespace, resources: Resources) -> int:
                 outcome = run_recorded_relaxation(
                     translation,
                     system,
-                    ionic_backend(),
+                    ionic_backend(translation.potential_extrapolation),
                     reporter,
                     log.write,
                     directory=input_directory,
@@ -874,7 +874,7 @@ def _run(arguments: argparse.Namespace, resources: Resources) -> int:
                 dynamics = run_recorded_molecular_dynamics(
                     translation,
                     system,
-                    ionic_backend(),
+                    ionic_backend(translation.potential_extrapolation),
                     reporter,
                     log.write,
                     directory=input_directory,

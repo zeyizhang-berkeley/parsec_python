@@ -88,6 +88,13 @@ class ParsecInputTranslation:
     use_symmetry: bool = True
     # Molecular dynamics (``Molecular_Dynamics``), ``None`` when it is off.
     molecular_dynamics: "MolecularDynamicsSettings | None" = None
+    # ``Potential_Extrapolation``: how the SCF loop of a moved structure
+    # starts.  ``none`` as PARSEC (the last potential with the ionic
+    # potential exchanged), ``atomic`` with the superposed atomic densities
+    # moved along with the atoms, ``second_order`` with the change of the
+    # density extrapolated along the trajectory
+    # (:mod:`parsec_python.SCF.single_point`).
+    potential_extrapolation: str = "none"
     # ``Energy_Refinement``: the hybrid functional whose exchange-correlation
     # energy is evaluated once on the converged orbitals after the SCF
     # (:mod:`parsec_python.Energy.refinement`), ``None`` when it is off.  It
@@ -625,6 +632,8 @@ def _parse_parsec_input(
         "bfgs_number_corr",
         *_MOLECULAR_DYNAMICS_KEYS,
         "dynamic_diag_tol",
+        # PARSEC.py extension: the start of the SCF loop after a move.
+        "potential_extrapolation",
         # PARSEC.py extension: a modular initial-density source.  These
         # labels do not alter the DFT grid or any post-initialization physics.
         "initial_density",
@@ -1552,6 +1561,21 @@ def _parse_parsec_input(
             "isolated systems only; this periodic run reports energies only."
         )
 
+    potential_extrapolation = "none"
+    if "potential_extrapolation" in scalar:
+        from ..SCF.single_point import POTENTIAL_EXTRAPOLATIONS
+
+        potential_extrapolation = _normalize_label(one("potential_extrapolation"))
+        if potential_extrapolation not in POTENTIAL_EXTRAPOLATIONS:
+            raise ParsecInputError(
+                "Potential_Extrapolation must be one of "
+                + ", ".join(POTENTIAL_EXTRAPOLATIONS)
+            )
+        if not atoms_move:
+            warnings.append(
+                "Potential_Extrapolation is set, but no atom moves; it is ignored."
+            )
+
     energy_refinement = None
     if "energy_refinement" in scalar:
         from ..Energy.refinement import check_refinement_request, normalize_refinement
@@ -1740,6 +1764,7 @@ def _parse_parsec_input(
         compute_forces=compute_forces,
         use_symmetry=use_symmetry,
         molecular_dynamics=molecular_dynamics if molecular_dynamics.enabled else None,
+        potential_extrapolation=potential_extrapolation,
         energy_refinement=energy_refinement,
     )
 

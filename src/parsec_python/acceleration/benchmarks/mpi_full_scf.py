@@ -668,11 +668,14 @@ def execute(args, cp, comm, MPI, initialization_seconds, initial_affinity=None):
     translation, relax_restart, restart_notes = restart_structure(
         translation, translation.source.parent,
         None if args.restart_from is None else args.restart_from.expanduser().resolve())
-    # No point group for manual movements, or where the movable flags do not respect it.
-    if translation.molecular_dynamics is not None and not args.serial_control:
+    # No point group for manual movements, or where the movable flags do not respect it. One rank can still
+    # solve such a run as the single sector of the identity, whose basis the GPUs of its node then share.
+    from parsec_python.acceleration.driver import single_sector_setting
+    one_sector = single_sector_setting() != 'off' and size == 1 and not args.serial_control
+    if translation.molecular_dynamics is not None and not args.serial_control and not one_sector:
         # The ranks of this runner divide the symmetry sectors, and molecular dynamics uses no symmetry.
         raise ValueError('molecular dynamics uses no symmetry and so cannot be divided among ranks: '
-                         'run it with parsec_python/main.py or with --serial-control')
+                         'run it with one rank (one node), or on one node with --serial-control')
     from parsec_python.MolecularDynamics.run import (restart_structure as dynamics_restart_structure,
                                                      run_recorded_molecular_dynamics)
     translation, dynamics_restart, dynamics_notes = dynamics_restart_structure(translation, translation.source.parent)
@@ -688,11 +691,12 @@ def execute(args, cp, comm, MPI, initialization_seconds, initial_affinity=None):
                 else ('auto' if use_symmetry else 'off'))
     # Forces are symmetrized where the calculation itself uses the group.
     symmetrize_forces = keeps_group and symmetry != 'off'
-    if symmetry == 'off' and not args.serial_control:
+    if symmetry == 'off' and not args.serial_control and not one_sector:
         # The ranks of this runner divide the symmetry sectors.
         raise ValueError('this run uses no point-group symmetry'
                          + (f' ({symmetry_note})' if symmetry_note else '')
-                         + ', so its sectors cannot be divided among ranks: run it on one node with --serial-control')
+                         + ', so its sectors cannot be divided among ranks: run it with one rank (one node), '
+                         'or on one node with --serial-control')
     # As in acceleration.cli: none unless --symmetry-cache names its directory.
     cache = _symmetry_cache_directory(args)
     output = args.output_dir.resolve()
@@ -786,15 +790,16 @@ def execute(args, cp, comm, MPI, initialization_seconds, initial_affinity=None):
                 memory.append(_observe_memory(cp, args.devices, f'iteration_{item.iteration}'))
             scf_started = time.perf_counter()
             forces = outcome = dynamics = None
+            moves = ionic_backend(translation.potential_extrapolation)
             try:
                 if translation.molecular_dynamics is not None:
-                    dynamics = run_recorded_molecular_dynamics(translation, system, ionic_backend(), reporter,
+                    dynamics = run_recorded_molecular_dynamics(translation, system, moves, reporter,
                                                                log.write, directory=output, restart=dynamics_restart)
                     result, forces = dynamics.result, dynamics.forces
                 elif translation.relaxation is not None:
                     # Every structure is solved by the ranks as the first one: the root moves the atoms on all of
                     # them, continues its SCF loop from the previous one and collects the forces.
-                    outcome = run_recorded_relaxation(translation, system, ionic_backend(), reporter, log.write,
+                    outcome = run_recorded_relaxation(translation, system, moves, reporter, log.write,
                                                       directory=output, input_directory=translation.source.parent,
                                                       restart=relax_restart, symmetrize=symmetrize_forces)
                     result = outcome.result
