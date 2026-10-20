@@ -129,6 +129,14 @@ def _fairchem_inference():
     except ImportError:
         return "default"
     settings = inference_settings_default()
+    if (
+        hasattr(settings, "execution_mode")
+        and settings.execution_mode is None
+        and importlib.util.find_spec("triton") is None
+    ):
+        # On a GPU fairchem picks kernels written in Triton, which the
+        # PyTorch of Windows does not bring: the PyTorch path instead.
+        settings = dataclasses.replace(settings, execution_mode="umas_fast_pytorch")
     if not getattr(settings, "compile", False):
         return settings
     choice = os.environ.get("PARSEC_MLFF_COMPILE", "off").strip().lower() or "off"

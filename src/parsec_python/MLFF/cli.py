@@ -149,8 +149,9 @@ def build_parser() -> argparse.ArgumentParser:
     relax.add_argument("--again", action="store_true", help="relax even if mlff_structure.xyz matches")
     models = commands.add_parser("models", help="list the models and what an interpreter can run")
     models.add_argument("--python", help="interpreter to look into")
-    check = commands.add_parser("check", help="build a model and evaluate a water molecule")
-    check.add_argument("model_name", metavar="MODEL")
+    check = commands.add_parser("check", help="build a model (download its weights) and evaluate a water molecule")
+    check.add_argument("model_name", metavar="MODEL", nargs="?", default=DEFAULT_MODEL,
+                       help=f"default {DEFAULT_MODEL}")
     check.add_argument("--python", help="interpreter that has the model package")
     check.add_argument("--device", choices=("auto", "cuda", "cpu"))
     return parser

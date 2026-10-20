@@ -108,6 +108,21 @@ class KeywordTests(_ScratchCase):
         self.assertIsNone(translation.mlff)
         self.assertIn("without Initial_Structure: mlff", "\n".join(translation.warnings))
 
+    def test_a_dry_run_does_not_start_the_force_field(self) -> None:
+        # A model that cannot be built: a dry run must not try to.
+        from parsec_python.acceleration.cli import main as accelerated_main
+
+        source = self.write_input(
+            _water_lines("Initial_Structure: mlff\nMLFF_Model: python:no_such_file.py:make")
+        )
+        for main in (None, accelerated_main):
+            with self.subTest(driver="reference" if main is None else "accelerated"):
+                arguments = [source, "--dry-run"]
+                code, output, error = _run_cli(arguments) if main is None else _run_cli(arguments, main=main)
+                self.assertEqual(code, 0, error)
+                self.assertIn("Initial structure: relaxed with the force field", output)
+                self.assertNotIn("MLFF error", output + error)
+
     def test_command_line_option(self) -> None:
         translation = self.parse(_water_lines())
         self.assertEqual(apply_mlff_option(translation, "").mlff, MLFFSettings())

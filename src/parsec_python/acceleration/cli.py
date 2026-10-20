@@ -593,13 +593,16 @@ def _run(arguments: argparse.Namespace, resources: Resources) -> int:
             translation, translation.source.parent
         )
         restart_notes = [*restart_notes, *dynamics_notes]
-        # Initial_Structure: mlff, unless a restart file gave the structure.
-        translation, mlff_notes = relax_initial_structure(
-            translation,
-            translation.source.parent,
-            restarted=translation.problem is not problem_of_input,
-            progress=None if arguments.quiet else print,
-        )
+        # Initial_Structure: mlff, unless a restart file gave the structure;
+        # a dry run only reports the settings.
+        mlff_notes = []
+        if not arguments.dry_run:
+            translation, mlff_notes = relax_initial_structure(
+                translation,
+                translation.source.parent,
+                restarted=translation.problem is not problem_of_input,
+                progress=None if arguments.quiet else print,
+            )
         restart_notes = [*restart_notes, *mlff_notes]
         use_symmetry, symmetry_note = symmetry_decision(translation)
         # Whether the atoms stay in the point group of the first structure,
