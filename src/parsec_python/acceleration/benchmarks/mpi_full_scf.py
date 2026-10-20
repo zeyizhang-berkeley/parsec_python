@@ -652,6 +652,9 @@ def execute(args, cp, comm, MPI, initialization_seconds, initial_affinity=None):
         raise ValueError('full-SCF runner requires one MPI rank per node')
 
     translation = parse_parsec_input(args.input, pseudopotential_directory=args.pp_dir)
+    if args.mlff is not None:
+        from parsec_python.MLFF import apply_mlff_option
+        translation = apply_mlff_option(translation, args.mlff)
     if translation.problem.periodic_cell is not None:
         # Refused here by name: the sphere and the symmetry sectors read below are those of a cluster.
         raise ValueError('the full-SCF runner divides the symmetry sectors of an isolated cluster; a periodic input '
@@ -665,6 +668,7 @@ def execute(args, cp, comm, MPI, initialization_seconds, initial_affinity=None):
         raise ValueError('a spin-polarized calculation solves its two channels on the full grid and so cannot be '
                          'divided among ranks: run it with parsec_python/main.py or with --serial-control')
     # Relax_Restart, or --restart-from, replaces the coordinates of the input on every rank alike.
+    problem_of_input = translation.problem
     translation, relax_restart, restart_notes = restart_structure(
         translation, translation.source.parent,
         None if args.restart_from is None else args.restart_from.expanduser().resolve())
@@ -712,6 +716,24 @@ def execute(args, cp, comm, MPI, initialization_seconds, initial_affinity=None):
     if any(item != inputs for item in identical_inputs):
         raise ValueError('input or pseudopotential content differs across ranks')
     _require_same_domain(comm.allgather(_parsed_domain(translation)))
+    if translation.mlff is not None:
+        # Initial_Structure: mlff: the root relaxes the structure with the force field, and every rank takes it.
+        from parsec_python.MLFF import relax_initial_structure, with_positions
+        outcome = None
+        if rank == 0:
+            try:
+                output.mkdir(parents=True, exist_ok=True)
+                relaxed, mlff_notes = relax_initial_structure(
+                    translation, output, restarted=translation.problem is not problem_of_input,
+                    progress=None if args.quiet else print)
+                outcome = ('done', np.array([atom.position for atom in relaxed.problem.atoms]), mlff_notes)
+            except Exception as error:
+                outcome = ('failed', f'{type(error).__name__}: {error}', [])
+        outcome = comm.bcast(outcome, root=0)
+        if outcome[0] == 'failed':
+            raise RuntimeError(f'MLFF error: {outcome[1]}')
+        translation = with_positions(translation, outcome[1])
+        restart_notes = [*restart_notes, *outcome[2]]
     context = None if args.serial_control else MPISectorContext(comm)
     memory = []
     # As in acceleration.cli, this clock begins after imports, input parsing
@@ -1036,6 +1058,9 @@ def _build_parser():
                        help='read and write the symmetry cache in DIRECTORY; it pays only for repeated calculations of '
                             'the same structure and grid, and every rank then loads or builds all sectors')
     cache.add_argument('--no-symmetry-cache', action='store_true', help='use no symmetry cache (the default)')
+    parser.add_argument('--mlff', nargs='?', const='', default=None, metavar='MODEL',
+                        help='relax the input structure with a machine-learned force field first '
+                             '(Initial_Structure: mlff), on the root rank; MODEL as MLFF_Model')
     parser.add_argument('--quiet', action='store_true')
     return parser
 

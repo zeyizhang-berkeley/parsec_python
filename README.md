@@ -714,6 +714,11 @@ from the previous wavefunctions. `Skip_Force: false` adds the forces to a
 single point. See
 [Forces, relaxation and molecular dynamics](src/parsec_python/FORCES_AND_RELAXATION.md).
 
+`Initial_Structure: mlff` (or `--mlff MODEL` on the command line) first
+relaxes the input structure with a machine-learned force field, UMA, MACE or
+any ASE calculator, and starts the DFT calculation from it; see
+[Initial structures from machine-learned force fields](src/parsec_python/MLFF/README.md).
+
 ## Acceleration policy
 
 Acceleration changes execution, not the physical model:

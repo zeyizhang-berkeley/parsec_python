@@ -42,6 +42,7 @@ Units are PARSEC's throughout: bohr, Rydberg, Ry/bohr.
 | `Move_Flag` (per `Atom_Type`) | 0 | 0 moves every atom of the type, `n > 0` its first `n` atoms, a negative value reads a fourth column of `Atom_Coord` (1 moves, 0 fixes). |
 | `Molecular_Dynamics` | `false` | Switches molecular dynamics on; it excludes `Minimization`. |
 | `Cooling_Method`, `Tinit`, `T_Final`, `T_Step`, `Time_Step`, `Friction_Coefficient`, `Step_num`, `Restart_mode`, `rng_seed`, `test_rng` | PARSEC's | Controls of `moldyn.f90`; see "Molecular dynamics" below. |
+| `Initial_Structure` | `input` | Not a PARSEC keyword. `mlff` relaxes the input structure with a machine-learned force field (UMA, MACE, `MLFF_Model`) before the first SCF loop; see [MLFF/README.md](MLFF/README.md). |
 | `Potential_Extrapolation` | `none` | Not a PARSEC keyword. How the SCF loop of a moved structure starts: `none` as PARSEC, `atomic` with the superposed atomic densities moved along with the atoms, `second_order` with the density change also extrapolated along the trajectory; see "Start of the next SCF loop" below. |
 
 ### Command lines
