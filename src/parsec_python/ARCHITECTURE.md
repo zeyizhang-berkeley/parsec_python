@@ -47,6 +47,68 @@ reference_main.py
   -> cli.py -> driver.py -> SCF
 ```
 
+K-point and band-path parallelism follows the same rule. The readable
+definition is serial: `SCF/kpoint_solver.py` (`SerialKPointSolver`, `map_tasks`)
+is all the k-point, spin-orbit, non-collinear and band-path drivers import.
+`acceleration/SCF/kpoint_parallel.py` and `acceleration/Parallel/` (worker
+threads, BLAS control, GPU device workers, `acceleration/Hamiltonian/device_bloch.py`)
+are the performance counterpart; importing `parsec_python.acceleration` installs
+it with `set_parallel_backend`. `acceleration/tests/test_kpoint_parallel.py`
+checks it against the serial definition.
+
+A basis too large for one GPU is split over MPI ranks by blocks of grid rows:
+`acceleration/Parallel/mpi.py` (the communicator and its collectives), `acceleration/Hamiltonian/distributed_bloch.py`
+(row-sliced operators with halo exchange and projector sums) and `acceleration/SCF/kpoint_mpi.py` (the solver that the
+drivers get from `make_kpoint_solver` when `PARSEC_MPI=1`). The eigensolver in `chebff_spinor.py` is the same code
+with its reductions routed through the operator; the drivers stay replicated and unaware of MPI.
+
+Preparing a periodic cell follows the same rule. `V_ion` keeps the direct definitions: the Ewald local
+potential and the projector and atomic-density builders measure the distance of every grid point to every atom
+image. `acceleration/V_ion/periodic_setup.py` supplies a grid-ball query (integer index boxes, identical
+rows and distances) through `V_ion.ionic_potential.set_support_finder`, the local potential as one FFT
+through `V_ion.ewald.set_local_potential_provider`, the superposed atomic densities through
+`V_ion.ionic_potential.set_atomic_density_provider`, and a threaded map of the real-space terms of the Ewald
+ion-ion energy that keeps their order (`V_ion.ewald.set_translation_map`); importing `parsec_python.acceleration`
+installs all four.
+The radial sums reach the end of the radial tables (about 118 bohr), so they visit thousands of images of every
+atom in a small cell: the module sums them in blocks of images (broadcast distances per axis, worker threads,
+`PARSEC_PERIODIC_SETUP_THREADS`) in the order of the definitions.  By default (since 2026-10-30,
+`PARSEC_PERIODIC_SETUP_REACH=physical`) each sum stops where its terms are zero or below round-off, which changes
+the last bits (1e-11 Ry in energies); `PARSEC_PERIODIC_SETUP_REACH=table` reaches the end of the tables, bit for
+bit the definitions (the default before).
+`acceleration/tests/test_periodic_setup.py` checks them against the definitions. The replacements serve the
+orthorhombic grid of `Grid.pbc.build_periodic_grid` only; `GeneralPeriodicGrid` and `ConfinedPeriodicGrid`
+(subclasses with other point positions) keep the definitions.  For the forces, relaxation and dynamics of
+such a cell the accelerated command line installs, for that calculation only, device builders of the local
+potential and of the atomic densities (`acceleration/V_ion/periodic_device.py`, through the same provider hook
+and `V_ion.ionic_potential.set_atomic_density_provider`) and their derivatives as the local terms of
+`Forces.periodic.periodic_local_forces` (`Forces.periodic.set_local_force_provider`,
+`acceleration/Forces/periodic_device.py`); the host builders of `periodic_setup.py` are restored afterwards.
+
+The tetrahedron sums of `Create_DOS` follow the same rule: `Output/dos.py` keeps the definition
+(`spectrum_sums`, written with the operations NumPy and CuPy share) and a provider hook
+(`set_spectrum_provider`); `acceleration/Output/device_dos.py` installs a provider that runs it on the
+GPU and sums the pairs in `bincount`'s order, so the `DOS` file is the same bit for bit
+(`acceleration/tests/test_device_dos.py`).
+
+The fields of a periodic SCF step follow it too. `Hartree.confined.solve_confined_hartree` (wire and slab:
+boundary values of `hartset_wire`/`hartset_slab` and the CG) and `Hartree.pbc.solve_periodic_hartree`
+(`Calc_Hartree_G`, the FD-CG of a cell) take a faster solver of the same equations through
+`set_confined_hartree_solver` / `set_periodic_hartree_solver`, and the spin functionals of a periodic cell
+(`SCF.pbc`, `set_periodic_spin_xc_provider`) a faster evaluator; `acceleration/Hartree/periodic_device.py` and
+`acceleration/V_xc/periodic_xc.py` supply the CUDA ones where the k-point plan puts the eigenproblems on a device
+(`PARSEC_PERIODIC_HARTREE`, `PARSEC_CUPY_XC`), the plain FD-CG of an orthorhombic 3-D cell among them by default
+since 2026-10-30 (`PARSEC_PERIODIC_HARTREE=host` keeps the host CG); the CA and PBE spin functionals of a periodic
+cell stay on the host by default. `acceleration/tests/test_periodic_device_fields.py` checks them against the
+definitions.
+
+Where a performance path cannot carry a feature of the readable drivers it hands the
+combination back by name (`acceleration/tests/test_parity_device_routes.py`): ARPACK and
+DIAGLA run on the host route of a device k-point worker or band path
+(`SCF.kpoint_solver.device_solver_supports`), the MPI solver refuses them, and the
+accelerated CLI refuses under `--mpi` the features that read whole orbitals
+(`acceleration/cli.py::_mpi_unsupported_features`).
+
 The flow is a dependency direction, not permission for lower-level modules to
 import the SCF driver. Physics components must remain independently callable.
 
@@ -57,10 +119,10 @@ import the SCF driver. Physics components must remain independently callable.
 | `Input` | ESDF parsing and validated calculation configuration | grid construction or file output |
 | `Grid` | isolated-domain points, masks, shifts, and index maps | kinetic coefficients |
 | `Laplacian` | finite-difference coefficients and kinetic application | effective potentials |
-| `Pseudopotential` | POTRE and old-format POTR parsing, radial data, interpolation-ready models | placement on a molecular grid |
+| `Pseudopotential` | POTRE, old-format POTR, Martins-Wang POTRW and FHIPP parsing, radial data, Fourier filters, interpolation-ready models | placement on a molecular grid |
 | `V_ion` | local potential, KB projectors, atomic density, ion-ion energy | SCF state |
 | `Hartree` | isolated boundary values and Poisson solution | density mixing |
-| `V_xc` | CA/PZ-LDA and PBE potentials and energy densities, unpolarized and spin-polarized | total-energy assembly |
+| `V_xc` | LDA (CA/PZ, PW92, X-alpha, Wigner, Hedin-Lundqvist), GGA (PBE, PW91) and asymptotically corrected (LB94, Casida-Salahub) potentials and energy densities, unpolarized and spin-polarized | total-energy assembly |
 | `Hamiltonian` | composition and block matrix-vector products | choosing an eigensolver |
 | `Eigensolvers` | PARSEC-selected eigensolver control flow and reusable subspaces | occupations or SCF mixing |
 | `Occupations` | Fermi level, occupations (searched, or fixed by `occup.in`), and density from orbitals | eigensolution |
