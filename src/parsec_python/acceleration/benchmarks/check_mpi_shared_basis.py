@@ -116,8 +116,12 @@ def main() -> int:
             os.environ["PARSEC_MPI_SHARED_EXCHANGE_BYTES"] = str(8 * rows * per_round)
         group = MPIShardGroup(comm, operator, transport=transport)
         layout = group.column_layout(blocks)
-        local = cp.asfortranarray(cp.asarray(_local_columns(layout, rank, matrix)))
+        local = group.allocate_columns(rows, layout)
+        local.set(np.asfortranarray(_local_columns(layout, rank, matrix)))
         values, rotated, _whitened = group.ritz(operator, SharedBasis(group, local, layout), stages=False)
+        if route == 'inplace':
+            check(f'in-place basis uses one allocation [{transport}, round={per_round}]',
+                  group.separate_row_blocks == 0 and rotated.local.data.ptr == local.data.ptr)
         whole = np.zeros((rows, states))
         for column, offset, count in layout.spans(rank):
             whole[:, column : column + count] = cp.asnumpy(rotated.local[:, offset : offset + count])
@@ -134,9 +138,9 @@ def main() -> int:
         os.environ.pop("PARSEC_CUPY_RITZ_CONDITION_HELPER", None)
         check(f"condition number beside the root changes no bit [{transport}]",
               np.array_equal(alone_values, reference_values) and np.array_equal(alone_basis, reference_basis))
-        for per_round in (None, 7):
-            label = f"{transport}, {'one round' if per_round is None else f'{per_round} columns per round'}"
-            values, basis = ritz_pairs("rounds", transport, per_round)
+        for route, per_round in ((r, w) for r in ('rounds', 'inplace') for w in (None, 7)):
+            label = f"{route}, {transport}, {'one round' if per_round is None else f'{per_round} columns per round'}"
+            values, basis = ritz_pairs(route, transport, per_round)
             scale = float(np.max(np.abs(reference_values)))
             value_error = float(np.max(np.abs(values - reference_values))) / scale
             signs = np.sign(np.sum(basis * reference_basis, axis=0))

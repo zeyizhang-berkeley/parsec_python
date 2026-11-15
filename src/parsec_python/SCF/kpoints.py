@@ -185,6 +185,15 @@ def _refined_levels(solver, potentials: dict, filter_degree: int, tolerance, eig
     }
 
 
+def _restart_levels(solver, potentials, degree, tolerance, eigenvalues, warm_start, iteration):
+    from .restart_refinement import refine_kpoints
+    policy = getattr(warm_start, "restart_refinement", None)
+    carried = getattr(warm_start, "eigensolver_state", None)
+    if iteration == 1 and policy is not None and not carried:
+        return refine_kpoints(solver, potentials, degree, tolerance, eigenvalues, policy)
+    return eigenvalues
+
+
 def run_scf_kpoints(
     system: PeriodicPreparedSinglePointSystem,
     k_points: np.ndarray,
@@ -502,6 +511,11 @@ def run_scf_kpoints(
                         solve_potentials,
                         filter_degree,
                         diagonalization_tolerance if dynamic_tolerance else None,
+                    )
+                    eigenvalues_by_k = _restart_levels(
+                        solver, solve_potentials, filter_degree,
+                        diagonalization_tolerance if dynamic_tolerance else None,
+                        eigenvalues_by_k, warm_start, iteration,
                     )
             residual_max = solver_residual_max(solver)
 
@@ -1065,6 +1079,11 @@ def run_scf_kpoints_spin_polarized(
                         solve_potentials,
                         filter_degree,
                         diagonalization_tolerance if dynamic_tolerance else None,
+                    )
+                    by_task = _restart_levels(
+                        solver, solve_potentials, filter_degree,
+                        diagonalization_tolerance if dynamic_tolerance else None,
+                        by_task, warm_start, iteration,
                     )
             residual_max = solver_residual_max(solver)
             eigenvalues_by_spin_k = [by_task[:n_kpoints], by_task[n_kpoints:]]

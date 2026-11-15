@@ -109,7 +109,8 @@ def _numpy_as_device(events):
     stream = SimpleNamespace(synchronize=lambda: events.append('synchronize'))
     cp = SimpleNamespace(
         tril=np.tril, asfortranarray=np.asfortranarray, asnumpy=np.asarray, isfinite=np.isfinite, abs=np.abs, eye=np.eye,
-        float64=np.float64, cuda=SimpleNamespace(get_current_stream=lambda: stream),
+        float64=np.float64, arange=np.arange, maximum=np.maximum,
+        cuda=SimpleNamespace(get_current_stream=lambda: stream),
         linalg=SimpleNamespace(cholesky=named('cholesky', np.linalg.cholesky), eigh=named('eigh', np.linalg.eigh),
                                eigvalsh=named('eigvalsh', np.linalg.eigvalsh)))
     cupyx = ModuleType('cupyx')
@@ -266,6 +267,17 @@ class DenseBackendSwitchTests(unittest.TestCase):
 
 
 class ConditionBesideTheSolveTests(unittest.TestCase):
+    def test_consuming_disposable_grams_preserves_every_ritz_coefficient(self):
+        overlap, projection = _gram_pair(31, 512)
+        with patch.dict(os.environ, _DEVICE), _numpy_as_device([]):
+            expected = ritz.solve_whitened_ritz_on_device(overlap, projection)
+            self.assertTrue(np.isnan(projection[0, -1]))
+            actual = ritz.solve_whitened_ritz_on_device(overlap, projection, overwrite_grams=True)
+        for left, right in zip(expected, actual):
+            np.testing.assert_array_equal(left, right)
+        np.testing.assert_array_equal(overlap, overlap.T)
+        np.testing.assert_array_equal(projection, projection.T)
+
     """The order of the device solve whose condition number is estimated elsewhere, followed on the host."""
 
     def test_the_estimate_starts_before_the_factorization_and_is_judged_after_the_eigensolve(self):

@@ -52,8 +52,8 @@
 #   --gpus-per-node   GPUs each rank drives (default 4)
 #   --cpus-per-rank   CPUs of each rank as srun -c counts them (default 32,
 #                which is 16 cores with two hardware threads each)
-#   --rank-per-gpu    G ranks per node, one GPU each, for a run without
-#                symmetry (molecular dynamics, a periodic cell) on several nodes. Their
+#   --rank-per-gpu    G ranks per node, one GPU each. Extra ranks share each
+#                symmetry sector in a separate communicator, which may span nodes. Their
 #                exchanges pass GPU arrays to MPI: Cray MPICH needs mpi4py
 #                built with craype-accel-nvidia80 loaded (it links
 #                libmpi_gtl_cuda); PARSEC_MPI_SHARED_TRANSPORT=host stages

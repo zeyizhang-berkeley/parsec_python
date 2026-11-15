@@ -37,8 +37,7 @@ class SharedSectorAssignmentTests(unittest.TestCase):
         for rank in range(4):
             self.assertEqual(sector_device_groups(1, 4, rank, (0,), shared=True), {0: (0,)})
             self.assertEqual(sector_device_groups(1, 4, rank, (2, 3), shared=True), {0: (2,)})
-        with self.assertRaisesRegex(ValueError, "only the single sector"):
-            sector_device_groups(4, 4, 0, (0,), shared=True)
+        self.assertEqual(sector_device_groups(4, 8, 3, (0,), shared=True), {1: (0,)})
         # Without the switch the former rule still refuses more ranks than sectors.
         with self.assertRaises(ValueError):
             sector_device_groups(1, 4, 0, (0,))
@@ -60,20 +59,119 @@ class SharedSectorAssignmentTests(unittest.TestCase):
                     self.assertEqual(owned, (0,))
                     self.assertEqual(groups, {0: (0,)})
 
-    def test_more_ranks_than_several_sectors_still_fails(self):
-        world = _World(3)
+    def test_more_ranks_share_multiple_sectors_in_disjoint_groups(self):
+        from parsec_python.acceleration.tests.thread_mpi import run_ranks
+        from parsec_python.acceleration.experimental.mpi_scf import sector_rank_groups
 
-        def configure(rank):
-            context = MPISectorContext(_Comm(world, rank))
-            with self.assertRaises(MPISCFError):
-                context.configure(2, (0,))
+        for size, sectors in ((3, 2), (8, 4), (11, 4), (64, 4)):
+            expected = sector_rank_groups(sectors, size)
+            def configure(ctx):
+                context = MPISectorContext(ctx.comm)
+                context.configure(sectors, (0,))
+                self.assertTrue(context.shared)
+                self.assertEqual(len(context.owned_sectors), 1)
+                sector = context.owned_sectors[0]
+                self.assertEqual(tuple(context.sector_comm.allgather(ctx.rank)), expected[sector])
+                self.assertEqual(context.sector_owners, tuple(group[0] for group in expected))
+                return sector
+            result = run_ranks(size, configure)
+            self.assertEqual(sorted(result), sorted(s for s, group in enumerate(expected) for _ in group))
 
-        with ThreadPoolExecutor(max_workers=3) as pool:
-            for future in [pool.submit(configure, r) for r in range(3)]:
-                future.result(timeout=25)
+    def test_rank_groups_balance_all_ranks_without_empty_sectors(self):
+        from parsec_python.acceleration.experimental.mpi_scf import sector_rank_groups
+        for sectors in (1, 2, 4, 8):
+            for size in (1, 3, 8, 17, 64):
+                groups = sector_rank_groups(sectors, size)
+                self.assertEqual(len(groups), sectors)
+                self.assertTrue(all(groups))
+                if size >= sectors:
+                    self.assertEqual([r for group in groups for r in group], list(range(size)))
+                    self.assertLessEqual(max(map(len, groups)) - min(map(len, groups)), 1)
+                else:
+                    self.assertEqual(groups, tuple((s % size,) for s in range(sectors)))
+
+    def test_sector_metadata_is_merged_once_and_local_states_stay_private(self):
+        from dataclasses import dataclass
+        import numpy as np
+        from parsec_python.acceleration.tests.thread_mpi import run_ranks
+
+        @dataclass
+        class Result:
+            eigenvalues: object
+            vectors: object
+            state: object
+            handover: object = None
+
+        def run(ctx):
+            context = MPISectorContext(ctx.comm)
+            context.configure(4, (0,))
+            sector = context.owned_sectors[0]
+            local = Result(np.array([sector + .5]), object(), object())
+            context._apply = lambda *args: {sector: local}
+            merged = context._execute_counted(None, 'solve', {'representations': (0, 1, 2, 3)}, None)
+            if ctx.rank == 0:
+                self.assertEqual(set(merged), {0, 1, 2, 3})
+                self.assertIs(merged[0], local)
+                for index in (1, 2, 3):
+                    np.testing.assert_array_equal(merged[index].eigenvalues, [index + .5])
+                    self.assertIsNone(merged[index].vectors)
+                    self.assertIsNone(merged[index].state)
+            else:
+                self.assertIsNone(merged)
+        run_ranks(11, run)
 
 
 class ExchangeRoundTests(unittest.TestCase):
+    def test_inplace_exchanges_preserve_unread_columns_and_roundtrip_exactly(self):
+        import numpy as np
+
+        for rows, widths in ((17, (6, 5, 2)), (3, (0, 1, 0, 5)), (100, (9, 9, 9)), (2, (2, 0, 0))):
+            edges = np.concatenate(([0], np.cumsum(widths)))
+            layout = ColumnLayout(tuple(zip(edges[:-1], edges[1:])))
+            original = np.arange(rows * sum(widths), dtype=float).reshape(rows, -1)
+            for width in (1, 2, 7, 100):
+                plans = [_RowExchange(SimpleNamespace(size=len(widths), rank=r), layout, rows, width)
+                         for r in range(len(widths))]
+                order, starts = plans[0].round_order()
+                columns, row_blocks, capacities = [], [], []
+                for r, plan in enumerate(plans):
+                    offset, capacity = plan.inplace_storage()
+                    backing = np.empty(capacity)
+                    col = backing[:rows * widths[r]].reshape((rows, widths[r]), order='F')
+                    col[:] = original[:, edges[r]:edges[r+1]]
+                    row = backing[offset:offset + plan.own * layout.columns].reshape((plan.own, layout.columns), order='F')
+                    columns.append(col); row_blocks.append(row); capacities.append(capacity)
+                for step in reversed(range(plans[0].rounds)):
+                    sends = [p.pack_columns(np, col, step) for p, col in zip(plans, columns)]
+                    for r, plan in enumerate(plans):
+                        receive = row_blocks[r][:, starts[step]:starts[step+1]]
+                        cursor = 0
+                        for send, counts, _recv, _counts in sends:
+                            n = counts[r] // max(1, plan.own) if plan.own else 0
+                            if plan.own:
+                                start = sum(counts[:r])
+                                receive[:, cursor:cursor+n] = send[start:start+counts[r]].reshape((plan.own,n),order='F')
+                            cursor += n
+                        unread = min(widths[r], step * width)
+                        np.testing.assert_array_equal(columns[r][:,:unread], original[:,edges[r]:edges[r]+unread])
+                for r, plan in enumerate(plans):
+                    np.testing.assert_array_equal(row_blocks[r], original[plan.edges[r]:plan.edges[r+1]][:,order])
+                for step in range(plans[0].rounds):
+                    # All ranks finish their send before any rank overwrites the shared storage.
+                    sends = [row[:,starts[step]:starts[step+1]].ravel(order='F').copy() for row in row_blocks]
+                    for r, plan in enumerate(plans):
+                        counts = plan.counts(step)
+                        pieces = []
+                        for q, other in enumerate(plans):
+                            start = other.own * sum(counts[:r])
+                            pieces.append(sends[q][start:start+other.own*counts[r]])
+                        plan.unpack_columns(np.concatenate(pieces), step, columns[r])
+                for r, col in enumerate(columns):
+                    np.testing.assert_array_equal(col, original[:,edges[r]:edges[r+1]])
+                    for count in range(layout.columns+1):
+                        trimmed = _RowExchange(SimpleNamespace(size=len(widths),rank=r),layout.leading(count),rows,width)
+                        self.assertLessEqual(trimmed.inplace_storage()[1], capacities[r])
+
     def test_row_blocks_cover_the_rows_once(self):
         for rows, size in ((10, 4), (10007, 16), (3, 4)):
             edges = row_edges(rows, size)
@@ -244,7 +342,8 @@ class SharedRitzRoundsTests(unittest.TestCase):
         self.hamiltonian = sp.diags((off, diagonal, off), (-1, 0, 1), format="csr")
         self.matrix = generator.standard_normal((self.rows, self.states))
 
-    def run_ranks(self, route, matrix, *, per_round=None, helper=None, failing_rank=None, world=None):
+    def run_ranks(self, route, matrix, *, per_round=None, helper=None, failing_rank=None, world=None,
+                  orthonormal=False, recover=False):
         import cupy as cp
         import cupyx.scipy.sparse as csp
         import numpy as np
@@ -273,11 +372,24 @@ class SharedRitzRoundsTests(unittest.TestCase):
                 group = MPIShardGroup(_ThreadComm(world, rank), operator, transport="host")
                 layout = group.column_layout(blocks)
                 local = np.concatenate([matrix[:, c : c + n] for c, _o, n in layout.spans(rank)], axis=1)
-                basis = SharedBasis(group, cp.asfortranarray(cp.asarray(local)), layout)
+                device_columns = group.allocate_columns(self.rows, layout)
+                device_columns.set(np.asfortranarray(local))
+                basis = SharedBasis(group, device_columns, layout)
+                retry_basis = None
                 try:
-                    values, rotated, _whitened = group.ritz(operator, basis, stages=False)
+                    if orthonormal:
+                        values, rotated, _whitened = group.orthonormal_ritz(operator, basis, None)
+                    else:
+                        values, rotated, _whitened = group.ritz(operator, basis, stages=False)
                 except GeneralizedRitzStabilityError as error:
-                    return "refused", local, cp.asnumpy(error.filtered.local), layout
+                    if not recover:
+                        return "refused", local, cp.asnumpy(error.filtered.local), layout
+                    retry_basis = error.filtered
+                if retry_basis is not None:
+                    values, rotated, _whitened = group.orthonormal_ritz(operator, retry_basis, None)
+                if route == 'inplace':
+                    self.assertEqual(group.separate_row_blocks, 0)
+                    self.assertEqual(rotated.local.data.ptr, device_columns.data.ptr)
                 return np.asarray(values), local, cp.asnumpy(rotated.local), layout
 
         environment = {"PARSEC_MPI_SHARED_RITZ": route}
@@ -311,9 +423,9 @@ class SharedRitzRoundsTests(unittest.TestCase):
         expected = eigh(projection, overlap, eigvals_only=True)
         reference = self.run_ranks("rows", self.matrix)
         reference_basis = self.whole(reference)
-        for per_round in (None, 5, 1):
-            with self.subTest(per_round=per_round):
-                results = self.run_ranks("rounds", self.matrix, per_round=per_round)
+        for route, per_round in ((route, width) for route in ('rounds', 'inplace') for width in (None, 5, 1)):
+            with self.subTest(route=route, per_round=per_round):
+                results = self.run_ranks(route, self.matrix, per_round=per_round)
                 for values, *_ in results:
                     np.testing.assert_allclose(values, reference[0][0], rtol=0.0, atol=1.0e-11 * np.abs(expected).max())
                     np.testing.assert_allclose(values, expected, rtol=0.0, atol=1.0e-10 * np.abs(expected).max())
@@ -326,7 +438,7 @@ class SharedRitzRoundsTests(unittest.TestCase):
     def test_the_condition_number_on_the_next_rank_changes_no_bit(self):
         import numpy as np
 
-        for route in ("rows", "rounds"):
+        for route in ("rows", "rounds", "inplace"):
             with self.subTest(route=route):
                 beside = self.run_ranks(route, self.matrix, per_round=5)
                 alone = self.run_ranks(route, self.matrix, per_round=5, helper="off")
@@ -350,7 +462,7 @@ class SharedRitzRoundsTests(unittest.TestCase):
 
         mpi_shared_basis.set_failure_handler(handler)
         try:
-            for route in ("rows", "rounds"):
+            for route in ("rows", "rounds", "inplace"):
                 with self.subTest(route=route):
                     calls.clear()
                     world.barrier.reset()
@@ -372,7 +484,7 @@ class SharedRitzRoundsTests(unittest.TestCase):
         # A refusal that every rank raises together is no failure of some ranks.
         mpi_shared_basis.set_failure_handler(lambda group, error: calls.append(error))
         try:
-            for route in ("rows", "rounds"):
+            for route in ("rows", "rounds", "inplace"):
                 for helper in ("auto", "off"):
                     with self.subTest(route=route, helper=helper):
                         for values, local, filtered, _layout in self.run_ranks(route, matrix, per_round=5, helper=helper):
@@ -381,6 +493,28 @@ class SharedRitzRoundsTests(unittest.TestCase):
         finally:
             mpi_shared_basis.set_failure_handler(None)
         self.assertEqual(calls, [])
+
+    def test_shared_storage_qr_matches_the_original_fallback_on_both_backends(self):
+        import numpy as np
+
+        matrix = self.matrix.copy()
+        matrix[:, 40] = matrix[:, 3] + 1e-6 * matrix[:, 40]
+        for backend in ("device", "host"):
+            with self.subTest(backend=backend), patch.dict(os.environ, PARSEC_CUPY_RITZ_DENSE_BACKEND=backend):
+                with patch.dict(os.environ, PARSEC_MPI_SHARED_QR="rows"):
+                    reference = self.run_ranks("inplace", matrix, per_round=5, orthonormal=True)
+                with patch.dict(os.environ, PARSEC_MPI_SHARED_QR="inplace"):
+                    # First reject the ill-conditioned generalized solve, then
+                    # use the intact restored columns for the robust fallback.
+                    actual = self.run_ranks("inplace", matrix, per_round=5, recover=True)
+                np.testing.assert_allclose(actual[0][0], reference[0][0], rtol=0, atol=1e-10)
+                basis, old = self.whole(actual), self.whole(reference)
+                np.testing.assert_allclose(basis.T @ basis, np.eye(self.states), rtol=0, atol=5e-10)
+                self.assertLess(np.linalg.norm(old - basis @ (basis.T @ old)), 1e-7)
+                # A Galerkin Ritz residual, not an assumption that this trial
+                # subspace contains exact eigenvectors of the full operator.
+                residual = self.hamiltonian @ basis - basis * actual[0][0]
+                self.assertLess(np.max(np.abs(basis.T @ residual)), 1e-9)
 
 
 class ShiftedCholeskyTests(unittest.TestCase):

@@ -1,7 +1,8 @@
 """Run a complete production SCF with persistent MPI symmetry-sector workers.
 
-Use one MPI rank per node; --devices names CuPy indices within that rank's
-Slurm-provided CUDA visibility. Rank zero alone owns SCF, Hartree and output.
+Use one MPI rank per node for node-local sector groups, or one rank per GPU
+for sector groups that can span nodes. --devices names CuPy indices within
+that rank's CUDA visibility. Rank zero alone owns SCF, Hartree and output.
 The --serial-control path uses the unchanged production solver on one rank; it
 keeps the solver's former routes where the launcher selects none.
 A rank creates its CUDA contexts on a thread beside its static preparation;
@@ -825,8 +826,8 @@ def execute(args, cp, comm, MPI, initialization_seconds, initial_affinity=None):
     if args.serial_control and size != 1:
         raise ValueError('--serial-control requires exactly one MPI rank')
     hosts = comm.allgather(socket.gethostname())
-    # One rank per node divides the symmetry sectors among the nodes; several ranks per node, one GPU each,
-    # share the basis of the single sector of a run without symmetry (Eigensolvers/mpi_shared_basis.py).
+    # Several ranks per node use one GPU each. Their disjoint sector groups
+    # share bases through MPI, including groups that span node boundaries.
     per_node = {host: hosts.count(host) for host in hosts}
     shared_ranks = size > 1 and max(per_node.values()) > 1
     if shared_ranks and len(set(per_node.values())) != 1:
@@ -901,10 +902,6 @@ def execute(args, cp, comm, MPI, initialization_seconds, initial_affinity=None):
                          + (f' ({symmetry_note})' if symmetry_note else '')
                          + ', so its sectors cannot be divided among ranks: run it with one rank (one node), '
                          'with one rank per GPU, or on one node with --serial-control')
-    if shared_ranks and symmetry != 'off' and not hybrid:
-        # Several ranks per node share one sector; the sectors of a symmetric run go to one rank per node.
-        raise ValueError('several ranks per node share the basis of a run without symmetry; this run uses its '
-                         'point group: launch it with one rank per node')
     # As in acceleration.cli: none unless --symmetry-cache names its directory.
     cache = _symmetry_cache_directory(args)
     output = args.output_dir.resolve()
@@ -1239,6 +1236,7 @@ def execute(args, cp, comm, MPI, initialization_seconds, initial_affinity=None):
             shared_state.append(dict(sector=sector, ranks=group.size, device=group.device,
                                      transport=group.transport, ritz_passes=group.passes,
                                      ritz_route=shared_ritz_route(group.ritz_route),
+                                     separate_row_blocks=group.separate_row_blocks,
                                      seconds=dict(group.seconds), exchanged_bytes=group.exchanged_bytes))
     # What became of the host thread that made the estimates of the radius search beside the SCF of the root
     # (PARSEC_DOMAIN_REPORT_THREAD): a dict, and none for a rank or a run without that thread.

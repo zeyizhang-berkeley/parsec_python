@@ -762,7 +762,7 @@ class CuPySymmetrySCFEigensolver:
 
                         attach_shared_group(
                             operator,
-                            mpi_context.comm,
+                            mpi_context.sector_comm,
                             ritz_route=getattr(mpi_context, "shared_ritz_route", "rows"),
                         )
                 if neighbors_are_shared and device_id not in shared_device_neighbors:
@@ -1642,7 +1642,8 @@ class CuPySymmetrySCFEigensolver:
                 from .mpi_shared_basis import exchange_bytes, shared_ritz_route
 
                 share = -(-int(count) // group.size)
-                if shared_ritz_route(group.ritz_route) == "rounds":
+                route = shared_ritz_route(group.ritz_route)
+                if route in {"rounds", "inplace"}:
                     # The Ritz step in rounds (a periodic cell): this rank's
                     # columns and the row block of the basis, the three
                     # buffers of a round (H X, send, receive) and the summed
@@ -1653,7 +1654,8 @@ class CuPySymmetrySCFEigensolver:
                     # the pool they held at most 51.6 GiB of arrays (root
                     # 61.2), where this counts 55.0 GB.
                     states[owner] += (
-                        2 * rows * share * np.dtype(np.float64).itemsize
+                        (1 if route == "inplace" else 2) * rows * share * np.dtype(np.float64).itemsize
+                        + (rows * group.size * 8 if route == "inplace" else 0)
                         + 3 * exchange_bytes()
                         + 2 * int(count) ** 2 * np.dtype(np.float64).itemsize
                     )

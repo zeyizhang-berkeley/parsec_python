@@ -7,6 +7,8 @@ import os
 from typing import Any
 
 import numpy as np
+
+from parsec_python import diagnostics as debug
 from scipy.linalg import solve_triangular
 
 from ..backends.cupy import device_stage, require_cupy
@@ -1014,6 +1016,8 @@ def _judge_condition(estimate, *arguments) -> float:
         # frame that still named ``estimate`` would close a cycle, which
         # keeps the arrays of both threads until the collector runs.
         del estimate
+    debug.emit("ritz_condition", leader=True, condition=float(condition),
+               limit=float(_generalized_condition_limit()), finite=bool(np.isfinite(condition)))
     if not np.isfinite(condition) or condition > _generalized_condition_limit():
         raise GeneralizedRitzStabilityError(
             f"filtered overlap condition number {condition:.3e} is unsafe"
@@ -1025,6 +1029,8 @@ def solve_whitened_ritz_on_device(
     raw_overlap: Any,
     raw_projection: Any,
     condition: Any | None = None,
+    *,
+    overwrite_grams: bool = False,
 ) -> tuple[Any, Any, Any]:
     """Solve the small generalized Ritz problem on the current device.
 
@@ -1037,6 +1043,10 @@ def solve_whitened_ritz_on_device(
     solve.  Returns the Ritz values, the Fortran-ordered coefficients and
     the whitened matrix as device arrays.  They agree with the host solve to
     round-off, not bit for bit.
+
+    ``overwrite_grams`` lets an owner consume its disposable Gram buffers:
+    their upper triangles become the mirrored lower triangles. The default
+    preserves both inputs; no caller may opt in with live basis/state storage.
 
     The condition number is only compared with its limit, and estimating it
     takes about as long as everything else here.  A caller with an idle
@@ -1057,11 +1067,9 @@ def solve_whitened_ritz_on_device(
     from cupyx.scipy.linalg import solve_triangular as device_solve_triangular
 
     cp, _ = require_cupy()
-    lower = cp.tril(raw_overlap)
-    overlap = lower + cp.tril(lower, -1).T
-    lower = cp.tril(raw_projection)
-    projected = lower + cp.tril(lower, -1).T
-    del lower
+    from .dense_memory import mirror_lower
+    overlap = mirror_lower(raw_overlap, cp, copy=not overwrite_grams)
+    projected = mirror_lower(raw_projection, cp, copy=not overwrite_grams)
     # What waits for a number that is estimated elsewhere.  It is taken out
     # before it is called: an error of the estimate holds this frame in its
     # traceback, as it does that of :func:`_judge_condition`.
@@ -1088,6 +1096,9 @@ def solve_whitened_ritz_on_device(
                 left_projected.T,
                 lower=True,
             ).T
+            # These full m x m arrays are dead before cuSOLVER allocates its
+            # eigensolver workspace (about four more matrices for real syevd).
+            del projected, left_projected
             # The triangular solves report nothing.  A non-finite whitened
             # matrix is rejected here, before cuSOLVER, as the host
             # eigensolver or the audit rejects it.
@@ -1100,6 +1111,7 @@ def solve_whitened_ritz_on_device(
                 whitened_vectors,
                 lower=False,
             )
+            del cholesky, whitened_vectors
     except np.linalg.LinAlgError as error:
         if waiting:
             _judge_condition(waiting.pop())
@@ -1116,11 +1128,12 @@ def solve_whitened_ritz_on_device(
         _judge_condition(waiting.pop())
 
     coefficient_overlap = coefficients.T @ overlap @ coefficients
+    # The audit is unchanged; subtract I on the diagonal and reduce the two
+    # extremes instead of materializing identity, difference and abs arrays.
+    diagonal = cp.arange(coefficient_overlap.shape[0])
+    coefficient_overlap[diagonal, diagonal] -= 1.0
     audit_error = float(
-        cp.abs(
-            coefficient_overlap
-            - cp.eye(coefficient_overlap.shape[0], dtype=cp.float64)
-        ).max().item()
+        cp.maximum(coefficient_overlap.max(), -coefficient_overlap.min()).item()
     )
     if not np.isfinite(audit_error) or audit_error > 5.0e-10:
         raise GeneralizedRitzStabilityError(

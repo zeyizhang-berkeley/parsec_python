@@ -26,6 +26,9 @@ import warnings
 import numpy as np
 import scipy.sparse as sp
 
+from .. import diagnostics as debug
+from .restart_refinement import RestartRefinementSettings, guarded_solver
+
 from ..Eigensolvers import (
     DYNAMIC_TOLERANCE_START,
     ArpackSettings,
@@ -506,6 +509,8 @@ class SCFWarmStart:
     mixer: object | None = None
     relative_criterion: float | None = None
     level_tolerance: float | None = None
+    # Experimental checkpoint reconstruction; None preserves the fixed-pass policy.
+    restart_refinement: RestartRefinementSettings | None = None
     # A meta-GGA: the mixed vtau of the loop before (a pair for spin), full grid; None starts with PBE.
     kinetic_potential: object | None = None
     # ... and in the orbital form of the density gradient the mixed W of each channel (the loop's layout).
@@ -2238,6 +2243,9 @@ def run_scf(
     solve_current_eigenproblem = (
         solve_eigval if eigenproblem_solver is None else eigenproblem_solver
     )
+    solve_current_eigenproblem = guarded_solver(
+        solve_current_eigenproblem, getattr(warm_start, "restart_refinement", None)
+    )
     build_orbital_density = (
         density_from_orbitals
         if orbital_density_builder is None
@@ -2306,6 +2314,13 @@ def run_scf(
     # Dynamic_Diag_Tol: 0.1 for the first iteration of every SCF loop
     # (parsec.F90:1106-1111), then the SRE rule after each iteration.
     diagonalization_tolerance = first_diagonalization_tolerance(eigensolver_settings)
+    debug.emit("scf_start", electrons=float(system.electron_count), states=number_of_states,
+               method=eigensolver_settings.method, first_filter_cycles=eigensolver_settings.first_filter_cycles,
+               diagonalization_tolerance=diagonalization_tolerance,
+               convergence_criterion=settings.convergence_criterion,
+               warm_start=warm_start is not None,
+               eigensolver_state_restored=warm_start is not None and warm_start.eigensolver_state is not None,
+               mixer_restored=warm_start is not None and getattr(warm_start, "mixer", None) is not None)
     # PARSEC fixes CHEBFF's cycle count and later SUBSPACE pass count.  CHEBDAV
     # instead uses Diag_Tolerance for residual-prefix locking during this first
     # solve.  Neither selection is silently replaced by another eigensolver.
@@ -2428,6 +2443,14 @@ def run_scf(
     # (``refining``) on the same V_in, its eigenpairs to that tolerance.
     level_tolerance = None if warm_start is None else getattr(warm_start, "level_tolerance", None)
     refining = False
+
+    def debug_field(values):
+        if scalar_field_adapter is None:
+            return debug.field_summary(values, volume_element=system.grid.volume_element)
+        return debug.field_summary(
+            scalar_field_adapter.wedge_values(values), weights=scalar_field_adapter.weights,
+            volume_element=system.grid.volume_element)
+
     for iteration in range(1, settings.max_iterations + 1 + int(level_tolerance is not None)):
         if iteration > settings.max_iterations and not refining:
             break
@@ -2437,6 +2460,10 @@ def run_scf(
         # The eigenproblem in this iteration uses V_in exactly as it existed
         # before constructing rho_new; save it for energy bookkeeping/output.
         last_input_potential = input_potential.copy()
+        if debug.wants(2):
+            debug.emit("scf_input", minimum=2, iteration=iteration,
+                       potential=debug_field(input_potential),
+                       eigensolver_state_present=eigval_state is not None)
         # Rebuild the small policy object so a degree reduced by the SCF logic
         # below is used by the next SUBSPACE call.  solve_eigval dispatches on
         # eigval_state, not on the nonlinear iteration number itself.
@@ -2798,6 +2825,20 @@ def run_scf(
             ),
         )
         history.append(diagnostic)
+        debug.emit("scf_iteration", iteration=iteration,
+                   weighted_residual=metrics.weighted, plain_residual=metrics.plain,
+                   energy_ry=float(energies.total), electron_target=float(system.electron_count),
+                   occupation_electrons=2.0 * float(np.sum(occupations)),
+                   density_minimum=density_minimum, density_maximum=density_maximum,
+                   eigenvalue_min=float(eigenvalues[0]), eigenvalue_max=float(eigenvalues[-1]),
+                   eigen_residual_max=eigen_residual_max,
+                   hartree_residual=float(hartree.residual_norm),
+                   mixer_resets=getattr(mixer, "safeguard_resets", None),
+                   mixer_clips=getattr(mixer, "safeguard_clips", None),
+                   converged=bool(iteration_converged), seconds=iteration_seconds)
+        if debug.wants(2):
+            debug.emit("scf_fields", minimum=2, iteration=iteration,
+                       density=debug_field(density), next_potential=debug_field(mixed_potential))
         if callback is not None:
             callback(diagnostic)
         if iteration_state_callback is not None:

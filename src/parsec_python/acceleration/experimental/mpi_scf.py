@@ -2,11 +2,11 @@
 
 Only rank zero enters the production SCF loop. Other ranks call worker_loop.
 The existing first/subsequent eigensolver policies remain on each sector's
-owner. MPI carries scalar potentials/densities and small Ritz metadata, never
-orbital matrices. This is experimental full-SCF orchestration, not distributed
-Ritz across ranks: a sector stays on the GPUs of its own rank. Several of them
-share its basis by default (Eigensolvers/distributed_state.py); otherwise the
-optional node-local filtering gathers onto its owner GPU.
+owner. The world communicator carries fields and Ritz metadata. When there
+are more ranks than sectors, disjoint sector communicators share each basis
+and its Ritz work across nodes, with one GPU per rank. Otherwise sectors keep
+their existing cyclic assignment and node-local GPU groups. Hybrid exchange
+retains its separate ownership rules.
 """
 from dataclasses import replace
 from time import perf_counter
@@ -19,11 +19,30 @@ class MPISCFError(RuntimeError):
     """A worker failed; the outer launcher must abort the MPI job."""
 
 
+def sector_rank_groups(representations, size):
+    """Balanced, contiguous rank groups, independent of node/GPU counts.
+
+    With fewer ranks than sectors, sectors cycle over singleton groups.
+    Extra ranks subdivide the work *within* sectors, including uneven counts.
+    Contiguous groups favor intra-node communication but can span any nodes.
+    """
+    representations, size = int(representations), int(size)
+    if representations < 1 or size < 1:
+        raise ValueError('MPI ranks and representations must be positive')
+    if size <= representations:
+        return tuple((sector % size,) for sector in range(representations))
+    base, extra = divmod(size, representations)
+    edges = [0]
+    for sector in range(representations):
+        edges.append(edges[-1] + base + (sector < extra))
+    return tuple(tuple(range(edges[s], edges[s + 1])) for s in range(representations))
+
+
 def sector_device_groups(representations, size, rank, devices, shared=False, exchange=False):
     """Assign sectors cyclically to ranks and disjoint GPU groups when possible.
 
-    With ``shared`` the one sector of a run without symmetry belongs to every
-    rank, each of which holds a share of its basis on its first device
+    With ``shared`` each sector belongs to a disjoint rank group,
+    each rank holding a share of its basis on its first device
     (:mod:`..Eigensolvers.mpi_shared_basis`).  With ``exchange`` (a hybrid
     functional, ``SCF/hybrid_mpi.py``) every sector basis lies on one device
     of its rank, which the exchange operator needs, and a rank may own no
@@ -39,9 +58,10 @@ def sector_device_groups(representations, size, rank, devices, shared=False, exc
         owned = tuple(range(rank, representations, size))
         return {sector: (devices[index % len(devices)],) for index, sector in enumerate(owned)}
     if shared:
-        if representations != 1 or not 0 <= rank < size:
-            raise ValueError('only the single sector of a run without symmetry is shared by the ranks')
-        return {0: (devices[0],)}
+        if not 0 <= rank < size or size < representations:
+            raise ValueError('shared sectors require at least one rank per sector')
+        return {sector: (devices[0],) for sector, ranks in enumerate(sector_rank_groups(representations, size))
+                if rank in ranks}
     if representations < 1 or not 1 <= size <= representations or not 0 <= rank < size:
         raise ValueError('MPI ranks must be between one and the representation count')
     owned = tuple(range(rank, representations, size))
@@ -82,8 +102,9 @@ class MPISectorContext:
         self.stopped = False
         self.owned_sectors = ()
         self.device_groups = {}
-        # Whether the ranks share the basis of the single sector (configure).
+        # Whether disjoint rank groups share sector bases (configure).
         self.shared = False
+        self.sector_comm = comm
         # The Ritz step of a shared basis where PARSEC_MPI_SHARED_RITZ names none
         # (mpi_shared_basis.shared_ritz_route): the runner asks for rounds for a periodic cell.
         self.shared_ritz_route = "rows"
@@ -100,8 +121,7 @@ class MPISectorContext:
                                     shared=self._shared(representations), exchange=self.exchange)
 
     def _shared(self, representations):
-        # More ranks than the one sector of a run without symmetry: they share its basis (not with a hybrid).
-        return int(representations) == 1 and self.size > 1 and not self.exchange
+        return self.size > int(representations) and not self.exchange
 
     def configure(self, representations, devices):
         shared = self._shared(representations)
@@ -122,6 +142,14 @@ class MPISectorContext:
         self.owned_sectors = tuple(groups)
         self.shared = shared
         self.topology = tuple(record[1] for record in records)
+        self.rank_groups = sector_rank_groups(representations, self.size)
+        self.sector_owners = tuple(group[0] for group in self.rank_groups)
+        if shared and int(representations) > 1:
+            # Every world rank joins exactly one sector communicator. No
+            # eigensolver collective crosses sector boundaries after this.
+            self.sector_comm = self.comm.Split(color=self.owned_sectors[0], key=self.rank)
+        else:
+            self.sector_comm = self.comm
         return groups
 
     def execute(self, solver, command, payload=None, *, density_builder=None, channel=None):
@@ -226,17 +254,21 @@ class MPISectorContext:
                 # The failure that every rank reports is the one to raise.
                 raise failure from released
             raise failure
-        if command == 'solve' and self.shared:
-            # Every rank solved the shared sector together: the Ritz values are those of all of them.
-            return value if self.rank == self.root else None
         if command == 'solve':
+            if self.shared:
+                # All members hold identical Ritz metadata. Only a sector's
+                # leader contributes it to the world; density later sums the
+                # disjoint orbital columns from *every* member exactly once.
+                packed = {sector: result for sector, result in packed.items()
+                          if self.sector_owners[sector] == self.rank}
             records = self.comm.allgather(packed)
             if self.rank != self.root:
                 return None
             merged = {}
             for rank, record in enumerate(records):
                 for sector, result in record.items():
-                    if sector % self.size != rank or sector in merged:
+                    owner = self.sector_owners[sector] if self.shared else sector % self.size
+                    if owner != rank or sector in merged:
                         raise MPISCFError('sector result has duplicate or incorrect ownership')
                     merged[sector] = value[sector] if rank == self.rank else result
             if set(merged) != set(payload['representations']):
@@ -379,4 +411,4 @@ class MPISymmetryDensityBuilder:
         return reducer.field(values) if reducer is not None else values[self.solver.decomposition.reduction.full_to_wedge]
 
 
-__all__ = ['MPISCFError', 'MPISectorContext', 'MPISymmetryDensityBuilder', 'sector_device_groups']
+__all__ = ['MPISCFError', 'MPISectorContext', 'MPISymmetryDensityBuilder', 'sector_device_groups', 'sector_rank_groups']

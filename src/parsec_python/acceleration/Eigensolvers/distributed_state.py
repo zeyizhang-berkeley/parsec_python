@@ -63,6 +63,8 @@ from weakref import ref
 
 import numpy as np
 
+from parsec_python import diagnostics as debug
+
 from parsec_python.Eigensolvers.chebff import ChebFFCycle, ChebFFSettings
 from parsec_python.Eigensolvers.spectral_bounds import bound_request
 from parsec_python.Eigensolvers.subspace import SubspaceSettings, subspace_filter_bounds
@@ -4388,6 +4390,12 @@ def run_distributed_chebff(
     modes = first_solve_modes(handover, settings.filter_cycles)
     handover_cycles: list[dict] = []
 
+    debug_leader = not hasattr(group, "comm") or group.rank == group.owner
+    debug.emit("chebff_start", leader=debug_leader, rows=dimension, states=wanted_states,
+               filter_cycles=settings.filter_cycles, polynomial_degree=settings.polynomial_degree,
+               lower_bound=lower_bound, upper_bound=upper_bound, smallest_ritz=smallest_ritz,
+               residual_acceptance=False, handover=handover)
+
     for cycle_number in range(1, settings.filter_cycles + 1):
         lower_in, upper_in = lower_bound, upper_bound
         asked = modes[cycle_number - 1]
@@ -4409,6 +4417,8 @@ def run_distributed_chebff(
                         values_condition_limit=first_cycle_condition_limit() if asked == "values" else 0.0,
                     )
         except GeneralizedRitzStabilityError as error:
+            debug.emit("ritz_fallback", leader=debug_leader, phase="chebff",
+                       cycle=cycle_number, reason=str(error))
             filtered = error.filtered
         if basis is None:
             # Outside the handler: its traceback would keep the arrays of the
@@ -4431,6 +4441,18 @@ def run_distributed_chebff(
         lower_bound, upper_bound = _updated_filter_bounds(
             lower_bound, upper_bound, smallest_ritz, largest_ritz
         )
+        debug.emit("chebff_cycle", leader=debug_leader, cycle=cycle_number,
+                   lower_bound_in=lower_in, upper_bound_in=upper_in,
+                   lower_bound_out=lower_bound, upper_bound_out=upper_bound,
+                   eigenvalue_min=smallest_ritz, eigenvalue_max=largest_ritz,
+                   qr_fallback=step is not None and step.note == "QR fallback")
+        if debug.enabled(2):
+            if asked == "rotation" or (step is not None and step.mode == "rotation"):
+                from .debug_audit import shared_ritz_audit
+                shared_ritz_audit(group, basis, host_eigenvalues, phase=f"chebff_cycle_{cycle_number}")
+            else:
+                debug.emit("eigenpair_audit_skipped", leader=debug_leader,
+                           phase=f"chebff_cycle_{cycle_number}", reason="basis carries an unrotated handover")
         records.append(
             ChebFFCycle(
                 number=cycle_number,
@@ -4514,6 +4536,11 @@ def run_distributed_subspace(
         bound,
     )
     degree = filter_degree(settings, state, lower_bound, upper_bound)
+    debug_leader = not hasattr(group, "comm") or group.rank == group.owner
+    debug.emit("subspace_start", leader=debug_leader, states=state.working_states,
+               filters_completed=state.filters_completed, lower_bound=lower_bound,
+               upper_bound=upper_bound, degree=degree,
+               qr_already_required=state.generalized_ritz_failed)
     blocks = subspace_filter_blocks(
         state.working_states, settings.block_size, degree, settings.degree_delta
     )
@@ -4540,6 +4567,7 @@ def run_distributed_subspace(
                     host_eigenvalues, basis, whitened, step = group.ritz_handover(
                         operator, filtered, stages=True, handover=mode, halves=halves)
         except GeneralizedRitzStabilityError as error:
+            debug.emit("ritz_fallback", leader=debug_leader, phase="subspace", reason=str(error))
             generalized_ritz_failed = True
             filtered = error.filtered
             note = "QR fallback"
@@ -4551,6 +4579,13 @@ def run_distributed_subspace(
     del filtered
     if host_eigenvalues.shape != (state.working_states,):
         raise RuntimeError("Rayleigh--Ritz changed the working state count")
+    if debug.enabled(2):
+        if step is None or step.mode == "rotation":
+            from .debug_audit import shared_ritz_audit
+            shared_ritz_audit(group, basis, host_eigenvalues, phase="subspace")
+        else:
+            debug.emit("eigenpair_audit_skipped", leader=debug_leader, phase="subspace",
+                       reason="basis carries an unrotated handover")
     eigenvalues = cp.asarray(host_eigenvalues, dtype=cp.float64)
     record = None
     if step is not None and step.mode == "triangular":

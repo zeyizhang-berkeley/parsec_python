@@ -13,6 +13,11 @@ both as correctness checks and as GPU benchmarks.
 - `performance/` has figures and data of those measurements: time and GPU
   memory against the number of electrons and of GPUs, fitted power laws, where
   the time goes, and what limits the size of a system.
+- [`large_system_experiments/`](large_system_experiments/README.md) records the
+  November 2026 multi-node H100/H200/GB200 experiments, larger frozen inputs,
+  memory-optimization comparisons and checkpoint-reconstruction diagnostics.
+  These use different launch/storage conditions from the A100 reference
+  series below; their capacity and timing evidence is reported separately.
 
 All inputs share the following settings:
 

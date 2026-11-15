@@ -69,6 +69,7 @@ from ..models import (
 )
 from ..Hamiltonian.hubbard import hubbard_operator, hubbard_terms_from_orbitals
 from .pbc import PeriodicPreparedSinglePointSystem
+from .restart_refinement import guarded_solver
 from .single_point import (
     PreparedSinglePointSystem,
     SCFWarmStart,
@@ -305,7 +306,8 @@ def run_spin_scf(
 
     scf_start = time.perf_counter()
     level_detail = None
-    solvers = _channel_solvers(eigenproblem_solver)
+    solvers = tuple(guarded_solver(solve, getattr(warm_start, "restart_refinement", None))
+                    for solve in _channel_solvers(eigenproblem_solver))
     ionic_potential = to_internal(system.ionic_potential)
     volume_element = system.grid.volume_element
     number_of_states = _number_of_states(system)

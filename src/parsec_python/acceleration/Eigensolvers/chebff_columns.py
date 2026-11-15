@@ -48,6 +48,8 @@ from typing import Any, Callable
 
 import numpy as np
 
+from parsec_python import diagnostics as debug
+
 from parsec_python.Eigensolvers.chebyshev import subspace_filter_blocks
 from parsec_python.Eigensolvers.spectral_bounds import bound_request
 from parsec_python.Eigensolvers.subspace import _adapt_polynomial_degree, subspace_filter_bounds
@@ -224,40 +226,17 @@ class ColumnGroup:
     def lower_sum_to_root(self, matrix):
         """The lower triangle of ``matrix`` (``m x m``) summed over the ranks, on the root only.
 
-        The root gets a matrix with that triangle and zeros above it; the other ranks ``None``.  Only
-        the root factors the Gram matrix and diagonalizes the projected Hamiltonian, both of which read
-        the lower triangle, so the ranks send ``m (m + 1) / 2`` entries each to a ``Reduce``.
+        Consumes ``matrix``: the root reuses it for the sum, with zeros above
+        the diagonal; the other ranks return None. Bounded lower-triangle
+        tiles replace full triangle buffers and O(m²) cached index arrays.
         """
-        xp = self.xp
-        count = int(matrix.shape[0])
-        if self.size == 1:
-            return xp.tril(matrix)
-        rows, columns = self._lower_indices(count)
-        packed = xp.ascontiguousarray(matrix[rows, columns])
+        from .dense_memory import lower_sum_in_place
         self._sync()
         started = time.perf_counter()
-        if self.reduce_transport == "cuda":
-            total = xp.empty_like(packed) if self.is_root else None
-            self._reduce(packed, total)
-        else:
-            host = np.ascontiguousarray(self._host(packed))
-            out = np.empty_like(host) if self.is_root else None
-            self._reduce(host, out)
-            total = None if out is None else self._device(out)
+        result = lower_sum_in_place(matrix, self.xp, self._reduce,
+                                    root=self.is_root, transport=self.reduce_transport)
         self.seconds["reduce"] += time.perf_counter() - started
-        if not self.is_root:
-            return None
-        result = xp.zeros((count, count), dtype=matrix.dtype)
-        result[rows, columns] = total
         return result
-
-    def _lower_indices(self, count: int):
-        cached = getattr(self, "_lower", None)
-        if cached is None or cached[0] != count:
-            rows, columns = np.tril_indices(count)
-            cached = (count, self._device(rows), self._device(columns))
-            self._lower = cached
-        return cached[1], cached[2]
 
     def _reduce(self, send, receive) -> None:
         if self.mpi is None:
@@ -271,23 +250,10 @@ class ColumnGroup:
             return array
         self._sync()
         started = time.perf_counter()
-        xp = self.xp
-        if self.transport == "cuda":
-            buffer = (
-                xp.ascontiguousarray(xp.asarray(array, dtype=dtype))
-                if self.is_root
-                else xp.empty(shape, dtype=dtype)
-            )
-            self._sync()
-            self.comm.Bcast(buffer, root=self.root)
-        else:
-            host = (
-                np.ascontiguousarray(self._host(array), dtype=dtype)
-                if self.is_root
-                else np.empty(shape, dtype=dtype)
-            )
-            self.comm.Bcast(host, root=self.root)
-            buffer = self._device(host)
+        from .dense_memory import broadcast_matrix
+        buffer = broadcast_matrix(array, shape, dtype, self.xp,
+                                  lambda piece: self.comm.Bcast(piece, root=self.root),
+                                  root=self.is_root, transport=self.transport)
         self.seconds["broadcast"] += time.perf_counter() - started
         return buffer
 
@@ -491,12 +457,19 @@ def _cholesky_qr_rows(xp, rows, group: ColumnGroup, dimension: int) -> None:
         gram = group.lower_sum_to_root(_gram(xp, rows, chunk))  # the root factors it (lower triangle)
         status, factor = None, None
         if group.is_root:
-            gram = gram + xp.tril(gram, -1).conj().T
+            from .dense_memory import mirror_lower
+            gram = mirror_lower(gram, xp, copy=False)
             trace = float(xp.real(xp.trace(gram)))
             shift = 11.0 * (dimension * count + count * (count + 1)) * eps * trace if pass_index == 0 else 0.0
+            debug.emit("complex_qr_gram", leader=True, pass_number=pass_index + 1,
+                       states=count, rows=dimension, trace=trace, initial_shift=shift)
             for _attempt in range(4):
                 try:
-                    lower = xp.linalg.cholesky(gram + shift * xp.eye(count, dtype=xp.complex128))
+                    shifted = gram.copy()
+                    diagonal = xp.arange(count)
+                    shifted[diagonal, diagonal] += shift
+                    lower = xp.linalg.cholesky(shifted)
+                    del shifted
                     if bool(xp.all(xp.isfinite(lower))):
                         factor = lower
                         break
@@ -555,9 +528,9 @@ def _orthonormal_ritz(
         del projection
         values = rotations = None
         if group.is_root:
-            hermitian = lower + xp.tril(lower, -1).conj().T
-            values, rotations = xp.linalg.eigh(hermitian)
-            del hermitian
+            from .dense_memory import mirror_lower
+            mirror_lower(lower, xp, copy=False)
+            values, rotations = xp.linalg.eigh(lower)
             values = np.ascontiguousarray(group._host(values), dtype=np.float64)
         del lower
         values = group.bcast(values)
@@ -566,18 +539,27 @@ def _orthonormal_ritz(
             r1 = min(r0 + row_chunk, own)
             rows[r0:r1] = rows[r0:r1] @ rotations
     norms = None
-    if residuals:
+    if residuals or debug.enabled(2):
         with stats.timed("residual_seconds"):
             wanted = rotations[:, :requested]
             levels = xp.asarray(np.asarray(values[:requested], dtype=np.float64))
             squares = xp.zeros(requested, dtype=xp.float64)
-            for r0 in range(0, own, row_chunk):
-                r1 = min(r0 + row_chunk, own)
+            audit_chunk = (row_chunk if residuals else min(
+                row_chunk, max(1, debug.buffer_bytes() // (3 * max(1, requested) * rows.dtype.itemsize))))
+            for r0 in range(0, own, audit_chunk):
+                r1 = min(r0 + audit_chunk, own)
                 difference = applied[r0:r1] @ wanted
                 difference -= rows[r0:r1, :requested] * levels[None, :]
                 squares += (difference.real * difference.real + difference.imag * difference.imag).sum(axis=0)
                 del difference
-            norms = np.sqrt(np.asarray(group._host(group.sum(squares)), dtype=np.float64))
+            measured = np.sqrt(np.asarray(group._host(group.sum(squares)), dtype=np.float64))
+            if residuals:
+                norms = measured
+            debug.emit("complex_eigenpair_audit", minimum=2, leader=group.is_root,
+                       checked_states=requested, all_finite=bool(np.isfinite(measured).all()),
+                       maximum_residual_ry=float(np.max(measured, initial=0.)),
+                       rms_residual_ry=float(np.sqrt(np.mean(measured * measured))) if measured.size else 0.,
+                       residuals_used_by_solver=bool(residuals))
     del applied, rotations
     with stats.timed("ritz_seconds"):
         local = group.to_columns(rows, layout, dimension, copy=False)
@@ -724,6 +706,9 @@ def solve_column_eigval(
         and state.working_states == working
         and state.layout == layout
     )
+    debug.emit("kpoint_solve_start", leader=group.is_root, rows=dimension,
+               requested_states=requested_states, working_states=working,
+               reused_subspace=reusable, converge_first=converge_first, pool_size=group.size)
     if not reusable:
         chebff = settings.chebff
         relative = None
@@ -779,6 +764,10 @@ def solve_column_eigval(
             )
             smallest_ritz = float(eigenvalues[0])
             largest_ritz = float(eigenvalues[-1])
+            debug.emit("kpoint_chebff_cycle", leader=group.is_root, cycle=cycle + 1,
+                       lower_bound=lower_bound, upper_bound=upper_bound,
+                       eigenvalue_min=smallest_ritz, eigenvalue_max=largest_ritz,
+                       residual_max=None if residuals is None else float(np.max(residuals)))
             if largest_ritz >= upper_bound:
                 new_upper = largest_ritz + 0.5 * (largest_ritz - upper_bound) + 1.0
                 new_lower = min(lower_bound, (3.0 * lower_bound + new_upper) / 4.0)

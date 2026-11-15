@@ -37,10 +37,12 @@ silently get wrong:
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import numpy as np
+
+from .. import diagnostics as debug
 
 from ..Output.parsec_dat import (
     ParsecDat,
@@ -407,6 +409,10 @@ def load_restart(
     source = Path(path)
     if not source.is_file():
         raise RestartError(f"Restart_Run: {source} not found", 371)
+    from .restart_refinement import from_environment
+    refinement = from_environment(system.input.eigensolver)
+    if spinors and refinement is not None:
+        raise NotImplementedError("Restart level refinement is not implemented for spin-orbit loops")
     if spin_count is None:
         spin_count = 2 if getattr(system.input.scf, "spin_polarized", False) else 1
     data = read_parsec_dat(source, wavefunctions=False)
@@ -417,6 +423,17 @@ def load_restart(
         complex_wavefunctions=complex_wavefunctions,
         spinors=spinors,
     )
+    debug.emit("restart_loaded", path=str(source), file_points=fields.file_points,
+               file_operations=fields.file_operations, missing_points=fields.missing_points,
+               dropped_points=fields.dropped_points, extrapolated=fields.extrapolate,
+               stored_states=fields.stored_states, wavefunctions_restored=False,
+               mixer_history_restored=False, first_solve="from_scratch",
+               same_grid_uses_stored_density=False)
+    if debug.wants(2):
+        debug.emit("restart_fields", minimum=2,
+                   potentials=[debug.field_summary(v) for v in fields.potentials],
+                   densities=[debug.field_summary(v, volume_element=system.grid.volume_element)
+                              for v in fields.densities])
     if spinors:
         if fields.extrapolate:
             raise RestartError(
@@ -428,7 +445,7 @@ def load_restart(
             input_potential=tuple(np.array(value) for value in fields.potentials),
             hartree_potential=-ionic,
         )
-    return fields, restart_warm_start(system, fields)
+    return fields, replace(restart_warm_start(system, fields), restart_refinement=refinement)
 
 
 def spin_orbit_start(warm_start: SCFWarmStart, spin_polarized: bool):

@@ -73,6 +73,8 @@ from weakref import ref
 
 import numpy as np
 
+from parsec_python import diagnostics as debug
+
 from parsec_python.Eigensolvers.lapack_random import (
     _MODULUS,
     _MULTIPLIER,
@@ -162,7 +164,7 @@ def shared_transport() -> str:
 
 
 def shared_ritz_route(default: str = "rows") -> str:
-    """``PARSEC_MPI_SHARED_RITZ``: ``rows``, ``rounds`` or ``auto`` (the default), the Ritz step of a shared basis.
+    """``PARSEC_MPI_SHARED_RITZ``: ``rows``, ``rounds``, ``inplace`` or ``auto``.
 
     ``rows`` moves the filtered columns and ``H`` times them to two row blocks
     of ``m`` columns each and keeps both, beside the columns, until the
@@ -170,7 +172,9 @@ def shared_ritz_route(default: str = "rows") -> str:
     ``rounds`` keeps one row block, that of the basis, and forms ``H X`` a
     round of columns at a time, each projected as it arrives; the rotated
     rows go back in the same rounds (:meth:`MPIShardGroup._ritz_in_rounds`):
-    two shares.  ``auto`` is ``default``, the route of the group
+    two shares.  ``inplace`` reuses the columns' allocation for the rows,
+    with bounded exchange and rotation tiles and padding for uneven ranks.
+    ``auto`` is ``default``, the route of the group
     (:class:`MPIShardGroup`): ``rounds`` for a periodic cell, whose runner asks
     for it, ``rows`` otherwise (clusters keep their bits).
 
@@ -186,10 +190,10 @@ def shared_ritz_route(default: str = "rows") -> str:
     """
 
     value = os.environ.get("PARSEC_MPI_SHARED_RITZ", "auto").strip().lower() or "auto"
-    if value not in {"auto", "rows", "rounds"}:
-        raise ValueError("PARSEC_MPI_SHARED_RITZ must be auto, rows or rounds")
-    if default not in {"rows", "rounds"}:
-        raise ValueError("the default Ritz route of a shared basis must be rows or rounds")
+    if value not in {"auto", "rows", "rounds", "inplace"}:
+        raise ValueError("PARSEC_MPI_SHARED_RITZ must be auto, rows or rounds, or inplace")
+    if default not in {"rows", "rounds", "inplace"}:
+        raise ValueError("the default Ritz route of a shared basis must be rows or rounds, or inplace")
     return default if value == "auto" else value
 
 
@@ -459,6 +463,29 @@ class _RowExchange:
         order = np.concatenate(columns) if columns else np.zeros(0, dtype=np.int64)
         return order, starts
 
+    def inplace_storage(self) -> tuple[int, int]:
+        """Row offset and allocation size, in float64 elements, for one basis.
+
+        Convert columns to rows in decreasing round order.  At boundary j,
+        the unconsumed columns end at N * min(w_rank, j * width), and the
+        received rows start at offset + own_rows * starts[j].  Keep the
+        latter at or beyond the former at every boundary.  This also makes
+        the reverse, increasing-round conversion safe, after each send has
+        completed.  No equal-rank-size or node-local assumption is needed.
+
+        The required capacity is the maximum of the unread column prefix
+        plus the received row suffix.  It decreases when any rank's width
+        decreases, so leading-column trims retain sufficient storage.
+        """
+
+        starts, offset = 0, 0
+        mine = self.layout.widths[self.group.rank]
+        for step in range(self.rounds + 1):
+            offset = max(offset, self.rows * min(mine, step * self.width) - self.own * starts)
+            if step < self.rounds:
+                starts += sum(self.counts(step))
+        return offset, max(self.rows * mine, offset + self.own * self.layout.columns)
+
     # Columns to rows.
 
     def pack_columns(self, cp, local, step: int, *, start: int | None = None, receive=None):
@@ -568,6 +595,20 @@ class MPIShardGroup:
         }
         self.passes = 0
         self.exchanged_bytes = 0
+        self.separate_row_blocks = 0
+
+    def allocate_columns(self, rows: int, layout):
+        """F-ordered local columns, reserving in-place row padding when requested."""
+
+        cp, _ = require_cupy()
+        layout = _as_layout(layout)
+        shape = (int(rows), layout.widths[self.rank])
+        if shared_ritz_route(self.ritz_route) != "inplace":
+            return cp.empty(shape, dtype=cp.float64, order="F")
+        plan = _RowExchange(self, layout, rows, self._round_width(rows))
+        _offset, capacity = plan.inplace_storage()
+        backing = cp.empty(max(1, capacity), dtype=cp.float64)
+        return cp.ndarray(shape, dtype=cp.float64, memptr=backing.data, order="F")
 
     # ----- the interface of SectorDeviceGroup ---------------------------
 
@@ -613,7 +654,7 @@ class MPIShardGroup:
         on_device = os.environ.get("PARSEC_CUPY_DEVICE_RANDOM", "0").lower() in {"1", "true", "on"}
         start = generator.seed
         with cp.cuda.Device(self.device):
-            block = cp.empty((rows, layout.widths[self.rank]), dtype=cp.float64, order="F")
+            block = self.allocate_columns(rows, layout)
             for column, offset, count in layout.spans(self.rank):
                 generator.seed = _skip(start, column * rows)
                 target = block[:, offset : offset + count]
@@ -681,6 +722,8 @@ class MPIShardGroup:
         ``rows`` and the rounds of :meth:`_ritz_in_rounds`.
         """
 
+        if shared_ritz_route(self.ritz_route) == "inplace":
+            return self._ritz_inplace(operator, filtered, stages=stages)
         if shared_ritz_route(self.ritz_route) == "rounds":
             return self._ritz_in_rounds(operator, filtered, stages=stages)
         cp, _ = require_cupy()
@@ -872,23 +915,148 @@ class MPIShardGroup:
         self.passes += 1
         return eigenvalues, SharedBasis(self, columns, layout), whitened
 
+    def _ritz_inplace(self, operator: Any, filtered: SharedBasis, *, stages: bool):
+        """One tall basis allocation through projection, dense solve and rotation.
+
+        Each reverse round applies H before replacing the consumed columns
+        with their row representation.  Only already-received row suffixes
+        enter the lower Gram products.  Rotation uses independent row tiles;
+        forward exchanges restore the column distribution.  A refused dense
+        solve restores the original filtered columns bit for bit instead.
+        Externally supplied, unpadded allocations use a separate row block;
+        ``separate_row_blocks`` counts that fallback, without changing math.
+        """
+
+        from .dense_memory import buffer_bytes
+
+        cp, _ = require_cupy()
+        layout, rows = filtered.layout, int(filtered.shape[0])
+        states = int(layout.columns)
+        columns = filtered.local
+        filtered.take()
+        plan = _RowExchange(self, layout, rows, self._round_width(rows))
+        order, starts = plan.round_order()
+        offset, capacity = plan.inplace_storage()
+
+        def stage(name):
+            return device_stage(operator, name) if stages else _NoStage()
+
+        def row_round(step):
+            piece = row_basis.T[starts[step] : starts[step + 1]]
+            return piece.reshape(-1) if piece.size else cp.empty(1, dtype=cp.float64)
+
+        def restore_columns():
+            for step in range(plan.rounds):
+                counts = plan.counts(step)
+                send = row_round(step)
+                receive_counts = [height * counts[self.rank] for height in plan.heights()]
+                receive = cp.empty(max(1, sum(receive_counts)), dtype=cp.float64)
+                self._exchange(send, [plan.own * count for count in counts], receive, receive_counts)
+                # Alltoallv has consumed every row before columns may overwrite them.
+                plan.unpack_columns(receive, step, columns)
+                self._sync()
+                del send, receive
+
+        with cp.cuda.Device(self.device):
+            if SectorDeviceGroup._room(columns) >= capacity:
+                row_basis = SectorDeviceGroup._view(cp, columns, offset, (plan.own, states))
+            else:
+                row_basis = cp.empty((plan.own, states), dtype=cp.float64, order="F")
+                self.separate_row_blocks += 1
+            packed = cp.zeros((2, states, states), dtype=cp.float64)
+            with stage("subspace_ritz_projection_seconds"):
+                for step in reversed(range(plan.rounds)):
+                    first, last = starts[step], starts[step + 1]
+                    mine = plan.counts(step)[self.rank]
+                    local_first = step * plan.width
+                    started = perf_counter()
+                    applied = cp.empty((rows, mine), dtype=cp.float64, order="F")
+                    if mine:
+                        operator.apply_into(columns[:, local_first : local_first + mine], applied)
+                    self._sync()
+                    self.seconds["apply"] += perf_counter() - started
+                    started = perf_counter()
+                    send, sc, receive, rc = plan.pack_columns(cp, columns, step, receive=row_round(step))
+                    self._exchange(send, sc, receive, rc)
+                    self._sync()
+                    del send, receive
+                    send, sc, receive, rc = plan.pack_columns(cp, applied, step, start=0)
+                    del applied
+                    self._exchange(send, sc, receive, rc)
+                    self._sync()
+                    del send
+                    self.seconds["to_rows"] += perf_counter() - started
+                    started = perf_counter()
+                    if last > first:
+                        packed[0, first:, first:last] = transposed_product(
+                            cp, row_basis[:, first:], row_basis[:, first:last]
+                        )
+                        received = receive[: plan.own * (last - first)].reshape((last - first, plan.own)).T
+                        packed[1, first:, first:last] = transposed_product(cp, row_basis[:, first:], received)
+                        del received
+                    self._sync()
+                    del receive
+                    self.seconds["gram"] += perf_counter() - started
+                started = perf_counter()
+                packed = self._sum(packed)
+                self.seconds["reduce"] += perf_counter() - started
+            eigenvalues, coefficients, whitened = self._small_solve(packed, column_order=order)
+            del packed
+            if eigenvalues is None:
+                restore_columns()
+                del row_basis
+                raise _stability_error(coefficients, SharedBasis(self, columns, layout))
+            with stage("subspace_ritz_rotation_seconds"):
+                started = perf_counter()
+                height = max(1, buffer_bytes() // (8 * max(1, states)))
+                for first in range(0, plan.own, height):
+                    last = min(plan.own, first + height)
+                    rotated = row_basis[first:last] @ coefficients
+                    row_basis[first:last] = rotated
+                    del rotated
+                self._sync()
+                del coefficients
+                self.seconds["rotate"] += perf_counter() - started
+                started = perf_counter()
+                restore_columns()
+                del row_basis
+                self.seconds["to_columns"] += perf_counter() - started
+        self.passes += 1
+        return eigenvalues, SharedBasis(self, columns, layout), whitened
+
     @_ends_the_job_on_failure
     def orthonormal_ritz(self, operator: Any, filtered: SharedBasis, generator) -> tuple:
         """Robust fallback: shifted Cholesky QR of the rows (three passes), then :meth:`ritz`."""
 
         cp, _ = require_cupy()
-        from cupyx.scipy.linalg import solve_triangular
+        route = os.environ.get("PARSEC_MPI_SHARED_QR", "rows").strip().lower()
+        if route not in {"rows", "inplace"}:
+            raise ValueError("PARSEC_MPI_SHARED_QR must be rows or inplace")
 
         layout = filtered.layout
         rows = int(filtered.shape[0])
         columns = filtered.local
+        debug.emit("qr_start", leader=self.rank == self.owner, route=route,
+                   rows=rows, states=layout.columns, group_size=self.size,
+                   local_columns=layout.widths[self.rank])
         filtered.take()
         on_device = dense_solve_on_device()
         with cp.cuda.Device(self.device):
-            row_basis = self.to_rows(columns, layout, rows)
+            if route == "inplace":
+                row_basis, plan = self._to_rows_in_place(columns, layout, rows)
+            else:
+                row_basis = self.to_rows(columns, layout, rows)
             states = int(layout.columns)
             for step in range(3):
                 overlap = self._sum(cp.ascontiguousarray(row_basis.T @ row_basis)[None])[0]
+                if debug.wants(2, leader=self.rank == self.owner):
+                    diagonal = overlap.diagonal()
+                    debug.emit("qr_gram", minimum=2, leader=self.rank == self.owner,
+                               route=route, pass_number=step + 1,
+                               diagonal_min=float(diagonal.min().item()),
+                               diagonal_max=float(diagonal.max().item()),
+                               trace=float(diagonal.sum().item()))
+                    del diagonal
                 status, factor = None, None
                 if self.rank == self.owner:
                     try:
@@ -908,13 +1076,76 @@ class MPIShardGroup:
                 factor = self._broadcast_matrix(factor, states)
                 # X <- X L^-T, row by row: in place on the device route (no copy of the rows),
                 # through the transposed rows as before on the host route.
-                if on_device:
+                if on_device or route == "inplace":
+                    # The host backend still computes exactly its original
+                    # Cholesky factor. Its triangular solve can also consume
+                    # the rows directly, without a second tall output array.
                     _solve_lower_transpose_in_place(factor, row_basis)
                 else:
+                    from cupyx.scipy.linalg import solve_triangular
                     row_basis = cp.asfortranarray(solve_triangular(factor, row_basis.T, lower=True).T)
-            columns = self.to_columns(row_basis, layout, rows, target=columns)
+                if route == "inplace":
+                    # Do not carry the preceding pass's O(states²) buffers
+                    # into the next Gram allocation or the subsequent Ritz.
+                    del overlap, factor
+            if route == "inplace":
+                self._to_columns_in_place(row_basis, columns, plan)
+            else:
+                columns = self.to_columns(row_basis, layout, rows, target=columns)
             del row_basis
+        debug.emit("qr_end", leader=self.rank == self.owner, route=route,
+                   separate_row_blocks=self.separate_row_blocks)
         return self.ritz(operator, SharedBasis(self, columns, layout), stages=False)
+
+    def _to_rows_in_place(self, columns, layout, rows):
+        """Consume columns into the same padded storage, in canonical order.
+
+        Decreasing exchange rounds keep unread columns intact. A bounded
+        permutation then restores canonical column order, so shifted QR
+        sees the same matrix as the existing separate-row route.
+        """
+        from .dense_memory import permute_columns_in_place
+
+        cp, _ = require_cupy()
+        plan = _RowExchange(self, layout, rows, self._round_width(rows))
+        order, starts = plan.round_order()
+        offset, capacity = plan.inplace_storage()
+        if SectorDeviceGroup._room(columns) >= capacity:
+            row_basis = SectorDeviceGroup._view(cp, columns, offset, (plan.own, layout.columns))
+        else:
+            # External/unpadded basis storage remains supported and visible
+            # in diagnostics; the normal in-place Ritz allocator has room.
+            row_basis = cp.empty((plan.own, layout.columns), dtype=cp.float64, order="F")
+            self.separate_row_blocks += 1
+        for step in reversed(range(plan.rounds)):
+            receive = row_basis.T[starts[step]:starts[step + 1]].reshape(-1)
+            if not receive.size:
+                receive = cp.empty(1, dtype=cp.float64)
+            send, sc, receive, rc = plan.pack_columns(cp, columns, step, receive=receive)
+            self._exchange(send, sc, receive, rc)
+            self._sync()
+            del send, receive
+        permute_columns_in_place(row_basis, np.argsort(order), cp)
+        return row_basis, plan
+
+    def _to_columns_in_place(self, row_basis, columns, plan):
+        """Consume canonical rows back into columns without a tall copy."""
+        from .dense_memory import permute_columns_in_place
+
+        cp, _ = require_cupy()
+        order, starts = plan.round_order()
+        permute_columns_in_place(row_basis, order, cp)
+        for step in range(plan.rounds):
+            counts = plan.counts(step)
+            send = row_basis.T[starts[step]:starts[step + 1]].reshape(-1)
+            if not send.size:
+                send = cp.empty(1, dtype=cp.float64)
+            receive_counts = [height * counts[self.rank] for height in plan.heights()]
+            receive = cp.empty(max(1, sum(receive_counts)), dtype=cp.float64)
+            self._exchange(send, [plan.own * count for count in counts], receive, receive_counts)
+            plan.unpack_columns(receive, step, columns)
+            self._sync()
+            del send, receive
 
     # ----- collectives ----------------------------------------------------
 
@@ -923,39 +1154,22 @@ class MPIShardGroup:
         cp.cuda.get_current_stream().synchronize()
 
     def _sum(self, packed):
-        """Sum a device array over the ranks; every rank gets the sum."""
+        """Consume local Gram storage; every rank gets the sum in that storage."""
 
+        from .dense_memory import sum_in_place
         cp, _ = require_cupy()
         self._sync()
-        if self.transport == "cuda":
-            total = cp.empty_like(packed)
-            self.comm.Allreduce(packed, total)
-            return total
-        host = np.ascontiguousarray(cp.asnumpy(packed))
-        total = np.empty_like(host)
-        self.comm.Allreduce(host, total)
-        return cp.asarray(total)
+        return sum_in_place(packed, cp, self.comm.Allreduce, transport=self.transport)
 
     def _broadcast_matrix(self, matrix, size: int):
         """The root's ``size x size`` matrix (device or host) as a device array on every rank."""
 
+        from .dense_memory import broadcast_matrix
         cp, _ = require_cupy()
-        if self.transport == "cuda":
-            buffer = (
-                cp.ascontiguousarray(cp.asarray(matrix, dtype=cp.float64))
-                if self.rank == self.owner
-                else cp.empty((size, size), dtype=cp.float64)
-            )
-            self._sync()
-            self.comm.Bcast(buffer, root=self.owner)
-            return cp.asfortranarray(buffer)
-        host = (
-            np.ascontiguousarray(cp.asnumpy(matrix) if isinstance(matrix, cp.ndarray) else matrix, dtype=np.float64)
-            if self.rank == self.owner
-            else np.empty((size, size), dtype=np.float64)
-        )
-        self.comm.Bcast(host, root=self.owner)
-        return cp.asfortranarray(cp.asarray(host))
+        self._sync()
+        return broadcast_matrix(matrix, (size, size), np.float64, cp,
+                                lambda piece: self.comm.Bcast(piece, root=self.owner),
+                                root=self.rank == self.owner, transport=self.transport)
 
     def _condition_helper(self) -> int | None:
         """The rank that estimates the condition number of the root's small solve meanwhile, or ``None``.
@@ -1066,6 +1280,7 @@ class MPIShardGroup:
                     eigenvalues, coefficients, whitened = solve_whitened_ritz_on_device(
                         packed[0],
                         packed[1],
+                        overwrite_grams=True,
                         condition=(
                             None
                             if not symmetric
@@ -1091,6 +1306,9 @@ class MPIShardGroup:
         elif self.rank == helper:
             self._estimate_condition_for_owner()
         status = self.comm.bcast(status, root=self.owner)
+        debug.emit("ritz_dense", leader=self.rank == self.owner, states=states,
+                   backend="device" if on_device else "host", status="passed" if status is None else "fallback",
+                   reason=status, ritz_route=shared_ritz_route(getattr(self, "ritz_route", "rows")))
         if status is not None:
             self.seconds["dense"] += perf_counter() - started
             return None, status, None
@@ -1136,6 +1354,8 @@ class MPIShardGroup:
         send_spec, receive_spec = self._specs(host_send, send_counts, host_receive, receive_counts)
         self.comm.Alltoallv(send_spec, receive_spec)
         receive.set(host_receive)
+        # The host buffer must remain live until the asynchronous upload completes.
+        self._sync()
 
     def to_rows(self, local, layout, rows: int):
         """This rank's row block (``rows_rank x m``, Fortran order) of the basis whose columns ranks hold."""
