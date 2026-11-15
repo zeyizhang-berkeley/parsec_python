@@ -1,54 +1,67 @@
-# 大体系、多节点 GPU 实验记录
+# Large-system, multi-node GPU experiments
 
-本目录记录 2026-11-11 至 2026-11-15 的 PARSEC Python 大体系实验。
-科学结果快照截至 **2026-11-15 00:46 PST**；之后补跑了发布前 CPU 回归。
-发布前于 **01:14 PST** 再次查询：同一分配上的 `inherit` 对照仍在运行，
-最新收集到第 10 轮重建，最大相邻能级变化为 1.76443e−3 Ry；尚无最终 A/B 结果。
-目标是在相同物理问题和精度设置下，用更多节点计算更大体系，并逐项验证
-显存、通信和算法上的改进。电子数均指**赝势价电子数**。
+This directory records PARSEC Python experiments from November 11–15, 2026.
+The main scientific-results snapshot is **2026-11-15 00:46 PST**, followed by a
+publication CPU regression. A subsequent **01:14 PST** check found the matching
+`inherit` control still running: 10 extra reconstruction passes, with maximum
+adjacent-pass level change of 1.76443e-3 Ry. No final timing ratio was available.
 
-这是一条实验分支。源码中已实现的功能、已测得的收益和仍待验证的候选分别说明；
-一次 SCF 收敛不等同于全部精度审查通过，也不等同于找到了该 GPU 的最大容量。
+The objective is to calculate larger systems on more nodes while preserving the
+physical problem and accuracy settings, and to measure memory, communication and
+algorithmic improvements separately. Electron counts mean **pseudopotential
+valence electrons** throughout.
 
-## 当前最重要的结果
+This is an experimental branch. Implemented features, measured benefits and
+unvalidated candidates are distinguished explicitly. SCF convergence alone does
+not complete an independent accuracy review or establish a GPU's maximum capacity.
 
-- **完整 SCF 的显存实测：**19,392 电子的无对称性 cluster，在 64 H100 上，
-  memory-v1 将单卡采样峰值从 61,269 降到 42,989 MiB，降低 **29.84%**。
-  总能量差为 $3.73\times10^{-9}$ Ry。两次运行的耗时是 1,350.64 和
-  1,827.59 秒；这是不同分配上的测量，观察到 35.31% 时间增加，不能称为提速。
-- **大体系容量：**memory-v2 已有 64 H100 上 80,136 电子 cluster、
-  42,592 电子 Γ 点、16,384 电子 3×3×3 k 网格的收敛记录；64 GB200 上已有
-  95,648 电子 cluster、70,304 电子 Γ 点、32,000 电子 2×2×2 k 网格的收敛记录。
-  这些是各自配置下的已完成样本，不能混用不同 k 网格或当作通用上限。
-- **模块临时存储：**dense Ritz、MPI Ritz 和 robust QR 的独立测试分别观察到约
-  24.93%、35.64–40.60%、25.54% 的活跃 CuPy 内存降低。
-  它们不是完整程序显存下降的百分比。
-- **最新重启结果：**95,648 电子 cluster 的 `smart` 重建策略在 64 GB200 上
-  经过 33 轮固定势重建后达到门槛，随后一个 SCF 步达到原收敛标准。
-  整次重启耗时 5,239.92 秒，峰值 97,105 MiB。
-  同一批 GPU 上的 `inherit` 对照仍在计算，尚无最终提速比例。
-- **新的优化依据：**该大体系重启的 rank 0/sector 0 中，两次布局转换累计约
-  3,812 秒，占对角化时间约 74%。减少跨节点重分布是下一阶段的重点候选。
+## Main findings
 
-## 阅读顺序
+- **Full-SCF memory measurement:** for a 19,392-electron cluster without symmetry
+  on 64 H100s, memory-v1 reduced the sampled per-GPU peak from 61,269 to 42,989 MiB
+  (**29.84%**). The total-energy difference was $3.73\times10^{-9}$ Ry. The runs
+  took 1,350.64 and 1,827.59 seconds on different allocations: an observed 35.31%
+  increase in time, not a speedup.
+- **Completed large systems:** memory-v2 has converged records on 64 H100s for an
+  80,136-electron cluster, 42,592-electron Gamma-point cell and 16,384-electron
+  cell with a 3×3×3 k mesh. On 64 GB200s, completed examples include a 95,648-electron
+  cluster, 70,304-electron Gamma cell and 32,000-electron cell with a 2×2×2 k mesh.
+  These are completed samples under their own settings, not universal limits.
+- **Module workspace savings:** isolated dense Ritz, MPI Ritz and robust-QR checks
+  measured approximately 24.93%, 35.64–40.60% and 25.54% lower live CuPy allocations.
+  These percentages do not describe full-program peak memory.
+- **Latest completed restart:** the `smart` candidate reconstructed the fixed-potential
+  subspace of the 95,648-electron cluster in 33 extra passes on 64 GB200s, then met
+  the original SCF criterion in one resumed step. End-to-end time was 5,239.92 seconds;
+  sampled peak memory was 97,105 MiB. Its matching `inherit` control was unfinished
+  at the recorded checks.
+- **Next optimization target:** in that audited restart, rank 0/sector 0 spent
+  approximately 3,812 seconds in the two layout conversions, about 74% of the
+  diagonalization time. These timers include packing, transfers and waits.
 
-| 文件 | 内容 |
+## Reading guide
+
+| File | Contents |
 |---|---|
-| [RESULTS.md](RESULTS.md) | 资源、体系、容量边界、完整 SCF 与模块比较、重启诊断和精度限制 |
-| [OPTIMIZATION_NOTES.md](OPTIMIZATION_NOTES.md) | 具体改了哪些源码，显存/通信为何成为瓶颈，下一阶段如何验证 |
-| [REPRODUCIBILITY.md](REPRODUCIBILITY.md) | 输入来源、源码身份、环境、开关、运行和检查方法 |
-| [data/runs.csv](data/runs.csv) | 46 条筛选后的科学运行记录，含完成与失败样本 |
-| [data/runs.json](data/runs.json) | 相同运行的结构化记录及可用的输入、运行时哈希 |
-| [data/large_restart_result.json](data/large_restart_result.json) | 95,648 电子重启的 SCF、电子数和本征对审计 |
-| [data/large_restart_profile.json](data/large_restart_profile.json) | 分 rank 的大体系重启计时与内存数据 |
-| [data/provenance.json](data/provenance.json) | 基线、冻结版本、27 个改动源码的哈希与测试结果 |
-| [inputs/](inputs/) | 12 个实际使用的 cluster/周期输入；包含成功与失败样本 |
-| [checks/](checks/) | 独立 CPU 精度检查、报告校验和图表生成脚本 |
+| [RESULTS.md](RESULTS.md) | Resources, systems, capacity observations, full-SCF/module comparisons, restart diagnostics and accuracy limits |
+| [GPU_UTILIZATION.md](GPU_UTILIZATION.md) | Why the 64-GB200 repair job has low utilization; comparison with the earlier 16-GB200 job |
+| [OPTIMIZATION_NOTES.md](OPTIMIZATION_NOTES.md) | Source changes, memory/communication bottlenecks and proposed validation work |
+| [REPRODUCIBILITY.md](REPRODUCIBILITY.md) | Inputs, source identity, environment, switches and verification commands |
+| [data/runs.csv](data/runs.csv) | 46 curated scientific run records, including completed and failed attempts |
+| [data/runs.json](data/runs.json) | The same runs with available input/runtime hashes |
+| [data/large_restart_result.json](data/large_restart_result.json) | SCF, charge and eigenpair audits for the 95,648-electron restart |
+| [data/large_restart_profile.json](data/large_restart_profile.json) | Per-rank timing and memory measurements for that restart |
+| [data/provenance.json](data/provenance.json) | Baseline/frozen identities, hashes of 27 changed source/test files, and regression results |
+| [inputs/](inputs/) | 12 actual cluster/periodic input files, including successful and failed sizes |
+| [checks/](checks/) | Independent CPU accuracy checks, evidence validation and figure regeneration |
 
-采样峰值、CuPy 活跃内存、运行耗时、重建耗时均使用不同字段，不能互相替代。
-详细原始调度日志、计算凭据和大型 checkpoint 留在实验存储中；本目录发布科学输入、
-选择后的数值证据及内容哈希。没有把调度失败或未完成的尝试补成结果。
+Sampled device peaks, live CuPy allocations, total runtime and reconstruction time
+are separate measurements. Raw scheduler logs, credentials and large checkpoints
+remain in experiment storage. This directory publishes scientific inputs, selected
+numerical evidence and content hashes; it does not turn interrupted attempts into
+completed results.
 
-此前 1–16 A100 的基准见[上级 README](../README.md)及
-[performance](../performance/README.md)。本次海外多节点测试的拓扑、网络、
-检查点 I/O 和计时口径不同，两个系列不能直接相除来宣称硬件加速。
+Earlier 1–16 A100 benchmarks are in the [parent README](../README.md) and
+[performance directory](../performance/README.md). Those measurements use different
+launch/storage conditions and topology. Their timings cannot be divided directly
+by the present end-to-end measurements to claim a hardware speedup.

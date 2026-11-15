@@ -66,6 +66,17 @@ def main():
     check(abs(result['result']['energy_ry']-result['parent_energy_ry']
               -result['energy_difference_from_parent_ry']) < 1e-12, 'Energy difference differs')
     check(result['production_adopted'] is False, 'This report has no production-adoption decision')
+    from analyze_utilization import derive
+    check(read('gpu_utilization_analysis.json') == derive(), 'Utilization arithmetic differs from its evidence')
+    utilization = read('utilization_evidence.json')
+    for name, digest in utilization['shared_target_and_reference_source_hashes'].items():
+        check(sha(REPO/name) == digest, 'Compared MPI implementation differs: ' + name)
+    historical = read('old_16gb200_profile.json')
+    cluster = re.search(r'C(\d+)H(\d+)', historical['case_id'])
+    carbon, hydrogen = map(int, cluster.groups())
+    check(historical['electrons'] == 4*carbon+hydrogen, 'Historical electron count differs')
+    check(historical['atoms'] == carbon+hydrogen, 'Historical atom count differs')
+    check(len(historical['per_rank']) == historical['ranks'], 'Historical rank inventory differs')
     for path in ROOT.rglob('*.md'):
         for target in re.findall(r'\]\(([^)]+)\)',path.read_text()):
             if '://' in target or target.startswith('#'):
