@@ -27,7 +27,7 @@ class RestartRefinementError(RuntimeError):
 @dataclass(frozen=True)
 class RestartRefinementSettings:
     tolerance: float
-    max_passes: int = 40
+    max_passes: int = 100
     stable_passes: int = 2
     lower_bound_rule: str = "inherit"
 
@@ -54,7 +54,7 @@ def from_environment(eigensolver_settings):
         raise ValueError("PARSEC_RESTART_REFINE must be off or levels")
     return RestartRefinementSettings(
         float(eigensolver_settings.tolerance),
-        max_passes=int(os.environ.get("PARSEC_RESTART_REFINE_MAX_PASSES", "40")),
+        max_passes=int(os.environ.get("PARSEC_RESTART_REFINE_MAX_PASSES", "100")),
         lower_bound_rule=os.environ.get("PARSEC_RESTART_REFINE_LOWER_BOUND", "inherit").strip().lower(),
     )
 

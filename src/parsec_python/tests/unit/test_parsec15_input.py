@@ -500,6 +500,7 @@ class OutputKeywordTests(_InputDirectory):
 
 class EsdfLenientTests(_InputDirectory):
     def test_unknown_and_repeated_labels(self) -> None:
+        self.assertEqual(self.cluster().problem.scf.max_iterations, 100)
         with self.assertRaisesRegex(UnsupportedParsecOptionError, "boundary_mask"):
             self.cluster("boundary_mask false")
         with self.assertRaisesRegex(ParsecInputError, "duplicate max_iter"):

@@ -21,6 +21,13 @@ class RestartRefinementTests(unittest.TestCase):
             policy = from_environment(SimpleNamespace(tolerance=1e-4))
         self.assertEqual(policy.lower_bound_rule, "smart")
         self.assertEqual(policy.tolerance, 1e-4)
+        self.assertEqual(policy.max_passes, 40)  # Explicit historical limits remain valid.
+        with patch.dict(os.environ, {"PARSEC_RESTART_REFINE": "levels"}, clear=True):
+            default = from_environment(SimpleNamespace(tolerance=1e-4))
+        self.assertEqual(default, RestartRefinementSettings(1e-4))
+        self.assertEqual(default.max_passes, 100)
+        self.assertEqual(default.stable_passes, 2)
+        self.assertEqual(default.lower_bound_rule, "inherit")
         with self.assertRaisesRegex(ValueError, "inherit or smart"):
             RestartRefinementSettings(1e-4, lower_bound_rule="unknown")
 

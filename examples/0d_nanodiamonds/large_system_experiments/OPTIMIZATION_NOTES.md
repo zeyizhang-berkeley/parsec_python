@@ -122,8 +122,11 @@ resumed residual after additional cycles is the main evidence for this diagnosis
 The `levels` policy keeps the Hamiltonian fixed and performs extra solves until
 all requested levels stabilize for two consecutive passes. It retains only an
 O(states) host spectrum snapshot, not another full wavefunction basis. If the
-40-pass limit is reached, it fails before constructing/mixing a new density, and
-that output must not become a new healthy parent automatically.
+configured limit is reached, it fails before constructing/mixing a new density,
+and that output must not become a new healthy parent automatically. The current
+default limit is 100 extra passes; the reported GPU experiments used an explicit
+40-pass limit. Ordinary SCF has a separate `Max_Iter` limit, also defaulting to
+100 when omitted. Neither change relaxes the accuracy thresholds.
 
 The `smart` option changes the filtering lower bound during extra reconstruction
 passes only. In the large example, the old monotone bound retained an early value

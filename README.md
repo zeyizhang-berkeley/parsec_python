@@ -583,6 +583,13 @@ The isolated single-point workflow is:
 9. Stop according to the translated PARSEC convergence criterion or
    `Max_Iter`, then write the PARSEC-shaped report.
 
+`Max_Iter` defaults to 100 ordinary SCF iterations when omitted; an explicit
+input value takes precedence. Experimental fixed-potential checkpoint
+reconstruction has a separate 100-pass default limit,
+`PARSEC_RESTART_REFINE_MAX_PASSES`. It remains disabled unless
+`PARSEC_RESTART_REFINE=levels` is set. Raising either limit allows more work
+without changing convergence tolerances.
+
 The Hamiltonian and nonlocal potential remain matrix-free during iterative
 eigensolution. Static terms are prepared once; only density-dependent local
 fields change during SCF.

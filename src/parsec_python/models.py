@@ -1457,6 +1457,9 @@ class ExactExchangeSettings:
 class SCFSettings:
     """Isolated single-point SCF controls.
 
+    ``max_iterations`` defaults to 100 ordinary SCF iterations. It is
+    separate from the opt-in fixed-potential restart reconstruction limit.
+
     ``xc_functional`` is PARSEC's ``Correlation_Type`` (the names and the
     Fortran labels are listed in :mod:`parsec_python.V_xc.selection`);
     ``xalpha``, ``wigner`` and ``hedin_lundqvist`` have no spin-polarized
@@ -1515,7 +1518,7 @@ class SCFSettings:
     ``(2*Hf_One+1)*(2*Hf_Two+1)*(2*Hf_Three+1)`` cells.
     """
 
-    max_iterations: int = 50
+    max_iterations: int = 100
     convergence_criterion: float = 2.0e-4
     fermi_temperature_kelvin: float = 80.0
     number_of_states: int | None = None

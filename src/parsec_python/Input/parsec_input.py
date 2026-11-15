@@ -4653,7 +4653,7 @@ def _parse_parsec_input(
         scalar, one, spin_polarized=spin_polarized, warnings=warnings
     )
     scf = SCFSettings(
-        max_iterations=_integer(one("max_iter", "50"), label="Max_Iter"),
+        max_iterations=_integer(one("max_iter", "100"), label="Max_Iter"),
         convergence_criterion=_energy_rydberg(
             one("convergence_criterion", "2e-4 Ry"),
             label="Convergence_Criterion",

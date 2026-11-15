@@ -4,9 +4,11 @@
 
 The baseline Git commit is `2c961072e0232ab1a41f85be481bb2f8876f6fc5`.
 This branch contains memory/communicator changes, switchable diagnostics,
-fixed-potential reconstruction and the smart-bound candidate. The SHA256 values
-of 27 changed source/test files match the measured GPU bundle; see
-[provenance.json](data/provenance.json).
+fixed-potential reconstruction and the smart-bound candidate. At publication,
+the SHA256 values of 27 changed source/test files matched the measured GPU
+bundle; see [provenance.json](data/provenance.json). Those hashes describe the
+historical measured code, before the subsequent default-limit change to 100.
+They are preserved rather than relabeled as evidence for the new defaults.
 
 Historical labels such as `2c96107+memory-…`, `+qr-…`, `+restartfix-…` and
 `+restartbounds-…` identify frozen snapshots, not Git commits that can be checked
@@ -22,7 +24,7 @@ Enabling every change in this branch does not reproduce every historical version
 | memory-v1 | Dense-intermediate reuse, sector communicators | Full-SCF memory decrease; timing trade-off not fully isolated |
 | memory-v2 | MPI Ritz layout reuse within one allocation | Module accuracy, capacity and short SCF checks |
 | QR candidate | Shared-storage robust QR | Module/short-SCF checks passed; large-system validation unfinished |
-| restart levels | Additional fixed-potential solves | Original accuracy thresholds, at most 40 extra passes |
+| restart levels | Additional fixed-potential solves | Historical GPU bundle: original accuracy thresholds, at most 40 extra passes |
 | restart smart | Smart lower bound during extra reconstruction | 95,648-electron restart converged; matched A/B and array review open |
 
 ## 2. Structures and inputs
@@ -72,8 +74,17 @@ shared MPI route; 64 ranks must not accidentally select the same device.
 | `PARSEC_DEBUG=off/summary/audit` | Switchable diagnostics | Audit adds Hq, reductions and synchronization |
 | `PARSEC_DEBUG_RANKS=leaders` | Sector/pool leader records | Retain each leader when collecting logs |
 | `PARSEC_RESTART_REFINE=off/levels` | Fixed-potential reconstruction | Default off; requires the actual `load_restart` path |
-| `PARSEC_RESTART_REFINE_MAX_PASSES=40` | Bounded extra work | Failure stops before accepting an unqualified density |
+| `PARSEC_RESTART_REFINE_MAX_PASSES=100` | Current default for extra reconstruction passes | Explicit values override it; failure stops before accepting an unqualified density |
 | `PARSEC_RESTART_REFINE_LOWER_BOUND=inherit/smart` | Extra-pass lower-bound rule | Default inherit; SCF accuracy threshold unchanged |
+
+The current default for ordinary SCF is also 100 iterations when `Max_Iter` is
+omitted. These are independent limits: `Max_Iter` counts density/potential SCF
+updates, whereas `PARSEC_RESTART_REFINE_MAX_PASSES` bounds additional solves at
+the fixed loaded potential before the first resumed density is accepted.
+The restart policy still requires two consecutive stable passes at the input
+`Diag_Tolerance`; the final SCF criterion is unchanged. Existing explicit input
+limits and the historical 40-pass measurements are unchanged. The higher caps
+allow more work and do not establish convergence or a performance improvement.
 
 For an already allocated GPU pool, the portable fresh cluster/Gamma entry point
 is `parsec_python.acceleration.benchmarks.mpi_full_scf`. For example, on a Slurm
@@ -149,12 +160,20 @@ python -m unittest \
 
 python examples/0d_nanodiamonds/large_system_experiments/checks/check_cpu_restart_bounds.py
 python examples/0d_nanodiamonds/large_system_experiments/checks/check_cpu_kpoint_restart.py
-python examples/0d_nanodiamonds/large_system_experiments/checks/validate_report.py
 ```
 
 The independent spectral fixture allows 80 extra passes to compare convergence
-work; the GPU candidate uses 40. Both limits are recorded in the JSON. CPU work
-ratios must not be presented as GPU speedups.
+work; the historical GPU candidate used 40. Both limits are recorded in the
+JSON. The current default of 100 does not retroactively change those runs. CPU
+work ratios must not be presented as GPU speedups.
+
+The evidence validator intentionally checks source hashes against the published
+measured snapshot. Run it in a separate checkout of commit
+`15cf1d7bbc3f38a95983207299c6bf824e736dca`, before the default-limit change:
+
+```bash
+python examples/0d_nanodiamonds/large_system_experiments/checks/validate_report.py
+```
 
 GPU module checks are in `acceleration/benchmarks/`: `check_dense_memory`,
 `check_mpi_inplace_memory`, `check_mpi_shared_qr` and `check_debug_audit`.

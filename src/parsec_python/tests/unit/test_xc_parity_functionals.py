@@ -583,7 +583,7 @@ class SelectionAndSettingsTests(unittest.TestCase):
         self.assertNotIn("ionization_energy_difference", repr(default))
         self.assertEqual(
             repr(default),
-            "SCFSettings(max_iterations=50, convergence_criterion=0.0002, "
+            "SCFSettings(max_iterations=100, convergence_criterion=0.0002, "
             "fermi_temperature_kelvin=80.0, number_of_states=None, net_charge=0.0, "
             "use_plain_residual=False, normalize_initial_density=True, xc_functional='ca')",
         )

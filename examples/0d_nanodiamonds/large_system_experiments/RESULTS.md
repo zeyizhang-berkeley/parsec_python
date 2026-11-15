@@ -156,8 +156,10 @@ as an important cause, but does not prove that all divergence mechanisms are fix
 
 `PARSEC_RESTART_REFINE=levels` performs additional solves at fixed loaded potential.
 Every requested level must change by no more than the input `Diag_Tolerance` for
-two consecutive passes before a new density is constructed. The GPU candidate
-allows at most 40 extra passes and fails closed. The `smart` candidate additionally
+two consecutive passes before a new density is constructed. The recorded GPU candidate
+allowed at most 40 extra passes and failed closed. The current code defaults to
+100 extra passes; these historical results retain their original 40-pass limit.
+The `smart` candidate additionally
 uses the existing dynamic filter-lower-bound rule during those extra passes only.
 Polynomial degrees, FP64, physical parameters and the final SCF criterion are unchanged.
 

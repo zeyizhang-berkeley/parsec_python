@@ -14,7 +14,7 @@ new density reaches mixing or an iteration checkpoint callback.
 
 ```bash
 export PARSEC_RESTART_REFINE=levels
-export PARSEC_RESTART_REFINE_MAX_PASSES=40
+export PARSEC_RESTART_REFINE_MAX_PASSES=100
 export PARSEC_RESTART_REFINE_LOWER_BOUND=inherit  # or opt-in smart; see below
 export PARSEC_DEBUG=summary  # audit also measures actual Hq - epsilon*q
 ```
@@ -24,6 +24,14 @@ the default and preserves the old fixed-pass path. Logging and the repair
 are separate switches. The repair only attaches to `load_restart`; a
 programmatic `SCFWarmStart` can explicitly supply
 `RestartRefinementSettings`. A saved eigensolver state bypasses rebuilding.
+
+The reconstruction cap now defaults to 100 extra passes. Ordinary SCF also
+defaults to 100 iterations when `Max_Iter` is omitted; the two limits count
+different work. Explicit input and environment limits still take precedence.
+Convergence still stops either loop early, and the accuracy thresholds and
+two-stable-pass reconstruction gate are unchanged. The historical GPU results
+below used an explicit 40-pass reconstruction cap. Raising the cap permits
+continued improvement; reaching it without satisfying the gate is not acceptance.
 
 The common policy is used by the scalar/sector SCF loop, its isolated spin
 channels, and the k-point loops with and without spin polarization. An
