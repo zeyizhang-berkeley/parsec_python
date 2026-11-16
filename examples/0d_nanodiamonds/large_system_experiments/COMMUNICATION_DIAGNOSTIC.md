@@ -100,16 +100,91 @@ evidence when platform collection is incomplete.
 The targeted source CPU validation recorded **45 passed tests, 7 skipped tests
 and no failures**, including checks of the actual exchange-wrapper operation
 order with tracing on/off. Separate adapter checks enforce the frozen trace
-policy. Skipped tests are not GPU passes. **Validation of the new tracing code on the real large-memory GPU
-case is pending**; this document does not claim that the instrumented DFT task has
-started or completed.
+policy. Skipped tests are not GPU passes. The first instrumented large-memory
+DFT allocation subsequently ran, but terminated before SCF, as detailed below.
+**Full GPU numerical validation remains pending.**
 
-The intended next comparison keeps the 95,648-electron inherited-bound case,
+The instrumented comparison keeps the 95,648-electron inherited-bound case,
 healthy parent checkpoint, reconstruction cap of 100, `Max_Iter=100`,
 `FF_MaxIter=3`, precision controls and full-SCF policy unchanged. The trace is
 intended to locate the first missing stage or inconsistent exchange metadata
 under the actual memory footprint. Any later correction still requires numerical
 validation before a performance or production-adoption claim.
+
+## First large-memory trace outcome, reviewed November 16
+
+The first instrumented allocation ran the **C23191H2884 nanodiamond cluster**
+(26,075 atoms and **95,648 valence electrons**) on **64 GB200 GPUs, 16 nodes ×
+4 GPUs**. It retained the healthy parent, inherited spectral lower bound,
+reconstruction cap of 100, `Max_Iter=100` and `FF_MaxIter=3`. The sanitized record is
+[restart_trace_termination_20261116.json](data/restart_trace_termination_20261116.json).
+
+| Measurement at the last completed reconstruction pass | Result |
+|---|---:|
+| Completed extra reconstruction passes | 33 |
+| Next reconstruction pass started | 34 |
+| Maximum adjacent-pass level change | **0.0001622911340486699 Ry** |
+| Required level-change threshold | 0.0001 Ry |
+| Consecutive passing checks | 0 of 2 required |
+| Elapsed reconstruction time | 4,749.62 s |
+| Completed SCF iterations | **0** |
+| Latest four sector eigenpair audits | All checked values finite |
+
+Level changes continued to decrease over the last five completed passes, from
+0.000209894 to 0.000162291 Ry. This is progress toward the reconstruction gate,
+not an SCF convergence result. The gate had not passed when the allocation ended.
+Finite audit values also do not establish converged eigenpairs or final SCF
+precision; the audit residual and adjacent-pass level change are different
+quantities.
+
+The platform recorded failure at **2026-11-15 22:53:43.619 PST**. Launcher logs
+showed **SIGTERM on all 16 workers** at approximately 22:53:38–39 PST, and all 16
+instances reported exit code 2. The inspected platform reason fields were empty.
+These observations establish a coordinated termination signature, but **do not
+identify its initiating cause or prove preemption**. The eight-hour allocation
+guard had not expired and had not requested a stop.
+
+The inspected terminal-window queries returned no rows for `Alltoallv`,
+`Traceback` or `Segmentation`. This particular query evidence did not reproduce
+the native MPI fault seen in earlier attempts. Absence from these keyword queries
+does not rule out an unreported fault or establish a platform root cause.
+
+The collected trace also has a coverage limitation: the latest per-rank trace
+records were approximately **182 seconds older than the final reconstruction
+record**. Therefore, a last observed `mpi_enter` or staging event cannot locate
+the terminating operation. The saved count review at **2026-11-15 22:38:28 PST**
+found **472,832 of 472,832 resolved sender/receiver count pairs matched**, covering
+1,847 fully resolved collective sequences. Another 911 complete-entry sequences
+lacked sufficient layout metadata, and 213 sequences had partial rank coverage.
+These counts describe that earlier snapshot, not complete terminal coverage. No
+mismatch was observed in its resolved subset; unresolved coverage remains
+unresolved.
+
+A separate monitoring defect left the status summary stale: MPI trace records
+use `stage`, while ordinary debug records use `event`. The summarizer previously
+assumed every record contained `event`. The corrected summarizer streams the
+mixed log, skips irrelevant or incomplete records, and successfully reproduced
+the terminal pass-33 summary. This change affects monitoring only.
+
+This allocation produced **no accepted full-SCF result and no validated speedup
+or memory reduction**. A conditional recovery supervisor was started at
+**2026-11-16 01:08 PST**, after 35 controller regression tests passed locally and
+on the development machine. That timestamp records supervisor startup, not GPU
+readiness or scientific acceptance. The recovery release changes only the
+scheduler allocation/retry fields in the manifest; scientific source, adapters,
+inputs, sequence, runtime and healthy parent remain identical.
+
+The controller permits up to 11 allocations within the existing campaign budget.
+It retries only after verifying the exact terminal allocation, all 16 worker exit
+codes and SIGTERM records, and the absence of contradictory failure/stop/expiry
+evidence. Missing evidence defers without consuming a new allocation; numerical,
+native or memory errors block recovery. The classification remains
+`external_termination_unclassified`, not confirmed preemption. Terminal log
+queries cover the completion-centered window with five minutes on each side,
+after allowing at least five minutes for ingestion. Collection drains for a
+bounded five to ten minutes and continues to label platform coverage as partial.
+The parent does not contain wavefunctions, so recovery must rebuild them; it
+cannot resume directly at reconstruction pass 34.
 
 ## Source identity
 
@@ -122,7 +197,13 @@ The underlying scientific base bundle was
 with GB200 runtime
 `59067e1e373f0a5e5114cc47c0ad6edcf708ac13ff3eae2248d241fb5ed8b4b8`.
 
-These identities describe the **completed communication probe**, not the new
-instrumented DFT candidate. Historical `smart` results continue to belong to
-their earlier frozen bundle. Internal endpoints, hosts, process identifiers,
-raw logs and checkpoints are intentionally absent from the public aggregate.
+These identities describe the **completed communication probe**. The terminated
+instrumented DFT allocation used source
+`2c96107+restarttrace-4a91d62cd7c813410426`, with release SHA256
+`9d7c43a81a8f335e8401215df2bb2d3b0facd6bf40c5cde8e5a5171cccb4e449`.
+The metadata-only recovery release is
+`ca0af36744679fe413c0acf39a7aef8f6230f2aa42a32af66d094b25b0331569`;
+it retains the same scientific source revision and source inventory.
+Historical `smart` results continue to belong to their earlier frozen bundle.
+Internal endpoints, hosts, process identifiers, raw logs and checkpoints are
+intentionally absent from the public aggregate.
