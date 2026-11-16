@@ -221,6 +221,60 @@ allocation cap remained 11, with one used and ten not yet submitted at patch tim
 Supervisor recovery alone does not establish that a replacement GPU allocation
 has started or that any numerical optimization has been validated.
 
+## Native MPI fault in the second recovery allocation
+
+The second recovery allocation reached the MPI readiness checks on **64 GB200
+GPUs, 16 nodes × 4 GPUs**. The platform recorded failure at
+**2026-11-16 18:17:20.927 UTC (10:17:20.927 PST)**. This attempt used the same
+pinned scientific-source and runtime archives, and archived 95,648-electron
+case as the preceding recovery release. It **did not reach checkpoint reconstruction or SCF**. The
+sanitized evidence is in
+[readiness_native_failure_20261116.json](data/readiness_native_failure_20261116.json).
+
+| Readiness evidence | Observed result |
+|---|---|
+| MPI startup | All 64 unique ranks reported startup |
+| Shared-basis checks | `ALL PASSED` recorded |
+| GPU unit tests on the coordinator rank | 16 tests, `OK`; reported test time 1.335 s |
+| Native stack evidence | 14 observed rows containing `PMPI_Alltoallv_c+0x548` |
+| Native signal evidence | 14 observed SIGSEGV rows with fault address `0x110` |
+| QR comparison completion | No completion result observed |
+| Terminal worker review | All 16 workers received SIGTERM and reported exit code 2 |
+| Reconstruction / SCF results | None |
+| Recovery decision | Blocked because of positive native-failure evidence |
+
+The native fault distinguishes this attempt from the earlier bootstrap
+interruption. SIGTERM and exit code 2 describe the terminal worker state; they
+do not establish preemption or explain the earlier segmentation fault. The
+inspected platform reason fields did not establish an initiating cause, and the
+allocation guard had not requested a stop. The 14 stack and signal rows are
+**observed log counts**, not a complete census of failed MPI ranks. The saved
+SIGTERM query extract is also truncated; the all-worker terminal aggregate
+comes from the separate terminal review.
+
+The recorded sequence establishes successful shared-basis checks and successful
+coordinator GPU unit tests before failure, with no subsequent QR completion
+record. It does **not** identify the exact application call that entered the
+faulting collective. In this frozen adapter, readiness runs in check mode with
+no physical case attached, so its MPI tracing remained **off** even though the
+later DFT case enabled tracing. Consequently, the available output lacks the
+all-rank exchange-entry/exit metadata needed to connect the native frame to a
+specific readiness call and buffer layout.
+
+The cause therefore remains unresolved between the application caller, the MPI
+implementation, and the loaded runtime environment. The observed symbol and
+fault address are evidence of a native failure, not proof of an MPI-library bug
+or an invalid application buffer. A useful follow-up must isolate the QR check
+from the inherited readiness sequence, capture stage boundaries on every rank,
+and identify the loaded MPI components before interpreting another failure.
+This section records the failed attempt only; it makes no claim that a new
+diagnostic has started or succeeded.
+
+The earlier communication-only pass remains valid for its tested transfer
+patterns and low-memory workload. It cannot overrule this readiness failure or
+establish that the large DFT calculation is stable. This attempt adds **no
+accepted numerical result, validated speedup, or validated memory reduction**.
+
 ## Source identity
 
 The successful communication probe used scientific source

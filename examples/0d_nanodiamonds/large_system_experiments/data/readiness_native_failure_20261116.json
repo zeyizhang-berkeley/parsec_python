@@ -1,0 +1,90 @@
+{
+  "schema": "parsec-public-diagnostic-result-v1",
+  "review_date": "2026-11-16",
+  "experiment": "Native MPI fault during readiness in the second recovery allocation",
+  "allocation_ordinal_in_recovery_campaign": 2,
+  "resources": {
+    "gpu_model": "GB200",
+    "nodes": 16,
+    "gpus_per_node": 4,
+    "total_gpus": 64,
+    "mpi_ranks": 64,
+    "preemptible": true
+  },
+  "intended_case_not_executed": {
+    "kind": "cluster",
+    "formula": "C23191H2884",
+    "atoms": 26075,
+    "valence_electrons": 95648,
+    "reconstruction_max_passes": 100,
+    "scf_max_iter": 100,
+    "filter_cycles": 3
+  },
+  "timeline": {
+    "platform_failed_at_utc": "2026-11-16T18:17:20.927Z",
+    "platform_failed_at_pst": "2026-11-16T10:17:20.927-08:00"
+  },
+  "readiness_evidence": {
+    "unique_started_ranks": 64,
+    "rank_inventory_complete": true,
+    "shared_basis_all_passed_marker_observed": true,
+    "coordinator_gpu_unit_tests_run": 16,
+    "coordinator_gpu_unit_tests_ok_marker_observed": true,
+    "reported_unit_test_seconds": 1.335,
+    "qr_completion_observed": false,
+    "readiness_accepted": false
+  },
+  "native_failure_evidence": {
+    "observed_native_stack_symbol": "PMPI_Alltoallv_c",
+    "observed_native_stack_offset": "0x548",
+    "matching_stack_rows": 14,
+    "signal": "SIGSEGV",
+    "signal_number": 11,
+    "fault_address": "0x110",
+    "matching_signal_rows": 14,
+    "observed_row_counts_are_complete_rank_census": false,
+    "python_traceback_query_rows": 0,
+    "negative_query_interpretation": "No matching Python traceback or QR completion rows in the inspected queries; absence does not prove complete log coverage."
+  },
+  "termination": {
+    "platform_state": "failed",
+    "workers_receiving_sigterm": 16,
+    "workers_exiting_code_2": 16,
+    "worker_counts_source": "Separate terminal-allocation review",
+    "guard_stop_requested": false,
+    "initiating_cause": "unknown",
+    "preemption_confirmed": false,
+    "sigterm_keyword_query_rows": 32,
+    "sigterm_query_rows_saved_in_keyword_extract": 30,
+    "unique_workers_in_saved_sigterm_extract": 15
+  },
+  "coverage": {
+    "mpi_trace_enabled_for_readiness": false,
+    "later_dft_case_trace_policy_enabled": true,
+    "all_rank_exchange_entry_exit_coverage": false,
+    "exact_failing_application_call_identified": false,
+    "runtime_library_root_cause_identified": false,
+    "platform_log_coverage_complete": false,
+    "explanation": "Readiness had no attached physical case, so the inherited check-mode adapter did not enable the DFT case's trace policy. Existing basis and unit-test output does not locate the exact failing collective call."
+  },
+  "controller_response": {
+    "state": "blocked_terminal_evidence",
+    "reason": "fatal_evidence",
+    "native_failure_reclassified_as_preemption": false
+  },
+  "preserved_identity": {
+    "source_revision": "2c96107+restarttrace-4a91d62cd7c813410426",
+    "release_sha256": "ca0af36744679fe413c0acf39a7aef8f6230f2aa42a32af66d094b25b0331569",
+    "source_inventory_sha256": "c996d64a0b3f15487197718776673f3d59b0abbe61b24e7d059c72e11e645271",
+    "runtime_archive_sha256": "59067e1e373f0a5e5114cc47c0ad6edcf708ac13ff3eae2248d241fb5ed8b4b8"
+  },
+  "scientific_result": {
+    "new_reconstruction_results": 0,
+    "completed_scf_iterations": 0,
+    "full_scf_accepted": false,
+    "performance_claim_validated": false,
+    "memory_reduction_validated": false,
+    "new_diagnostic_start_or_success_claimed": false
+  },
+  "public_data_scope": "Sanitized aggregate only; no internal endpoints, hostnames, process identifiers, credentials, checkpoint locations, or raw logs."
+}
