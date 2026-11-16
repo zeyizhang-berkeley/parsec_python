@@ -92,6 +92,8 @@ def refine(step, initial_levels, policy, *, label):
     started = perf_counter()
     stable = 0
     for number in range(1, policy.max_passes + 1):
+        debug.emit("restart_level_refinement_start", label=label, passes=number,
+                   lower_bound_rule=policy.lower_bound_rule, tolerance_ry=policy.tolerance)
         current = _levels(step())
         if len(current) != len(previous) or any(a.shape != b.shape for a, b in zip(current, previous)):
             raise RestartRefinementError("Restart level refinement failed: state inventory changed")

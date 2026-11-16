@@ -49,6 +49,7 @@ from typing import Any, Callable
 import numpy as np
 
 from parsec_python import diagnostics as debug
+from .mpi_trace import start_exchange
 
 from parsec_python.Eigensolvers.chebyshev import subspace_filter_blocks
 from parsec_python.Eigensolvers.spectral_bounds import bound_request
@@ -257,7 +258,7 @@ class ColumnGroup:
         self.seconds["broadcast"] += time.perf_counter() - started
         return buffer
 
-    def _exchange(self, send, send_counts, receive, receive_counts) -> None:
+    def _exchange(self, send, send_counts, receive, receive_counts, *, trace_label=None) -> None:
         """One ``Alltoallv`` of complex buffers (``counts`` in complex elements), as float64 views."""
         xp = self.xp
         sends = np.asarray(send_counts, dtype=np.int64) * 2
@@ -267,24 +268,34 @@ class ColumnGroup:
             return np.concatenate(([0], np.cumsum(counts[:-1]))).astype(np.int64)
 
         self.sent_bytes += 8 * int(sends.sum())
+        trace = start_exchange(self, send, send_counts, receive, receive_counts,
+                               wire_multiplier=2, label=trace_label)
+        if trace: trace.emit("device_sync_enter", phase="producer")
         self._sync()
+        if trace: trace.emit("device_sync_done", phase="producer")
         if self.transport == "cuda":
             send_buffer, receive_buffer = send.view(xp.float64), receive.view(xp.float64)
         else:
+            if trace: trace.emit("host_stage_enter")
             send_buffer = np.ascontiguousarray(self._host(send)).view(np.float64)
             receive_buffer = np.empty(2 * int(receive.size), dtype=np.float64)
+            if trace: trace.emit("host_stage_done")
         send_spec = [send_buffer, (sends, offsets(sends))]
         receive_spec = [receive_buffer, (receives, offsets(receives))]
         if self.mpi is not None:
             send_spec.append(self.mpi.DOUBLE)
             receive_spec.append(self.mpi.DOUBLE)
+        if trace: trace.emit("mpi_enter")
         self.comm.Alltoallv(send_spec, receive_spec)
+        if trace: trace.emit("mpi_exit")
         if self.transport != "cuda":
+            if trace: trace.emit("upload_enter")
             host = receive_buffer.view(np.complex128)
             if xp is np:
                 receive[...] = host
             else:
                 receive.set(host)
+            if trace: trace.emit("upload_done", completion="host_copy" if xp is np else "enqueued")
 
     # ----- moves between columns and rows --------------------------------------
     def _round_rows(self, columns: int) -> int:

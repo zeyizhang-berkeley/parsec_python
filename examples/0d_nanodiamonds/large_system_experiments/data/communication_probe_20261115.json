@@ -1,0 +1,75 @@
+{
+  "schema": "parsec-communication-probe-summary-v1",
+  "experiment_date": "2026-11-15",
+  "verified_at": "2026-11-15T21:07:16.821218-08:00",
+  "scope": "Communication-only diagnostic; no DFT calculation or electronic capacity measurement",
+  "resources": {
+    "gpu_model": "NVIDIA GB200",
+    "nodes": 16,
+    "gpus_per_node": 4,
+    "total_gpus": 64,
+    "mpi_ranks": 64,
+    "sector_communicators": 4,
+    "ranks_per_sector": 16,
+    "preemptible": true
+  },
+  "configuration": {
+    "maximum_phase_rounds": 1000,
+    "active_time_limit_seconds": 600.0,
+    "logical_send_bytes_per_rank_tiers": [
+      1048576,
+      67108864,
+      536870912
+    ],
+    "phase_kinds": [
+      "host",
+      "gpu_host_gpu"
+    ],
+    "required_phase_kind_size_combinations": 6,
+    "precision": "Exact FP64 integer-pattern comparison of every received element"
+  },
+  "result": {
+    "state": "accepted",
+    "exit_code": 0,
+    "passed_rank_reports": 64,
+    "unique_rank_reports": 64,
+    "completed_ranks": 64,
+    "completed_hosts": 16,
+    "all_required_phases_completed": true,
+    "phase_rounds_per_rank": 1000,
+    "termination_reason": "Reached phase-round cap before active-time limit",
+    "active_seconds": 164.93038910254836,
+    "launcher_seconds": 233.3439016342163,
+    "sampled_peak_gpu_mib": 1727.0,
+    "logical_total_send_bytes": 12864366575616,
+    "logical_total_send_tib": 11.7000732421875
+  },
+  "completion": {
+    "completed_at": "2026-11-15T19:34:27.030595-08:00",
+    "platform_final_state": "killed",
+    "interpretation": "Allocation stopped by diagnostic-completion cleanup after the accepted result; platform state does not invalidate the completed probe"
+  },
+  "identities": {
+    "probe_bundle_sha256": "7d1d5949b4a4686f3ccfde7cb9c05c1b2752314f27df63938c2f28996b2cef1a",
+    "source_revision": "2c96107+restart100-aaca2df3fea923efe323",
+    "source_base_release_sha256": "7ebe86ec8f56d10c7a23e224fe5ac7b694cdeaed16ee9e27897c3a177e3521b0",
+    "gb200_runtime_sha256": "59067e1e373f0a5e5114cc47c0ad6edcf708ac13ff3eae2248d241fb5ed8b4b8",
+    "science_sources_identical_to_base": true
+  },
+  "evidence_boundary": {
+    "full_scf_executed": false,
+    "production_adopted": false,
+    "full_scf_submission_hold_preserved": true,
+    "large_dft_memory_stability_established": false,
+    "transport_bandwidth_measurement": false,
+    "all_rank_summary_and_receipts_verified": true,
+    "platform_stream_collection_complete": false
+  },
+  "limitations": [
+    "The run completed 1000 phase rounds in about 165 seconds; it was not a ten-minute endurance run.",
+    "The peak memory was 1,727 MiB/GPU, much lower than the approximately 95 GiB/GPU large DFT restart.",
+    "Exact communication patterns passed, but this does not establish full DFT numerical correctness, native-code stability, or long-term availability.",
+    "Logical byte volume includes transfers within a node and self-destinations and is not measured NIC traffic.",
+    "The platform log collector encountered a query timeout; completion is based on saved all-rank summaries and receipts."
+  ]
+}

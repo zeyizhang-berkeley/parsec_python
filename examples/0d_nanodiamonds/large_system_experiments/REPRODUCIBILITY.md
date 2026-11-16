@@ -12,11 +12,21 @@ They are preserved rather than relabeled as evidence for the new defaults.
 
 Historical labels such as `2c96107+memory-…`, `+qr-…`, `+restartfix-…` and
 `+restartbounds-…` identify frozen snapshots, not Git commits that can be checked
-out by those names. The latest tested bundle SHA256 is
+out by those names. The historical measured `smart` bundle SHA256 is
 `9f332b0cb1b01756953c44d7f0940e01cf695aeacd4776975cfc7227ae5dd6c2`;
 the GB200 runtime SHA256 is
 `59067e1e373f0a5e5114cc47c0ad6edcf708ac13ff3eae2248d241fb5ed8b4b8`.
 Enabling every change in this branch does not reproduce every historical version.
+
+That `9f332b…` bundle is not the latest source state. The subsequent 100-limit
+scientific bundle is `7ebe86ec8f56d10c7a23e224fe5ac7b694cdeaed16ee9e27897c3a177e3521b0`.
+The completed communication-only probe used its unchanged scientific source with
+a separate adapter bundle; its hashes, acceptance evidence and scope are in
+[COMMUNICATION_DIAGNOSTIC.md](COMMUNICATION_DIAGNOSTIC.md) and
+[communication_probe_20261115.json](data/communication_probe_20261115.json).
+The newer optional MPI tracing code has targeted CPU validation, while its
+large-memory GPU validation remains pending. Do not attribute the earlier GPU
+results to that instrumentation.
 
 | Stage | Changes | Evidence boundary |
 |---|---|---|
@@ -73,6 +83,7 @@ shared MPI route; 64 ranks must not accidentally select the same device.
 | `PARSEC_MPI_SHARED_TRANSPORT=host` | Host-staged MPI | CUDA path needs separate environment/numerical validation |
 | `PARSEC_DEBUG=off/summary/audit` | Switchable diagnostics | Audit adds Hq, reductions and synchronization |
 | `PARSEC_DEBUG_RANKS=leaders` | Sector/pool leader records | Retain each leader when collecting logs |
+| `PARSEC_MPI_TRACE=1` | Existing exchange-stage and buffer-layout metadata | Default off; all ranks, independent of debug leader selection; adds logging, not MPI calls or device synchronization |
 | `PARSEC_RESTART_REFINE=off/levels` | Fixed-potential reconstruction | Default off; requires the actual `load_restart` path |
 | `PARSEC_RESTART_REFINE_MAX_PASSES=100` | Current default for extra reconstruction passes | Explicit values override it; failure stops before accepting an unqualified density |
 | `PARSEC_RESTART_REFINE_LOWER_BOUND=inherit/smart` | Extra-pass lower-bound rule | Default inherit; SCF accuracy threshold unchanged |
@@ -85,6 +96,13 @@ The restart policy still requires two consecutive stable passes at the input
 `Diag_Tolerance`; the final SCF criterion is unchanged. Existing explicit input
 limits and the historical 40-pass measurements are unchanged. The higher caps
 allow more work and do not establish convergence or a performance improvement.
+
+Optional MPI trace records contain metadata rather than orbital values, with a
+cache of at most 256 layout signatures per group. Preserve per-rank records and
+source identity when diagnosing a missing exchange stage. Disable tracing for
+performance comparisons after correctness is established; metadata processing
+and flushed output add overhead. See the [communication diagnostic](COMMUNICATION_DIAGNOSTIC.md)
+for the completed probe and the limits of its evidence.
 
 For an already allocated GPU pool, the portable fresh cluster/Gamma entry point
 is `parsec_python.acceleration.benchmarks.mpi_full_scf`. For example, on a Slurm

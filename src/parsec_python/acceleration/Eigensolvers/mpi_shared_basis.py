@@ -74,6 +74,7 @@ from weakref import ref
 import numpy as np
 
 from parsec_python import diagnostics as debug
+from .mpi_trace import start_exchange
 
 from parsec_python.Eigensolvers.lapack_random import (
     _MODULUS,
@@ -1340,22 +1341,35 @@ class MPIShardGroup:
         self.exchanged_bytes += 8 * int(send_counts.sum())
         return send_spec, receive_spec
 
-    def _exchange(self, send, send_counts, receive, receive_counts) -> None:
+    def _exchange(self, send, send_counts, receive, receive_counts, *, trace_label=None) -> None:
         """One ``Alltoallv`` of float64 buffers (device arrays, or staged through the host)."""
 
         cp, _ = require_cupy()
+        trace = start_exchange(self, send, send_counts, receive, receive_counts, label=trace_label)
+        if trace: trace.emit("device_sync_enter", phase="producer")
         self._sync()
+        if trace: trace.emit("device_sync_done", phase="producer")
         if self.transport == "cuda":
             send_spec, receive_spec = self._specs(send, send_counts, receive, receive_counts)
+            if trace: trace.emit("mpi_enter")
             self.comm.Alltoallv(send_spec, receive_spec)
+            if trace: trace.emit("mpi_exit")
             return
+        if trace: trace.emit("host_stage_enter")
         host_send = np.ascontiguousarray(cp.asnumpy(send))
         host_receive = np.empty(int(receive.size), dtype=np.float64)
         send_spec, receive_spec = self._specs(host_send, send_counts, host_receive, receive_counts)
+        if trace: trace.emit("host_stage_done")
+        if trace: trace.emit("mpi_enter")
         self.comm.Alltoallv(send_spec, receive_spec)
+        if trace: trace.emit("mpi_exit")
+        if trace: trace.emit("upload_enter")
         receive.set(host_receive)
+        if trace: trace.emit("upload_done", completion="enqueued")
         # The host buffer must remain live until the asynchronous upload completes.
+        if trace: trace.emit("device_sync_enter", phase="post_upload")
         self._sync()
+        if trace: trace.emit("device_sync_done", phase="post_upload")
 
     def to_rows(self, local, layout, rows: int):
         """This rank's row block (``rows_rank x m``, Fortran order) of the basis whose columns ranks hold."""

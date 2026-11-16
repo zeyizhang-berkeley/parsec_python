@@ -5,6 +5,9 @@ The main scientific-results snapshot is **2026-11-15 00:46 PST**, followed by a
 publication CPU regression. A subsequent **01:14 PST** check found the matching
 `inherit` control still running: 10 extra reconstruction passes, with maximum
 adjacent-pass level change of 1.76443e-3 Ry. No final timing ratio was available.
+The later November 15 [communication diagnostic](COMMUNICATION_DIAGNOSTIC.md)
+adds a completed 64-GB200 transport probe and documents optional exchange tracing;
+it does not replace those historical scientific-result snapshots.
 
 The objective is to calculate larger systems on more nodes while preserving the
 physical problem and accuracy settings, and to measure memory, communication and
@@ -45,12 +48,14 @@ not complete an independent accuracy review or establish a GPU's maximum capacit
 |---|---|
 | [RESULTS.md](RESULTS.md) | Resources, systems, capacity observations, full-SCF/module comparisons, restart diagnostics and accuracy limits |
 | [GPU_UTILIZATION.md](GPU_UTILIZATION.md) | Why the 64-GB200 repair job has low utilization; comparison with the earlier 16-GB200 job |
+| [COMMUNICATION_DIAGNOSTIC.md](COMMUNICATION_DIAGNOSTIC.md) | Completed 64-GB200 communication probe, its memory/duration limits, and optional all-rank exchange tracing |
 | [OPTIMIZATION_NOTES.md](OPTIMIZATION_NOTES.md) | Source changes, memory/communication bottlenecks and proposed validation work |
 | [REPRODUCIBILITY.md](REPRODUCIBILITY.md) | Inputs, source identity, environment, switches and verification commands |
 | [data/runs.csv](data/runs.csv) | 46 curated scientific run records, including completed and failed attempts |
 | [data/runs.json](data/runs.json) | The same runs with available input/runtime hashes |
 | [data/large_restart_result.json](data/large_restart_result.json) | SCF, charge and eigenpair audits for the 95,648-electron restart |
 | [data/large_restart_profile.json](data/large_restart_profile.json) | Per-rank timing and memory measurements for that restart |
+| [data/communication_probe_20261115.json](data/communication_probe_20261115.json) | Sanitized aggregate from the completed communication-only diagnostic |
 | [data/provenance.json](data/provenance.json) | Baseline/frozen identities, hashes of 27 changed source/test files, and regression results |
 | [inputs/](inputs/) | 12 actual cluster/periodic input files, including successful and failed sizes |
 | [checks/](checks/) | Independent CPU accuracy checks, evidence validation and figure regeneration |
