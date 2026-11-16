@@ -186,6 +186,41 @@ bounded five to ten minutes and continues to label platform coverage as partial.
 The parent does not contain wavefunctions, so recovery must rebuild them; it
 cannot resume directly at reconstruction pass 34.
 
+## Bootstrap interruption and recovery-controller correction
+
+The first recovery allocation was submitted on **2026-11-16 at 01:18:27.881 PST**,
+started at 01:19:27.640 and failed at **01:21:45.164 PST**. All 16 workers received
+SIGTERM and reported exit code 2; the initiating cause remains unknown. All 16
+nodes had committed staging records with the expected source revision, but the
+application had not published its readiness marker or started the DFT sequence.
+This attempt therefore added **no reconstruction or SCF result**. The sanitized
+incident record is
+[restart_bootstrap_recovery_20261116.json](data/restart_bootstrap_recovery_20261116.json).
+
+The recovery controller then stayed in `waiting_for_terminal_evidence` until the
+status review around **10:00 PST**. Its original gate required `ready.json` even
+when termination occurred before readiness, so a legitimate startup interruption
+could never satisfy that gate. This was a controller limitation, separate from
+the numerical solver and from the unknown cause of the termination.
+
+The corrected gate recognizes an interrupted bootstrap only with verified frozen
+entrypoints, consistent committed staging records, an otherwise empty application
+control area, all 16 SIGTERM/exit-code records, and failure queries covering the
+entire short allocation lifetime (at most 300 seconds). Missing evidence still
+defers; positive contradictions block. Additional broad `Error`/`failed` searches
+apply only to this verified bootstrap phase, preventing ordinary numerical debug
+fields such as `maximum_norm_squared_error` from being mistaken for program failures.
+The classification remains an **unclassified external termination during
+bootstrap**, not confirmed preemption.
+
+The private controller correction passed **44 regression tests**, including
+**31 retry-policy tests**, locally and on the development machine. It was deployed
+at **10:09:15 PST** and the CPU supervisor restart was verified. The GPU bundle,
+scientific source, precision controls and healthy checkpoint were unchanged. The
+allocation cap remained 11, with one used and ten not yet submitted at patch time.
+Supervisor recovery alone does not establish that a replacement GPU allocation
+has started or that any numerical optimization has been validated.
+
 ## Source identity
 
 The successful communication probe used scientific source

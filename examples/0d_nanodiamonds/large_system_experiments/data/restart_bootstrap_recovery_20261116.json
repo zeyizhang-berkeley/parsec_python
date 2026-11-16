@@ -1,0 +1,93 @@
+{
+  "schema": "parsec-public-diagnostic-result-v1",
+  "review_date": "2026-11-16",
+  "experiment": "Recovery allocation interrupted during bootstrap",
+  "system": {
+    "kind": "cluster",
+    "formula": "C23191H2884",
+    "atoms": 26075,
+    "valence_electrons": 95648
+  },
+  "resources": {
+    "nodes": 16,
+    "gpus_per_node": 4,
+    "total_gpus": 64,
+    "preemptible": true,
+    "gpu_model": "GB200"
+  },
+  "timeline": {
+    "submitted_at_utc": "2026-11-16T09:18:27.881Z",
+    "platform_started_at_utc": "2026-11-16T09:19:27.640Z",
+    "completed_at_utc": "2026-11-16T09:21:45.164Z",
+    "controller_deployed_at_utc": "2026-11-16T18:09:15Z",
+    "submission_to_completion_seconds": 197.283
+  },
+  "bootstrap_evidence": {
+    "committed_staging_nodes": 16,
+    "unique_workers": 16,
+    "source_identity_consistent": true,
+    "application_readiness_marker_present": false,
+    "application_diagnostic_started": false,
+    "observed_debug_and_trace_events": 0
+  },
+  "termination": {
+    "platform_state": "failed",
+    "workers_receiving_sigterm": 16,
+    "workers_exiting_code_2": 16,
+    "root_cause": "unknown",
+    "preemption_confirmed": false,
+    "guard_stop_requested": false,
+    "inspection_keyword_row_counts": {
+      "Traceback": 0,
+      "Error": 0,
+      "failed": 0,
+      "PARSEC_": 0
+    },
+    "negative_query_interpretation": "No matching rows in the inspected startup logs; not proof that no fault occurred."
+  },
+  "controller_issue": {
+    "prior_state": "waiting_for_terminal_evidence",
+    "cause": "The retry gate required the application readiness marker even for termination before readiness.",
+    "reviewed_at_utc": "2026-11-16T18:00:16.595824+00:00"
+  },
+  "controller_correction": {
+    "phase": "bootstrap",
+    "classification": "external_termination_unclassified",
+    "requires_reviewed_entrypoints": true,
+    "requires_committed_source_consistent_staging": true,
+    "requires_no_application_control_artifacts": true,
+    "requires_all_worker_sigterm_and_exit_evidence": true,
+    "requires_complete_startup_log_window": true,
+    "maximum_bootstrap_lifetime_seconds": 300,
+    "missing_evidence": "defer_without_consuming_allocation",
+    "positive_contradictions": "block",
+    "broad_error_keyword_queries": "verified_bootstrap_phase_only",
+    "combined_regression_tests_passed": 44,
+    "retry_policy_tests_passed": 31,
+    "validation_locations": [
+      "local",
+      "development_machine"
+    ],
+    "supervisor_restart_verified": true
+  },
+  "preserved_identity": {
+    "source_revision": "2c96107+restarttrace-4a91d62cd7c813410426",
+    "recovery_release_sha256": "ca0af36744679fe413c0acf39a7aef8f6230f2aa42a32af66d094b25b0331569",
+    "gpu_bundle_unchanged": true,
+    "scientific_source_unchanged": true,
+    "precision_controls_unchanged": true,
+    "healthy_checkpoint_unchanged": true
+  },
+  "allocation_budget_at_patch": {
+    "maximum_allocations": 11,
+    "used_allocations": 1,
+    "unsubmitted_allocations": 10
+  },
+  "scientific_result": {
+    "new_reconstruction_results": 0,
+    "completed_scf_iterations": 0,
+    "full_scf_accepted": false,
+    "performance_claim_validated": false
+  },
+  "replacement_gpu_start_claimed": false
+}
