@@ -276,6 +276,12 @@ class MPISectorContext:
                     raise ValueError('local force terms must be finite, three per projector')
         except Exception as exc:
             error = f'{type(exc).__name__}: {exc}'
+            # The error text alone travels to the other ranks: where it was raised is printed here, by the rank
+            # that raised it (the MPISCFError below would hide it).
+            import sys
+            import traceback
+
+            print(f'MPI rank {self.rank}: {command} failed:\n{traceback.format_exc()}', file=sys.stderr, flush=True)
         errors = self.comm.allgather(error)
         if any(item is not None for item in errors):
             self.failed = True

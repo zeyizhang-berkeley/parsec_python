@@ -116,7 +116,13 @@ def _matching_tree(candidates: np.ndarray, period: np.ndarray | None):
         if tree is not None:
             _MATCHING_TREES.move_to_end(key)
             return tree
-    tree = cKDTree(candidates) if period is None else cKDTree(_folded(candidates, period), boxsize=period)
+    # copy_data: a k-d tree keeps a reference to a contiguous float64 array, and a kept tree must not change with
+    # an array its caller later changes in place (the key is that of the values it was built from)
+    tree = (
+        cKDTree(candidates, copy_data=True)
+        if period is None
+        else cKDTree(_folded(candidates, period), boxsize=period, copy_data=True)
+    )
     with _MATCHING_TREES_LOCK:
         _MATCHING_TREES[key] = tree
         while len(_MATCHING_TREES) > _MATCHING_TREE_CAPACITY:
@@ -1420,12 +1426,10 @@ def sector_projector_orbits_setting() -> str:
     return value
 
 
-def _atom_orbits(atoms, operations, translations, grid, tolerance: float):
-    """``(representatives, sizes)``: the smallest index in the orbit of every atom under the operations
-    ``r -> R r + t`` and the number of atoms in it, or ``None`` where an image matches no atom of its species.
-
-    The operations form a group, so the orbit of an atom is the set of its images (the identity among them).
-    """
+def atom_image_table(atoms, operations, translations, grid, tolerance: float):
+    """``images[g, a]``: the atom that operation ``g`` (``r -> R r + t``, ``t`` in grid steps along the axes of a
+    periodic cell, images modulo its lattice) carries atom ``a`` onto, or ``None`` where an image matches no atom of
+    its species within ``tolerance``."""
 
     if not atoms:
         return None
@@ -1451,6 +1455,19 @@ def _atom_orbits(atoms, operations, translations, grid, tolerance: float):
             if not np.all(np.isfinite(distances)):
                 return None
             images[g, members] = members[nearest]
+    return images
+
+
+def _atom_orbits(atoms, operations, translations, grid, tolerance: float):
+    """``(representatives, sizes)``: the smallest index in the orbit of every atom under the operations
+    ``r -> R r + t`` and the number of atoms in it, or ``None`` where an image matches no atom of its species.
+
+    The operations form a group, so the orbit of an atom is the set of its images (the identity among them).
+    """
+
+    images = atom_image_table(atoms, operations, translations, grid, tolerance)
+    if images is None:
+        return None
     representatives = images.min(axis=0)
     ordered = np.sort(images, axis=0)
     sizes = 1 + np.count_nonzero(np.diff(ordered, axis=0), axis=0)
@@ -1467,8 +1484,8 @@ def compress_projectors_for_sectors(operator, reduction):
     therefore gives the sector the same ``U^T B_a D B_a^T U``, and the columns of the representative scaled by
     the square root of the orbit size give their sum: ``1/|orbit|`` of the columns, the same operator up to
     round-off.  ``operator`` unchanged where the reduction knows no orbits, ``PARSEC_SECTOR_PROJECTOR_ORBITS=off``,
-    or every atom is its own orbit.  Only for the Hamiltonian of the sectors: the projector gradients of the forces
-    keep every atom.
+    or every atom is its own orbit.  The projector gradients of the forces are compressed by the same rule
+    (:func:`compress_gradients_for_sectors`).
     """
 
     representatives = getattr(reduction, "atom_representatives", None)
@@ -1495,6 +1512,46 @@ def compress_projectors_for_sectors(operator, reduction):
     return NonlocalProjectorOperator(
         projectors=projectors,
         signs=np.asarray(operator.signs, dtype=np.float64)[columns],
+        labels=tuple(labels[index] for index in columns),
+    )
+
+
+def compress_gradients_for_sectors(gradients, reduction):
+    """The projector gradients that go with :func:`compress_projectors_for_sectors`: the columns of the atom of each
+    orbit scaled by the square root of the orbit size, in the order of the projectors (the same rule on the labels).
+
+    The nonlocal force terms that a sector then contracts are those of the representatives, ``n_a`` times the term of
+    one atom of the orbit; the average over the group of the reduction gives every atom of the orbit its term
+    (:mod:`parsec_python.acceleration.Forces.sector_symmetry`).  ``gradients`` unchanged where the projectors are.
+    """
+
+    representatives = getattr(reduction, "atom_representatives", None)
+    sizes = getattr(reduction, "atom_orbit_sizes", None)
+    if representatives is None or sizes is None or sector_projector_orbits_setting() == "off":
+        return gradients
+    labels = tuple(gradients.labels)
+    if not labels:
+        return gradients
+    atom_of_column = np.fromiter((int(label[0]) for label in labels), dtype=np.int64, count=len(labels))
+    if atom_of_column.max() >= representatives.size or atom_of_column.min() < 0:
+        return gradients
+    keep = representatives[atom_of_column] == atom_of_column
+    if np.all(keep):
+        return gradients
+    import scipy.sparse as _sparse
+    from dataclasses import replace as _replace
+
+    columns = np.flatnonzero(keep)
+    scale = _sparse.diags(np.sqrt(sizes[atom_of_column[columns]].astype(np.float64)))
+    components = []
+    for component in gradients.components:
+        compressed = _sparse.csc_matrix(_sparse.csc_matrix(component)[:, columns] @ scale)
+        compressed.sort_indices()
+        components.append(compressed)
+    return _replace(
+        gradients,
+        components=tuple(components),
+        signs=np.asarray(gradients.signs, dtype=np.float64)[columns],
         labels=tuple(labels[index] for index in columns),
     )
 
@@ -1577,15 +1634,22 @@ def detect_point_group_reduction(
     if not plan.cost <= 0.5 / abelian.group_order + 1.0e-12:
         return abelian
     subgroup = [candidates[index] for index in plan.subgroup]
-    mappings = []
+    # The smallest image of every row under H, map by map: the maps are not kept together (32 maps of the 46.7 M
+    # points of a 20^3 diamond cell are 12 GB); _orbit_labels of that one array is _orbit_labels of all the maps.
+    smallest = None
     for index in plan.subgroup:
         mapping = _grid_row_mapping_operation(
             grid, candidates[index], lattice_tolerance, table=table, translation=shift_of(index)
         )
         if mapping is None:
             return abelian
-        mappings.append(mapping)
-    representative_rows, full_to_wedge, multiplicities = _orbit_labels(mappings)
+        if smallest is None:
+            smallest = np.array(mapping, dtype=np.int64, copy=True)
+        else:
+            np.minimum(smallest, mapping, out=smallest)
+        del mapping
+    representative_rows, full_to_wedge, multiplicities = _orbit_labels([smallest])
+    del smallest
     if np.any(multiplicities <= 0):
         raise RuntimeError("invalid empty symmetry orbit")
     characters = np.array(

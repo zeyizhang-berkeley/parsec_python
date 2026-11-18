@@ -1212,6 +1212,8 @@ def update_periodic_geometry(system: PeriodicPreparedSinglePointSystem, atoms) -
 
 def prepare_periodic_single_point(
     problem: SinglePointInput,
+    *,
+    negative_laplacian_builder=None,
 ) -> PeriodicPreparedSinglePointSystem:
     """Build every static periodic component, but do not enter the SCF loop.
 
@@ -1226,6 +1228,8 @@ def prepare_periodic_single_point(
 
     These are Andrew Grieder's routines, the default; ``problem.grid.fortran_routines``
     (``Use_Fortran_Routines``) selects :func:`_prepare_fortran_periodic_single_point`.
+    ``negative_laplacian_builder(grid)`` replaces :func:`~..Laplacian.build_negative_laplacian` (the accelerated
+    driver's deferred descriptor of the same matrix).
     """
     if problem.periodic_cell is None:
         raise ValueError("prepare_periodic_single_point requires problem.periodic_cell")
@@ -1280,7 +1284,9 @@ def prepare_periodic_single_point(
             )
 
     stage_start = time.perf_counter()
-    negative_laplacian = build_negative_laplacian(grid)
+    negative_laplacian = (
+        build_negative_laplacian if negative_laplacian_builder is None else negative_laplacian_builder
+    )(grid)
     # Only needed for k-point sampling's -2i*k.grad kinetic term
     # (Hamiltonian.kpoint_operator), bands and meta-GGAs: built when one
     # reads it, so that a Gamma-point run does not hold it.

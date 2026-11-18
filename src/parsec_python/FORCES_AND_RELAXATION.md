@@ -863,6 +863,28 @@ Nothing leaves the devices that a single point keeps there.
 - **Several nodes**: the rank of each node rebuilds the projectors of its own
   sectors (command `geometry`), restarts its solvers (`new_scf_loop`) and
   contracts its part of the nonlocal force (`forces`); the root sums them.
+- **Projectors of one atom per orbit** (a point group with weighted sectors, Td or
+  Oh): the sector operators hold the projectors of one atom of each orbit of the
+  group of the sectors, scaled by the square root of the orbit size, and since
+  2026-11-18 the projector gradients of the forces are compressed by the same rule
+  (`compress_gradients_for_sectors`): the terms belong to the representatives,
+  and the average over the full group of the reduction
+  (`acceleration/Forces/sector_symmetry.py`, translations of a cell included)
+  gives every atom of an orbit its term and the partners of the weighted levels
+  theirs, whatever symmetrization is asked for. Before, a structure whose atoms
+  with projectors formed such orbits stopped in the contraction (a Td cluster
+  with forces in its sectors, a regression of the compression of 2026-11-16);
+  Ge5 in Td against the full grid: within 2e-6 Ry/bohr
+  (`test_forces_geometry.TetrahedralSectorForceTests`).
+- **Periodic cells in sectors** (Gamma point, the default routines, one process,
+  through the driver: `driver.compute_forces(system, result)`): the nonlocal
+  term as above, the Ewald and local terms from the full-grid density, the
+  total averaged over the group of the reduction. Eight silicon atoms with the
+  neighbours of one moved along their bonds (Td, weights 1, 1, 3, 3) against
+  `PARSEC_PERIODIC_SYMMETRY=off`: within 2e-6 Ry/bohr
+  (`test_periodic_point_group.PeriodicSectorForceTests`). The command line still
+  solves a periodic cell with forces on the full grid; the Fortran-derived
+  routines in sectors are refused.
 - **Spin-orbit coupling and non-collinear magnetism**: the accelerated entry point runs these inputs, when they ask for
   forces, with the reference solver and says so. Its pooled k-point solver (periodic and non-collinear inputs) hands the
   orbitals of a k-point to the force pass on the device that solved it: the overlaps with the projectors, the spin-orbit

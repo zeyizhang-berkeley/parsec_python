@@ -1162,14 +1162,52 @@ def affine_grid_images(matrix, constant, counts, index_type=np.int64, *, xp=np):
         xp.arange(n[axis], dtype=xp.int64).reshape([n[axis] if other == axis else 1 for other in range(3)])
         for axis in range(3)
     ]
-    flat = xp.zeros((1, 1, 1), dtype=xp.int64)
+    terms = []
     for row in range(3):
         component = xp.full((1, 1, 1), int(constant[row]), dtype=xp.int64)
         for column in range(3):
             if matrix[row][column]:
                 component = component + int(matrix[row][column]) * axes[column]
-        flat = flat + (component % n[row]) * strides[row]
-    return xp.broadcast_to(flat, tuple(n)).reshape(-1).astype(index_type)
+        terms.append((component % n[row]) * strides[row])
+    size = n[0] * n[1] * n[2]
+    if xp is not np or size < _THREADED_IMAGES:
+        flat = terms[0] + terms[1] + terms[2]
+        return xp.broadcast_to(flat, tuple(n)).reshape(-1).astype(index_type)
+    # A large grid: the sum of the three broadcast terms written once into the result, by slabs of the first axis on
+    # threads (NumPy leaves the lock in these sums); the same integers.
+    result = np.empty(tuple(n), dtype=index_type)
+
+    def part(term, first, last):
+        return term[first:last] if term.shape[0] > 1 else term
+
+    def fill(first: int, last: int) -> None:
+        slab = result[first:last]
+        np.add(part(terms[0], first, last), part(terms[1], first, last), out=slab, casting="unsafe")
+        np.add(slab, part(terms[2], first, last), out=slab, casting="unsafe")
+
+    _run_by_slabs(fill, n[0])
+    return result.reshape(-1)
+
+
+_THREADED_IMAGES = 1 << 22
+"""Points of a grid from which :func:`affine_grid_images` fills its result by slabs on threads."""
+
+
+def _run_by_slabs(work, count: int) -> None:
+    """``work(first, last)`` over slabs of ``range(count)`` on the threads of the periodic setup."""
+
+    from concurrent.futures import ThreadPoolExecutor
+
+    from ..Laplacian.finite_difference import _build_threads
+
+    threads = max(1, min(_build_threads(), count))
+    if threads == 1:
+        work(0, count)
+        return
+    bounds = np.linspace(0, count, threads + 1).astype(int)
+    with ThreadPoolExecutor(max_workers=threads) as pool:
+        for future in [pool.submit(work, int(a), int(b)) for a, b in zip(bounds[:-1], bounds[1:]) if b > a]:
+            future.result()
 
 
 def _row_major_points(grid, points, counts) -> bool:

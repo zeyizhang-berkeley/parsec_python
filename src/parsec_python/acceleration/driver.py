@@ -242,9 +242,16 @@ def _cached_reference_view(
     """
 
     negative_laplacian = reference.negative_laplacian
-    from .Laplacian import DeferredNativeNegativeLaplacian
+    from .Laplacian import DeferredNativeNegativeLaplacian, DeferredPeriodicNegativeLaplacian
 
-    if isinstance(negative_laplacian, DeferredNativeNegativeLaplacian):
+    if isinstance(negative_laplacian, DeferredPeriodicNegativeLaplacian):
+        # the descriptor of a periodic box stays one (its wrapped matrix, its rows from the stencil)
+        negative_laplacian = DeferredPeriodicNegativeLaplacian(
+            negative_laplacian.grid, sharing_matrix_with=negative_laplacian
+        )
+        negative_laplacian.reference_static_cache_status = "hit"
+        negative_laplacian.reference_static_cache_lookup_seconds = lookup_seconds
+    elif isinstance(negative_laplacian, DeferredNativeNegativeLaplacian):
         negative_laplacian = DeferredNativeNegativeLaplacian(
             negative_laplacian.grid,
             cache_directory=cache_directory,
@@ -1363,7 +1370,13 @@ def _prepare_reference_physics(
             # A rank that only shares the basis of the sector: grid, kinetic
             # operator and projectors alone.
             return _prepare_periodic_orbital_operators(problem)
-        reference = prepare_reference_periodic_single_point(problem)
+        from .Laplacian import periodic_laplacian_builder
+
+        # the full-grid matrix of a box built when something reads it (PARSEC_PERIODIC_DEFER_LAPLACIAN): the sector
+        # stencils come from the grid
+        reference = prepare_reference_periodic_single_point(
+            problem, negative_laplacian_builder=periodic_laplacian_builder()
+        )
         if cache_key is not None:
             _remember_reference(cache_key, reference, cache_capacity)
         return reference
@@ -1561,7 +1574,9 @@ def _prepare_periodic_orbital_operators(problem):
             f"[0, {np.diag(np.asarray(lattice_vectors)).tolist()}); this path does not recenter geometry"
         )
     stage = perf_counter()
-    negative_laplacian = periodic.build_negative_laplacian(grid)
+    from .Laplacian import periodic_laplacian_builder
+
+    negative_laplacian = (periodic_laplacian_builder() or periodic.build_negative_laplacian)(grid)
     finite_difference_seconds = perf_counter() - stage
     stage = perf_counter()
     nonlocal_operator = periodic.build_nonlocal_projectors(
@@ -2853,6 +2868,10 @@ def _resolve_and_prepare_reference(
             selection,
             defer_native_laplacian and selection.selected == "cupy",
         )
+        if selection.selected != "cupy":
+            # Only the CuPy backend reads a deferred Laplacian (the periodic box defers its matrix whatever the
+            # backend: PARSEC_PERIODIC_DEFER_LAPLACIAN): the host backends get the matrix, as on the overlap path.
+            reference = _reference_with_matrix(reference)
         reference_seconds = perf_counter() - reference_started
         return selection, reference, {
             "cuda_initialization_overlap": "disabled",
@@ -2924,6 +2943,8 @@ def _resolve_and_prepare_reference(
             selection,
             defer_native_laplacian and selection.selected == "cupy",
         )
+        if selection.selected != "cupy":
+            reference = _reference_with_matrix(reference)
         reference_seconds += perf_counter() - reference_started
         overlapped_seconds = 0.0
         overlap_status = "rebuild_after_backend_change"

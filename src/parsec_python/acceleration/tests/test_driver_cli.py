@@ -267,6 +267,37 @@ class PeriodicDriverTests(unittest.TestCase):
         for name in [name for name in os.environ if name.startswith("PARSEC_")]:
             del os.environ[name]
 
+    def test_a_deferred_periodic_laplacian_is_built_for_host_backends_and_kept_by_the_resident_cache(self) -> None:
+        # PARSEC_PERIODIC_DEFER_LAPLACIAN: the periodic preparation defers the matrix of a box; a host backend gets
+        # the matrix, and the view of a cached reference (the resident worker) keeps the periodic descriptor
+        from parsec_python.acceleration.Laplacian import (
+            DeferredPeriodicNegativeLaplacian,
+            periodic_negative_laplacian,
+        )
+        from parsec_python.Laplacian import build_negative_laplacian
+
+        for backend in ("scipy", "native"):
+            with self.subTest(backend=backend):
+                try:
+                    system = prepare_single_point(self.problem, backend=backend)
+                except driver_module.BackendUnavailableError:
+                    continue
+                matrix = system.reference.negative_laplacian
+                self.assertNotIsInstance(matrix, DeferredPeriodicNegativeLaplacian)
+                expected = build_negative_laplacian(system.reference.grid)
+                np.testing.assert_array_equal(matrix.toarray(), expected.toarray())
+        reference = driver_module.prepare_reference_periodic_single_point(
+            self.problem, negative_laplacian_builder=periodic_negative_laplacian
+        )
+        self.assertIsInstance(reference.negative_laplacian, DeferredPeriodicNegativeLaplacian)
+        view = driver_module._cached_reference_view(reference, cache_directory=None, lookup_seconds=0.25)
+        self.assertIsInstance(view.negative_laplacian, DeferredPeriodicNegativeLaplacian)
+        self.assertEqual(view.negative_laplacian.reference_static_cache_status, "hit")
+        self.assertFalse(view.negative_laplacian.materialized)
+        # the two descriptors share one matrix, whichever builds it
+        built = view.negative_laplacian.materialize()
+        self.assertIs(reference.negative_laplacian.materialize(), built)
+
     def test_periodic_cell_takes_the_reference_construction_and_its_own_hartree_solve(self) -> None:
         with (
             patch.object(

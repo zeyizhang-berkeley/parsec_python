@@ -1692,8 +1692,14 @@ class CuPySymmetrySCFEigensolver:
             raise RuntimeError(
                 "this eigensolver was not given the projector gradients of its system"
             )
+        from ..Symmetry.axis_reflection import compress_gradients_for_sectors
+
         started = perf_counter()
-        gradients = provider()
+        # The columns of the projectors of the sector operators (one atom per orbit of the group of the sectors,
+        # compress_projectors_for_sectors): the terms then belong to these labels (projector_force_labels), and
+        # the average over the group of the reduction gives the other atoms of each orbit theirs.
+        gradients = compress_gradients_for_sectors(provider(), self.decomposition.reduction)
+        self.projector_force_labels = tuple(gradients.labels)
         built = perf_counter()
         if not self._owned_representations:
             # A rank of a hybrid's MPI run without sectors adds no terms.

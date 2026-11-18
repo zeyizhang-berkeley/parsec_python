@@ -240,6 +240,36 @@ class SpaceGroupTests(unittest.TestCase):
         self.assertEqual(fortran_anint(0.49999999999999994), 0.0)
 
 
+class AffineGridImageTests(unittest.TestCase):
+    """The row of the image of every point of a row-major grid, filled by slabs on threads for a large grid."""
+
+    def test_the_threaded_images_are_those_of_the_broadcast_sum(self) -> None:
+        import os
+        from unittest import mock
+
+        from parsec_python.Grid import space_group
+
+        counts = (170, 162, 158)  # above the threshold of the threads (2^22 points)
+        self.assertGreater(int(np.prod(counts)), space_group._THREADED_IMAGES)
+        for matrix, constant in (
+            (np.diag([-1, 1, -1]), (3, 0, 157)),
+            (np.array([[0, 1, 0], [-1, 0, 0], [0, 0, 1]]), (5, 7, 11)),
+            (np.eye(3, dtype=int), (0, 0, 0)),
+        ):
+            n = np.asarray(counts)
+            indices = np.indices(counts).reshape(3, -1)
+            # (M i + c) mod n, row-major: what the map stands for (axes 0 and 1 swapped have unequal counts here,
+            # and the formula takes each row modulo its own count, as the function does)
+            images = (np.asarray(matrix) @ indices + np.asarray(constant)[:, None]) % n[:, None]
+            expected = (images[0] * n[1] + images[1]) * n[2] + images[2]
+            for threads in ("1", "4"):
+                with mock.patch.dict(os.environ, {"PARSEC_PERIODIC_SETUP_THREADS": threads}):
+                    for index_type in (np.int64, np.int32):
+                        found = space_group.affine_grid_images(matrix, constant, counts, index_type)
+                        self.assertEqual(found.dtype, np.dtype(index_type))
+                        np.testing.assert_array_equal(found, expected)
+
+
 class IrreducibleWedgeTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:

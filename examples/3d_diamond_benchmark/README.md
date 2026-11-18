@@ -271,7 +271,18 @@ A100, each run second in its allocation: 151.2 s instead of 176.2 s, the setup b
 (ion-ion 0.7 instead of 16.8 s, finite differences 5.8 instead of 10.1, atomic density 3.5 instead of 8.1), the SCF
 106.3 s either way, the same total and ion-ion energies to the digits printed. With the sector stencils of the cell
 built from its grid (2026-11-18: the reduction of its full matrix checked every row and column once per sector) and the
-atom-matching trees of the symmetry detection kept: 141.9 s, the setup 35.4 s, the same energies.
+atom-matching trees of the symmetry detection kept: 141.9 s, the setup 35.4 s, the same energies. With the
+finite-difference matrix of the cell never built (`PARSEC_PERIODIC_DEFER_LAPLACIAN`: the sector stencils and the FFT
+Hartree symbol come from the grid), the row maps of the point group filled on threads and the orbits of its 32
+operations taken map by map: 132.7 s, the setup 26.9 s, the same energies (the matrix built at once: 139.6 s); the
+host memory of a rank peaks at 8.1-10.7 GiB instead of 30.6-31.4 (21.2-24.0 with the matrix).
+
+n = 22 (85,184 atoms, 340,736 electrons, 62.1 M grid points) converges in 8 SCF steps on 16 A100 in 261.7 s
+(-11.40393 Ry/atom, as from n = 8 on) with `PARSEC_CUPY_SECTOR_MARGIN=fixed` (the full margin of states of the weighted
+sectors from the start), 78.8 GiB on the fullest GPU; `PARSEC_CUPY_SECTOR_MARGIN_BUDGET=0.95` also fits (261.6 s, 79.1
+GiB). By default the margin is cut for memory, a sector then misses states and grows from a new start in the second
+step, and that growth runs out of memory: the GPUs of a rank hold three sector bases of 19.3 GiB each. One rank per GPU
+(sector groups of ranks) does not fit either: the ranks are dealt to the sectors in equal numbers, not by their sizes.
 
 ### Scaling on one size
 

@@ -125,6 +125,11 @@ def _wrapped_stencil_grid(negative_laplacian: object):
     stencil of that grid (a matrix changed in place keeps the name and goes through the matrix).
     """
 
+    from ..Laplacian import DeferredPeriodicNegativeLaplacian
+
+    if isinstance(negative_laplacian, DeferredPeriodicNegativeLaplacian):
+        # the descriptor of that matrix, not built: the grid is what it stands for
+        return negative_laplacian.grid
     grid = getattr(negative_laplacian, "parsec_wrapped_stencil_of", None)
     if grid is None or not sp.isspmatrix_csr(negative_laplacian):
         return None
