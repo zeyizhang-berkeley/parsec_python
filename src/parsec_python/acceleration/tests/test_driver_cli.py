@@ -515,9 +515,13 @@ class PeriodicDriverTests(unittest.TestCase):
         other = (record[0], record[1], float(0.5).hex(), *record[3:])
         with self.assertRaisesRegex(ValueError, "periodic cell or the settings of its grid differ"):
             mpi_full_scf._require_same_domain([record, other])
-        moving = replace(translation, compute_forces=True)
-        with self.assertRaisesRegex(ValueError, "forces, relaxation and molecular dynamics of a periodic cell"):
-            mpi_full_scf._refuse_unsupported_periodic(moving)
+        # The forces and the moves of a cell on the default routines run there (test_mpi_periodic_sector_forces;
+        # molecular dynamics on one sector of the identity); a band structure of a cell does not.
+        mpi_full_scf._refuse_unsupported_periodic(replace(translation, compute_forces=True))
+        mpi_full_scf._refuse_unsupported_periodic(replace(translation, compute_forces=True, molecular_dynamics=object()))
+        bands = replace(translation, problem=replace(translation.problem, bands=object()))
+        with self.assertRaisesRegex(ValueError, "band structure .* of a periodic cell"):
+            mpi_full_scf._refuse_unsupported_periodic(bands)
         # The prepared grid of every rank is compared before the SCF.
         system = SimpleNamespace(grid=prepare_periodic_single_point(self.problem).grid)
         prepared = mpi_full_scf._prepared_cell_grid(system)

@@ -11,7 +11,11 @@ ranks than sectors, disjoint groups of consecutive ranks share the sectors, one
 group per sector, which may span nodes: each group's communicator carries the
 filter, layout changes, Gram sums and rotations of its basis
 (Eigensolvers/mpi_shared_basis.py), and a run without symmetry is the case of one
-sector. A hybrid functional keeps its own ownership rules.
+sector. Only a CHEBFF first solve divides the columns of a sector among the ranks
+of its group; after any other (CHEBDAV) every rank of the group holds and solves
+the whole basis, and its density and force terms count on the group's first rank
+alone (MPISectorContext.whole_basis_sectors). A hybrid functional keeps its own
+ownership rules.
 """
 from dataclasses import replace
 from time import perf_counter
@@ -85,6 +89,37 @@ def sector_device_groups(representations, size, rank, devices, shared=False, exc
             for sector, group in zip(owned, groups, strict=True)}
 
 
+def force_term_signature(terms, labels):
+    """``(shape, digest)`` of the nonlocal force terms of a rank: what the ranks compare before they sum them.
+
+    ``labels`` are the projector labels ``(atom, l, m)`` that the rows of ``terms`` belong to (the
+    ``projector_force_labels`` of the sector eigensolver: one atom per orbit of the group of the sectors where the
+    projectors are compressed, ``Symmetry.axis_reflection.compress_gradients_for_sectors``); ``None`` where the
+    solver names none.  The digest is a BLAKE2b of their integers, so that two ranks agree only where every row is
+    the same projector.
+    """
+    import hashlib
+
+    shape = tuple(int(size) for size in np.shape(terms))
+    if labels is None:
+        return shape, None
+    labels = tuple(labels)
+    try:
+        data = np.asarray(labels, dtype=np.int64)
+        content = repr(data.shape).encode() + data.tobytes()
+    except (TypeError, ValueError):
+        content = repr(tuple(tuple(int(value) for value in label) for label in labels)).encode()
+    return shape, hashlib.blake2b(content, digest_size=16).hexdigest()
+
+
+def force_signature_mismatches(signatures):
+    """One entry per rank: ``None`` where its :func:`force_term_signature` is that of rank 0, else what differs."""
+    first = signatures[0]
+    return [None if item == first else
+            f'its nonlocal force terms (rows {item[0]}, projector labels {item[1]}) are not those of rank 0 '
+            f'(rows {first[0]}, projector labels {first[1]})' for item in signatures]
+
+
 def sector_device_pool_setting():
     """``PARSEC_SECTOR_DEVICE_POOL``: ``auto`` (default) spreads every sector of a rank over all its devices where
     the sectors do not divide them evenly (:func:`sector_device_groups`); ``off`` keeps disjoint groups, as before."""
@@ -117,6 +152,14 @@ class MPISectorContext:
     for (the active one of the root's solver, or the channel of the orbitals
     of a density); a rank serves both channels of a spin-polarized loop in
     the sectors it owns.
+
+    The commands ``forces`` and ``spin_forces`` sum one row per projector of
+    every rank on the root; the rows of a cell in the sectors of a point group
+    belong to the projectors of one atom per orbit (``projector_force_labels``).
+    Before the sum the ranks compare the shape of their rows and a digest of
+    those labels (:func:`force_term_signature`): a difference fails the
+    command on every rank instead of summing other projectors or leaving the
+    sum waiting.  After the sum ``command_observer`` is called on every rank.
     """
     def __init__(self, comm, *, exchange=False):
         self.comm = comm
@@ -142,6 +185,9 @@ class MPISectorContext:
         self.exchange = bool(exchange)
         self.retain_orbitals = bool(exchange)
         self.exchange_service = None
+        # Called on every rank after each forces or spin_forces command with the command and how many of it this
+        # rank has served (the full-SCF runner records the memory of its devices there); None calls nothing.
+        self.command_observer = None
 
     def planned_groups(self, representations, devices):
         """The device groups of the sectors this rank will own (what ``configure`` assigns)."""
@@ -258,7 +304,7 @@ class MPISectorContext:
 
     def _execute_counted(self, solver, command, payload, density_builder):
         self.command_counts[command] = self.command_counts.get(command, 0) + 1
-        error, value, packed = None, None, None
+        error, value, packed, signature = None, None, None, None
         try:
             value = self._apply(solver, command, payload, density_builder)
             if command == 'solve':
@@ -274,6 +320,8 @@ class MPISectorContext:
                 value = np.ascontiguousarray(value, dtype=np.float64)
                 if value.ndim != 2 or value.shape[1] != 3 or not np.all(np.isfinite(value)):
                     raise ValueError('local force terms must be finite, three per projector')
+                # What the rows of this rank belong to, compared below before they are summed.
+                signature = force_term_signature(value, getattr(solver, 'projector_force_labels', None))
         except Exception as exc:
             error = f'{type(exc).__name__}: {exc}'
             # The error text alone travels to the other ranks: where it was raised is printed here, by the rank
@@ -282,7 +330,13 @@ class MPISectorContext:
             import traceback
 
             print(f'MPI rank {self.rank}: {command} failed:\n{traceback.format_exc()}', file=sys.stderr, flush=True)
-        errors = self.comm.allgather(error)
+        records = self.comm.allgather((error, signature))
+        errors = [record[0] for record in records]
+        if command in ('forces', 'spin_forces') and not any(item is not None for item in errors):
+            # Rows of other projectors (a rank that compressed its projectors to other atoms, or none) would be
+            # summed as if they were the same, and rows of another count would leave the sum waiting: every rank
+            # finds the same difference here and stops before the sum.
+            errors = force_signature_mismatches([record[1] for record in records])
         if any(item is not None for item in errors):
             self.failed = True
             details = '; '.join(f'rank {rank}: {item}' for rank, item in enumerate(errors) if item)
@@ -299,7 +353,8 @@ class MPISectorContext:
         if command == 'solve':
             if self.shared:
                 # The ranks of a group hold the same Ritz values: its first rank alone reports them (the
-                # density then sums the columns of every rank of the group once).
+                # density then sums the columns of every rank of the group once, and a basis that every rank
+                # of the group holds whole on its first rank alone: whole_basis_sectors).
                 packed = {sector: result for sector, result in packed.items()
                           if self.sector_owners[sector] == self.rank}
             records = self.comm.allgather(packed)
@@ -333,11 +388,26 @@ class MPISectorContext:
                     fractions[sector] = min(fractions.get(sector, 1.0), fraction)
             return fractions
         if command in ('forces', 'spin_forces'):
-            # One row per projector on every rank: the ranks hold the same atoms.
+            # One row per projector on every rank: the ranks hold the same atoms and projectors (checked above).
             total = np.empty_like(value)
             self.comm.Allreduce(value, total)
+            self._observe(command)
             return total
         return value
+
+    def _observe(self, command):
+        """Call ``command_observer`` after ``command``; what it raises is printed, not raised (no rank may leave
+        the protocol alone)."""
+        observer = self.command_observer
+        if observer is None:
+            return
+        try:
+            observer(command, self.command_counts.get(command, 0))
+        except Exception as exc:
+            import sys
+
+            print(f'MPI rank {self.rank}: the observation after {command} failed: {type(exc).__name__}: {exc}',
+                  file=sys.stderr, flush=True)
 
     def _release_joined(self, density_builder):
         """Wait for the pool release of ``density_builder`` where it left that to its caller.
@@ -357,6 +427,41 @@ class MPISectorContext:
         except Exception as exc:
             self.failed = True
             raise MPISCFError(f'density pool release failed: rank {self.rank}: {type(exc).__name__}: {exc}') from exc
+
+    def whole_basis_sectors(self, basis_of):
+        """The sectors of its group that this rank holds whole and leaves out of the sums over the ranks.
+
+        The density and force commands add up what every rank computes from its sectors.  The ranks of a group
+        that share a sector (``shared``) each hold a share of the columns of its basis where the first solve
+        divided them (``Eigensolvers/mpi_shared_basis.SharedBasis``: CHEBFF, ``run_distributed_chebff``), and each
+        adds its own columns.  Any other first solve (CHEBDAV, the default ``Eigensolver``) leaves every rank of
+        the group with the whole basis, which it solved alone: the group's first rank, which alone reports the
+        sector's Ritz values (the solve command), adds the sector once, and the other ranks add nothing for it.
+        Summed by every rank of the group, the density and the force terms of such a sector counted as many times
+        as the group has ranks (A100, 2026-11-18: displaced Si8 on 2 x 4 ranks twice the density, -25.7 Ry).
+        ``basis_of(sector)`` is this rank's basis of a sector it owns (None where it holds none).
+        """
+        if not self.shared:
+            return frozenset()
+        from ..Eigensolvers.mpi_shared_basis import SharedBasis
+
+        return frozenset(sector for sector in self.owned_sectors
+                         if self.sector_owners[sector] != self.rank
+                         and not isinstance(basis_of(sector), SharedBasis))
+
+    def _counted_occupations(self, solvers, representations, occupations):
+        """``occupations`` with those of the sectors that this rank holds whole and does not report set to zero
+        (:meth:`whole_basis_sectors`; ``solvers`` are the sector solvers of the channel of the selection)."""
+
+        def saved(sector):
+            state = getattr(solvers[sector], 'device_state', None)
+            return getattr(getattr(state, 'subspace', None), 'vectors', None)
+
+        skipped = self.whole_basis_sectors(saved)
+        if not skipped:
+            return occupations
+        return np.where(np.isin(np.asarray(representations), sorted(skipped)), 0.0,
+                        np.asarray(occupations, dtype=np.float64))
 
     def _apply(self, solver, command, payload, density_builder):
         if command.startswith('exx_'):
@@ -407,9 +512,11 @@ class MPISectorContext:
             # Keep the pre-trim result snapshots through density construction:
             # the selected columns can exceed the NEXT iteration's active set.
             representations, columns, occupations, volume = payload
-            owned = np.isin(representations, self.owned_sectors)
             results = [solver._mpi_latest_results.get(index, SimpleNamespace(vectors=None))
                        for index in range(self.representation_count)]
+            # A sector of a group that this rank holds whole is added by the group's first rank alone.
+            skipped = self.whole_basis_sectors(lambda sector: results[sector].vectors)
+            owned = np.isin(representations, [sector for sector in self.owned_sectors if sector not in skipped])
             orbitals = solver._pack_selected_wedge_vectors(results, representations[owned], columns[owned])
             # The pool release after the density (PARSEC_CUPY_DENSITY_RELEASE) runs on the device threads
             # beside the collective calls of this command, which touch no device, and is waited for
@@ -433,12 +540,20 @@ class MPISectorContext:
                 raise RuntimeError('this rank was prepared without a geometry handler')
             handler(np.asarray(payload, dtype=np.float64))
         elif command == 'forces':
-            # Nonlocal force terms of the sectors of this rank, from the states its solvers hold.
+            # Nonlocal force terms of the sectors of this rank, from the states its solvers hold (a sector of a
+            # group that it holds whole is added by the group's first rank alone).
             representations, columns, occupations = payload
+            occupations = self._counted_occupations(solver._solvers, representations, occupations)
             return solver._projector_force_terms_local(representations, columns, occupations)
         elif command == 'spin_forces':
             # The same for both spin channels of a spin-polarized loop, summed.
-            return solver._spin_projector_force_terms_local(payload)
+            selections = []
+            for index, (representations, columns, occupations) in enumerate(payload):
+                solvers = (solver._solvers if getattr(solver, '_spin_channels', None) is None
+                           else solver._channel_value(index, '_solvers'))
+                selections.append((representations, columns,
+                                   self._counted_occupations(solvers, representations, occupations)))
+            return solver._spin_projector_force_terms_local(tuple(selections))
         else:
             raise ValueError(f'unknown MPI SCF command: {command}')
 
@@ -465,5 +580,5 @@ class MPISymmetryDensityBuilder:
         return reducer.field(values) if reducer is not None else values[self.solver.decomposition.reduction.full_to_wedge]
 
 
-__all__ = ['MPISCFError', 'MPISectorContext', 'MPISymmetryDensityBuilder', 'sector_device_groups',
-           'sector_rank_groups']
+__all__ = ['MPISCFError', 'MPISectorContext', 'MPISymmetryDensityBuilder', 'force_signature_mismatches',
+           'force_term_signature', 'sector_device_groups', 'sector_rank_groups']

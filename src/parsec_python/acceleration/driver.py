@@ -5597,8 +5597,15 @@ def _prepare_single_point(
             else None
         )
 
-    def projector_gradients():
-        """Gradients of the projectors of the present atoms, column for column."""
+    def projector_gradients(atom_indices=None):
+        """Gradients of the projectors of the present atoms, column for column.
+
+        ``atom_indices`` (the representative atoms of the orbits of the
+        symmetry sectors, :func:`.Symmetry.axis_reflection.sector_gradient_atoms`)
+        samples those atoms only: the columns of the projectors of these
+        atoms, in the order of the projectors and with their atom indices.
+        The Fortran-derived routines of a cell sample every atom.
+        """
 
         from parsec_python.Forces import (
             NonlocalProjectorGradients,
@@ -5608,9 +5615,17 @@ def _prepare_single_point(
         from .V_ion.double_grid import build_projector_gradients
 
         operator = reference.nonlocal_operator
+        selected = None
+        labels = tuple(operator.labels)
+        if atom_indices is not None:
+            selected = np.unique(np.asarray(atom_indices, dtype=np.int64).reshape(-1))
+            wanted = np.zeros(len(reference.atoms), dtype=bool)
+            wanted[selected] = True
+            # the projector columns of the selected atoms, in their order
+            labels = tuple(label for label in labels if wanted[int(label[0])])
 
-        def _matching_columns(gradients):
-            columns = gradient_columns_for(operator.labels, gradients.labels)
+        def _matching_columns(gradients, labels):
+            columns = gradient_columns_for(labels, gradients.labels)
             if isinstance(columns, slice):
                 return gradients
             return NonlocalProjectorGradients(
@@ -5618,15 +5633,16 @@ def _prepare_single_point(
                     component[:, columns] for component in gradients.components
                 ),
                 signs=gradients.signs[columns],
-                labels=tuple(operator.labels),
+                labels=tuple(labels),
             )
 
         if is_periodic:
             if uses_fortran_routines(reference.grid):
-                # The Fortran-derived routines: the gradients of the projectors with their lattice images.
+                # The Fortran-derived routines: the gradients of the projectors with their lattice images, of
+                # every atom.
                 from .Forces.periodic_device import periodic_projector_gradients
 
-                return _matching_columns(periodic_projector_gradients(reference))
+                return _matching_columns(periodic_projector_gradients(reference), tuple(operator.labels))
             from parsec_python.Forces.nonlocal_force import (
                 build_periodic_projector_gradients,
             )
@@ -5638,6 +5654,7 @@ def _prepare_single_point(
                 reference.pseudopotentials,
                 reference.input.pseudopotentials,
                 reference.input.periodic_cell.lattice_vectors,
+                atom_indices=selected,
             )
         else:
             gradients = build_projector_gradients(
@@ -5645,8 +5662,9 @@ def _prepare_single_point(
                 reference.atoms,
                 reference.pseudopotentials,
                 reference.input.pseudopotentials,
+                atom_indices=selected,
             )
-        return _matching_columns(gradients)
+        return _matching_columns(gradients, labels)
 
     def move_atoms(positions):
         """Rebuild in this process what depends on the atom positions.
@@ -5654,6 +5672,19 @@ def _prepare_single_point(
         ``parsec.F90`` after ``domove``: ``isolat``, ``nonloc``, ``corecd``,
         ``ionpot`` and ``forceion`` on the unchanged grid.  A rank that only
         serves symmetry sectors rebuilds its projectors alone.
+
+        A periodic cell (``back_to_cell``, ``nonloc``, ``corecd``, ``ionpbc``,
+        ``ewald_sum``) is rebuilt by :func:`parsec_python.SCF.pbc.update_periodic_geometry`;
+        one solved in the sectors of its point group moves where the atoms
+        keep that group (:func:`.Forces.sector_symmetry.check_sector_atoms`,
+        which a relaxation with forces and positions averaged over it does),
+        on Andrew Grieder's routines.  Every route then installs the moved
+        projectors in the full-grid operator and in the sector operators
+        (compressed to one atom per orbit as at preparation), rebinds
+        ``reference``, which every closure of the SCF loop reads (the local
+        ionic potential, the core density of the XC evaluators, the Hartree
+        solve of a cell, the Ewald energy), and starts the projector
+        gradients of the next forces.
         """
 
         nonlocal reference, hartree_boundary_tail, native_xc_evaluator
@@ -5667,36 +5698,48 @@ def _prepare_single_point(
             replace(atom, position=position)
             for atom, position in zip(reference.atoms, positions)
         )
-        if is_periodic and symmetry_reduction is not None and symmetry_reduction.group_order > 1:
-            # Its sector operators were built for the first structure; the
-            # periodic geometry updates replace the full-grid ones only.
-            raise NotImplementedError(
-                "the atoms of a periodic cell solved in the sectors of its point group do not move here: "
-                "prepare it with symmetry='off' or PARSEC_PERIODIC_SYMMETRY=off"
-            )
-        if is_periodic and not uses_fortran_routines(reference.grid):
-            # Andrew Grieder's routines.
-            # No Hartree boundary, symmetry sectors or native XC evaluator: the projectors are replaced on the device
-            # operator and the reference system (ionic potential, densities, Ewald terms) is rebuilt for the new
-            # positions; the Hartree closure reads the rebound ``reference``.
-            from parsec_python.SCF import update_periodic_geometry
-
-            moved = update_periodic_geometry(reference, atoms)
-            implementation.replace_nonlocal_operator(moved.nonlocal_operator)
-            reference = moved
-            return
-        if symmetry_reduction is not None:
-            # Sectors, wedge fields and wedge sums hold for this group only.
-            from .Forces.local_device import sector_atom_images
-
-            sector_atom_images(symmetry_reduction, atoms)
+        in_sectors = symmetry_reduction is not None and symmetry_reduction.group_order > 1
         if is_periodic:
-            # parsec.F90 after domove for a bulk cell (back_to_cell, nonloc,
-            # corecd, ionpbc, ewald_sum): SCF.pbc.update_periodic_geometry.
-            from .Forces.periodic_device import update_periodic_reference
+            fortran_routines = uses_fortran_routines(reference.grid)
+            if in_sectors and fortran_routines:
+                # Their forces are refused in the sectors (Forces/compute.py),
+                # and their moved fields have not been checked against them.
+                raise NotImplementedError(
+                    "the atoms of a periodic cell of the Fortran-derived routines solved in the sectors of its "
+                    "point group do not move here: prepare it with symmetry='off' or PARSEC_PERIODIC_SYMMETRY=off"
+                )
+            if in_sectors:
+                # The sectors, their weights and the projectors of one atom
+                # per orbit hold for the group of the first structure only.
+                from .Forces.sector_symmetry import check_sector_atoms
 
-            moved = update_periodic_reference(reference, atoms)
+                check_sector_atoms(
+                    symmetry_reduction,
+                    atoms,
+                    reference.grid,
+                    reference.input.periodic_cell.lattice_vectors,
+                )
+            if fortran_routines:
+                # parsec.F90 after domove for a bulk cell (back_to_cell, nonloc,
+                # corecd, ionpbc, ewald_sum): the device fields inside
+                # device_periodic_forces.
+                from .Forces.periodic_device import update_periodic_reference
+
+                moved = update_periodic_reference(reference, atoms)
+            else:
+                # Andrew Grieder's routines: the ionic potential, the projectors,
+                # the densities and the Ewald terms of the new positions; the
+                # projectors alone on a rank that shares the basis of a sector
+                # (its reference holds no ionic potential).
+                from parsec_python.SCF import update_periodic_geometry
+
+                moved = update_periodic_geometry(reference, atoms)
         else:
+            if symmetry_reduction is not None:
+                # Sectors, wedge fields and wedge sums hold for this group only.
+                from .Forces.local_device import sector_atom_images
+
+                sector_atom_images(symmetry_reduction, atoms)
             moved = update_reference_geometry(
                 reference,
                 atoms,

@@ -11,11 +11,18 @@
 # A periodic cell (Boundary_Conditions: bulk) runs at the Gamma point, with
 # real orbitals, an orthorhombic cell, no spin and a native LDA or GGA, as one
 # sector whose orbitals the ranks share: on several nodes launch it with
-# --rank-per-gpu (one rank per GPU), on one node either layout. K-points go to
-# parsec_python/main.py --mpi; spin, hybrids, meta-GGAs, oblique cells, wires,
-# slabs, forces, relaxation and molecular dynamics of a cell to main.py (the
-# runner refuses them by name). See "Periodic cells at the Gamma point on
-# several nodes" in MULTI_GPU.md.
+# --rank-per-gpu (one rank per GPU), on one node either layout. A cell with a
+# point group about its origin runs in the sectors of that group, on either
+# layout; its forces (Skip_Force: false) and its relaxations (bfgs, simple,
+# every atom movable) on the default routines run there too, every rank
+# moving the projectors of its sectors. Molecular dynamics, manual movements
+# and fixed atoms (Move_Flag) of a cell, and every forces or moving run under
+# PARSEC_PERIODIC_SECTOR_FORCES=off, take one sector of the identity, as
+# main.py takes the full grid: one rank on one node, or --rank-per-gpu.
+# K-points go to parsec_python/main.py --mpi; spin, hybrids, meta-GGAs,
+# oblique cells, wires, slabs and the forces of Use_Fortran_Routines of a cell
+# to main.py (the runner refuses them by name). See "Periodic cells at the
+# Gamma point on several nodes" in MULTI_GPU.md.
 #
 # An input with Minimization (bfgs, simple) runs the structural relaxation on
 # the same layout, and Skip_Force: false adds the forces to a single point;

@@ -1458,6 +1458,85 @@ def atom_image_table(atoms, operations, translations, grid, tolerance: float):
     return images
 
 
+def _permutation_rows(images: np.ndarray) -> bool:
+    """Whether every row of ``images`` (operations x atoms) is a permutation of the atoms."""
+
+    count = images.shape[1]
+    for row in images:
+        if np.bincount(row, minlength=count).max(initial=0) > 1:
+            return False
+    return True
+
+
+def group_atom_image_table(atoms, reduction, grid, tolerance: float):
+    """``images[g, a]`` of :func:`atom_image_table` for the full operations of a :class:`PointGroupReduction`.
+
+    ``G`` is the union of the right cosets ``H c`` (``coset_operations``), so an operation ``g = h c`` carries atom
+    ``a`` onto ``h(c(a))``: the tables of ``H`` and of the coset representatives, ``|H| + [G:H]`` tree queries
+    (38 for the 192 operations of a diamond supercell), give every row by composition, where the queries of every
+    operation took 4.6 s for the 64,000 atoms of a 20^3 cell.  ``g`` is matched to its ``h`` and ``c`` by the
+    product of the affine matrices ``[[R, t], [0, 1]]`` (``t`` in grid steps, modulo the counts of the grid), the
+    product of the group table of the reduction.  ``None`` where an image matches no atom of its species; a reduction
+    without coset representatives, or an operation that matches no product, takes the query of every operation.
+    Raises ``ValueError`` where a row is not a permutation of the atoms (a composed row is one where its factors are).
+    """
+
+    full = np.asarray(reduction.full_operations, dtype=np.float64).reshape(-1, 3, 3)
+    full_shifts = getattr(reduction, "full_translations", None)
+    full_shifts = None if full_shifts is None else np.asarray(full_shifts, dtype=np.int64).reshape(-1, 3)
+
+    def direct():
+        images = atom_image_table(atoms, full, full_shifts, grid, tolerance)
+        if images is not None and not _permutation_rows(images):
+            raise ValueError("an operation of the point group of the sectors does not permute the atoms")
+        return images
+
+    cosets = getattr(reduction, "coset_operations", None)
+    if cosets is None:
+        return direct()
+    subgroup = np.asarray(reduction.operations, dtype=np.float64).reshape(-1, 3, 3)
+    cosets = np.asarray(cosets, dtype=np.float64).reshape(-1, 3, 3)
+    # the counts of a periodic grid, the modulus of the translations (a cluster has none)
+    counts = None if full_shifts is None else np.asarray(grid.points_per_axis, dtype=np.int64)
+
+    def shifts_of(values, size):
+        if full_shifts is None:
+            return None
+        if values is None:
+            return np.zeros((size, 3), dtype=np.int64)
+        return np.asarray(values, dtype=np.int64).reshape(-1, 3)
+
+    subgroup_shifts = shifts_of(getattr(reduction, "translations", None), subgroup.shape[0])
+    coset_shifts = shifts_of(getattr(reduction, "coset_translations", None), cosets.shape[0])
+    if subgroup.shape[0] * cosets.shape[0] != full.shape[0]:
+        return direct()
+
+    def key(matrix, shift) -> bytes:
+        translation = np.zeros(3, dtype=np.int64) if counts is None else np.mod(np.asarray(shift, dtype=np.int64), counts)
+        return np.rint(matrix).astype(np.int64).tobytes() + translation.tobytes()
+
+    products = {}
+    for h, matrix in enumerate(subgroup):
+        for c, coset in enumerate(cosets):
+            shift = None
+            if full_shifts is not None:
+                shift = np.rint(matrix).astype(np.int64) @ coset_shifts[c] + subgroup_shifts[h]
+            products[key(matrix @ coset, shift)] = (h, c)
+    factors = [products.get(key(full[g], None if full_shifts is None else full_shifts[g])) for g in range(full.shape[0])]
+    if any(factor is None for factor in factors):
+        return direct()
+    within = atom_image_table(atoms, subgroup, subgroup_shifts, grid, tolerance)
+    across = atom_image_table(atoms, cosets, coset_shifts, grid, tolerance)
+    if within is None or across is None:
+        return None
+    if not (_permutation_rows(within) and _permutation_rows(across)):
+        raise ValueError("an operation of the point group of the sectors does not permute the atoms")
+    images = np.empty((full.shape[0], within.shape[1]), dtype=np.int64)
+    for g, (h, c) in enumerate(factors):
+        images[g] = within[h][across[c]]
+    return images
+
+
 def _atom_orbits(atoms, operations, translations, grid, tolerance: float):
     """``(representatives, sizes)``: the smallest index in the orbit of every atom under the operations
     ``r -> R r + t`` and the number of atoms in it, or ``None`` where an image matches no atom of its species.
@@ -1523,6 +1602,10 @@ def compress_gradients_for_sectors(gradients, reduction):
     The nonlocal force terms that a sector then contracts are those of the representatives, ``n_a`` times the term of
     one atom of the orbit; the average over the group of the reduction gives every atom of the orbit its term
     (:mod:`parsec_python.acceleration.Forces.sector_symmetry`).  ``gradients`` unchanged where the projectors are.
+
+    The columns are matched by their labels, so ``gradients`` may hold every atom or the representatives alone
+    (:func:`sector_gradient_atoms`): both give the same matrices bit for bit.  Where every column is that of a
+    representative, the columns are scaled as long as one of them belongs to an orbit of more than one atom.
     """
 
     representatives = getattr(reduction, "atom_representatives", None)
@@ -1536,7 +1619,9 @@ def compress_gradients_for_sectors(gradients, reduction):
     if atom_of_column.max() >= representatives.size or atom_of_column.min() < 0:
         return gradients
     keep = representatives[atom_of_column] == atom_of_column
-    if np.all(keep):
+    if np.all(keep) and np.all(np.asarray(sizes)[atom_of_column] == 1):
+        # Every atom with projectors its own orbit: the projectors were not compressed.  (Gradients of the
+        # representatives alone whose orbits hold more atoms are scaled below: the projectors of those were.)
         return gradients
     import scipy.sparse as _sparse
     from dataclasses import replace as _replace
@@ -1554,6 +1639,46 @@ def compress_gradients_for_sectors(gradients, reduction):
         signs=np.asarray(gradients.signs, dtype=np.float64)[columns],
         labels=tuple(labels[index] for index in columns),
     )
+
+
+_GRADIENT_ATOMS_SWITCH = "PARSEC_SECTOR_GRADIENT_ATOMS"
+
+
+def sector_gradient_atoms_setting() -> str:
+    """``PARSEC_SECTOR_GRADIENT_ATOMS``: ``representatives`` (default) samples the projector gradients of the forces
+    in sectors whose projectors hold one atom per orbit (:func:`compress_projectors_for_sectors`) for the
+    representative atoms only; ``all`` samples every atom and drops the other columns afterwards, as before.  Both
+    give the same forces bit for bit (:func:`compress_gradients_for_sectors`)."""
+
+    value = os.environ.get(_GRADIENT_ATOMS_SWITCH, "representatives").strip().lower() or "representatives"
+    if value not in {"representatives", "all"}:
+        raise ValueError(f"{_GRADIENT_ATOMS_SWITCH} must be representatives or all, not {value!r}")
+    return value
+
+
+def sector_gradient_atoms(reduction):
+    """The atoms whose projector gradients the sectors of ``reduction`` contract, or ``None`` for every atom.
+
+    Where the sector projectors hold one atom per orbit (:func:`compress_projectors_for_sectors`: a reduction with
+    the orbits of its atoms, ``PARSEC_SECTOR_PROJECTOR_ORBITS`` not ``off``, an orbit of more than one atom), the
+    forces read the gradient columns of the representative of every orbit only (:func:`compress_gradients_for_sectors`):
+    the representatives in ascending order, a fraction ``1/|orbit|`` of the atoms.  ``None`` where every column is
+    read, or under ``PARSEC_SECTOR_GRADIENT_ATOMS=all``.
+    """
+
+    representatives = getattr(reduction, "atom_representatives", None)
+    sizes = getattr(reduction, "atom_orbit_sizes", None)
+    if (
+        representatives is None
+        or sizes is None
+        or sector_projector_orbits_setting() == "off"
+        or sector_gradient_atoms_setting() == "all"
+    ):
+        return None
+    representatives = np.asarray(representatives, dtype=np.int64)
+    if not np.any(np.asarray(sizes) > 1):
+        return None
+    return np.flatnonzero(representatives == np.arange(representatives.size))
 
 
 def detect_point_group_reduction(

@@ -246,17 +246,28 @@ def compute_periodic_forces(
     weighted representations (:class:`..Symmetry.axis_reflection.PointGroupReduction`, one partner of each degenerate
     level solved) has its nonlocal term completed by the average over the full group ``G`` of the reduction, its
     translations included (:mod:`.sector_symmetry`), and the total averaged over ``G`` (or over ``operations``);
-    otherwise a crystal has no symmetrization here.
+    otherwise a crystal has no symmetrization here.  The density and exchange-correlation potential of such a run are
+    averaged over ``G``, so its local terms are those of one atom per orbit of ``G`` turned onto the others
+    (:func:`.periodic_local.orbit_periodic_local_forces`, ``PARSEC_PERIODIC_SECTOR_LOCAL_FORCES``), and
+    ``phase_seconds["local_ewald_asymmetry"]`` (Ry/bohr) reports how much the average over the group changed the
+    Ewald and local terms.
     """
 
-    from .sector_symmetry import sector_force_operations
+    from .sector_symmetry import abelian_cell_operations, sector_force_operations
 
     completion = sector_force_operations(system)
-    if (symmetrize or operations) and completion is None:
+    # A cell in the sectors of an Abelian group solves every level: its forces need no completion, but a relaxation
+    # averages them (and its moved positions) over that group, so that atoms the group fixes stay on it.
+    abelian = abelian_cell_operations(system) if completion is None and (symmetrize or operations) else None
+    if (symmetrize or operations) and completion is None and abelian is None:
         raise ValueError(
             "a periodic cell has no symmetrized forces: its structure is not reduced by space-group operations"
         )
-    from .periodic_local import fast_periodic_local_forces
+    from .periodic_local import (
+        fast_periodic_local_forces,
+        orbit_periodic_local_forces,
+        periodic_sector_local_forces_setting,
+    )
 
     started = perf_counter()
     clock: dict[str, float] = {}
@@ -277,11 +288,25 @@ def compute_periodic_forces(
         result.density,
         result.xc_potential,
     )
+    # In sectors the density and the exchange-correlation potential are averaged over G (PARSEC_PERIODIC_SECTOR_
+    # LOCAL_FORCES=orbits): the local terms of one atom per orbit of G, turned onto the others.
+    orbits = completion is not None and periodic_sector_local_forces_setting() == "orbits"
+    site_asymmetry = 0.0
+
+    def local_terms():
+        if orbits:
+            return orbit_periodic_local_forces(*arguments, completion, xp=xp, erf=erf)
+        if device is None:
+            return fast_periodic_local_forces(*arguments), None
+        return fast_periodic_local_forces(*arguments, xp=xp, erf=erf), None
+
     if device is None:
-        local = fast_periodic_local_forces(*arguments)
+        local, details = local_terms()
     else:
         with xp.cuda.Device(device):
-            local = fast_periodic_local_forces(*arguments, xp=xp, erf=erf)
+            local, details = local_terms()
+    if details is not None:
+        site_asymmetry = details["site_asymmetry"]
     clock["local"] = perf_counter() - mark
     mark = perf_counter()
     separable = _nonlocal_forces(system, result, clock)
@@ -289,10 +314,20 @@ def compute_periodic_forces(
     if completion is not None:
         # The nonlocal term is complete over G already (_sector_atom_forces); the total is averaged over G too.
         averaged_over = tuple(operations) if operations else completion
+    elif abelian is not None:
+        averaged_over = tuple(operations) if operations else abelian
     clock["nonlocal"] = perf_counter() - mark
     forces = assemble_forces(
         positions, repulsion, local, separable, averaged_over, phase_seconds=clock, periodic=True
     )
+    if completion is not None:
+        # What the average over the group changed (Ry/bohr, not seconds): the asymmetry of the Ewald and local terms
+        # (the nonlocal term is averaged already), with that of the local forces of the orbits (the representatives in
+        # their site groups, a few other atoms against their turned values); round-off where the density is invariant,
+        # as it is in sectors.
+        clock["local_ewald_asymmetry"] = max(
+            site_asymmetry, float(np.max(np.abs(forces.unsymmetrized - forces.symmetrized), initial=0.0))
+        )
     return replace(forces, seconds=perf_counter() - started)
 
 

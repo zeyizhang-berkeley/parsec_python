@@ -897,7 +897,9 @@ def _mpi_unsupported_features(translation) -> list[str]:
             "forces, relaxation or molecular dynamics of a periodic run at the Gamma point alone, "
             "with spin, a hybrid functional or spinors (they read the orbitals, which the distributed "
             "solver does not gather; those of the scalar k-point SCF are summed on the ranks of its "
-            "k-point pools)"
+            "k-point pools; the forces and relaxations of a bulk cell at the Gamma point run on "
+            "several GPUs and nodes in the sectors of its point group with "
+            "scripts/run_multi_gpu_scf.sh [--rank-per-gpu])"
         )
     dos = getattr(translation, "dos", None)
     if dos is not None and getattr(dos, "ylm_l", -1) >= 0:
@@ -994,6 +996,121 @@ def _gamma_point_only(problem: SinglePointInput) -> bool:
 
     sampling = kpoint_sampling(problem)
     return sampling is not None and len(sampling[0]) == 1 and not np.any(sampling[0])
+
+
+_PERIODIC_SECTOR_FORCES_SWITCH = "PARSEC_PERIODIC_SECTOR_FORCES"
+
+
+def periodic_sector_forces_setting() -> str:
+    """``PARSEC_PERIODIC_SECTOR_FORCES``: ``auto`` (the default) or ``off``.
+
+    ``auto`` lets the forces and the relaxation of a bulk cell at the Gamma point keep the sectors of its point group
+    (:func:`periodic_sector_forces_refusal` names what does not); ``off`` solves every forces, relaxation and
+    molecular-dynamics run of a cell on the full grid, as before the forces in sectors existed.
+    """
+
+    value = os.environ.get(_PERIODIC_SECTOR_FORCES_SWITCH, "auto").strip().lower() or "auto"
+    if value not in {"auto", "off"}:
+        raise ValueError(f"{_PERIODIC_SECTOR_FORCES_SWITCH} must be auto or off, not {value!r}")
+    return value
+
+
+def periodic_sector_forces_refusal(translation, *, supercell: bool = False) -> str | None:
+    """Why the forces or the moved atoms of a periodic cell keep the full grid, or ``None`` where sectors take them.
+
+    The sectors of the point group of a bulk cell at the Gamma point (``PARSEC_PERIODIC_SYMMETRY``, the driver's
+    route) give the forces of the density the SCF used once their nonlocal term and the total are averaged over the
+    full group ``G`` of the reduction (:mod:`.Forces.sector_symmetry`).  That holds for a single point with forces and
+    for a relaxation by an optimizer (``bfgs``, ``simple``), whose ionic loop finds ``G`` once and averages the forces
+    and the moved positions over it (``parsec.F90`` keeps the structure of a relaxation in its group in the same way).
+    The rest stays on the full grid: molecular dynamics and manual movements (``parsec.F90`` uses no symmetry there),
+    ``Move_Flag`` fixing atoms (a fixed atom that ``G`` exchanges with a movable one leaves the group), the
+    Fortran-derived routines (``Use_Fortran_Routines``, whose forces read the full grid), point charges, a band
+    structure, a non-self-consistent run, a restart from ``wfn.dat`` (full-grid states), an electric field
+    (``Polarizability``), k-point sampling beyond the Gamma point (its own routes, e.g. the force wedge of the mesh)
+    and the supercell that stands for a mesh of the time-reversal invariant points (``supercell``: it repeats the
+    atoms of the input).  ``PARSEC_PERIODIC_SECTOR_FORCES=off`` keeps every one on the full grid, as before.
+    """
+
+    problem = translation.problem
+    if problem.periodic_cell is None:
+        return "not a periodic cell"
+    if periodic_sector_forces_setting() == "off":
+        return f"{_PERIODIC_SECTOR_FORCES_SWITCH}=off"
+    if getattr(translation, "molecular_dynamics", None) is not None:
+        return "molecular dynamics uses no symmetry"
+    relaxation = getattr(translation, "relaxation", None)
+    if relaxation is not None and relaxation.method not in ("bfgs", "simple"):
+        return "manual movements use no symmetry"
+    if relaxation is None and not getattr(translation, "compute_forces", False):
+        return "no forces are computed"
+    if getattr(getattr(translation, "routines", None), "fortran", False) or getattr(
+        problem.grid, "fortran_routines", False
+    ):
+        return "the forces of the Fortran-derived routines (Use_Fortran_Routines) read the full grid"
+    movable = getattr(translation, "movable", None)
+    if movable is not None and not all(bool(flag) for flag in movable):
+        return "Move_Flag fixes atoms"
+    if getattr(problem, "point_charges", ()):
+        return "point charges (Add_Point_Charges)"
+    if getattr(translation, "polarizability_field", None) is not None:
+        return "an electric field (Polarizability)"
+    if problem.bands is not None:
+        return "a band structure"
+    if getattr(translation, "nscf", None) is not None:
+        return "a non-self-consistent run"
+    if getattr(translation, "restart_run", False) and getattr(translation, "restart_from_wfndat", False):
+        return "Restart_From_Wfndat (the stored orbitals seed the eigensolver of the full grid)"
+    if supercell:
+        return "the supercell of a k-point mesh, which repeats the atoms of the input"
+    if problem.has_kpoint_sampling and not _gamma_point_only(problem):
+        return "k-point sampling beyond the Gamma point"
+    return None
+
+
+def _periodic_sector_forces_line(system, operations) -> str | None:
+    """The parsec.out line of the forces of a cell in sectors, or ``None`` where the cell is on the full grid.
+
+    With the full group ``G`` of a point-group reduction (``operations``): ``|G|``, the atoms whose projectors the
+    sectors keep (one per orbit of the group of the sectors:
+    :func:`.Symmetry.axis_reflection.compress_projectors_for_sectors`, ``PARSEC_SECTOR_PROJECTOR_ORBITS``; the
+    nonlocal forces contract the gradients of the same columns) and their columns.  The sectors of an Abelian group
+    solve every level and keep every projector: their forces need no average.
+    """
+
+    from .Forces.sector_symmetry import sector_reduction
+    from .Symmetry.axis_reflection import sector_projector_orbits_setting
+
+    sectors = getattr(getattr(system, "backend", None), "symmetry_eigensolver", None)
+    solved = getattr(getattr(sectors, "decomposition", None), "reduction", None)
+    if solved is None or int(getattr(solved, "group_order", 1)) <= 1:
+        return None
+    if operations is None:
+        return (
+            f" Forces of the periodic cell in the sectors of its point group: an Abelian group of "
+            f"{int(solved.group_order)} operations, every level solved, the projectors of every atom "
+            f"({_PERIODIC_SECTOR_FORCES_SWITCH}=auto)"
+        )
+    reduction = sector_reduction(system)
+    atom_count = len(system.atoms)
+    operator = getattr(system, "nonlocal_operator", None)
+    labels = () if operator is None else tuple(getattr(operator, "labels", ()))
+    representatives = None if reduction is None else getattr(reduction, "atom_representatives", None)
+    sizes = None if reduction is None else getattr(reduction, "atom_orbit_sizes", None)
+    kept_atoms, kept_columns = atom_count, len(labels)
+    if representatives is not None and sizes is not None and sector_projector_orbits_setting() == "auto":
+        representatives = np.asarray(representatives, dtype=np.int64)
+        if representatives.size == atom_count:
+            kept_atoms = int(np.count_nonzero(representatives == np.arange(atom_count)))
+            if labels:
+                atom_of_column = np.fromiter((int(label[0]) for label in labels), dtype=np.int64, count=len(labels))
+                if atom_of_column.min() >= 0 and atom_of_column.max() < atom_count:
+                    kept_columns = int(np.count_nonzero(representatives[atom_of_column] == atom_of_column))
+    return (
+        f" Forces of the periodic cell in the sectors of its point group: averaged over {len(operations)} "
+        f"operations; projectors of {kept_atoms} of {atom_count} atoms ({kept_columns} of {len(labels)} columns) "
+        f"({_PERIODIC_SECTOR_FORCES_SWITCH}=auto)"
+    )
 
 
 def _reference_argv(arguments: argparse.Namespace) -> list[str]:
@@ -1416,14 +1533,40 @@ def _run(
             "NOTE: Restart_Run of a spin-polarized calculation: both channels on the full grid "
             "(Spin_Symmetry_Sectors: off for the restart)",
         ]
+    # PARSEC_PERIODIC_SECTOR_FORCES, read in every run so that a value it does
+    # not know is refused.
+    try:
+        periodic_sector_forces_setting()
+    except ValueError as error:
+        print(f"Input error: {error}", file=sys.stderr)
+        return 2
+    # Whether the forces or the relaxation of a periodic cell keep the sectors
+    # of its point group (periodic_sector_forces_refusal).
+    periodic_sector_forces = False
     if translation.problem.periodic_cell is not None:
         # The parser keeps no point group for a cell on the default routines
         # (use_symmetry: its forces are not symmetrized).  The SCF of a bulk
         # cell at the Gamma point may still solve in the sectors of its point
         # group about the origin of the cell, which the driver looks for
-        # (PARSEC_PERIODIC_SYMMETRY); the forces, the moved atoms, the bands
-        # and the non-self-consistent runs of a cell read the full grid.
-        periodic_full_grid = (
+        # (PARSEC_PERIODIC_SYMMETRY).  Its single-point forces and its
+        # relaxations by an optimizer keep those sectors too, their forces and
+        # moved positions averaged over the full group of the sectors
+        # (PARSEC_PERIODIC_SECTOR_FORCES=auto); molecular dynamics, manual
+        # movements, Move_Flag with fixed atoms, the Fortran-derived routines,
+        # the bands and the non-self-consistent runs of a cell read the full
+        # grid (periodic_sector_forces_refusal).
+        moving_or_forces = (
+            translation.relaxation is not None
+            or translation.molecular_dynamics is not None
+            or translation.compute_forces
+        )
+        sector_forces_refusal = (
+            periodic_sector_forces_refusal(translation, supercell=_found_supercell is not None)
+            if moving_or_forces
+            else None
+        )
+        periodic_sector_forces = moving_or_forces and sector_forces_refusal is None
+        periodic_full_grid = None if periodic_sector_forces else (
             "a relaxation or molecular dynamics"
             if translation.relaxation is not None or translation.molecular_dynamics is not None
             else "forces"
@@ -1435,13 +1578,30 @@ def _run(
             else None
         )
         wfndat_restart = translation.restart_run and getattr(translation, "restart_from_wfndat", False)
+        # Under PARSEC_PERIODIC_SECTOR_FORCES=auto a refusal names what keeps
+        # the full grid; under off the message of before.
+        named_refusal = (
+            moving_or_forces
+            and periodic_full_grid is not None
+            and sector_forces_refusal is not None
+            and periodic_sector_forces_setting() == "auto"
+        )
         if arguments.symmetry == "on" and (
             periodic_full_grid is not None or wfndat_restart or translation.problem.point_charges
         ):
             print(
                 "Input error: --symmetry on cannot be used with "
                 + (
-                    f"{periodic_full_grid} of a periodic cell, which the point-group sectors of a cell do not compute"
+                    (
+                        "molecular dynamics"
+                        if translation.molecular_dynamics is not None
+                        else "a relaxation"
+                        if translation.relaxation is not None
+                        else "forces"
+                    )
+                    + f" of a periodic cell here, which keeps the full grid: {sector_forces_refusal}"
+                    if named_refusal
+                    else f"{periodic_full_grid} of a periodic cell, which the point-group sectors of a cell do not compute"
                     if periodic_full_grid is not None
                     else "Restart_From_Wfndat"
                     if wfndat_restart
@@ -1657,6 +1817,24 @@ def _run(
                 or translation.molecular_dynamics is not None
             )
             reporter.setup(system)
+            # The forces of a cell solved in the sectors of a point group with
+            # weighted representations: averaged over the full group G of the
+            # sectors (Forces/sector_symmetry.py), which the ionic loop of a
+            # relaxation finds once and keeps the moved positions in
+            # (PARSEC_PERIODIC_SECTOR_FORCES=auto).
+            sector_operations = None
+            if periodic_sector_forces:
+                from .Forces.sector_symmetry import sector_force_operations, sector_symmetry_operations
+
+                sector_operations = sector_force_operations(system)
+                # G of a point group, or H of Abelian sectors: the forces and
+                # moved positions of a relaxation stay on the group the moved
+                # atoms must keep (check_sector_atoms)
+                if sector_symmetry_operations(system) is not None:
+                    symmetrize_forces = True
+                line = _periodic_sector_forces_line(system, sector_operations)
+                if line is not None:
+                    log.write(line)
             # FDET (PARSEC 1.5): the frozen field and the tip sphere.
             from parsec_python.Output.correction_output import embedding_setup_lines
 
@@ -1770,6 +1948,9 @@ def _run(
                 if translation.problem.periodic_cell is not None:
                     from .Forces.periodic_device import with_periodic_operations
 
+                    # A cell in the sectors of a point group takes the full
+                    # group G of the sectors with its translations, what its
+                    # forces are averaged over and its moved atoms keep.
                     backend = with_periodic_operations(backend)
                 if restart is not None:
                     from parsec_python.SCF.restart import with_first_warm_start

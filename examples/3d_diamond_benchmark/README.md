@@ -284,6 +284,34 @@ GiB). By default the margin is cut for memory, a sector then misses states and g
 step, and that growth runs out of memory: the GPUs of a rank hold three sector bases of 19.3 GiB each. One rank per GPU
 (sector groups of ranks) does not fit either: the ranks are dealt to the sectors in equal numbers, not by their sizes.
 
+### Gamma point: forces and relaxations in the sectors (2026-11-18)
+
+The forces and the `bfgs` relaxations of a cell keep the sectors of its point group (`PARSEC_PERIODIC_SECTOR_FORCES`,
+README of `acceleration`): the projector gradients of one atom per orbit, the local terms of one atom per orbit of the
+full group, the total averaged over that group. The inputs of `make_diamond.py` name `Cubic_Spline`, which puts the
+forces of a Gamma cell on the Fortran-derived routines by default; a forces run adds
+
+```bash
+--set 'Skip_Force: false' --set 'Use_Fortran_Routines: .false.'   # and for a relaxation: --set 'Minimization: bfgs'
+```
+
+One relaxation step (the SCF and the forces of the perfect cubes, whose forces vanish by symmetry: the largest is
+1.5-3.7e-4 Ry/bohr at the SCF criterion of 2e-4 Ry) on 16 A100, one rank per node:
+
+| n | atoms | whole run | SCF | forces | fullest GPU |
+|---|---:|---:|---:|---:|---:|
+| 6 | 1,728 | 9.6 s | 1.5 s | 2.2 s | 1.6 GiB |
+| 10 | 8,000 | 14.6 s | 4.0 s | 3.0 s | 2.4 GiB |
+| 20 | 64,000 | 164.7 s | 118.5 s | 14.8 s | 50.6 GiB |
+| 22 | 85,184 | 304.1 s | 237.3 s | 20.0 s | 79.1 GiB |
+
+n = 22 with `PARSEC_CUPY_SECTOR_MARGIN=fixed` and `PARSEC_CUPY_FORCE_PREFETCH=off` (the gradients built beside the SCF
+take the last GiB otherwise); its energy is that of the SCF alone above. Before the local terms of the orbits and the
+gradients of the representatives, the local forces of n = 20 took about 520 s on one A100 and the gradients of every
+atom 188 s on the host. With the bonds of 6^3 cubes displaced by 0.04 bohr (G of 192, SCF to 1e-8 Ry), the forces in
+the sectors agree with one sector of the identity (`PARSEC_PERIODIC_SYMMETRY=off`) within 1.4e-8 Ry/bohr: 10.7 s in all
+(forces 1.0 s) against 424.3 s (forces 36.4 s) on 16 A100.
+
 ### Scaling on one size
 
 | case | 1 GPU | 4 GPUs (1 node) | 8 GPUs (2 nodes) | 16 GPUs (4 nodes) |

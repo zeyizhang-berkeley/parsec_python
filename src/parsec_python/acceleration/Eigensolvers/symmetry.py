@@ -1685,20 +1685,25 @@ class CuPySymmetrySCFEigensolver:
         from time import perf_counter
         from types import SimpleNamespace
 
-        from ..Forces.nonlocal_device import gradient_transposes
+        from ..Forces.nonlocal_device import gradient_transposes, share_device_gradients
 
         provider = self.projector_gradient_provider
         if provider is None:
             raise RuntimeError(
                 "this eigensolver was not given the projector gradients of its system"
             )
-        from ..Symmetry.axis_reflection import compress_gradients_for_sectors
+        from ..Symmetry.axis_reflection import compress_gradients_for_sectors, sector_gradient_atoms
 
         started = perf_counter()
         # The columns of the projectors of the sector operators (one atom per orbit of the group of the sectors,
         # compress_projectors_for_sectors): the terms then belong to these labels (projector_force_labels), and
-        # the average over the group of the reduction gives the other atoms of each orbit theirs.
-        gradients = compress_gradients_for_sectors(provider(), self.decomposition.reduction)
+        # the average over the group of the reduction gives the other atoms of each orbit theirs.  Only the
+        # representative atoms are sampled where those are all the sectors read (PARSEC_SECTOR_GRADIENT_ATOMS).
+        reduction = self.decomposition.reduction
+        atoms = sector_gradient_atoms(reduction)
+        gradients = compress_gradients_for_sectors(
+            provider() if atoms is None else provider(atom_indices=atoms), reduction
+        )
         self.projector_force_labels = tuple(gradients.labels)
         built = perf_counter()
         if not self._owned_representations:
@@ -1721,6 +1726,9 @@ class CuPySymmetrySCFEigensolver:
             )
             for representation in self._owned_representations
         }
+        # Each device puts the gradients of a sector on itself once per force call and holds those of one
+        # sector at a time (the hand-over corrections and the spin channels contract with that copy).
+        share_device_gradients(transposes.values())
         return (
             len(gradients.labels),
             transposes,
@@ -1817,6 +1825,15 @@ class CuPySymmetrySCFEigensolver:
             rows = self.decomposition.sector_size(representation)
             owner = self._sector_device_ids[representation]
             group = getattr(self._operators[representation], "_mpi_shared_group", None)
+            if group is not None and getattr(
+                getattr(self._solvers[representation], "settings", None), "initial_method", "chebff"
+            ) != "chebff":
+                # Only a CHEBFF first solve divides the columns among the ranks of the group (a SharedBasis); after
+                # another one (CHEBDAV, the input default) every rank of it holds and filters the whole basis
+                # (experimental/mpi_scf.py, whole_basis_sectors), counted whole here as on one device.
+                states[owner] += rows * int(count) * np.dtype(np.float64).itemsize * self.spin_channel_count
+                buffers[owner] = max(buffers[owner], streaming_workspace_bytes(rows, count))
+                continue
             if group is not None:
                 from .mpi_shared_basis import exchange_bytes, shared_ritz_route
 

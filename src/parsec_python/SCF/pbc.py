@@ -1183,6 +1183,12 @@ def update_periodic_geometry(system: PeriodicPreparedSinglePointSystem, atoms) -
     coordinates); the builders get them folded into the cell (:attr:`PeriodicPreparedSinglePointSystem.cell_atoms`).
 
     A system of the Fortran-derived routines goes to :func:`fortran_update_periodic_geometry`.
+
+    A system without a local ionic potential (``ionic_potential is None``: the orbital operators alone, which an MPI
+    rank that shares the basis of a sector prepares, ``acceleration.driver._prepare_periodic_orbital_operators``) gets
+    the projectors of the moved atoms alone: ``nonloc`` of ``parsec.F90`` after ``domove`` with the atoms folded into
+    the cell as :attr:`PeriodicPreparedSinglePointSystem.cell_atoms` folds them, on the same grid and with the same
+    arguments as that preparation.  Its other fields stay as they were (``None``, and NaN for the energies).
     """
 
     if uses_fortran_routines(system.grid):
@@ -1192,6 +1198,23 @@ def update_periodic_geometry(system: PeriodicPreparedSinglePointSystem, atoms) -
     if len(atoms) != len(system.atoms) or any(new.symbol != old.symbol for new, old in zip(atoms, system.atoms)):
         raise ValueError("moved atoms must keep their number, order and species")
     problem = replace(system.input, atoms=atoms)
+    if system.ionic_potential is None:
+        # The orbital operators of a sector rank: the projectors alone (the fields of the SCF loop are the root's).
+        moved = replace(system, input=problem, atoms=atoms)
+        nonlocal_operator = build_nonlocal_projectors(
+            system.grid,
+            moved.cell_atoms,
+            system.pseudopotentials,
+            problem.pseudopotentials,
+            problem.periodic_cell.lattice_vectors,
+            periodic_dimensions=problem.periodic_cell.dimensions,
+        )
+        seconds = time.perf_counter() - started
+        return replace(
+            moved,
+            nonlocal_operator=nonlocal_operator,
+            timings=PreparationTimings(nonlocal_ionic_seconds=seconds, total_seconds=seconds),
+        )
     folded = fold_atoms_into_cell(atoms, problem.periodic_cell.lattice_vectors)
     terms = _geometry_terms(
         problem,
