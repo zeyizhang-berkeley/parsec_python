@@ -308,9 +308,18 @@ Forces (`Forces.compute_periodic_forces`; the Fortran routines are `forpbc.f90`,
 3. **Nonlocal projectors** (`Forces/nonlocal_force.py`): the same formula with the Bloch projectors of the k-point,
    `F_a = 4 sum_k w_k sum_n f_nk sum_q s_q Re[conj(<beta_q|u_nk>) <grad beta_q|u_nk>]`. A k-point run keeps no eigenvectors,
    so `run_scf_kpoints(..., compute_forces=True)` accumulates the term from them at the end of the SCF loop
-   (`result.nonlocal_forces`). The row-distributed MPI k-point solver does not support it.
-4. The **net force is removed**, as Fortran does for a crystal. The forces are **not symmetrized** (no space-group
-   operations are found) and no torque is reported; the force report prints `(Ewald forces included)` as Fortran's.
+   (`result.nonlocal_forces`). The row-distributed MPI k-point solver does not support it; the MPI k-point pools do
+   (since 2026-11-17: each rank adds the terms of its columns, summed over the ranks).
+4. The **net force is removed**, as Fortran does for a crystal, and no torque is reported; the force report prints
+   `(Ewald forces included)` as Fortran's. At the Gamma point and on the whole mesh (or its time-reversal pairs) the
+   forces are **not symmetrized**. A Monkhorst-Pack mesh (`Monkhorst_Pack_Shift`) of the forces of a single point or of a
+   `bfgs`/`simple` relaxation runs its irreducible wedge since 2026-11-18 (`PARSEC_KPOINT_FORCE_WEDGE`, `auto` by
+   default), as a single point without forces and Fortran's routines do: the operations of the space group that map the
+   grid of `Grid_Spacing` onto itself reduce the mesh and symmetrize the density, the nonlocal force of the wedge is
+   completed over them (its points stand for their stars) and the total averaged over them (`symm_forces.f90`), so the
+   structure keeps the group. Molecular dynamics and `manual` movements (PARSEC uses no symmetry for them), a `Move_Flag`
+   that an operation does not respect, `Ignore_Symmetry` and a structure without operations keep the whole mesh, run as
+   its pairs `k`, `-k` (`PARSEC_KPOINT_TIME_REVERSAL`); `PARSEC_KPOINT_FORCE_WEDGE=off` keeps the whole mesh everywhere.
 
 The terms are exact derivatives of the energies the SCF evaluates (`Forces` tests: finite differences of each energy and of the
 SCF total energy, 1e-5 Ry/bohr or better), with one exception: the local potential and the nonlocal projectors use PARSEC's

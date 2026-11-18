@@ -1087,7 +1087,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         except BaseException as error:
             _abort_mpi(1, error)
             raise
-    if status not in (0, 3):
+    if status not in (0, 3, 4):
+        # 3 (an SCF loop did not converge) and 4 (a relaxation not relaxed: Movement_Num used up) are outcomes of
+        # the run that every rank reaches together (relaxation_exit_code of the reference CLI): no abort for them
         _abort_mpi(status)
     return status
 

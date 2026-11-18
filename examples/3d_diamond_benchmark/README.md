@@ -252,6 +252,17 @@ Before the same day these took 31.1 s and 381.0 s: the whole mesh (205.4 s of SC
 from the readable sum (20.9 s and 159.3 s: the scope of the forces on the GPU had replaced the builder of the bulk
 grid, which the single points kept, 0.24 s at n = 6).
 
+Since the night after, forces and relaxations take the irreducible wedge of the mesh as a single point does
+(`PARSEC_KPOINT_FORCE_WEDGE`, as Fortran's routines with `symm_forces.f90`: the forces completed and averaged over the
+operations that map the grid onto itself, so the structure keeps them): n = 6 with the 3x3x3 mesh runs 4 of the 27
+points, 54.6 s instead of 135.6 s (SCF 39.3 s), 5.8 GiB on the fullest GPU instead of 12.7, the total energy within
+2.4e-6 Ry (the SCF criterion is 2e-4 Ry). The structures with an atom moved (`make_diamond.py --displace 0.05 0.05
+0.05`, the six operations about it left): n = 3 with the 2x2x2 mesh, SCF to 1e-6 Ry, 4 of 8 points, the same total
+energy to the digits printed and forces within 1e-6 Ry/bohr of the whole mesh; two BFGS moves with the 3x3x3 mesh 6
+of 27 points, SCF 33.4 instead of 52.0 s, the last energy within 2.4e-6 Ry. Such a structure leaves the k-points little
+groups of order 2 at most: n = 6 then takes 265 s per SCF loop with the wedge (6 points, 11 tasks), and the 14 pairs
+(25 tasks) ran out of GPU memory in the second structure.
+
 The setup of large Gamma cells (2026-11-17): the Ewald ion-ion sums on the GPU (`acceleration/V_ion/ewald_device.py`:
 the images of the host in cells of the cutoff for the real-space pairs, CuPy for the structure factors;
 `PARSEC_DEVICE_EWALD=off` keeps the host sums bit for bit), the finite-difference matrix filled by slabs on threads

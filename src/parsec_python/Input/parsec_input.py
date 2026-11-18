@@ -45,7 +45,12 @@ from ..models import (
 from ..models import EmbeddingSettings  # FDET of PARSEC 1.5
 from ..Grid.cell import primitive_lattice, replicate_positions, supercell_lattice
 from ..Grid.pbc import fortran_grid_shift
-from ..Grid.kpoints import explicit_kpoints, kpoint_time_reversal_setting, read_kpoint_file
+from ..Grid.kpoints import (
+    explicit_kpoints,
+    kpoint_force_wedge_setting,
+    kpoint_time_reversal_setting,
+    read_kpoint_file,
+)
 from ..Grid.pbc import periodic_grid_shift, uses_general_periodic_grid
 from . import routines as _routines_module
 from .routines import RoutineChoice, UseFortranRoutines, decide_routines
@@ -4851,14 +4856,39 @@ def _parse_parsec_input(
         # Andrew Grieder's routines put no fractional translations in the grid.  The Monkhorst_Pack_Shift mesh of a
         # bulk single point of scalar orbitals is reduced by the operations of the crystal that map his grid onto
         # itself, with time reversal, and the density is symmetrized with them (_default_routines_wedge); a hybrid
-        # (its exchange sums over the full mesh), spinors and moving atoms keep the full list of equal weights.
-        keeps_full_mesh = bool(
-            scf.is_hybrid
-            or noncollinear
+        # (its exchange sums over the full mesh) and spinors keep the full list of equal weights.  Forces and a
+        # relaxation take the wedge too (PARSEC_KPOINT_FORCE_WEDGE, since 2026-11-18): their forces are completed
+        # and averaged over the group (Forces.total.compute_periodic_forces, symm_forces.f90), so the structure keeps
+        # it; molecular dynamics and manual movements use no symmetry (as PARSEC) and keep the full list.
+        spinor_orbitals = bool(
+            noncollinear
             or self_consistent_spin_orbit
             or any(specification.spin_orbit for specification in specifications.values())
-            or atoms_move
-            or single_point_forces
+        )
+        moving_wedge = None
+        if (
+            periodicity == 3
+            and default_routines_mesh is not None
+            and (atoms_move or single_point_forces)
+            and not (scf.is_hybrid or spinor_orbitals)
+            and not (molecular_dynamics.enabled or minimization == "manual")
+            and not (optional_bool("create_dos") or optional_bool("output_gw"))
+            and kpoint_force_wedge_setting() == "auto"
+        ):
+            moving_wedge = _default_routines_force_wedge(
+                atoms,
+                periodic_cell,
+                grid,
+                default_routines_mesh,
+                movable=movable if minimization in {"bfgs", "simple"} else None,
+                ignore_symmetry=ignore_symmetry,
+                symmetrize_density=symmetrize_density,
+                symmetrize_given="symmetrize_charge_density" in scalar,
+            )
+        keeps_full_mesh = bool(
+            scf.is_hybrid
+            or spinor_orbitals
+            or ((atoms_move or single_point_forces) and moving_wedge is None)
         )
         weighted_list = bool(
             explicit_kpoint_weights is not None
@@ -4879,16 +4909,20 @@ def _parse_parsec_input(
                 "wedge or a weighted Kpoint_List of a bulk single point of scalar orbitals only)"
             )
         if default_routines_mesh is not None and not keeps_full_mesh:
-            symmetrize_density, space_group = _default_routines_wedge(
-                atoms,
-                periodic_cell,
-                grid,
-                default_routines_mesh,
-                ignore_symmetry=ignore_symmetry,
-                symmetrize_density=symmetrize_density,
-                symmetrize_given="symmetrize_charge_density" in scalar,
-                warnings=warnings,
-            )
+            if moving_wedge is not None:
+                symmetrize_density, space_group, wedge_warnings = moving_wedge
+                warnings.extend(wedge_warnings)
+            else:
+                symmetrize_density, space_group = _default_routines_wedge(
+                    atoms,
+                    periodic_cell,
+                    grid,
+                    default_routines_mesh,
+                    ignore_symmetry=ignore_symmetry,
+                    symmetrize_density=symmetrize_density,
+                    symmetrize_given="symmetrize_charge_density" in scalar,
+                    warnings=warnings,
+                )
             monkhorst_pack_dimensions, monkhorst_pack_shift = default_routines_mesh
             explicit_kpoint_array = None
             explicit_kpoint_weights = None
@@ -6139,6 +6173,54 @@ def _default_routines_wedge(
             "with them (" + "; ".join(dropped) + ")"
         )
     return True, group
+
+
+def _default_routines_force_wedge(
+    atoms,
+    periodic_cell: PeriodicCell,
+    grid: PeriodicGridSettings,
+    mesh,
+    *,
+    movable,
+    ignore_symmetry: bool,
+    symmetrize_density: bool,
+    symmetrize_given: bool,
+):
+    """The wedge of :func:`_default_routines_wedge` for forces or a relaxation, or ``None`` for the whole mesh.
+
+    Returns ``(symmetrize_density, space_group, warnings)``.  The forces of the wedge are completed over its group and
+    averaged over it (:func:`parsec_python.Forces.total.compute_periodic_forces`, as ``symm_forces.f90``), which keeps
+    a relaxed structure in the group while every movable atom is mapped onto a movable one: ``movable`` (the flags of a
+    relaxation, ``None`` for the forces of a single point) is checked against the atom images of every operation.
+    ``None`` where no operation but the identity remains (``Ignore_Symmetry``, ``Symmetrize_Charge_Density:
+    .false.``, a structure without symmetry) or where an operation exchanges fixed and movable atoms: the caller then
+    keeps the whole mesh, run as its time-reversal pairs.
+    """
+
+    from ..Grid.space_group import space_group_atom_images
+
+    found: list[str] = []
+    symmetrize, group = _default_routines_wedge(
+        atoms,
+        periodic_cell,
+        grid,
+        mesh,
+        ignore_symmetry=ignore_symmetry,
+        symmetrize_density=symmetrize_density,
+        symmetrize_given=symmetrize_given,
+        warnings=found,
+    )
+    if group is None or group.order <= 1:
+        return None
+    if movable is not None and len(movable) == len(atoms):
+        mask = np.asarray(movable, dtype=bool)
+        try:
+            images = space_group_atom_images(group, periodic_cell.lattice_vectors, atoms)
+        except ValueError:
+            return None
+        if any(not np.array_equal(mask[row], mask) for row in images):
+            return None
+    return symmetrize, group, found
 
 
 def _default_routines_list_symmetry(
@@ -8094,6 +8176,24 @@ def summarize_translation(translation: ParsecInputTranslation) -> str:
                 "PARSEC_KPOINT_TIME_REVERSAL=off runs every point)",
             )
             if getattr(problem, "kpoint_time_reversal", False) and problem.kpoints is not None
+            else ()
+        ),
+        # Forces of the default routines on the wedge of a mesh (PARSEC_KPOINT_FORCE_WEDGE).
+        *(
+            (
+                f"Forces: the nonlocal forces of the irreducible k-points completed over the {problem.space_group.order} "
+                "operations of the wedge and the forces averaged over them, which keeps the structure in their group "
+                "(symm_forces.f90; PARSEC_KPOINT_FORCE_WEDGE=off runs the time-reversal pairs of the whole mesh)",
+            )
+            if (
+                getattr(translation, "compute_forces", False)
+                and not translation.routines.fortran
+                and getattr(problem, "monkhorst_pack_shift", None) is not None
+                and problem.space_group is not None
+                and problem.space_group.order > 1
+                and problem.periodic_cell is not None
+                and int(getattr(problem.periodic_cell, "periodicity", 3)) == 3
+            )
             else ()
         ),
         # Only where the refinement is requested: other summaries keep their text.

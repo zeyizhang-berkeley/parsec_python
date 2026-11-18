@@ -664,6 +664,25 @@ def kpoint_time_reversal_setting() -> str:
     return value
 
 
+KPOINT_FORCE_WEDGE_ENV = "PARSEC_KPOINT_FORCE_WEDGE"
+
+
+def kpoint_force_wedge_setting() -> str:
+    """``PARSEC_KPOINT_FORCE_WEDGE``: ``auto`` (default, since 2026-11-18) lets the forces and the relaxation of a
+    bulk cell on the default routines run the irreducible wedge of a Monkhorst-Pack mesh, as Fortran's routines and a
+    single point do: the space group that maps the grid onto itself reduces the mesh and symmetrizes the density, the
+    nonlocal forces of the wedge are completed over it and the forces averaged over it (``symm_forces.f90``), so the
+    structure keeps the group; ``off`` keeps the whole mesh (its time-reversal pairs), as before.  Molecular dynamics
+    and ``manual`` movements keep the whole mesh either way (PARSEC uses no symmetry for them)."""
+
+    import os
+
+    value = os.environ.get(KPOINT_FORCE_WEDGE_ENV, "auto").strip().lower() or "auto"
+    if value not in ("auto", "off"):
+        raise ValueError(f"{KPOINT_FORCE_WEDGE_ENV} must be auto or off, got {value!r}")
+    return value
+
+
 def time_reversal_reduced(k_points, weights, lattice_vectors) -> tuple[np.ndarray, np.ndarray]:
     """The representatives of a uniform mesh of equal weights under time reversal (``k ~ -k``).
 
@@ -735,6 +754,7 @@ __all__ = [
     "fold_to_centered_zone",
     "irreducible_monkhorst_pack",
     "kpoint_sampling",
+    "kpoint_force_wedge_setting",
     "kpoint_sampling_details",
     "kpoint_time_reversal_setting",
     "mesh_preserving_operations",
