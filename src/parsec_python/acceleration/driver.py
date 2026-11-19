@@ -461,11 +461,13 @@ def single_sector_setting() -> str:
     return value
 
 
-def periodic_sector_refusal(problem) -> str | None:
+def periodic_sector_refusal(problem, *, hybrid_sectors: bool = False) -> str | None:
     """Why a periodic cell cannot be solved in the sectors of the Gamma route, or ``None``.
 
     The route of the sectors takes a bulk cell at the Gamma point with real
-    orbitals: an orthorhombic cell, unpolarized, with a native LDA or GGA.
+    orbitals: an orthorhombic cell, unpolarized or with collinear spin
+    (``PARSEC_GAMMA_SPIN_SECTORS=auto``: both channels in the abelian
+    sectors, :mod:`.SCF.gamma_spin`), with a native LDA or GGA.
     Its orbitals are solved in the sectors of the point group of the cell
     about its origin (``PARSEC_PERIODIC_SYMMETRY=auto``, the default), whose
     density, potentials and mixer keep one value per orbit, the Hartree
@@ -477,8 +479,16 @@ def periodic_sector_refusal(problem) -> str | None:
     validated for the other periodic calculations named here; a calculation
     that names one keeps the full grid of one device in ``main.py`` (a
     spin-polarized cell goes to the k-point driver, whose k-point sectors may
-    still split the Gamma point: ``SCF/kpoint_sectors.py``), and the MPI
-    runner refuses it.
+    still split the Gamma point: ``SCF/kpoint_sectors.py``; so does, under
+    ``PARSEC_GAMMA_HYBRID_SECTORS=kpoint``, an unpolarized hybrid of a cell
+    large enough for those sectors, ``SCF/gamma_hybrid_route.py``), and the
+    MPI runner refuses it.
+
+    ``hybrid_sectors``: the caller solves an unpolarized hybrid in the real
+    sectors of this route (the driver in one process under
+    ``PARSEC_GAMMA_HYBRID_SECTORS=auto``, :func:`_gamma_hybrid_in_sectors`):
+    a hybrid is then no reason.  The other callers (the k-point mesh folded
+    into a supercell, the MPI runner) keep refusing it.
     """
 
     from parsec_python.Grid import kpoint_sampling
@@ -494,8 +504,14 @@ def periodic_sector_refusal(problem) -> str | None:
         if sampling is None or len(sampling[0]) != 1 or np.any(sampling[0]):
             return "k-point sampling beyond the Gamma point"
     if scf.spin_polarized or scf.noncollinear or scf.self_consistent_spin_orbit:
-        return "spin polarization, spin-orbit coupling or non-collinear magnetism"
-    if scf.is_hybrid:
+        # Collinear spin: both channels in the abelian sectors of the cell (PARSEC_GAMMA_SPIN_SECTORS=auto,
+        # SCF/gamma_spin.py); off refuses it as before.
+        from .SCF.gamma_spin import gamma_spin_sector_refusal
+
+        spin_refusal = gamma_spin_sector_refusal(problem)
+        if spin_refusal is not None:
+            return spin_refusal
+    if scf.is_hybrid and not hybrid_sectors:
         return "a hybrid functional"
     if scf.is_meta_gga:
         return "a meta-GGA functional"
@@ -508,6 +524,29 @@ def periodic_sector_refusal(problem) -> str | None:
     if getattr(scf, "van_der_waals", False):
         return "the Tkatchenko-Scheffler dispersion correction"
     return None
+
+
+def _gamma_hybrid_in_sectors(problem, mpi_context) -> bool:
+    """Whether an unpolarized hybrid of a bulk cell at the Gamma point takes the sectors of the Gamma route here.
+
+    ``PARSEC_GAMMA_HYBRID_SECTORS=auto`` (the default, ``SCF/gamma_hybrid_route.py``) in one process: the orbitals
+    in the real sectors of the abelian group of the cell (its commuting involutions with the half-cell
+    translations; a hybrid keeps no weighted sectors, ``_orbital_group_refusal``), the exchange of the device Fock
+    loop from their orbitals unfolded to the full grid, where the cuFFT pair solver of the cell solves the pair
+    densities, and its compressed operator folded to every sector (``Hamiltonian/exchange_device.py``).  A cell
+    whose basis (grid points times states) is below the floor of the k-point sectors (``2^24`` entries,
+    ``gamma_hybrid_route.sector_basis_reached``) keeps the full grid, where the sectors gain nothing (an 8-atom
+    cube took 1.8 times longer in them).  ``off``, ``kpoint`` and the MPI runner keep the former routes.
+    """
+
+    from .SCF.gamma_hybrid_route import gamma_hybrid_sectors_setting, sector_basis_reached
+
+    return (
+        mpi_context is None
+        and bool(getattr(getattr(problem, "scf", None), "is_hybrid", False))
+        and gamma_hybrid_sectors_setting() == "auto"
+        and sector_basis_reached(problem)
+    )
 
 
 def _orbital_group_refusal(problem, spin_polarized: bool, mpi_context) -> str | None:
@@ -3622,10 +3661,22 @@ def _prepare_single_point(
     trivial_origin_mode = periodic_trivial_origin_setting()
     periodic_centre_setting()
     periodic_abelian_translation_setting()
+    from .SCF.gamma_spin import gamma_spin_sector_setting
+
+    # (and PARSEC_GAMMA_SPIN_SECTORS, the route of a spin-polarized cell: SCF/gamma_spin.py, with the operations of
+    # test 2 of its guard, PARSEC_SPIN_GUARD_CELL_GROUP: SCF/spin_sectors.py)
+    gamma_spin_sector_setting()
+    from .SCF.spin_sectors import spin_guard_cell_group_setting
+
+    spin_guard_cell_group_setting()
     # A periodic cell in an MPI sector context: one sector of the identity
     # whose basis the ranks share (a bulk cell at Gamma; see
     # periodic_sector_refusal for what that route does not take).
-    periodic_refusal = periodic_sector_refusal(problem) if is_periodic else None
+    periodic_refusal = (
+        periodic_sector_refusal(problem, hybrid_sectors=_gamma_hybrid_in_sectors(problem, mpi_context))
+        if is_periodic
+        else None
+    )
     # The cell that route takes may use its point group about the origin of
     # the cell: the sectors of that group instead of the one of the identity
     # (PARSEC_PERIODIC_SYMMETRY=off keeps the identity).
@@ -3638,7 +3689,7 @@ def _prepare_single_point(
     if is_periodic and symmetry_mode == "on" and not periodic_symmetry:
         raise ValueError(
             "symmetry='on' needs a periodic cell whose point group the route of the sectors takes (a bulk "
-            "orthorhombic cell at the Gamma point, unpolarized, native LDA or GGA) and "
+            "orthorhombic cell at the Gamma point, unpolarized or collinear spin, native LDA or GGA) and "
             "PARSEC_PERIODIC_SYMMETRY=auto"
             + ("" if periodic_refusal is None else f"; this calculation has {periodic_refusal}")
         )
@@ -3646,7 +3697,7 @@ def _prepare_single_point(
         raise ValueError(
             f"{periodic_refusal} of a periodic cell does not run as an MPI SCF, whose "
             "ranks share the basis of one sector of the identity (a bulk "
-            "orthorhombic cell at the Gamma point, unpolarized, native LDA or GGA): "
+            "orthorhombic cell at the Gamma point, unpolarized or collinear spin, native LDA or GGA): "
             "run it with parsec_python/main.py"
             + (" --mpi" if "k-point" in periodic_refusal else "")
         )
@@ -4455,6 +4506,12 @@ def _prepare_single_point(
         reference = ionic_fields.result()
         if ionic_fields.devices:
             preparation_overlap["ionic_sum_devices"] = ionic_fields.devices
+    if is_periodic and spin_polarized and not sector_worker:
+        # The starting densities of the two channels that run_spin_scf reads (initchrg.f90 with the lattice
+        # images), which the periodic preparation leaves out (SCF/gamma_spin.py).
+        from parsec_python.SCF.pbc import with_initial_spin_densities
+
+        reference = with_initial_spin_densities(reference)
 
     stage_started = perf_counter()
     if sector_worker:

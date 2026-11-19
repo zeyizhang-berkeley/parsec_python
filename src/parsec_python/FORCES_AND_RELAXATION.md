@@ -321,6 +321,11 @@ Forces (`Forces.compute_periodic_forces`; the Fortran routines are `forpbc.f90`,
    structure keeps the group. Molecular dynamics and `manual` movements (PARSEC uses no symmetry for them), a `Move_Flag`
    that an operation does not respect, `Ignore_Symmetry` and a structure without operations keep the whole mesh, run as
    its pairs `k`, `-k` (`PARSEC_KPOINT_TIME_REVERSAL`); `PARSEC_KPOINT_FORCE_WEDGE=off` keeps the whole mesh everywhere.
+   Since 2026-11-19 the local ionic and core-correction forces of the wedge are summed for one atom per orbit of its
+   group and turned onto the others (`PARSEC_PERIODIC_LOCAL_ORBITS`, also for a Gamma cell in abelian sectors), and on
+   a GPU the ball sums of an orthorhombic cell are formed for many atoms per call (`PARSEC_PERIODIC_LOCAL_BALLS`; the
+   same terms in another order, 2.5e-15 Ry/bohr): diamond 6^3 with the 3x3x3 mesh, one relaxation step on 16 A100
+   49.9 -> 42.3 s, its forces 13.6 -> 0.49 s.
 
 The terms are exact derivatives of the energies the SCF evaluates (`Forces` tests: finite differences of each energy and of the
 SCF total energy, 1e-5 Ry/bohr or better), with one exception: the local potential and the nonlocal projectors use PARSEC's

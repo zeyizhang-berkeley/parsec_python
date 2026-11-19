@@ -355,6 +355,25 @@ class DeviceFockEngine:
     def description(self) -> str:
         return self.solvers.description
 
+    def take_exchange_paths(self):
+        """The paths the builds took since the last call (counts: the parity classes or the full grid of a
+        cluster's sector orbitals, the pooled block of a periodic cell's or its fallback to the sector tiles,
+        ``PARSEC_CUPY_EXCHANGE_POOL``), forgotten here; ``None`` where the pair solvers keep no such record.
+
+        The pair solvers are cached for the run of the driver (``DeviceExchange._solvers``): the Fock loop takes
+        the record at its start, after each of its steps and names those builds in its records
+        (:func:`parsec_python.SCF.hybrid.run_hybrid_scf`), so a later structure does not inherit them.
+        """
+
+        take = getattr(self.solvers, "take_paths", None)
+        return take() if callable(take) else None
+
+    def describe_exchange(self, paths) -> str:
+        """The pair solvers' description of the builds of ``paths`` (from :meth:`take_exchange_paths`)."""
+
+        describe = getattr(self.solvers, "describe", None)
+        return str(describe(paths) if callable(describe) else self.solvers.description)
+
     def start_system(self, system, definition):
         return self.device.start_system(system, definition)
 
@@ -574,11 +593,17 @@ def device_exchange_for(
         else selected_device_ids(int(cp.cuda.Device().id))
     )
     hybrid_functional_of(scf)  # the input's overrides are valid
-    from ..Hamiltonian.exchange_device import exchange_parity_box_setting, exchange_parity_setting
+    from ..Hamiltonian.exchange_device import (
+        exchange_parity_box_setting,
+        exchange_parity_setting,
+        exchange_pool_setting,
+    )
 
-    # The switches of the parity classes are refused here when wrong.
+    # The switches of the parity classes and of the pooled block of periodic sector orbitals
+    # (PARSEC_CUPY_EXCHANGE_POOL, read by the builds of such orbitals only) are refused here when wrong.
     exchange_parity_setting()
     exchange_parity_box_setting()
+    exchange_pool_setting()
     return DeviceExchange(
         backend=backend,
         sectors=sectors,

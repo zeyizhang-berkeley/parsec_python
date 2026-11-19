@@ -725,7 +725,9 @@ density, Hartree, XC, mixing), the diagonalization time of every iteration and a
 block (worker start-up, Bloch projectors, operator upload, eigensolver, eigenvector download and the
 device eigensolver's own seconds and counters, summed over the workers). A Gamma-only periodic
 spin-polarized run (no `Kpoint_Method`) goes through the 1x1x1 k-point driver when the k-points run on a
-device, because the Gamma-point spin driver has no device path; `python -m parsec_python.acceleration.benchmarks.check_kpoint_solver` times the two routes on
+device, because the Gamma-point spin driver has no device path (since 2026-11-19 a single point of a bulk
+orthorhombic cell with a native LDA or GGA takes the Gamma sector route of the accelerated driver instead,
+`PARSEC_GAMMA_SPIN_SECTORS`, acceleration README "Spin-polarized cells at the Gamma point"); `python -m parsec_python.acceleration.benchmarks.check_kpoint_solver` times the two routes on
 an input. Static matrices (Laplacian, projectors) are uploaded
 once per device; an SCF step uploads only the local potential and fields. The host BLAS runs one thread per device worker.
 `python -m parsec_python.acceleration.benchmarks.check_gpu_kpoints` compares the device operator, the filter, a short non-collinear

@@ -233,6 +233,24 @@ def _array_module(system):
     return cp, erf, local_force_device_ids(system)[0]
 
 
+def _abelian_local_operations(system, abelian=None):
+    """``H`` of the Abelian sectors of a periodic cell for its local forces (:func:`.sector_symmetry.
+    abelian_cell_operations`, or ``abelian`` where the caller has them), or ``None``: no such sectors, a group whose
+    operations do not map the atoms (the sums of every atom then), or ``PARSEC_PERIODIC_LOCAL_ORBITS=off``."""
+
+    from .periodic_local import periodic_local_orbits_setting
+    from .sector_symmetry import abelian_cell_operations
+
+    if periodic_local_orbits_setting() == "off":
+        return None
+    if abelian is None:
+        try:
+            abelian = abelian_cell_operations(system)
+        except ValueError:
+            return None
+    return abelian if abelian is not None and len(abelian) > 1 else None
+
+
 def compute_periodic_forces(
     system,
     result,
@@ -254,7 +272,11 @@ def compute_periodic_forces(
     averaged over ``G``, so its local terms are those of one atom per orbit of ``G`` turned onto the others
     (:func:`.periodic_local.orbit_periodic_local_forces`, ``PARSEC_PERIODIC_SECTOR_LOCAL_FORCES``), and
     ``phase_seconds["local_ewald_asymmetry"]`` (Ry/bohr) reports how much the average over the group changed the
-    Ewald and local terms.
+    Ewald and local terms.  A cell in the sectors of an Abelian group ``H`` (every level solved, the density and
+    exchange-correlation potential those of the orbits of ``H``) takes the local terms of one atom per orbit of ``H``
+    (``PARSEC_PERIODIC_LOCAL_ORBITS``, :func:`.sector_symmetry.abelian_cell_operations`), with
+    ``phase_seconds["local_representatives"]`` and ``["local_site_asymmetry"]`` (Ry/bohr).  The ball sums of the
+    local terms run batched on the GPU (``PARSEC_PERIODIC_LOCAL_BALLS``).
     """
 
     from .sector_symmetry import abelian_cell_operations, sector_force_operations
@@ -295,11 +317,16 @@ def compute_periodic_forces(
     # In sectors the density and the exchange-correlation potential are averaged over G (PARSEC_PERIODIC_SECTOR_
     # LOCAL_FORCES=orbits): the local terms of one atom per orbit of G, turned onto the others.
     orbits = completion is not None and periodic_sector_local_forces_setting() == "orbits"
+    # Abelian sectors: the density and the exchange-correlation potential are those of the orbits of H
+    # (PARSEC_PERIODIC_LOCAL_ORBITS=auto): the local terms of one atom per orbit of H.
+    abelian_orbits = None if completion is not None else _abelian_local_operations(system, abelian)
     site_asymmetry = 0.0
 
     def local_terms():
         if orbits:
             return orbit_periodic_local_forces(*arguments, completion, xp=xp, erf=erf)
+        if abelian_orbits is not None:
+            return orbit_periodic_local_forces(*arguments, abelian_orbits, xp=xp, erf=erf)
         if device is None:
             return fast_periodic_local_forces(*arguments), None
         return fast_periodic_local_forces(*arguments, xp=xp, erf=erf), None
@@ -311,6 +338,10 @@ def compute_periodic_forces(
             local, details = local_terms()
     if details is not None:
         site_asymmetry = details["site_asymmetry"]
+        if abelian_orbits is not None:
+            # Ry/bohr, not seconds: the checked atoms against their turned values (round-off)
+            clock["local_representatives"] = float(details["representatives"])
+            clock["local_site_asymmetry"] = float(site_asymmetry)
     clock["local"] = perf_counter() - mark
     mark = perf_counter()
     separable = _nonlocal_forces(system, result, clock)

@@ -459,8 +459,18 @@ class PeriodicDriverTests(unittest.TestCase):
         refusal = driver_module.periodic_sector_refusal
         self.assertIsNone(refusal(self.problem))
         scf = self.problem.scf
+        spin = replace(self.problem, scf=replace(scf, spin_polarized=True))
+        # Collinear spin takes the sectors (PARSEC_GAMMA_SPIN_SECTORS=auto, SCF/gamma_spin.py); off refuses it.
+        with patch.dict(os.environ, {"PARSEC_GAMMA_SPIN_SECTORS": "auto"}):
+            self.assertIsNone(refusal(spin))
+            self.assertIn(
+                "Spin_Symmetry_Sectors: off",
+                refusal(replace(spin, scf=replace(spin.scf, spin_symmetry_sectors="off"))),
+            )
+        with patch.dict(os.environ, {"PARSEC_GAMMA_SPIN_SECTORS": "off"}):
+            self.assertIn("spin polarization", refusal(spin))
         for changed, name in (
-            (replace(self.problem, scf=replace(scf, spin_polarized=True)), "spin polarization"),
+            (replace(self.problem, scf=replace(scf, spin_polarized=True, noncollinear=True)), "non-collinear"),
             (replace(self.problem, scf=replace(scf, xc_functional="pbe0")), "a hybrid functional"),
             (replace(self.problem, monkhorst_pack_dimensions=(1, 1, 2)), "k-point sampling"),
             (
@@ -481,7 +491,8 @@ class PeriodicDriverTests(unittest.TestCase):
         for added, message in (
             ("Kpoint_Method: mp\nbegin Monkhorst_Pack_Grid\n2 2 2\nend Monkhorst_Pack_Grid\n",
              "k-point sampling.*main.py --mpi"),
-            ("Spin_Polarization: true\n", "spin polarization"),
+            # collinear spin runs in the sectors (SCF/gamma_spin.py), not with its channels on the full grid
+            ("Spin_Polarization: true\nSpin_Symmetry_Sectors: off\n", "spin polarization with Spin_Symmetry_Sectors"),
         ):
             with self.subTest(message=message), tempfile.TemporaryDirectory() as directory:
                 source = Path(directory) / "parsec.in"

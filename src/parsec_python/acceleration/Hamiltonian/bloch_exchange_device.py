@@ -67,7 +67,7 @@ Nothing here prints or opens files.
 
 from __future__ import annotations
 
-from collections import OrderedDict
+from collections import Counter, OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from threading import Lock
@@ -458,7 +458,8 @@ class DevicePeriodicPairSolvers:
         self._buffers: dict = {}
         self._lock = Lock()
         self._label = description
-        self._paths: set[str] = set()
+        # Builds by path since the last take_paths (record_path).
+        self._paths: Counter = Counter()
         # One thread per device, kept for the run: cuFFT plans are cached per thread, so the builds after the
         # first make none (a pool made per build made them again in every build).
         self._executors: dict[int, ThreadPoolExecutor] = {}
@@ -504,16 +505,48 @@ class DevicePeriodicPairSolvers:
 
     @property
     def description(self) -> str:
+        """:meth:`describe` of the builds since the last :meth:`take_paths`."""
+
+        return self.describe()
+
+    def describe(self, paths=None) -> str:
+        """The solver, and the builds of ``paths`` (counts by path, :meth:`record_path`; default: those since the
+        last :meth:`take_paths`) that took the tiles of the symmetry sectors because the pooled full-grid block did
+        not fit the device (``PARSEC_CUPY_EXCHANGE_POOL=auto``): how many of the builds of sector orbitals."""
+
+        paths = self._paths if paths is None else paths
         shape = "x".join(str(value) for value in self.box.fft_shape)
         text = f"FP64 cuFFT pair solver of the periodic exchange kernel on the {shape} FFT box"
         if self.box.fft_shape != self.box.box_shape:
             text += " (the pair densities zero-padded along the open axis)"
         if self._label:
             text += f"; {self._label}"
-        return text + f"; devices take tiles of {self.batch_size}-column orbital blocks"
+        text += f"; devices take tiles of {self.batch_size}-column orbital blocks"
+        fallback = int(paths.get("pool-fallback", 0))
+        if fallback > 0:
+            # PARSEC_CUPY_EXCHANGE_POOL=auto: builds of sector orbitals whose full-grid block did not fit its device
+            builds = fallback + int(paths.get("pool", 0))
+            text += (
+                f" (of the symmetry sectors in {fallback} of {builds} builds, where the full-grid block of the "
+                "orbitals did not fit the device)"
+            )
+        return text
 
     def record_path(self, path: str) -> None:
-        self._paths.add(str(path))
+        """Count a build that took ``path``: ``"pool"`` (the pooled full-grid block of sector orbitals) or
+        ``"pool-fallback"`` (their sector tiles: the block did not fit), ``"full"`` (the tiles of one block)."""
+
+        with self._lock:
+            self._paths[str(path)] += 1
+
+    def take_paths(self) -> Counter:
+        """The counts of :meth:`record_path` since the last call, forgotten here: the Fock loop names the builds of
+        each of its steps and of its run, not those of an earlier run with this cached solver
+        (:func:`parsec_python.SCF.hybrid.run_hybrid_scf`)."""
+
+        with self._lock:
+            paths, self._paths = self._paths, Counter()
+        return paths
 
     def parity_layout(self):
         """No reflection-parity classes: a periodic cell's orbitals are on the full grid."""

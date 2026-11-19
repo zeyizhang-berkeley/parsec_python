@@ -24,7 +24,13 @@ of the density holds half of the reciprocal box, the term of ``-G`` is that of `
 is weighted and contracted slab by slab with the phases of a block of atoms, so no ``(3, M0, M1, M2)`` stack of the
 three components is formed (about 1.5 complex fields of the grid at the peak instead of about 6).  A cell whose
 density is invariant under a group of operations takes the local forces of one atom per orbit
-(:func:`orbit_periodic_local_forces`).
+(:func:`orbit_periodic_local_forces`, :func:`orbit_local_forces`; the k-point wedge and Abelian sectors through
+``PARSEC_PERIODIC_LOCAL_ORBITS``).
+
+On a GPU the ball sums of an orthorhombic cell are formed for many atoms per call (``PARSEC_PERIODIC_LOCAL_BALLS``,
+:func:`_batched_ball_sums`): the index box around every atom of a batch, the same distances as the per-atom loop
+(the coordinates of the grid minus the image of the atom, axis by axis), the same radial slopes, products and masks,
+and one reduction per batch; the loop formed the boxes on the host atom by atom (about 8 ms an atom).
 """
 
 from __future__ import annotations
@@ -61,6 +67,13 @@ _SERIES_SWITCH = "PARSEC_PERIODIC_FORCE_SERIES"
 _SERIES_VALUES = ("stream", "stack", "host")
 _SECTOR_LOCAL_SWITCH = "PARSEC_PERIODIC_SECTOR_LOCAL_FORCES"
 _SECTOR_LOCAL_VALUES = ("orbits", "all")
+_ORBITS_SWITCH = "PARSEC_PERIODIC_LOCAL_ORBITS"
+_BALLS_SWITCH = "PARSEC_PERIODIC_LOCAL_BALLS"
+_AUTO_OFF = ("auto", "off")
+#: Points of the index boxes of one batch of :func:`_batched_ball_sums` (two doubles each on the device with the fused
+#: terms of CuPy, about 13 with the array operations); fewer where the device has less than 16 doubles a point free.
+_BATCH_POINTS = 1 << 23
+_MIN_BATCH_POINTS = 1 << 16
 
 
 def periodic_force_series_setting() -> str:
@@ -91,6 +104,39 @@ def periodic_sector_local_forces_setting() -> str:
     if value not in _SECTOR_LOCAL_VALUES:
         raise ValueError(f"{_SECTOR_LOCAL_SWITCH} must be one of {', '.join(_SECTOR_LOCAL_VALUES)}, not {value!r}")
     return value
+
+
+def _auto_off(name: str) -> str:
+    value = os.environ.get(name, "auto").strip().lower() or "auto"
+    if value not in _AUTO_OFF:
+        raise ValueError(f"{name} must be auto or off, not {value!r}")
+    return value
+
+
+def periodic_local_orbits_setting() -> str:
+    """``PARSEC_PERIODIC_LOCAL_ORBITS``: the local forces of one atom per orbit on the routes without weighted sectors.
+
+    ``auto`` (default): a k-point run on the irreducible wedge of its mesh, whose density is averaged over the
+    operations of the wedge (:func:`parsec_python.Forces.periodic.reduced_kpoint_operations` with the
+    ``density_symmetry`` of the system, ``PARSEC_KPOINT_FORCE_WEDGE``), and a Gamma cell in the sectors of an Abelian
+    group, whose density is that of the orbits of its group, take the sums of one atom per orbit of that group,
+    turned onto the others (:func:`orbit_local_forces`); ``off``: the sums of every atom, as before (to 2026-11-19).
+    The values agree to round-off.  The weighted sectors of a point group keep ``PARSEC_PERIODIC_SECTOR_LOCAL_FORCES``.
+    """
+
+    return _auto_off(_ORBITS_SWITCH)
+
+
+def periodic_local_balls_setting() -> str:
+    """``PARSEC_PERIODIC_LOCAL_BALLS``: how the ball sums of the local forces of a cell are formed on a GPU.
+
+    ``auto`` (default): for an orthorhombic cell the balls of many atoms per call on the device
+    (:func:`_batched_ball_sums`); ``off``: the loop over the atoms, whose balls the host forms one by one, as before
+    (to 2026-11-19).  A calculation on the host and an oblique cell keep the loop.  The values agree to round-off
+    (the same terms, summed in another order).
+    """
+
+    return _auto_off(_BALLS_SWITCH)
 
 
 class _Slope:
@@ -139,6 +185,34 @@ class _Slope:
         if self.charge is not None:
             tail = distances >= self.tail
             result[tail] = 2.0 * self.charge / (distances[tail] * distances[tail])
+        return result
+
+    def dense(self, distances):
+        """:meth:`__call__` without the selections: every expression on every distance and the rules by ``where``,
+        so the values of the kept distances are those of :meth:`__call__` (the batched sums, no compaction)."""
+
+        xp = self.xp
+        inner = (distances >= self.first) & (distances < self.tail)
+        if self.knots is not None:
+            lower = xp.clip(xp.searchsorted(self.knots, distances, side="right") - 1, 0, int(self.knots.size) - 2)
+            upper = lower + 1
+            step = self.knots[upper] - self.knots[lower]
+            left = (self.knots[upper] - distances) / step
+            right = (distances - self.knots[lower]) / step
+            value = (
+                (self.values[upper] - self.values[lower]) / step
+                - (3.0 * left * left - 1.0) / 6.0 * step * self.second[lower]
+                + (3.0 * right * right - 1.0) / 6.0 * step * self.second[upper]
+            )
+            del lower, upper, step, left, right
+        else:
+            value = xp.interp(distances, self.radii, self.table)
+        result = xp.where(inner, value, 0.0)
+        del value, inner
+        if self.charge is not None:
+            tail = distances >= self.tail
+            square = xp.where(tail, distances * distances, 1.0)
+            result = xp.where(tail, 2.0 * self.charge / square, result)
         return result
 
 
@@ -383,6 +457,278 @@ def _to_host(xp, array) -> np.ndarray:
     return np.asarray(xp.asnumpy(array) if hasattr(xp, "asnumpy") else array)
 
 
+def _uses_batched_balls(xp) -> bool:
+    """Whether the ball sums run batched (:func:`_batched_ball_sums`): on a device module (CuPy) under
+    ``PARSEC_PERIODIC_LOCAL_BALLS=auto``."""
+
+    return periodic_local_balls_setting() == "auto" and getattr(xp, "cuda", None) is not None
+
+
+def _orthorhombic_geometry(grid):
+    """``(axes, sides, n, shift)`` of a grid whose point ``(i, j, k)`` lies at ``(x_i, y_j, z_k)``: the coordinates
+    along the three axes (taken from the grid's own), the side lengths, the points per axis and the shift; ``None``
+    for a cell whose lattice vectors are not the axes or a grid whose coordinates are not those of its axes."""
+
+    lattice = np.asarray(grid.cell.lattice_vectors, dtype=np.float64)
+    if lattice.shape != (3, 3) or np.any(lattice != np.diag(np.diag(lattice))) or np.any(np.diag(lattice) <= 0.0):
+        return None
+    n = np.asarray(grid.points_per_axis, dtype=np.int64)
+    coordinates = getattr(grid, "coordinates", None)
+    total = int(np.prod(n))
+    if coordinates is None or tuple(np.shape(coordinates)) != (total, 3):
+        return None
+    strides = (int(n[1] * n[2]), int(n[2]), 1)
+    axes = tuple(
+        np.ascontiguousarray(coordinates[np.arange(int(n[m]), dtype=np.int64) * strides[m], m], dtype=np.float64)
+        for m in range(3)
+    )
+    rows = np.unique(np.linspace(0, total - 1, 33).astype(np.int64))
+    indices = (rows // strides[0], (rows // strides[1]) % n[1], rows % n[2])
+    if not all(np.array_equal(coordinates[rows, m], axes[m][indices[m]]) for m in range(3)):
+        return None
+    return axes, np.diag(lattice).copy(), n, np.asarray(grid.shift, dtype=np.float64)
+
+
+def _batch_points(xp) -> int:
+    """The points of the index boxes of one batch: :data:`_BATCH_POINTS`, fewer on a device with little free memory."""
+
+    if getattr(xp, "cuda", None) is None:
+        return _BATCH_POINTS
+    from ..Hartree.gpu_memory import device_free_bytes
+
+    free = device_free_bytes()
+    if free is None:
+        return _BATCH_POINTS
+    return int(min(_BATCH_POINTS, max(_MIN_BATCH_POINTS, int(free) // (16 * 8))))
+
+
+_FUSED_PREAMBLE = r"""
+__device__ __forceinline__ long long first_above(const double* a, const long long n, const double x)
+{
+    // numpy.searchsorted(a, x, side="right"): the first index whose value is above x
+    long long low = 0, high = n;
+    while (low < high) {
+        const long long middle = (low + high) >> 1;
+        if (a[middle] > x) high = middle; else low = middle + 1;
+    }
+    return low;
+}
+"""
+
+_FUSED_OPERATION = r"""
+const double d = sqrt((xx + yy) + zz);
+const bool keep = strict ? (d < radius) : (d <= radius);
+double c = 0.0;
+if (keep) {
+    double s = 0.0;
+    if (d >= first && d < tail) {
+        if (spline) {
+            long long lower = first_above(&knots[0], count, d) - 1;
+            if (lower < 0) lower = 0;
+            if (lower > count - 2) lower = count - 2;
+            const long long upper = lower + 1;
+            const double step = knots[upper] - knots[lower];
+            const double left = (knots[upper] - d) / step;
+            const double right = (d - knots[lower]) / step;
+            s = (values[upper] - values[lower]) / step
+                - (3.0 * left * left - 1.0) / 6.0 * step * second[lower]
+                + (3.0 * right * right - 1.0) / 6.0 * step * second[upper];
+        } else {
+            long long j = first_above(&radii[0], samples, d) - 1;
+            if (j < 0) j = 0;
+            if (j > samples - 2) j = samples - 2;
+            const double slope = (table[j + 1] - table[j]) / (radii[j + 1] - radii[j]);
+            s = slope * (d - radii[j]) + table[j];
+        }
+    } else if (coulomb && d >= tail) {
+        s = 2.0 * charge / (d * d);
+    }
+    if (gaussian && d > 1.0e-8) {
+        const double a = eta * d;
+        s += 2.0 * charge * (2.0 * eta * exp(-(a * a)) / (1.7724538509055159 * d) - erf(a) / (d * d));
+    }
+    c = s * field[rx + ry + rz] * (d > 0.0 ? 1.0 / d : 0.0);
+}
+out = c;
+"""
+
+_FUSED_KERNELS: dict = {}
+
+
+def _fused_kernel(xp):
+    """The elementwise kernel of the terms of :func:`_batched_ball_sums` on CuPy (``None`` for another module): the
+    distance, the radial slope of :class:`_Slope` (the spline of its knots, or the linear interpolation of its table,
+    and the Coulomb tail), the slope of ``2 Z erf(eta r)/r``, the field at the row and ``1/d``, in one pass."""
+
+    factory = getattr(xp, "ElementwiseKernel", None)
+    if factory is None or getattr(xp, "cuda", None) is None:
+        return None
+    key = int(xp.cuda.Device().id)
+    if key not in _FUSED_KERNELS:
+        _FUSED_KERNELS[key] = factory(
+            "float64 xx, float64 yy, float64 zz, int64 rx, int64 ry, int64 rz, raw float64 field, "
+            "raw float64 knots, raw float64 values, raw float64 second, int64 count, raw float64 radii, "
+            "raw float64 table, int64 samples, float64 first, float64 tail, int32 spline, int32 coulomb, "
+            "int32 gaussian, float64 charge, float64 eta, float64 radius, int32 strict",
+            "float64 out",
+            _FUSED_OPERATION,
+            "parsec_periodic_local_ball_terms",
+            preamble=_FUSED_PREAMBLE,
+            options=("--fmad=false",),
+        )
+    return _FUSED_KERNELS[key]
+
+
+class _FusedSlope:
+    """The arguments of :func:`_fused_kernel` for the slope of a :class:`_Slope` (with ``2 Z erf(eta r)/r`` where
+    ``eta`` is given): the device arrays of its spline or table, its radii and its Coulomb tail."""
+
+    def __init__(self, xp, slope: _Slope, *, eta: float | None = None, charge: float = 0.0):
+        empty = xp.zeros(2, dtype=xp.float64)
+        spline = slope.knots is not None
+        self.arrays = (
+            slope.knots if spline else empty,
+            slope.values if spline else empty,
+            slope.second if spline else empty,
+            np.int64(slope.knots.size if spline else 0),
+            empty if spline else slope.radii,
+            empty if spline else slope.table,
+            np.int64(0 if spline else slope.radii.size),
+        )
+        self.scalars = (
+            np.float64(slope.first),
+            np.float64(slope.tail),
+            np.int32(1 if spline else 0),
+            np.int32(0 if slope.charge is None else 1),
+            np.int32(0 if eta is None else 1),
+            np.float64(charge if slope.charge is None else slope.charge),
+            np.float64(0.0 if eta is None else eta),
+        )
+
+
+def _batched_ball_sums(xp, geometry, positions, radius: float, field, slope, *, strict: bool, points: int | None = None):
+    """``sum_T sum_(r: |r - p - T| <= radius) slope(d) field(r) (r - p - T)/d`` with ``d = |r - p - T|`` for every
+    position ``p`` (``< radius`` where ``strict``), ``(atoms, 3)`` on the host, without ``dv``.
+
+    The sums of the loop of :func:`fast_periodic_local_forces` (the image balls of :func:`..V_ion.periodic_setup.
+    _atom_balls` for the local potential, those of the core density's images): the grid point ``u`` of an index box
+    around ``p`` that may lie outside the cell stands for the point ``i = u mod n`` of the cell and the image
+    ``T = -((u - i)/n) L`` of the atom, so ``r - p - T`` is formed as the loop forms it, ``x_i - (p + T)`` axis by axis,
+    and its length as ``sqrt((x^2 + y^2) + z^2)``; ``slope`` gets the same distances and the points beyond the radius
+    are masked.  A batch takes the boxes of several atoms (``points`` grid points at most, the boxes cut along their
+    first axis where one is larger), the field gathered at their rows, and is reduced as
+    ``sum_i x_i sum_(j,k) c_ijk`` (and alike for ``y``, ``z``).  The terms are those of the loop, summed in another order.
+    ``slope`` is a function of the distances (any array module), or a :class:`_FusedSlope`, whose terms one
+    elementwise kernel of CuPy forms (:func:`_fused_kernel`, the same expressions without fused multiply-adds).
+    """
+
+    fused = _fused_kernel(xp) if isinstance(slope, _FusedSlope) else None
+    if isinstance(slope, _FusedSlope) and fused is None:
+        raise ValueError("the fused terms of the ball sums need CuPy")
+    axes, sides, n, shift = geometry
+    positions = np.asarray(positions, dtype=np.float64).reshape(-1, 3)
+    count = positions.shape[0]
+    sums = np.zeros((count, 3))
+    if count == 0:
+        return sums
+    half = float(radius) * n.astype(np.float64) / sides  # half widths of the balls in grid steps
+    widths = (np.ceil(2.0 * half).astype(np.int64) + 4)
+    starts = np.floor(positions / sides * n - shift - half).astype(np.int64) - 1
+    budget = int(points) if points is not None else _batch_points(xp)
+    plane = int(widths[1] * widths[2])
+    rows_per_piece = max(1, min(int(widths[0]), budget // plane))
+    atoms_per_batch = max(1, budget // (rows_per_piece * plane)) if rows_per_piece == int(widths[0]) else 1
+    offsets = [np.arange(int(width), dtype=np.int64) for width in widths]
+    for first in range(0, count, atoms_per_batch):
+        last = min(first + atoms_per_batch, count)
+        block = positions[first:last]
+        relative, wrapped = [], []
+        for m in range(3):
+            unwrapped = starts[first:last, m, None] + offsets[m][None, :]
+            inside = np.mod(unwrapped, n[m])
+            image = -((unwrapped - inside) // n[m])
+            relative.append(axes[m][inside] - (block[:, m, None] + image * sides[m]))
+            wrapped.append(inside)
+        y, z = xp.asarray(relative[1]), xp.asarray(relative[2])
+        y_rows, z_rows = xp.asarray(wrapped[1] * n[2]), xp.asarray(wrapped[2])
+        y_square, z_square = (y * y)[:, None, :, None], (z * z)[:, None, None, :]
+        totals = xp.zeros((last - first, 3), dtype=xp.float64)
+        for low in range(0, int(widths[0]), rows_per_piece):
+            high = min(low + rows_per_piece, int(widths[0]))
+            x = xp.asarray(relative[0][:, low:high])
+            x_rows = xp.asarray(wrapped[0][:, low:high] * (n[1] * n[2]))[:, :, None, None]
+            if fused is not None:
+                coefficient = fused(
+                    (x * x)[:, :, None, None], y_square, z_square, x_rows, y_rows[:, None, :, None],
+                    z_rows[:, None, None, :], field, *slope.arrays, *slope.scalars, np.float64(radius),
+                    np.int32(1 if strict else 0),
+                )
+            else:
+                distances = xp.sqrt(((x * x)[:, :, None, None] + y_square) + z_square)
+                keep = distances < radius if strict else distances <= radius
+                rows = (x_rows + y_rows[:, None, :, None]) + z_rows[:, None, None, :]
+                values = field[rows]
+                del rows
+                coefficient = slope(distances) * values * _inverse(xp, distances)
+                del values
+                coefficient = xp.where(keep, coefficient, 0.0)
+                del keep, distances
+            totals += xp.stack(
+                (
+                    xp.sum(xp.sum(coefficient, axis=(2, 3)) * x, axis=1),
+                    xp.sum(xp.sum(coefficient, axis=(1, 3)) * y, axis=1),
+                    xp.sum(xp.sum(coefficient, axis=(1, 2)) * z, axis=1),
+                ),
+                axis=1,
+            )
+            del coefficient, x
+        sums[first:last] = _to_host(xp, totals)
+    return sums
+
+
+def _batched_local_sums(xp, erf, grid, geometry, atoms, potentials, specifications, positions, density_x, xc_x, eta, erfc_cutoff):
+    """``(ionic, core_correction)`` ball sums of every atom by :func:`_batched_ball_sums`, species by species, with the
+    slopes and reaches of the loop of :func:`fast_periodic_local_forces` (without ``dv``)."""
+
+    count = len(atoms)
+    ionic = np.zeros((count, 3))
+    core_correction = np.zeros((count, 3))
+    half_width = grid.settings.stencil_half_width
+    symbols = np.asarray([atom.symbol for atom in atoms])
+    for symbol in dict.fromkeys(symbols.tolist()):
+        members = np.flatnonzero(symbols == symbol)
+        potential = potentials[symbol]
+        specification = specifications[symbol]
+        charge = potential.ionic_charge
+        tables = species_force_tables(potential, specification)
+        local = _Slope(
+            xp, potential, potential.channel_potentials[specification.local_angular_momentum],
+            spline_padding=half_width, table=None, charge=charge,
+        )
+        reach = max(erfc_cutoff, _ionic.coulomb_onset_radius(potential, specification.local_angular_momentum))
+
+        def short_range(distances, _slope=local, _charge=charge):
+            return _slope.dense(distances) + _erf_over_r_slope(xp, erf, _charge, distances, eta)
+
+        fused = _fused_kernel(xp) is not None
+        terms = _FusedSlope(xp, local, eta=eta) if fused else short_range
+        with np.errstate(divide="ignore", invalid="ignore"):
+            ionic[members] = _batched_ball_sums(xp, geometry, positions[members], reach, density_x, terms, strict=False)
+        if tables.core_density_derivative is not None:
+            core = _Slope(
+                xp, potential, potential.core_density,
+                spline_padding=half_width if specification.use_spline else None,
+                table=tables.core_density_derivative,
+            )
+            support = _ionic.atomic_density_support_radius(potential, specification, core=True)
+            terms = _FusedSlope(xp, core) if fused else core.dense
+            with np.errstate(divide="ignore", invalid="ignore"):
+                core_correction[members] = _batched_ball_sums(
+                    xp, geometry, positions[members], support, xc_x, terms, strict=True
+                )
+    return ionic, core_correction
+
+
 def fast_periodic_local_forces(
     grid,
     atoms: Sequence[Atom],
@@ -431,6 +777,20 @@ def fast_periodic_local_forces(
     ionic += _reciprocal_forces(xp, grid, positions, charges, density, eta, g_cutoff, lattice)
 
     density_x, xc_x = xp.asarray(density), xp.asarray(xc)
+    # PARSEC_PERIODIC_LOCAL_BALLS=auto: the balls of many atoms per call on the device (an orthorhombic cell)
+    geometry = _orthorhombic_geometry(grid) if _uses_batched_balls(xp) else None
+    if geometry is not None:
+        balls, cores = _batched_local_sums(
+            xp, erf, grid, geometry, atoms, potentials, specifications, positions, density_x, xc_x, eta, erfc_cutoff
+        )
+        ionic += balls
+        core_correction += cores
+        volume_element = grid.volume_element
+        return LocalForceTerms(
+            ionic=ionic * volume_element,
+            self_consistency=np.zeros((count, 3)),
+            core_correction=core_correction * volume_element,
+        )
     tables: dict = {}
     slopes: dict = {}
 
@@ -565,16 +925,30 @@ def orbit_periodic_local_forces(
     group, and of the force of a checked atom by its turned value: round-off where the density is invariant.
     """
 
+    def summed_terms(chosen):
+        return fast_periodic_local_forces(
+            grid, chosen, potentials, specifications, lattice_vectors, density, xc_potential,
+            xp=xp, erf=erf, tolerance=tolerance,
+        )
+
+    return orbit_local_forces(summed_terms, atoms, operations)
+
+
+def orbit_local_forces(local_terms, atoms: Sequence[Atom], operations) -> tuple[LocalForceTerms, dict]:
+    """The local forces of :func:`orbit_periodic_local_forces` from any routine of them: ``local_terms(chosen)``
+    returns the :class:`LocalForceTerms` of the atoms ``chosen`` (whose sums need no other atom), here those of one atom
+    per orbit of ``operations`` and of up to :data:`_SAMPLED_ORBITS` checked atoms, in one call.  Returns the terms of
+    every atom and ``details`` as :func:`orbit_periodic_local_forces` does; the density and exchange-correlation
+    potential that ``local_terms`` reads must be invariant under ``operations``.
+    """
+
     count = len(atoms)
     images, representatives, sizes = atom_orbits(operations, count)
     larger = representatives[sizes > 1]
     chosen = larger[np.unique(np.linspace(0, larger.size - 1, min(larger.size, _SAMPLED_ORBITS)).astype(np.int64))]
     sampled = images[:, chosen].max(axis=0) if chosen.size else np.zeros(0, dtype=np.int64)
     summed = np.concatenate([representatives, sampled])
-    terms = fast_periodic_local_forces(
-        grid, [atoms[index] for index in summed], potentials, specifications, lattice_vectors, density,
-        xc_potential, xp=xp, erf=erf, tolerance=tolerance,
-    )
+    terms = local_terms([atoms[index] for index in summed])
     own = slice(0, representatives.size)
     ionic = turn_onto_orbits(terms.ionic[own], operations, images, representatives, sizes, count)
     core_correction = turn_onto_orbits(terms.core_correction[own], operations, images, representatives, sizes, count)
@@ -625,8 +999,11 @@ __all__ = [
     "atom_orbits",
     "fast_periodic_local_forces",
     "local_force_provider",
+    "orbit_local_forces",
     "orbit_periodic_local_forces",
     "periodic_force_series_setting",
+    "periodic_local_balls_setting",
+    "periodic_local_orbits_setting",
     "periodic_sector_local_forces_setting",
     "turn_onto_orbits",
 ]

@@ -824,11 +824,15 @@ def _periodic_run_name(translation) -> str:
 def _refuse_unsupported_periodic(translation, *, supercell: bool = False) -> None:
     """Refuse by name what this runner does not run of a periodic cell.
 
-    It solves a bulk cell at the Gamma point (orthorhombic, unpolarized, a
-    native LDA or GGA) in the sectors of its point group about the origin of
-    the cell, or as one sector of the identity whose basis the ranks share
-    (driver.periodic_sector_refusal). The forces of such a cell and its
-    relaxations (bfgs, simple) with every atom movable run here on the default
+    It solves a bulk cell at the Gamma point (orthorhombic, a native LDA or
+    GGA, unpolarized or collinear spin) in the sectors of its point group
+    about the origin of the cell, or as one sector of the identity whose
+    basis the ranks share (driver.periodic_sector_refusal). A spin cell
+    (PARSEC_GAMMA_SPIN_SECTORS=auto, since 2026-11-19) solves both channels
+    in the abelian sectors of the cell; its forces and relaxations are
+    refused on several ranks (:func:`_refuse_spin_ionic_steps`). The forces
+    of an unpolarized cell and its relaxations (bfgs, simple) with every atom
+    movable run here on the default
     routines: the ranks sum the nonlocal terms of their sectors, and the root
     completes them over the full group of the sectors
     (acceleration/Forces/sector_symmetry.py), as one process does; at every move
@@ -853,7 +857,8 @@ def _refuse_unsupported_periodic(translation, *, supercell: bool = False) -> Non
     if reason is not None:
         where = 'parsec_python/main.py --mpi' if 'k-point' in reason else 'parsec_python/main.py'
         raise ValueError(f'{reason} of a periodic cell is not available in the full-SCF runner, which solves a bulk '
-                         'cell at the Gamma point (orthorhombic, unpolarized, native LDA or GGA) as one sector whose '
+                         'cell at the Gamma point (orthorhombic, native LDA or GGA, unpolarized or collinear spin) in '
+                         'the sectors of its point group or as one sector whose '
                          f'basis the ranks share: run it with {where}')
     if problem.bands is not None or getattr(translation, 'nscf', None) is not None:
         raise ValueError('the band structure (bandstruc) and the non-self-consistent runs (nscf) of a periodic cell '

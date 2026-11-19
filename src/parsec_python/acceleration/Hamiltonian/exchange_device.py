@@ -64,6 +64,7 @@ Nothing here prints or opens files.
 
 from __future__ import annotations
 
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 import math
@@ -208,6 +209,12 @@ class SectorExpansion:
             + self.orbit_points.nbytes
             + self.orbit_weights.nbytes
         )
+
+    def on_device(self, device: int) -> bool:
+        """Whether the device copies of :meth:`_arrays` are on ``device`` already."""
+
+        with self._lock:
+            return int(device) in self._device
 
 
 @dataclass
@@ -492,7 +499,8 @@ class DevicePairSolvers:
         # value is refused when the solver is made, not at a later build.
         self.parity = bool(parity) and exchange_parity_setting() != "off"
         exchange_parity_box_setting()
-        self._paths: set[str] = set()
+        # Builds by path since the last take_paths (record_path).
+        self._paths: Counter = Counter()
         self.batch_size = max(1, int(batch_size))
         self.terms = tuple((str(kernel), float(weight), omega) for kernel, weight, omega in terms)
         self.multipole_order = int(multipole_order)
@@ -585,23 +593,39 @@ class DevicePairSolvers:
 
     @property
     def description(self) -> str:
-        """The solver, and the path its builds took so far (parity classes, the full grid or both)."""
+        """:meth:`describe` of the builds since the last :meth:`take_paths`."""
 
+        return self.describe()
+
+    def describe(self, paths=None) -> str:
+        """The solver, and the path the builds of ``paths`` took (counts by path, :meth:`record_path`; default: the
+        builds since the last :meth:`take_paths`): parity classes, the full grid or both."""
+
+        paths = self._paths if paths is None else paths
         text = self._ready()[1]
-        if "parity" in self._paths:
+        if int(paths.get("parity", 0)) > 0:
             octant = "x".join(str(value) for value in self.hosts[0].parity_layout.half_shape)
             text += (
                 "; the pair densities of symmetry-sector orbitals in reflection-parity classes on the "
                 f"{octant} octant"
             )
-            if "full" in self._paths:
+            if int(paths.get("full", 0)) > 0:
                 text += ", the others on the full grid"
         return text
 
     def record_path(self, path: str) -> None:
-        """Note that a build took ``path`` (``"parity"`` or ``"full"``) for :attr:`description`."""
+        """Count a build that took ``path`` (``"parity"`` or ``"full"``) for :meth:`describe`."""
 
-        self._paths.add(str(path))
+        with self._lock:
+            self._paths[str(path)] += 1
+
+    def take_paths(self) -> Counter:
+        """The counts of :meth:`record_path` since the last call, forgotten here (the Fock loop names the builds
+        of each step and of its run, :func:`parsec_python.SCF.hybrid.run_hybrid_scf`)."""
+
+        with self._lock:
+            paths, self._paths = self._paths, Counter()
+        return paths
 
     def solvers(self, device: int):
         from ..Hartree.kronecker_device import WORK_ARRAYS_PER_DENSITY, DeviceKroneckerPoisson
@@ -836,6 +860,14 @@ def planned_exchange_bytes(
     ``parity`` (:func:`planned_parity`) plans the path of the parity classes
     instead: the class plans, the coset maps (32 bytes per grid point in all)
     and the tile of :func:`parity_tile_bytes`.
+
+    The pooled block of the sector orbitals of a periodic cell
+    (``PARSEC_CUPY_EXCHANGE_POOL``, :func:`pooled_exchange_bytes`) is not
+    planned: a build takes it only where it fits what the devices have free
+    then (:func:`pooled_exchange_fits`), and the tiles of the sectors
+    otherwise, whose ``W_G`` and tile work are planned here.  Planned, it
+    would send sector states to the host to make room for a block the tiles
+    do without.
     """
 
     total_rows = max(1, sum(int(rows) for rows in sector_rows.values()))
@@ -1612,6 +1644,9 @@ class DeviceExchangeApplication:
     pair_solves: int
     poisson_seconds: float
     seconds: float
+    #: the application of the orbitals unfolded to one full-grid block (:func:`_apply_pooled_exchange`), kept by an
+    #: application of the occupied columns that a later build completes; ``None`` otherwise
+    pooled: Any = None
 
 
 @dataclass
@@ -2005,18 +2040,38 @@ def apply_device_exchange(
     ``columns="occupied"`` forms the occupied columns only (enough for the
     energy); ``"all"`` every column.  ``known``, an application of the
     occupied columns of the same orbitals, is completed with the empty ones
-    and consumed.
+    and consumed (its ``W`` becomes the result's; the pooled block of
+    :func:`_apply_pooled_exchange` is freed).  Sector orbitals of a periodic
+    cell go through one full-grid block (:func:`pooled_exchange_applies`)
+    where it fits the free memory of the devices now
+    (:func:`pooled_exchange_fits`), else through the tiles of their sectors.
     """
 
     from ..backends.cupy import require_cupy
 
     cp, _ = require_cupy()
+    record = getattr(solvers, "record_path", None)
+    if not callable(record):
+        record = None
+    # The pooled block of sector orbitals (PARSEC_CUPY_EXCHANGE_POOL): where it fits the devices now, else the
+    # tiles of the sectors.  A build that completes a known application takes the path that application took.
+    # Every build of such orbitals is counted as "pool" or "pool-fallback" (the solver's description).
+    if known is not None and known.pooled is not None:
+        if record is not None:
+            record("pool")
+        return _apply_pooled_exchange(orbitals, solvers, devices, columns=columns, known=known)
+    if pooled_exchange_applies(orbitals, solvers):
+        if known is None and pooled_exchange_fits(orbitals, solvers, devices, columns=columns):
+            if record is not None:
+                record("pool")
+            return _apply_pooled_exchange(orbitals, solvers, devices, columns=columns, known=None)
+        if record is not None:
+            record("pool-fallback")
     started = perf_counter()
     plan = plan_exchange(orbitals, solvers.batch_size, columns=columns, known=known)
     # Sector orbitals of a symmetric box: the pair densities in parity classes.
     parity = parity_context(orbitals, solvers)
-    record = getattr(solvers, "record_path", None)
-    if callable(record):
+    if record is not None:
         record("full" if parity is None else "parity")
     # W of every sector on its device.
     if known is not None:
@@ -2047,6 +2102,227 @@ def apply_device_exchange(
         poisson_seconds=float(max(timing.values(), default=0.0) + (0.0 if known is None else known.poisson_seconds)),
         seconds=float(perf_counter() - started + (0.0 if known is None else known.seconds)),
     )
+
+
+POOL_SETTING = "PARSEC_CUPY_EXCHANGE_POOL"
+
+
+def exchange_pool_setting() -> str:
+    """``PARSEC_CUPY_EXCHANGE_POOL``: ``auto`` (default) or ``off``.
+
+    ``auto``: the sector orbitals of a periodic cell at the Gamma point (the real abelian sectors of
+    ``PARSEC_GAMMA_HYBRID_SECTORS=auto``, whose pair densities have no parity classes: the cuFFT pair solver of the
+    cell takes the full grid) are unfolded once into one full-grid block, whose ``W`` the tiles of the full grid
+    form, folded back to every sector once (:func:`_apply_pooled_exchange`), where the block fits the free memory
+    of its device (:func:`pooled_exchange_fits`; else the tiles of ``off`` for that build and its completion).
+    ``off``: the tiles pair the blocks of every sector, each unfolded where a tile reads it (a few columns per
+    sector: small transforms), as before.  A wrong value is refused when the device exchange is set up
+    (:func:`parsec_python.acceleration.SCF.hybrid.device_exchange_for`).
+    """
+
+    value = os.environ.get(POOL_SETTING, "auto").strip().lower() or "auto"
+    if value not in {"auto", "off"}:
+        raise ValueError(f"{POOL_SETTING} must be auto or off")
+    return value
+
+
+def pooled_exchange_applies(orbitals: ChannelOrbitals, solvers) -> bool:
+    """Whether the sectors of ``orbitals`` are orbitals :func:`apply_device_exchange` can pool into one full-grid block.
+
+    Sector orbitals (more than one sector, each with its expansion, all in this process) whose pair densities take
+    the full-grid path of a periodic cell's solver (``small_build``, no parity layout), under
+    :func:`exchange_pool_setting` ``auto``.  The orbitals of a cluster (the Kronecker solver, parity classes or not)
+    keep the tiles of their sectors, whatever the switch says (it is read after the solver).  Whether the block fits
+    the devices is :func:`pooled_exchange_fits`.
+    """
+
+    if not callable(getattr(solvers, "small_build", None)) or solvers.parity_layout() is not None:
+        return False
+    if exchange_pool_setting() == "off":
+        return False
+    sectors = orbitals.sectors
+    return len(sectors) > 1 and all(sector.expansion is not None for sector in sectors)
+
+
+#: Share of a device's memory a pooled build leaves free beside its estimate (:func:`pooled_exchange_bytes`):
+#: cuFFT plans and their work areas, the rounding of CuPy's pool.
+POOL_MEMORY_MARGIN = 0.02
+
+
+def _whole_channel(orbitals: ChannelOrbitals, device: int, vectors) -> ChannelOrbitals:
+    """The channel of the pooled block: one full-grid sector of every state, ``vectors`` on ``device``."""
+
+    count = int(orbitals.state_count)
+    whole = OrbitalSector(
+        representation=None,
+        device=int(device),
+        vectors=vectors,
+        local=np.arange(count, dtype=np.int64),
+        states=np.arange(count, dtype=np.int64),
+        expansion=None,
+    )
+    return ChannelOrbitals(
+        (whole,), orbitals.occupations, float(orbitals.spin_weight), int(orbitals.full_size),
+        float(orbitals.volume_element),
+    )
+
+
+def _pooled_devices(orbitals: ChannelOrbitals, solvers, devices, columns: str, known=None) -> tuple[int, ...]:
+    """The devices of the full-grid build of the pooled block: ``devices``, or its home alone for a small build."""
+
+    home = int(orbitals.sectors[0].device)
+    devices = tuple(int(device) for device in devices) or (home,)
+    if len(devices) > 1 and solvers.small_build(_whole_channel(orbitals, home, None), columns=columns, known=known):
+        devices = (home,)
+    return devices
+
+
+def pooled_exchange_bytes(orbitals: ChannelOrbitals, solvers, devices, *, columns: str = "all") -> dict[int, int]:
+    """Device bytes a build through the pooled block takes (:func:`_apply_pooled_exchange`), by device.
+
+    On the home of the block (the device of the first sector), ``8 N M`` for the unfolded orbitals ``P`` and the
+    larger of: the unfolding of the widest sector (two of its full-grid blocks and its sector block, before ``W``
+    exists); ``W`` (``8 N M``) and the work of one tile of the full grid (:data:`_TILE_ARRAYS` full-grid arrays of
+    ``Exx_Batch_Size`` columns, and a received tile where other devices take tiles); ``W``, the fold of the widest
+    sector (one of its full-grid blocks and three of its sector blocks) and the folded ``W_G`` of the home's sectors;
+    and the sector expansions the home does not hold yet.  On every other device of the build the work of one tile
+    and on the device of every sector its folded ``W_G``, as on the tile path (:func:`require_exchange_memory`).
+    What the devices hold already is not counted: :func:`pooled_exchange_fits` compares with what they have free.
+    """
+
+    home = int(orbitals.sectors[0].device)
+    full = int(orbitals.full_size)
+    block = 8 * full * int(orbitals.state_count)
+    batch = int(solvers.batch_size)
+    builders = _pooled_devices(orbitals, solvers, devices, columns)
+    tile = 8 * batch * _TILE_ARRAYS * full
+    received = 8 * batch * full if any(device != home for device in builders) else 0
+    parts: dict[int, int] = {}
+    unfold = fold = expansions = 0
+    for sector in orbitals.sectors:
+        rows, count = int(sector.rows), int(sector.local.size)
+        parts[int(sector.device)] = parts.get(int(sector.device), 0) + 8 * rows * count
+        unfold = max(unfold, 8 * count * (2 * full + rows))
+        fold = max(fold, 8 * count * (full + 3 * rows))
+        if not sector.expansion.on_device(home):
+            expansions += int(sector.expansion.device_bytes())
+    needed = {device: count for device, count in parts.items() if device != home}
+    for device in builders:
+        if device != home:
+            needed[device] = needed.get(device, 0) + tile
+    needed[home] = block + expansions + max(unfold, block + tile + received, block + fold + parts.get(home, 0))
+    return needed
+
+
+def _device_memory(device: int) -> tuple[int, int]:
+    """``(available, total)`` bytes of ``device``: what the driver has free and the free blocks of CuPy's pool."""
+
+    from ..backends.cupy import require_cupy
+
+    cp, _ = require_cupy()
+    with cp.cuda.Device(int(device)):
+        free, total = cp.cuda.runtime.memGetInfo()
+        return int(free) + int(cp.get_default_memory_pool().free_bytes()), int(total)
+
+
+def pooled_exchange_fits(orbitals: ChannelOrbitals, solvers, devices, *, columns: str = "all") -> bool:
+    """Whether the pooled block of ``orbitals`` and its build fit what every device has free now.
+
+    :func:`pooled_exchange_bytes` and :data:`POOL_MEMORY_MARGIN` of the device against the driver's free bytes and
+    the free blocks of CuPy's pool.  The block lands on one device whatever the sectors' placement, so a large cell
+    whose sectors fit their devices may not fit it: :func:`apply_device_exchange` then forms ``W`` with the tiles of
+    the sectors (``W_G`` and the tile work only, where the sectors are).
+    """
+
+    for device, count in sorted(pooled_exchange_bytes(orbitals, solvers, devices, columns=columns).items()):
+        available, total = _device_memory(device)
+        if count + POOL_MEMORY_MARGIN * float(total) > float(available):
+            return False
+    return True
+
+
+def _pooled_orbitals(cp, orbitals: ChannelOrbitals, device: int) -> ChannelOrbitals:
+    """The orbitals of every sector unfolded into one full-grid block on ``device`` (columns in state order)."""
+
+    count = int(orbitals.state_count)
+    with cp.cuda.Device(int(device)):
+        full = cp.zeros((int(orbitals.full_size), count), dtype=cp.float64, order="F")
+        for sector in orbitals.sectors:
+            if not sector.local.size:
+                continue
+            block = sector.full_columns(cp, np.arange(sector.local.size, dtype=np.int64))
+            full[:, cp.asarray(sector.states)] = block
+            del block
+        cp.cuda.get_current_stream().synchronize()
+    return _whole_channel(orbitals, device, full)
+
+
+def _apply_pooled_exchange(
+    orbitals: ChannelOrbitals,
+    solvers,
+    devices: Sequence[int],
+    *,
+    columns: str,
+    known: DeviceExchangeApplication | None,
+) -> DeviceExchangeApplication:
+    """:func:`apply_device_exchange` of sector orbitals through one full-grid block (``PARSEC_CUPY_EXCHANGE_POOL``).
+
+    ``U_G`` is orthonormal and ``V_x`` maps every sector into itself, so ``W_G = U_G^T W`` of the full-grid ``W``
+    of the unfolded orbitals is the sector's part, and ``E_x`` is that of the full grid.  The full-grid build is
+    the one of an input without sectors (its tiles of ``Exx_Batch_Size`` columns, its devices: one where the build
+    is small, ``small_build``).  An application of the occupied columns keeps the full-grid one, which a later
+    build of every column completes and consumes (as the tile path consumes ``known``: the full-grid ``W``, the
+    unfolded orbitals and the folded parts of the occupied columns are freed, ``known.pooled`` is ``None`` after
+    it); an application of every column drops it.
+    """
+
+    from ..backends.cupy import require_cupy
+
+    cp, _ = require_cupy()
+    started = perf_counter()
+    if known is not None:
+        inner_known = known.pooled
+        pooled = inner_known.orbitals
+        # Consumed: the folded parts of the occupied build are not read (the full-grid W is completed and folded
+        # again), so they go before the build.
+        known.applied[:] = [None] * len(known.applied)
+        known.pooled = None
+    else:
+        inner_known = None
+        pooled = _pooled_orbitals(cp, orbitals, int(orbitals.sectors[0].device))
+    devices = _pooled_devices(orbitals, solvers, devices, columns, known=inner_known)
+    inner = apply_device_exchange(pooled, solvers, devices, columns=columns, known=inner_known)
+    whole = inner.applied[0]
+    applied = []
+    with cp.cuda.Device(int(whole.device.id)):
+        for sector in orbitals.sectors:
+            part = sector.expansion.fold(cp, whole[:, cp.asarray(sector.states)])
+            cp.cuda.get_current_stream().synchronize()
+            if int(part.device.id) != int(sector.device):
+                with cp.cuda.Device(int(sector.device)):
+                    moved = cp.empty(part.shape, dtype=cp.float64, order="F")
+                    moved.data.copy_from_device(part.data, part.nbytes)
+                part = moved
+            applied.append(part)
+    del whole
+    keep = columns == "occupied"
+    result = DeviceExchangeApplication(
+        orbitals=orbitals,
+        applied=applied,
+        columns=inner.columns,
+        occupied=inner.occupied,
+        energy=float(inner.energy),
+        pair_solves=int(inner.pair_solves),
+        poisson_seconds=float(inner.poisson_seconds),
+        seconds=float(perf_counter() - started + (0.0 if known is None else known.seconds)),
+        pooled=inner if keep else None,
+    )
+    if not keep:
+        # The full-grid W (inner.applied is known.pooled.applied where it completed one) and the unfolded orbitals.
+        inner.applied[:] = [None] * len(inner.applied)
+        for sector in pooled.sectors:
+            sector.vectors = None
+    return result
 
 
 # ---------------------------------------------------------------------------

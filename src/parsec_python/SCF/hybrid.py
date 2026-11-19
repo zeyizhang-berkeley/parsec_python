@@ -83,6 +83,7 @@ print or open files.  The outer iterations go to the SCF ``callback`` as
 
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import dataclass, replace
 from functools import lru_cache
 from time import perf_counter
@@ -1019,6 +1020,43 @@ def _observe(
     diis.append(replace(output, channels=blocks))
 
 
+class _SolverNames:
+    """The pair solver as the records of the Fock loop name it.
+
+    An engine whose builds record the path they take (``take_exchange_paths`` and ``describe_exchange``: the device
+    exchange, whose cached pair solvers count the parity classes of a cluster's sector orbitals, or the pooled
+    full-grid block of a periodic cell's sector orbitals and its fallback to the sector tiles where the block does
+    not fit, ``PARSEC_CUPY_EXCHANGE_POOL``) is named in each record by the builds of that step (:meth:`step`) and
+    in the summary by those of the run (:meth:`run`); what builds before the run recorded (an earlier structure) is
+    dropped when the loop starts.  Any other engine: its ``description`` after the first build, in every record.
+    """
+
+    def __init__(self, engine) -> None:
+        self.engine = engine
+        take = getattr(engine, "take_exchange_paths", None)
+        self.tracked = (
+            callable(take) and callable(getattr(engine, "describe_exchange", None)) and take() is not None
+        )
+        self.paths = Counter()
+        self.fixed: str | None = None
+
+    def step(self) -> str:
+        """The name for the record of the builds since the last call."""
+
+        if not self.tracked:
+            if self.fixed is None:
+                self.fixed = self.engine.description
+            return self.fixed
+        paths = self.engine.take_exchange_paths()
+        self.paths.update(paths)
+        return str(self.engine.describe_exchange(paths))
+
+    def run(self) -> str:
+        """The name for the summary: the builds of every step of the run."""
+
+        return self.step() if not self.tracked else str(self.engine.describe_exchange(self.paths))
+
+
 def run_hybrid_scf(
     system,
     *,
@@ -1081,6 +1119,8 @@ def run_hybrid_scf(
         keywords["iteration_state_callback"] = iteration_state_callback
     # The SCF loops of the Fock loop: the engine's (k-point loops) or run_scf.
     run_loop = getattr(engine, "run_scf", None) or run_scf
+    # The pair solver of each record: the paths of that step's builds (none were made by this run yet).
+    solver_names = _SolverNames(engine)
     # How the loop gets to its fixed point (parsec_python.SCF.fock_controls).
     criteria = InnerCriterion(
         adaptive=settings.inner_criterion == "adaptive",
@@ -1187,8 +1227,8 @@ def run_hybrid_scf(
     poisson_seconds += step_poisson
     exchange_seconds += step_seconds
     previous_energy = operator.reference_energy
-    # (A device engine may have built its solver beside the start.)
-    solver_name = engine.description
+    # The builds of the first operator (a device engine may have built its solver beside the start).
+    solver_name = solver_names.step()
     report(
         ExchangeLoopIteration(
             iteration=0,
@@ -1338,6 +1378,10 @@ def run_hybrid_scf(
             else:
                 # 1'. The operator of the new orbitals: the empty columns too.
                 applications = engine.exchange(sets, known=occupied_applications, columns="all")
+                # The build consumed the occupied application (its W; on the device, the pooled full-grid block
+                # of sector orbitals, PARSEC_CUPY_EXCHANGE_POOL): no reference to it is kept through the next
+                # inner loop.
+                occupied_applications = None
                 operator = engine.fock_operator(sets, applications, fraction)
                 engine.drop_orbitals(sets, inner)
                 source = {outer: 1.0}
@@ -1374,7 +1418,8 @@ def run_hybrid_scf(
                 poisson_seconds=step_poisson,
                 exchange_seconds=step_seconds,
                 operator_ranks=ranks,
-                pair_solver=solver_name,
+                # The builds of this step (a pooled block may not fit a later one: the sector tiles).
+                pair_solver=solver_names.step(),
                 operator_asymmetry=asymmetry,
                 inner_criterion=inner_criterion,
                 mixer_seeds=0 if mixer is None else mixer.seed_count,
@@ -1403,7 +1448,7 @@ def run_hybrid_scf(
         tolerance=settings.tolerance,
         start_functional=start_functional,
         start_iterations=start_iterations,
-        pair_solver=solver_name,
+        pair_solver=solver_names.run(),
         pair_solves=pair_solves,
         poisson_seconds=poisson_seconds,
         exchange_seconds=exchange_seconds,

@@ -535,6 +535,7 @@ def _reference_only_features(
     accelerated_backend_selected: bool,
     device_eigensolver_selected: bool = False,
     hybrid_on_device: bool = False,
+    gamma_spin_on_device: bool = False,
 ) -> list[str]:
     """Input features only the reference :mod:`parsec_python.cli` dispatches.
 
@@ -553,6 +554,10 @@ def _reference_only_features(
     and the backend resolves to CuPy in one process, where the device Fock
     loop runs it (:mod:`parsec_python.acceleration.SCF.hybrid`); otherwise
     the reference solver runs it.
+    ``gamma_spin_on_device``: a collinear spin-polarized bulk cell at the
+    Gamma point that the accelerated Gamma sectors run
+    (:func:`_gamma_spin_on_device`, ``PARSEC_GAMMA_SPIN_SECTORS``); otherwise
+    the reference solver's 1x1x1 k-point driver runs it.
     """
 
     problem = translation.problem
@@ -592,7 +597,7 @@ def _reference_only_features(
             )
         # else: Gamma-point-only self-consistent SOC on a resolved CuPy
         # backend -- accelerated, not reference-only.
-    elif problem.scf.spin_polarized and (
+    elif problem.scf.spin_polarized and not gamma_spin_on_device and (
         problem.periodic_cell is not None
         or any(
             specification.spin_orbit
@@ -943,7 +948,10 @@ def _hybrid_on_device(arguments: argparse.Namespace, translation) -> bool:
     Fock loop of :mod:`parsec_python.SCF.hybrid_periodic` on the reference
     solver, whose k-point workers and exchange use the GPUs
     (:mod:`parsec_python.acceleration.SCF.hybrid_periodic`).  ``False`` for
-    every other input, which the reference solver then runs.
+    every other input, which the reference solver then runs.  (Under
+    ``PARSEC_GAMMA_HYBRID_SECTORS=kpoint`` a bulk cell at the Gamma point large
+    enough for the k-point sectors then goes to that loop as the 1x1x1 mesh:
+    :func:`_gamma_hybrid_sector_handover`.)
     """
 
     from .Parallel import mpi
@@ -968,6 +976,59 @@ def _hybrid_on_device(arguments: argparse.Namespace, translation) -> bool:
     except (BackendUnavailableError, NotImplementedError, ValueError):
         return False
     return selection.selected == "cupy"
+
+
+def _gamma_hybrid_sector_handover(arguments: argparse.Namespace, translation) -> int | None:
+    """The exit status of the reference solver for an unpolarized Gamma-point hybrid that the k-point sectors take,
+    ``None`` for any other input (which the device Fock loop keeps).
+
+    Asked where the device Fock loop would run the input (:func:`_hybrid_on_device`, nothing else reference-only):
+    under ``PARSEC_GAMMA_HYBRID_SECTORS=kpoint`` a bulk cell large enough for the k-point sectors runs as the 1x1x1
+    mesh of the reference solver, whose GPU k-point workers solve the sectors of the little group of Gamma
+    (:func:`.SCF.gamma_hybrid_route.gamma_hybrid_sector_route`; ``auto``, the default, keeps it in the driver, in the
+    real sectors of the Gamma route, and ``off`` on the full grid).  The reference solver takes the same decision
+    from the same input.
+    """
+
+    from .SCF.gamma_hybrid_route import gamma_hybrid_sector_route
+
+    try:
+        route = gamma_hybrid_sector_route(translation)
+    except ValueError as error:
+        print(f"Input error: {error}", file=sys.stderr)
+        return 2
+    if route is None:
+        return None
+    if getattr(arguments, "mpi_rank", 0) == 0 and not arguments.quiet:
+        print(route.note(), file=sys.stderr)
+    return reference_main(_reference_argv(arguments))
+
+
+def _gamma_spin_on_device(arguments: argparse.Namespace, translation) -> bool:
+    """Whether the accelerated Gamma sectors run this spin-polarized periodic input (``PARSEC_GAMMA_SPIN_SECTORS``).
+
+    :func:`parsec_python.acceleration.SCF.gamma_spin.gamma_spin_on_sector_route`: a collinear single point of a bulk
+    cell at the Gamma point that the route of the sectors takes, in one process, on a backend that resolves to CuPy.
+    ``False`` keeps the reference solver's 1x1x1 k-point driver of before.
+    """
+
+    from .Parallel import mpi
+    from .SCF.gamma_spin import gamma_spin_on_sector_route, gamma_spin_sector_setting
+
+    gamma_spin_sector_setting()
+
+    def backend_is_cupy() -> bool:
+        try:
+            selection = resolve_backend(arguments.backend, translation.problem)
+        except (BackendUnavailableError, NotImplementedError, ValueError):
+            return False
+        return selection.selected == "cupy"
+
+    return gamma_spin_on_sector_route(
+        translation,
+        mpi=bool(getattr(arguments, "mpi", False) or mpi.requested()),
+        backend_is_cupy=backend_is_cupy,
+    )
 
 
 def _device_eigensolver_selected(arguments: argparse.Namespace, translation) -> bool:
@@ -1417,11 +1478,19 @@ def _run(
         from .Forces.periodic_device import periodic_ionic_scope
 
         scope.enter_context(periodic_ionic_scope(translation))
+    hybrid_on_device = _hybrid_on_device(arguments, translation)
+    try:
+        # PARSEC_GAMMA_SPIN_SECTORS, read in every run so that a value it does not know is refused.
+        gamma_spin_on_device = _gamma_spin_on_device(arguments, translation)
+    except ValueError as error:
+        print(f"Input error: {error}", file=sys.stderr)
+        return 2
     unsupported = _reference_only_features(
         translation,
         accelerated_backend_selected=accelerated_self_consistent_soc,
         device_eigensolver_selected=_device_eigensolver_selected(arguments, translation),
-        hybrid_on_device=_hybrid_on_device(arguments, translation),
+        hybrid_on_device=hybrid_on_device,
+        gamma_spin_on_device=gamma_spin_on_device,
     )
     if unsupported:
         features = ", ".join(unsupported)
@@ -1478,6 +1547,12 @@ def _run(
                 file=sys.stderr,
             )
         return reference_main(_reference_argv(arguments))
+    if hybrid_on_device and translation.problem.periodic_cell is not None:
+        # PARSEC_GAMMA_HYBRID_SECTORS=kpoint: an unpolarized Gamma-point hybrid of a large bulk cell as the 1x1x1
+        # k-point mesh of the reference solver, whose k-point sectors split the Gamma point (SCF/gamma_hybrid_route.py).
+        status = _gamma_hybrid_sector_handover(arguments, translation)
+        if status is not None:
+            return status
     if translation.problem.periodic_cell is not None:
         from .Parallel import mpi
 

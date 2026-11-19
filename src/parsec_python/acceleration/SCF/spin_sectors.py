@@ -58,7 +58,11 @@ run again on the full grid and starts it there):
    run: each channel density is invariant under the operations of the point
    group of the atoms on the grid (the signed permutations of the axes that map
    the atoms and the grid onto themselves, also those outside the sector
-   group; :func:`atom_group_images`), within
+   group; :func:`atom_group_images`; for a bulk cell the operations
+   ``r -> R r + t`` of the sector group and of the cell group with their
+   translations, about the site the sectors of the cell are centred on, a
+   defect off the origin included, and the signed permutations about the
+   origin, ``PARSEC_SPIN_GUARD_CELL_GROUP``), within
    :data:`DENSITY_SYMMETRY_TOLERANCE` = 0.01 electrons of
    ``int |rho(g r) - rho(r)| dr`` (:func:`density_symmetry_breaking`).  A sector
    state with a partly filled multiplet whose partners an operation of the
@@ -100,6 +104,7 @@ Units Ry, bohr.  Nothing here prints or opens files.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import os
 from types import SimpleNamespace
 
 import numpy as np
@@ -302,7 +307,453 @@ def _grid_images(grid, matrix: np.ndarray):
     return rows
 
 
-def atom_group_images(grid, atoms) -> list[tuple[np.ndarray, np.ndarray]]:
+def _periodic_atom_matrices(grid, atoms) -> list[np.ndarray] | None:
+    """The signed permutations about the origin that map the atoms of an orthorhombic cell onto themselves modulo
+    its lattice.
+
+    ``None`` for a grid without an orthorhombic cell (a cluster: the atoms as they are listed,
+    :func:`parsec_python.Forces.symmetry.atom_symmetry_operations`).  A cell lists each atom once, so an atom on the
+    face of the cell has its image on the opposite face outside the list: the operations of the listed atoms would
+    lose every sign change that moves it there (a vacancy at the origin of a diamond supercell keeps the six
+    permutations of the axes of its 24 operations).  These are the operations about the origin alone: a defect off
+    the origin keeps few of them (a diamond vacancy at ``(a/2, a/2, 0)`` the swap of x and y), while the sectors of
+    the cell are taken about the defect.  Test 2 of a cell therefore takes the operations of the cell group with
+    their translations as well (:func:`atom_group_images`, ``PARSEC_SPIN_GUARD_CELL_GROUP``); these remain among
+    its candidates, and the group it tests holds every one of them (:func:`_cell_group_images` tests one on its own
+    where the group would grow beyond its limit with it).
+    """
+
+    from scipy.spatial import cKDTree
+
+    from parsec_python.Forces.symmetry import POSITION_TOLERANCE, cubic_point_operations
+
+    lattice = getattr(getattr(grid, "cell", None), "lattice_vectors", None)
+    if lattice is None:
+        return None
+    lattice = np.asarray(lattice, dtype=np.float64)
+    if lattice.shape != (3, 3) or not np.allclose(lattice, np.diag(np.diag(lattice)), atol=1.0e-10):
+        return None
+    sides = np.diag(lattice).copy()
+    if np.any(sides <= 0.0):
+        return None
+    positions = np.mod(np.array([atom.position for atom in atoms], dtype=np.float64).reshape(-1, 3), sides)
+    symbols = [atom.symbol for atom in atoms]
+    members = {symbol: np.flatnonzero([s == symbol for s in symbols]) for symbol in dict.fromkeys(symbols)}
+    # a point on the upper face is the point on the lower one: wrapped into [0, side) by the tree's box
+    trees = {
+        symbol: cKDTree(np.mod(positions[rows], sides) % sides, boxsize=sides) for symbol, rows in members.items()
+    }
+    found: list[np.ndarray] = []
+    for matrix in cubic_point_operations():
+        matrix = np.rint(np.asarray(matrix, dtype=np.float64))
+        if not np.allclose(np.abs(matrix) @ sides, sides, atol=1.0e-10):
+            # a permutation of axes of different lengths does not map the cell onto itself
+            continue
+        rotated = np.mod(positions @ matrix.T, sides) % sides
+        ok = True
+        for symbol, rows in members.items():
+            distance, nearest = trees[symbol].query(rotated[rows])
+            if np.any(distance > POSITION_TOLERANCE) or len(set(np.asarray(nearest).tolist())) != len(rows):
+                ok = False
+                break
+        if ok:
+            found.append(matrix)
+    return found
+
+
+_GUARD_CELL_GROUP_SWITCH = "PARSEC_SPIN_GUARD_CELL_GROUP"
+
+
+def spin_guard_cell_group_setting() -> str:
+    """``PARSEC_SPIN_GUARD_CELL_GROUP``: ``auto`` (the default) or ``off``.
+
+    ``auto``: test 2 of a bulk orthorhombic cell (the spin sectors of a cell at the Gamma point,
+    ``PARSEC_GAMMA_SPIN_SECTORS``) tests the operations ``r -> R r + t`` that the sectors rely on and the group of
+    the cell that contains them (:func:`_cell_group_images`): the elements of the sector group with their
+    translations, the operations found from the environments of the atoms or the cell group about its symmetric site
+    (:class:`.kpoint_sectors.CellGroup`, the group whose commuting involutions the sectors take) and the signed
+    permutations about the origin.  Test 2 of the k-point sectors of a spin-polarized loop
+    (``PARSEC_KPOINT_SECTOR_GUARD``: the cell group of the k-point sectors, :class:`.kpoint_sectors.SectorGuardGroup`)
+    takes the operations found from the environments as well, those its potential is taken to be invariant under.
+    ``off``: the signed permutations about the origin alone (:func:`_periodic_atom_matrices`) on the Gamma sectors,
+    the cell group alone on the k-point sectors, as before; both keep few of the operations about a defect off the
+    origin of a cell larger than 2 x 2 x 2 diamond cubes.  Clusters are not affected.
+    """
+
+    value = os.environ.get(_GUARD_CELL_GROUP_SWITCH, "auto").strip().lower() or "auto"
+    if value not in ("auto", "off"):
+        raise ValueError(f"{_GUARD_CELL_GROUP_SWITCH} must be auto or off, not {value!r}")
+    return value
+
+
+def _is_diagonal(matrix) -> bool:
+    matrix = np.asarray(matrix)
+    return np.count_nonzero(matrix - np.diag(np.diag(matrix))) == 0
+
+
+def _affine(matrix, shift) -> np.ndarray:
+    """``[[R, t], [0, 1]]`` of ``r -> R r + t`` (``t`` in grid steps), integers."""
+
+    affine = np.eye(4, dtype=np.int64)
+    affine[:3, :3] = np.rint(np.asarray(matrix, dtype=np.float64)).astype(np.int64)
+    affine[:3, 3] = np.asarray(shift, dtype=np.int64)
+    return affine
+
+
+class _AffineClosure:
+    """The group that operations ``r -> R r + t`` of a periodic grid generate (``R`` signed permutations, ``t`` in
+    grid steps modulo the counts of the grid).
+
+    Elements are kept as arrays and coded as integers: the nine entries of ``R`` (base 3) and the row of ``t``.  A
+    generator joins by right products in breadth: the elements so far times the new generator, then every new
+    element times every generator (a finite group is the closure of the identity under right products by its
+    generators), products of whole arrays at once.  :meth:`add` refuses a generator that would take the group beyond
+    ``limit`` elements and leaves it as it was.
+    """
+
+    def __init__(self, counts) -> None:
+        self.counts = np.asarray(counts, dtype=np.int64).reshape(3)
+        self.rotations = np.eye(3, dtype=np.int64)[None]
+        self.translations = np.zeros((1, 3), dtype=np.int64)
+        self.generators: list[tuple[np.ndarray, np.ndarray]] = []
+        # the codes of the elements, ascending
+        self.codes = self._codes(self.rotations, self.translations)
+
+    def _codes(self, rotations, translations) -> np.ndarray:
+        counts = self.counts
+        digits = (np.asarray(rotations, dtype=np.int64).reshape(-1, 9) + 1) @ (3 ** np.arange(9, dtype=np.int64))
+        shifts = np.mod(np.asarray(translations, dtype=np.int64).reshape(-1, 3), counts)
+        rows = (shifts[:, 0] * counts[1] + shifts[:, 1]) * counts[2] + shifts[:, 2]
+        return digits * int(np.prod(counts)) + rows
+
+    @property
+    def order(self) -> int:
+        return int(self.rotations.shape[0])
+
+    def __contains__(self, affine) -> bool:
+        affine = np.asarray(affine, dtype=np.int64)
+        code = self._codes(affine[None, :3, :3], affine[None, :3, 3])[0]
+        position = int(np.searchsorted(self.codes, code))
+        return position < self.codes.size and self.codes[position] == code
+
+    def add(self, affine, limit: int | None = None) -> bool:
+        """Join ``affine`` to the generators; ``False`` (and nothing joined) where the group would exceed ``limit``."""
+
+        affine = np.asarray(affine, dtype=np.int64)
+        generator = (affine[:3, :3].copy(), np.mod(affine[:3, 3], self.counts))
+        generators = self.generators + [generator]
+        codes = self.codes
+        rotations, translations = [self.rotations], [self.translations]
+        size = self.order
+        # the elements so far times the new generator, then the new elements times every generator
+        frontier, using = (self.rotations, self.translations), [generator]
+        while True:
+            fresh_rotations, fresh_translations = [], []
+            for rotation, translation in using:
+                products = frontier[0] @ rotation
+                shifts = np.mod(frontier[0] @ translation + frontier[1], self.counts)
+                found = self._codes(products, shifts)
+                distinct, first = np.unique(found, return_index=True)
+                keep = np.sort(first[~np.isin(distinct, codes, assume_unique=True)])
+                if keep.size:
+                    codes = np.union1d(codes, found[keep])
+                    fresh_rotations.append(products[keep])
+                    fresh_translations.append(shifts[keep])
+                    size += int(keep.size)
+                    if limit is not None and size > limit:
+                        return False
+            if not fresh_rotations:
+                break
+            frontier = (np.concatenate(fresh_rotations), np.concatenate(fresh_translations))
+            rotations.append(frontier[0])
+            translations.append(frontier[1])
+            using = generators
+        self.generators = generators
+        self.codes = codes
+        self.rotations = np.concatenate(rotations)
+        self.translations = np.concatenate(translations)
+        return True
+
+
+#: The most operations of the group test 2 tests on a cell that :func:`_cell_group_images` follows (the operations about
+#: the origin of a crystal of many cells whose symmetric site lies elsewhere join its pure translations, n^3 x 4 of
+#: them in n x n x n diamond cubes): a candidate that would take it beyond is left out, one about the origin is tested
+#: on its own instead.
+_GUARD_GROUP_LIMIT = 1 << 15
+#: Neighbours of every species in the environment of an atom (:func:`_environment_operations`).
+_ENVIRONMENT_NEIGHBOURS = 12
+#: The most atoms of one environment from which :func:`_environment_operations` takes its candidates.
+_ENVIRONMENT_BUDGET = 32
+
+
+def _environment_operations(grid, atoms, tolerance: float) -> list[np.ndarray] | None:
+    """Affine ``[[R, t], [0, 1]]`` (``t`` in grid steps) of the operations ``r -> R r + t`` of a bulk orthorhombic
+    cell that map the atoms onto themselves modulo the lattice and the grid onto itself: one ``t`` for every such
+    signed permutation ``R`` and every pure translation, which generate them all; ``None`` where the rarest
+    environment of an atom has more than :data:`_ENVIRONMENT_BUDGET` atoms (a crystal of many cells, whose cell
+    group :class:`.kpoint_sectors.CellGroup` finds about its symmetric site).
+
+    The cell group of the detection searches the translation of every ``R`` among those that carry the first atom of
+    the smallest species onto an atom of it, and gives up after 32 candidates that pass its sampled atoms: a defect
+    off the origin of a cell larger than 2 x 2 x 2 diamond cubes loses most of its operations there (the vacancy at
+    ``(a/2, a/2, 0)`` of 3 x 3 x 3 cubes keeps the swap of x and y of its 24).  Here the candidates carry an atom
+    ``x0`` of the rarest environment onto the atoms of its environment, which every symmetry must: the environment
+    of an atom is the sorted distances to its :data:`_ENVIRONMENT_NEIGHBOURS` nearest atoms of every species
+    (modulo the lattice), atoms of one species whose lists agree within four atom tolerances (an operation within the
+    tolerance changes a distance by at most two); ``x0`` is chosen among the classes of those lists rounded to
+    1e-4 bohr (a vacancy of diamond: its four neighbours).  Each candidate is a whole number of grid steps; those
+    that carry 16 sampled atoms of every species near atoms of it are matched with every atom (each within the
+    tolerance of a different atom of its species, single-threaded k-d tree queries; two images nearest one atom go to
+    :func:`..Symmetry.axis_reflection._atoms_are_invariant_operation`).
+    """
+
+    from scipy.spatial import cKDTree
+
+    from ..Symmetry.axis_reflection import (
+        _atoms_are_invariant_operation,
+        _folded,
+        _integer_signed_permutation_parameters,
+        _lattice_period,
+        _positions_by_species,
+        _signed_permutation_operations,
+    )
+
+    period = _lattice_period(grid)
+    if period is None or not atoms:
+        return None
+    species = _positions_by_species(atoms)
+    counts = np.asarray(grid.points_per_axis, dtype=np.int64)
+    steps = period / counts
+    names = sorted(species)
+    trees = {name: cKDTree(_folded(species[name], period), boxsize=period) for name in names}
+    environments = {}
+    for name in names:
+        columns = []
+        for other in names:
+            # the atom itself is its own nearest neighbour of its species: one more, and dropped
+            own = 1 if other == name else 0
+            count = min(_ENVIRONMENT_NEIGHBOURS + own, species[other].shape[0])
+            if count - own <= 0:
+                continue
+            distances, _ = trees[other].query(_folded(species[name], period), k=count)
+            distances = np.sort(np.asarray(distances, dtype=np.float64).reshape(species[name].shape[0], count), axis=1)
+            columns.append(distances[:, own:])
+        environments[name] = np.hstack(columns) if columns else np.zeros((species[name].shape[0], 0))
+    # x0: an atom of the smallest class of rounded environments (the first of the first species among the smallest)
+    best = None
+    for name in names:
+        rounded = np.rint(environments[name] / 1.0e-4).astype(np.int64)
+        _, first, sizes = np.unique(rounded, axis=0, return_index=True, return_counts=True)
+        smallest = int(np.argmin(sizes))
+        if best is None or int(sizes[smallest]) < best[0]:
+            best = (int(sizes[smallest]), name, int(first[smallest]))
+    _, name, origin = best
+    reference = environments[name][origin]
+    alike = np.flatnonzero(np.max(np.abs(environments[name] - reference[None, :]), axis=1, initial=0.0) <= 4.0 * tolerance + 1.0e-9)
+    if alike.size > _ENVIRONMENT_BUDGET:
+        return None
+    x0 = species[name][origin]
+    targets = species[name][alike]
+    limit = 1.0e-6 if tolerance <= 1.0e-7 else np.maximum(1.0e-6, 2.5 * tolerance / steps)
+    radius = 2.0 * (tolerance * (1.0 + 1.0e-9) + 1.0e-12)
+    samples = {
+        other: species[other][np.unique(np.linspace(0, species[other].shape[0] - 1, 16).astype(np.int64))]
+        for other in names
+    }
+
+    def sampled(matrix, shifts) -> np.ndarray:
+        # whether the sampled atoms of every species land near an atom of it, for all candidates at once
+        passing = np.ones(shifts.shape[0], dtype=bool)
+        for other in names:
+            images = (samples[other] @ matrix.T)[None, :, :] + (shifts * steps)[:, None, :]
+            distances, _ = trees[other].query(_folded(images.reshape(-1, 3), period), k=1, distance_upper_bound=radius)
+            passing &= np.all(np.isfinite(distances).reshape(shifts.shape[0], -1), axis=1)
+        return passing
+
+    def matches(matrix, shift) -> bool:
+        # every atom within the tolerance of a partner of its species, the partners all different
+        translation = shift * steps
+        for other in names:
+            images = species[other] @ matrix.T + translation
+            distances, nearest = trees[other].query(_folded(images, period), k=1, distance_upper_bound=radius)
+            if not np.all(distances <= tolerance):
+                return False
+            if np.unique(nearest).size != nearest.size:
+                # two images nearest one atom: the matching of the detection decides
+                return _atoms_are_invariant_operation(species, matrix, tolerance, period, translation)
+        return True
+
+    identity = np.eye(3, dtype=np.int64)
+    found: list[np.ndarray] = []
+    for operation in _signed_permutation_operations():
+        matrix = np.asarray(operation, dtype=np.int64)
+        if _integer_signed_permutation_parameters(grid, operation, 1.0e-10) is None:
+            continue
+        candidates = _folded(targets - x0 @ matrix.T, period) / steps
+        rounded = np.rint(candidates)
+        whole = np.all(np.abs(candidates - rounded) <= limit, axis=1)
+        shifts = np.unique(np.mod(rounded[whole].astype(np.int64), counts), axis=0)
+        pure = np.array_equal(matrix, identity)
+        if pure:
+            shifts = shifts[np.any(shifts != 0, axis=1)]
+        if not shifts.shape[0]:
+            continue
+        for shift in shifts[sampled(matrix, shifts)]:
+            if not matches(matrix, shift):
+                continue
+            affine = np.eye(4, dtype=np.int64)
+            affine[:3, :3] = matrix
+            affine[:3, 3] = shift
+            found.append(affine)
+            if not pure:
+                # one translation per R: the others are this one after a pure translation
+                break
+    return found
+
+
+def _cell_group_images(grid, atoms, origin_matrices, sectors=None) -> list[tuple[np.ndarray, np.ndarray]]:
+    """``(affine, rows)`` of the operations that test 2 tests on a bulk orthorhombic cell.
+
+    The candidates, in this order: the elements of the sector group ``sectors`` (``r -> R r + t`` with their
+    translations; the sectors keep the channel densities invariant under them by construction, so the generators
+    after them are those beyond them, as the sign changes come first on a cluster); the operations of the atoms
+    found from their environments (:func:`_environment_operations`: all of them where an environment is rare, a
+    defect off the origin of any cell included), or where no environment is rare (a crystal of many cells) the
+    operations of the cell group, whose commuting involutions the sectors take (:class:`.kpoint_sectors.CellGroup`:
+    about the symmetric site of the crystal, with the half-cell translations of a cell that repeats a smaller one; the
+    one the detection of the sectors built where it has these inputs,
+    :func:`.kpoint_sectors.recent_cell_group_operations`, else built here);
+    either at the atom tolerance of the detection (``PARSEC_SYMMETRY_ATOM_TOLERANCE``) or at
+    :data:`parsec_python.Forces.symmetry.POSITION_TOLERANCE` (1e-6 bohr, that of the operations about the origin and
+    of the guard of a cluster), whichever is smaller, the translations first, then the sign changes, then the others;
+    and the signed permutations about the origin that map the atoms modulo the lattice (``origin_matrices``, those of
+    before, to 1e-6 bohr).  Every one maps the atoms onto themselves modulo the lattice, so a channel
+    density with the symmetry of the atoms passes; the elements of the sector group are among them, so the
+    operations tested are not empty where the sectors are not trivial.  The elements of the sector group need no
+    tolerance (the sectors keep the densities invariant under them, however far the atoms are off); an operation
+    beyond them that holds the atoms only to a looser tolerance would measure the structure: the sectors average the
+    Hamiltonian over their group alone, so the density breaks it by about as much as the atoms are off (a diamond
+    vacancy of 2 x 2 x 2 cubes with its atoms 3e-4 bohr off and ``PARSEC_SYMMETRY_ATOM_TOLERANCE=1e-3``: 0.028
+    electrons, above the tolerance of the test).  A candidate in the group generated by those taken so far
+    (:class:`_AffineClosure`) is skipped, and one that does not map the grid onto itself.  One that would take that
+    group beyond :data:`_GUARD_GROUP_LIMIT` operations is left out, unless it is one of ``origin_matrices``: those
+    are tested on their own instead (one per coset of those so tested), so that the group tested holds every one of
+    them, as under ``PARSEC_SPIN_GUARD_CELL_GROUP=off`` (the inversion about a bond centre of a perfect diamond crystal
+    of 6 x 6 x 6 cubes, whose cell group is Td about an atom with its half-cell translations: with it, the 41,472
+    operations of the crystal).  ``rows`` are the grid rows of the images ``R r + t`` (``_grid_row_mapping_operation``,
+    which wraps the cell), 32-bit below 2^31 points; ``affine`` is ``[[R, t], [0, 1]]`` with ``t`` in grid steps.
+    """
+
+    from parsec_python.Forces.symmetry import POSITION_TOLERANCE
+
+    from ..Symmetry.axis_reflection import (
+        _RowOrderTable,
+        _fast_maps_requested,
+        _grid_row_mapping_operation,
+        abelian_sector_operations,
+        symmetry_atom_tolerance,
+    )
+    from .kpoint_sectors import CellGroup, recent_cell_group_operations
+
+    counts = np.asarray(grid.points_per_axis, dtype=np.int64)
+    candidates: list[np.ndarray] = []
+    if sectors is not None and int(getattr(sectors, "group_order", 1)) > 1:
+        operations = abelian_sector_operations(sectors)
+        shifts = getattr(sectors, "translations", None)
+        shifts = (
+            np.zeros((operations.shape[0], 3), dtype=np.int64)
+            if shifts is None
+            else np.asarray(shifts, dtype=np.int64).reshape(-1, 3)
+        )
+        if shifts.shape[0] == operations.shape[0]:
+            candidates += [_affine(matrix, shift) for matrix, shift in zip(operations, shifts)]
+
+    def kind(affine) -> int:
+        # the translations first, then the sign changes, then the others
+        matrix = affine[:3, :3]
+        return 0 if np.array_equal(matrix, np.eye(3)) else 1 if _is_diagonal(matrix) else 2
+
+    # the operations beyond the sector group: those of the atoms to 1e-6 bohr at most (see above)
+    tolerance = min(symmetry_atom_tolerance(), POSITION_TOLERANCE)
+    try:
+        found = _environment_operations(grid, atoms, tolerance)
+    except ValueError:
+        # (a grid the detection refuses: the operations about the origin below)
+        found = None
+    if found is not None:
+        candidates += sorted(found, key=kind)
+    else:
+        # (where the environments found them all, the cell group is among them) the group the detection of the
+        # sectors built for these very atoms and grid, else built here
+        recent = recent_cell_group_operations(grid, atoms, atom_tolerance=tolerance)
+        if recent is None:
+            try:
+                cell = CellGroup(grid, atoms, atom_tolerance=tolerance)
+            except ValueError:
+                cell = None
+            recent = None if cell is None or cell.table is None else (cell.matrices, cell.shifts)
+        if recent is not None:
+            # (the identity first: left out)
+            candidates += sorted((_affine(matrix, shift) for matrix, shift in list(zip(*recent))[1:]), key=kind)
+    beyond = len(candidates)
+    candidates += [
+        _affine(matrix, np.zeros(3)) for matrix in sorted(origin_matrices, key=lambda matrix: not _is_diagonal(matrix))
+    ]
+    closure = _AffineClosure(counts)
+    # the operations about the origin covered so far (in the closure or tested on their own): signed permutations
+    # with no translation, at most 48
+    about_origin = _AffineClosure(counts)
+    table = _RowOrderTable(grid) if _fast_maps_requested() else None
+    # the maps are kept for the run: 32-bit rows where the grid allows (half the memory of the maps of before)
+    index_type = np.int32 if int(grid.size) < np.iinfo(np.int32).max else np.int64
+    images: list[tuple[np.ndarray, np.ndarray]] = []
+    for position, affine in enumerate(candidates):
+        affine[:3, 3] = np.mod(affine[:3, 3], counts)
+        origin = position >= beyond
+        if affine in closure:
+            if origin and affine not in about_origin:
+                about_origin.add(affine)
+            continue
+        if origin and affine in about_origin:
+            continue
+        rows = _grid_row_mapping_operation(grid, affine[:3, :3], 1.0e-10, table=table, translation=affine[:3, 3])
+        if rows is None:
+            continue
+        # an operation about the origin that the group would not hold within the limit is tested on its own (the
+        # closure stays as it was): the group tested holds all those that the test of before tested
+        if not closure.add(affine, limit=_GUARD_GROUP_LIMIT) and not origin:
+            continue
+        if origin:
+            about_origin.add(affine)
+        images.append((affine, np.asarray(rows).astype(index_type, copy=False)))
+        del rows
+    return images
+
+
+def guard_group_order(grid, images) -> int:
+    """The order of the group that the operations of test 2 (``images`` of :func:`atom_group_images`) generate on
+    ``grid``: modulo the counts of a cell, whose operations are affine; signed permutations on a cluster."""
+
+    if images and np.asarray(images[0][0]).shape == (4, 4):
+        closure = _AffineClosure(grid.points_per_axis)
+        for affine, _ in images:
+            closure.add(affine)
+        return closure.order
+    elements = {_key(np.eye(3)): np.eye(3)}
+    generators = [np.rint(np.asarray(matrix, dtype=np.float64)) for matrix, _ in images]
+    grown = True
+    while grown:
+        grown = False
+        for element in list(elements.values()):
+            for generator in generators:
+                product = element @ generator
+                if _key(product) not in elements:
+                    elements[_key(product)] = product
+                    grown = True
+    return len(elements)
+
+
+def atom_group_images(grid, atoms, sectors=None) -> list[tuple[np.ndarray, np.ndarray]]:
     """``(matrix, rows)`` of the operations that test 2 of the module needs on ``grid``.
 
     The signed permutations that map the atoms (by species) and the grid onto
@@ -315,6 +766,13 @@ def atom_group_images(grid, atoms) -> list[tuple[np.ndarray, np.ndarray]]:
     whose generators need not be among those of the group of the atoms.  An
     operation in a coset ``f H`` of a refused ``f`` is not asked again.
     ``rows`` are the grid rows of the images ``matrix r``.
+
+    A bulk orthorhombic cell (``PARSEC_SPIN_GUARD_CELL_GROUP=auto``) takes the
+    operations ``r -> R r + t`` of :func:`_cell_group_images` instead, with
+    ``matrix`` the affine ``[[R, t], [0, 1]]`` (``t`` in grid steps):
+    ``sectors``, the reduction of the sector orbitals, gives its elements
+    first.  ``off`` keeps the signed permutations about the origin of the cell
+    (:func:`_periodic_atom_matrices`) in the loop below, as before.
     """
 
     from parsec_python.Forces.symmetry import atom_symmetry_operations
@@ -322,7 +780,14 @@ def atom_group_images(grid, atoms) -> list[tuple[np.ndarray, np.ndarray]]:
     def is_diagonal(matrix) -> bool:
         return np.count_nonzero(matrix - np.diag(np.diag(matrix))) == 0
 
-    matrices = [np.rint(np.asarray(operation.matrix, dtype=np.float64)) for operation in atom_symmetry_operations(atoms)]
+    periodic = _periodic_atom_matrices(grid, atoms)
+    if periodic is not None and spin_guard_cell_group_setting() == "auto":
+        return _cell_group_images(grid, atoms, periodic, sectors)
+    matrices = (
+        [np.rint(np.asarray(operation.matrix, dtype=np.float64)) for operation in atom_symmetry_operations(atoms)]
+        if periodic is None
+        else periodic
+    )
     # The sign changes first: the generators returned are those beyond their group.
     matrices.sort(key=lambda matrix: not is_diagonal(matrix))
     closure = {_key(np.eye(3)): np.eye(3)}
@@ -352,6 +817,15 @@ def atom_group_images(grid, atoms) -> list[tuple[np.ndarray, np.ndarray]]:
     return generators
 
 
+def _operation_text(matrix) -> str:
+    """A signed permutation as its rows; an affine operation of a cell as ``R + t grid steps``."""
+
+    matrix = np.rint(matrix).astype(int)
+    if matrix.shape == (4, 4):
+        return f"{matrix[:3, :3].tolist()} + {matrix[:3, 3].tolist()} grid steps"
+    return f"{matrix.tolist()}"
+
+
 def density_symmetry_breaking(densities, grid, atoms=None, tolerance: float = DENSITY_SYMMETRY_TOLERANCE, images=None):
     """:class:`FractionalOccupations` of channel densities that break the point group of ``atoms``, else ``None``.
 
@@ -373,7 +847,7 @@ def density_symmetry_breaking(densities, grid, atoms=None, tolerance: float = DE
                 lines.append(
                     f"{_CHANNEL_NAMES[index] if index < 2 else index} channel: the density differs by "
                     f"{deviation:.4f} electrons from its image under the operation "
-                    f"{np.rint(matrix).astype(int).tolist()} of the atoms"
+                    f"{_operation_text(matrix)} of the atoms"
                 )
     if largest < tolerance:
         return None
@@ -717,7 +1191,8 @@ class SpinSectorReducer:
         grid, atoms = self.structure()
         key = (id(grid), tuple(tuple(np.asarray(atom.position, dtype=float).tolist()) for atom in atoms))
         if getattr(self, "_images_key", None) != key:
-            self._images = atom_group_images(grid, atoms)
+            # the sector group: its elements come first among the operations of a cell (a cluster takes none of it)
+            self._images = atom_group_images(grid, atoms, sectors=getattr(self.reducer, "reduction", None))
             self._images_key = key
         return grid, self._images
 
@@ -798,6 +1273,8 @@ __all__ = [
     "START_MULTIPLET_WIDTH",
     "atom_group_images",
     "density_symmetry_breaking",
+    "guard_group_order",
+    "spin_guard_cell_group_setting",
     "partly_filled_multiplets",
     "HostSpinXCOnOrbits",
     "MULTIPLET_WIDTH",

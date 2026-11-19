@@ -358,8 +358,12 @@ result to the last bit.
 
 The same runner and launch script run the SCF of a bulk periodic cell
 (`Boundary_Conditions: bulk`) at the Gamma point: real orbitals, an
-orthorhombic cell, no spin, a native LDA or GGA (`ca`, `pbe` and the other
-functionals of `V_xc/device_xc.py`). The driver looks for the point group of
+orthorhombic cell, a native LDA or GGA (`ca`, `pbe` and the other
+functionals of `V_xc/device_xc.py`), unpolarized or, since 2026-11-19 and
+for single points, collinear spin (`PARSEC_GAMMA_SPIN_SECTORS`: both
+channels in the abelian sectors of the cell, the spin commands of a cluster;
+V- in diamond 5^3 on 16 A100 with one rank per GPU: SCF 3.1 s against 10.6 s
+of the k-point pools). The driver looks for the point group of
 the cell about its origin (`PARSEC_PERIODIC_SYMMETRY=auto`, since 2026-11-16):
 the Cartesian signed permutations that map the atoms modulo the lattice and the
 periodic grid onto themselves (the row maps wrap around the cell); since
@@ -377,7 +381,8 @@ cell"). Without
 one, or with `PARSEC_PERIODIC_SYMMETRY=off`, the cell is one sector of the
 identity (every grid point an orbit, `AxisReflectionReduction.identity`), the
 sector of a molecular dynamics run: on several nodes one rank per GPU shares
-its orbitals
+its orbitals (molecular dynamics of a cell on several nodes needs
+`--rank-per-gpu`: one rank per node there is refused)
 (`Eigensolvers/mpi_shared_basis.py`), on one node one rank shares them among
 the GPUs of its node (`Eigensolvers/distributed_state.py`) or one rank per
 GPU does. Inside the allocation of `N` nodes with four GPUs each:

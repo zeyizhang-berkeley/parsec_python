@@ -1458,6 +1458,27 @@ def _gamma_spin_on_kpoint_driver(translation, is_periodic: bool, has_soc_species
     return parallel_backend_uses_device()
 
 
+def _gamma_hybrid_on_kpoint_driver(translation, is_periodic: bool) -> bool:
+    """Whether an unpolarized Gamma-point hybrid of a bulk cell runs as the 1x1x1 k-point run in the sectors of the
+    little group of Gamma (``PARSEC_GAMMA_HYBRID_SECTORS=kpoint``, an opt-in).
+
+    The accelerated command line hands such an input to this solver
+    (``acceleration/SCF/gamma_hybrid_route.py``: a cell whose basis reaches the floor of the k-point sectors and
+    whose abelian little group at least halves the work of its eigensolver); its GPU k-point workers then solve the
+    sectors, where the Gamma loop of ``run_scf`` would solve the full grid on the host.  ``False`` without such
+    workers, in an MPI run and for any other input.
+    """
+    if not is_periodic or not parallel_backend_uses_device():
+        return False
+    if os.environ.get("PARSEC_MPI", "").strip().lower() in ("1", "true", "on", "yes"):
+        return False
+    try:
+        from parsec_python.acceleration.SCF.gamma_hybrid_route import gamma_hybrid_sector_route
+    except ImportError:
+        return False
+    return gamma_hybrid_sector_route(translation) is not None
+
+
 def _run_periodic_hybrid(
     system,
     translation,
@@ -2491,6 +2512,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         # (acceleration/SCF/hybrid_periodic.py); the Gamma loop of run_scf has no device path for two channels of a
         # periodic cell.  Its energy equals the real loop's to the SCF convergence.
         periodic_hybrid_gamma = False
+    # PARSEC_GAMMA_HYBRID_SECTORS=kpoint: an unpolarized Gamma-point hybrid of a large bulk cell where the k-point
+    # workers run on the GPUs as the 1x1x1 Bloch loop in the sectors of the little group of Gamma; its energy equals
+    # the real loop's to the SCF convergence.
+    gamma_hybrid_kpoint = bool(
+        periodic_hybrid_gamma
+        and not spin_polarized
+        and not (self_consistent_spin_orbit or noncollinear)
+        and _gamma_hybrid_on_kpoint_driver(translation, is_periodic)
+    )
+    if gamma_hybrid_kpoint:
+        periodic_hybrid_gamma = False
+        uses_extended_drivers = True
     if periodic_hybrid_gamma:
         uses_extended_drivers = False
     if uses_extended_drivers and not (periodic_ionic or spinor_ionic) and (
@@ -2600,6 +2633,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     spin_polarized
                     and _gamma_spin_on_kpoint_driver(translation, is_periodic, has_soc_species)
                 )
+                or gamma_hybrid_kpoint
             ):
                 # these drivers hand their eigenproblems to the k-point solver: say where it runs
                 for line in parallel_backend_report():

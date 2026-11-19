@@ -491,6 +491,57 @@ Exx_Tolerance: 1.0e-9 Ry
         self.assertGreater(outer[-1].iteration, back + 1)
         self.assertAlmostEqual(result.energies.total, fixed.energies.total, delta=2.0e-9)
 
+    def test_no_occupied_application_outlives_the_build_that_completes_it(self) -> None:
+        """The occupied application that the build of every column completes is not kept through the next inner
+        loop (on a device it may hold the pooled block of PARSEC_CUPY_EXCHANGE_POOL: 2 x 8 N M bytes), with the
+        fixed controls and with the outer DIIS."""
+
+        import weakref
+
+        from parsec_python.Input import parse_parsec_input
+        from parsec_python.SCF import prepare_single_point
+        from parsec_python.SCF.hybrid import HostExchange, hybrid_definition, run_hybrid_scf
+        from parsec_python.SCF.single_point import run_scf
+
+        class Applications(list):
+            """The applications of one build (a list that takes weak references)."""
+
+        class Watched:
+            """The host engine; every inner loop counts the completed occupied applications still alive."""
+
+            def __init__(self, engine) -> None:
+                self.engine = engine
+                self.completed: list = []
+                self.alive: list[int] = []
+
+            def __getattr__(self, name):
+                return getattr(self.engine, name)
+
+            def exchange(self, sets, *, columns="occupied", known=None):
+                if known is not None:
+                    self.completed.append(weakref.ref(known))
+                return Applications(self.engine.exchange(sets, columns=columns, known=known))
+
+            def run_scf(self, system, **keywords):
+                self.alive.append(sum(reference() is not None for reference in self.completed))
+                return run_scf(system, **keywords)
+
+        directory = Path(tempfile.mkdtemp(prefix="parsec_fock_consumed_"))
+        try:
+            library = Path(__file__).resolve().parents[3] / "pp_generation" / "NCPPs" / "PBE" / "H" / "PARSEC"
+            shutil.copy(library / "H_POTRE.DAT", directory / "H_POTRE.DAT")
+            for extra in ("Exx_Inner_Criterion: fixed\nExx_Mixer_History: restart\nExx_Outer_Mixing: none\n", ""):
+                (directory / "parsec.in").write_text(self.BASE.format(extra=extra))
+                system = prepare_single_point(parse_parsec_input(directory / "parsec.in").problem)
+                engine = Watched(HostExchange(system, hybrid_definition(system.input.scf)))
+                result = run_hybrid_scf(system, engine=engine)
+                self.assertTrue(result.converged, extra)
+                self.assertTrue(engine.completed, extra)
+                self.assertGreater(len(engine.alive), len(engine.completed), extra)
+                self.assertEqual(engine.alive, [0] * len(engine.alive), extra)
+        finally:
+            shutil.rmtree(directory, ignore_errors=True)
+
     def test_the_last_allowed_loop_has_a_plain_operator(self) -> None:
         """No extrapolated operator for the loop at Exx_Max_Iter (it could not end the Fock loop)."""
 

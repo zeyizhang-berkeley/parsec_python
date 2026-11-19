@@ -8,7 +8,9 @@ states.
   atom in a periodic cube at the Gamma point (a partly filled minority p shell across three sectors), which leaves
   the sectors after the start Hamiltonian and is then the loop with one task per k-point, bit for bit.  What the
   tests measured goes to ``timings.detail`` and ``parsec.out`` whether they pass (a spin-polarized silicon cube at
-  the Gamma point) or not (since 2026-11-19).
+  the Gamma point) or not (since 2026-11-19).  About a diamond vacancy off the origin of 3 x 3 x 3 cubes, whose cell
+  group keeps the swap of x and y, test 2 takes the operations found from the environments of the atoms
+  (``PARSEC_SPIN_GUARD_CELL_GROUP``): Td at the Gamma point, D2d at a k-point along z.
 * The refit of the states of the sectors after the first solve (``PARSEC_KPOINT_SECTOR_REFIT``): the Ritz states cut
   to their lowest pairs (host and device kinds), and the SCF of a mesh with the refit gives the energy without it.
 """
@@ -225,6 +227,91 @@ class GuardTestsOnMadeUpLevels(unittest.TestCase):
         report = solver.density_symmetry_report((symmetric, broken), volume)
         self.assertIsNotNone(report)
         self.assertTrue(all(line.startswith("channel 2") for line in report.lines))
+
+
+def _tested_group_order(solver) -> int:
+    """The order of the group the operations of test 2 of ``solver`` generate (modulo the counts of the grid)."""
+
+    from parsec_python.acceleration.SCF import spin_sectors
+
+    group = solver._plans[0].guard_group
+    closure = spin_sectors._AffineClosure(group.cell.counts)
+    for operation, _ in group.images():
+        if isinstance(operation, (int, np.integer)):
+            operation = spin_sectors._affine(group.cell.matrices[operation], group.cell.shifts[operation])
+        closure.add(operation)
+    return closure.order
+
+
+class GuardGroupAboutADefectTests(unittest.TestCase):
+    """Test 2 of the k-point sectors about a diamond vacancy of 3 x 3 x 3 cubes (``PARSEC_SPIN_GUARD_CELL_GROUP``)."""
+
+    def solver(self, site, value, k_point=(0.0, 0.0, 0.0)):
+        from parsec_python.acceleration.tests.test_gamma_spin_sectors import _vacancy_cell
+
+        grid, atoms = _vacancy_cell(3, site)
+        geometry = {
+            "grid": grid,
+            "atoms": tuple(atoms),
+            "k_points": np.asarray(k_point, dtype=float).reshape(1, 3),
+            "weights": np.ones(1),
+            "lattice": np.asarray(grid.cell.lattice_vectors, dtype=float),
+            "density_symmetry": None,
+        }
+        job = KPointJob(1, 200, lambda *a: None, lambda *a: None, lambda *a, **k: {}, geometry=geometry)
+        with mock.patch.dict(os.environ, {"PARSEC_SPIN_GUARD_CELL_GROUP": value}):
+            solver = sectors.sector_solver(
+                job, lambda inner, **options: SerialKPointSolver(inner), problem_size=grid.size
+            )
+        self.assertIsInstance(solver, sectors.SectorKPointSolver)
+        self.assertEqual(solver.guarded_tasks(), [0])
+        return grid, atoms, solver
+
+    def test_a_vacancy_off_the_origin(self) -> None:
+        # The 1x1x1 k-point driver of a spin cell (forces, relaxations, main.py --mpi, PARSEC_GAMMA_SPIN_SECTORS=off).
+        # At the origin the cell group of the k-point sectors is Td about the vacancy (the sectors D2), and test 2 tests
+        # generators of it under either value.  At (a/2, a/2, 0) it keeps the swap of x and y of Td (its search of the
+        # translations gives up), and so do the sectors (2); the operations found from the environments of the atoms
+        # restore Td (auto), off tests the swap alone.  A t2^2 state in the partners x + y and z (both even under the
+        # swap: integer occupations in one sector, which test 3 passes) breaks the threefold axes: test 2 fires under
+        # auto, as a state in x and y does at the origin, and passed under off.  The symmetric state passes.
+        from parsec_python.acceleration.SCF import spin_sectors
+        from parsec_python.acceleration.tests.test_gamma_spin_sectors import _defect_densities, _lobe
+
+        a = 6.74
+        for site, filled, sizes in (
+            ((0.0, 0.0, 0.0), ((1.0, 0.0, 0.0), (0.0, 1.0, 0.0)), {"auto": 24, "off": 24}),
+            ((0.5, 0.5, 0.0), ((1.0, 1.0, 0.0), (0.0, 0.0, 1.0)), {"auto": 24, "off": 2}),
+        ):
+            centre = a * np.asarray(site)
+            for value in ("auto", "off"):
+                with self.subTest(site=site, value=value):
+                    grid, atoms, solver = self.solver(site, value)
+                    self.assertEqual(_tested_group_order(solver), sizes[value])
+                    volume = grid.volume_element
+                    bulk, partners = _defect_densities(grid, atoms, centre)
+                    symmetric = bulk + sum(partners)
+                    self.assertIsNone(solver.density_symmetry_report((symmetric, bulk), volume))
+                    broken = bulk + sum(_lobe(grid, centre, direction) for direction in filled)
+                    report = solver.density_symmetry_report((broken, bulk), volume)
+                    if sizes[value] == 2:
+                        self.assertIsNone(report)
+                        self.assertLess(solver.density_symmetry_measure((broken, bulk), volume), 1.0e-9)
+                    else:
+                        self.assertIsNotNone(report)
+                        self.assertGreater(report.largest, spin_sectors.DENSITY_SYMMETRY_NOISE_BOUND)
+                        self.assertTrue(all(line.startswith("channel 1") for line in report.lines))
+
+    def test_the_operations_a_kpoint_admits(self) -> None:
+        # A k-point along z: the operations about the vacancy at (a/2, a/2, 0) that carry it onto itself or its
+        # opposite are D2d (8 of the 24 of Td); those found from the environments beyond them are not tested.
+        _, _, solver = self.solver((0.5, 0.5, 0.0), "auto", k_point=(0.0, 0.0, 0.25 * 2.0 * np.pi / (3 * 6.74)))
+        self.assertEqual(_tested_group_order(solver), 8)
+        invariance = solver._plans[0].guard_group.invariance
+        threefold = np.roll(np.eye(3, dtype=np.int64), 1, axis=1)
+        self.assertFalse(invariance.admits(threefold, np.zeros(3, dtype=np.int64)))
+        self.assertTrue(invariance.admits(np.diag([-1, -1, 1]), np.zeros(3, dtype=np.int64)))
+        self.assertTrue(invariance.admits(np.eye(3, dtype=np.int64), np.array([1, 2, 3])))
 
 
 class GuardRunTests(unittest.TestCase):

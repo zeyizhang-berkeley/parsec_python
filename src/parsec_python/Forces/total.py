@@ -421,7 +421,10 @@ def compute_periodic_forces(
     symmetry operations of the atoms to average over (none by default: the Gamma-only periodic path does not
     reduce the grid by symmetry).  A k-point run on the irreducible wedge of a Monkhorst-Pack mesh (the problem
     carries the group of :func:`parsec_python.Forces.periodic.reduced_kpoint_operations`, ``PARSEC_KPOINT_FORCE_WEDGE``)
-    has its nonlocal force completed over that group and, unless ``operations`` are given, the total averaged over it.
+    has its nonlocal force completed over that group and, unless ``operations`` are given, the total averaged over it;
+    its density is averaged over the group, so its local terms are those of one atom per orbit turned onto the others
+    (:func:`_periodic_local_terms`, ``PARSEC_PERIODIC_LOCAL_ORBITS``).  ``phase_seconds`` holds the seconds of the
+    local terms (``local``) and, for the orbits, ``local_representatives`` and ``local_site_asymmetry`` (Ry/bohr).
     """
 
     from time import perf_counter
@@ -433,9 +436,18 @@ def compute_periodic_forces(
     lattice = np.asarray(system.input.periodic_cell.lattice_vectors, dtype=np.float64)
 
     repulsion = ewald_ion_ion_forces(atoms, system.pseudopotentials, lattice)
-    local = periodic_local_forces(
-        system.grid, atoms, system.pseudopotentials, specifications, lattice, result.density, result.xc_potential
-    )
+    completion = None
+    if getattr(result, "k_points", None) is not None:
+        from .periodic import reduced_kpoint_operations
+
+        completion = reduced_kpoint_operations(system, result)
+    mark = perf_counter()
+    local, orbits = _periodic_local_terms(system, atoms, specifications, lattice, result, completion)
+    clock = {"local": perf_counter() - mark}
+    if orbits is not None:
+        # one atom per orbit of the wedge's group (Ry/bohr, not seconds: the asymmetry of the checked atoms)
+        clock["local_representatives"] = float(orbits["representatives"])
+        clock["local_site_asymmetry"] = float(orbits["site_asymmetry"])
     if getattr(result, "k_points", None) is not None:
         # a k-point run does not keep its eigenvectors: the term was accumulated from them at the end of the SCF
         if result.nonlocal_forces is None:
@@ -443,9 +455,6 @@ def compute_periodic_forces(
                 "a k-point result needs its nonlocal forces from the SCF step: run it with compute_forces=True"
             )
         separable = np.asarray(result.nonlocal_forces, dtype=np.float64)
-        from .periodic import reduced_kpoint_operations
-
-        completion = reduced_kpoint_operations(system, result)
         if completion is not None:
             # An irreducible wedge (PARSEC_KPOINT_FORCE_WEDGE): its points stand for their stars, so the nonlocal
             # force of the wedge is averaged over its group, and the total over the same operations, which keeps the
@@ -471,8 +480,31 @@ def compute_periodic_forces(
         separable,
         operations,
         seconds=perf_counter() - started,
+        phase_seconds=clock,
         periodic=True,
     )
+
+
+def _periodic_local_terms(system, atoms, specifications, lattice, result, operations):
+    """``(local terms, details)`` of :func:`compute_periodic_forces`.
+
+    A run whose density is averaged over the group ``operations`` (the irreducible wedge of a k-point mesh: the
+    ``density_symmetry`` of the system, with the operations of
+    :func:`parsec_python.Forces.periodic.reduced_kpoint_operations`) has equivariant local forces: under
+    ``PARSEC_PERIODIC_LOCAL_ORBITS=auto`` they are summed for one atom per orbit and turned onto the others
+    (:func:`parsec_python.acceleration.Forces.periodic_local.orbit_local_forces`, which returns ``details``); every
+    other run, and ``off``, sums every atom (``details`` ``None``).  The values agree to round-off.
+    """
+
+    fields = (system.pseudopotentials, specifications, lattice, result.density, result.xc_potential)
+    if operations is not None and len(operations) > 1 and getattr(system, "density_symmetry", None) is not None:
+        from ..acceleration.Forces.periodic_local import orbit_local_forces, periodic_local_orbits_setting
+
+        if periodic_local_orbits_setting() == "auto":
+            return orbit_local_forces(
+                lambda chosen: periodic_local_forces(system.grid, chosen, *fields), atoms, operations
+            )
+    return periodic_local_forces(system.grid, atoms, *fields), None
 
 
 __all__ = [

@@ -271,6 +271,15 @@ of 27 points, SCF 33.4 instead of 52.0 s, the last energy within 2.4e-6 Ry. Such
 groups of order 2 at most: n = 6 then takes 265 s per SCF loop with the wedge (6 points, 11 tasks), and the 14 pairs
 (25 tasks) ran out of GPU memory in the second structure.
 
+Since 2026-11-19 the local forces of such runs take one atom per orbit of the wedge's group
+(`PARSEC_PERIODIC_LOCAL_ORBITS`) and the ball sums of many atoms per call on the GPU (`PARSEC_PERIODIC_LOCAL_BALLS`).
+n = 6 with the 3x3x3 mesh, one relaxation step on 16 A100: 42.3 s, forces 0.49 s (both switches off in the same
+allocation: 49.9 s, forces 13.6 s), the same total energy, forces within 1e-10 Ry/bohr. The local terms of 8,000
+atoms (n = 10) on one A100 take 0.49 s instead of 60.6 s for the force call of a k-point wedge, and those of 64,000
+atoms (n = 20) without symmetry 5.1 s instead of about 380 s (3.9 s of it the reciprocal series). A molecular-dynamics
+step of n = 6 at Gamma (one sector of the identity, 16 ranks one per GPU) takes 9.8 s instead of 22.9 s, the forces
+within 1.3e-14 Ry/bohr.
+
 The setup of large Gamma cells (2026-11-17): the Ewald ion-ion sums on the GPU (`acceleration/V_ion/ewald_device.py`:
 the images of the host in cells of the cutoff for the real-space pairs, CuPy for the structure factors;
 `PARSEC_DEVICE_EWALD=off` keeps the host sums bit for bit), the finite-difference matrix filled by slabs on threads

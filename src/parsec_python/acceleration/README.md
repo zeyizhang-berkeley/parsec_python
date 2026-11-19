@@ -969,7 +969,7 @@ a setting that selects the former one:
 | `PARSEC_SYMMETRY_ATOM_TOLERANCE` | `1e-7` bohr: the distance within which an image of an atom is that atom in the symmetry detection of clusters and cells (since 2026-11-18 a switch; positions are not symmetrized, so a larger value gives approximate results for inputs that are not exactly symmetric; forces and moves in sectors still check atoms to 1e-6 bohr). The report names operations that hold within 1e-3 bohr but not within the tolerance | any value up to 0.1 |
 | `PARSEC_PERIODIC_CA_XC` | `auto` (since 2026-11-18): CA-LDA and CA-LSD of periodic cells (bulk on the orthorhombic grid) on the device: on the orbits of the sectors at Gamma, on the full grid in the k-point loops and the periodic spin drivers (`V_xc/device_xc.py`, the host formula line by line, no fused multiply-add). Diamond 20^3 at Gamma with CA on 16 A100: 151.7 -> 131.1 s, XC 2.44 -> 0.011 s per step, the energy within 1e-10 Ry | `host`: NumPy over the full grid every step, as before (`PARSEC_CUPY_XC=off` too) |
 | `PARSEC_PERIODIC_SECTOR_BANDS` | `auto` (since 2026-11-18): a Gamma bulk cell with `bandstruc` runs its SCF in the sectors of its point group; the bands take the expanded converged potential, the lowest `States_Num` levels and their Fermi level by the full-grid formula (Si8: bands within 9.2e-11 Ry of the full grid; diamond 5^3, which ran out of memory in the band stage before, completes) | `off`: the whole SCF on the full grid, as before |
-| `PARSEC_KPOINT_SECTOR_GUARD` | `auto` (since 2026-11-18): spin-polarized k-point loops in sectors that rely on operations the density is not symmetrized over (a single Gamma point, a full mesh, the translations of a supercell) run the three tests of the cluster spin guard (a partly filled multiplet across sectors in the start Hamiltonian, a channel density that breaks the operations, fractional occupations of such a multiplet); a loop that fails runs again with one task per k-point and a NOTE in `parsec.out` (an O atom in a periodic cube: the broken-symmetry state, more than 1 mRy below the symmetric one the sectors held) | `off`: the sectors without the tests, as before |
+| `PARSEC_KPOINT_SECTOR_GUARD` | `auto` (since 2026-11-18): spin-polarized k-point loops in sectors that rely on operations the density is not symmetrized over (a single Gamma point, a full mesh, the translations of a supercell) run the three tests of the cluster spin guard (a partly filled multiplet across sectors in the start Hamiltonian, a channel density that breaks the operations, those of the cell group the sectors assume and, since 2026-11-19, those of the atoms found from their environments, `PARSEC_SPIN_GUARD_CELL_GROUP`; fractional occupations of such a multiplet); a loop that fails runs again with one task per k-point and a NOTE in `parsec.out` (an O atom in a periodic cube: the broken-symmetry state, more than 1 mRy below the symmetric one the sectors held) | `off`: the sectors without the tests, as before |
 | `PARSEC_KPOINT_SECTOR_REFIT` | `auto` (since 2026-11-18): after the first solve of a k-point loop each sector keeps the levels it holds among those of its k-point plus max(6, 10 %), and grows by its deficit later (diamond on 16 A100: 6^3 with a 3 x 3 x 3 mesh, later steps -15 %; 7^3 with 2 x 2 x 2, 86.6 -> 81.8 s; energies within the SCF criterion) | `off`: the first counts kept, bit for bit as before |
 | `PARSEC_MP_UNSHIFTED_MESH` | `fortran` (since 2026-11-18): a `Monkhorst_Pack_Grid` without a `Monkhorst_Pack_Shift` block is PARSEC 1.5's mesh on both routines: the Gamma-centred grid (i-1)/n reduced to its irreducible wedge (space group and time reversal, as `irrbz`), the density symmetrized; it runs as the same input with a zero shift block, without selecting the Fortran-derived routines (the k-point tables of PARSEC 1.5 matched for seven Si8 inputs; diamond 4 x 4 x 4: 10 points, 47.0 -> 10.5 s, the same energy). Even meshes use other points than before | `port`: the former unreduced (2i-n-1)/(2n) mesh, bit for bit |
 | `PARSEC_CUPY_SECTOR_GROWTH_RELEASE` | `auto` (since 2026-11-18): a sector that grows in the spectral bracket gives its basis back before its new first solve (the same numbers; memory only) | `off`: only sectors with cut margins do, as before |
@@ -981,6 +981,12 @@ a setting that selects the former one:
 | `PARSEC_SECTOR_PALETTE_LADDER` | `auto` (since 2026-11-19): every periodic sector cell is checked before its stencils are built (`driver._sector_palette_check`): a bound (`sector_palette_bounds`: the whole table of stencil values x signs x orbit-size ratios and the exact sums of the rows near a symmetry element; 0.26 s of CPU for the 62 M points of a 22^3 diamond cell, where the count takes 3.4 s), the count where the bound exceeds 256. A cell beyond the palette (a cube whose orbits differ in size: an even repeat on n = 2 mod 4 points per edge, Si 2x2x2 at Grid_Spacing 0.6 needs 295 at the default order 12, where the build of the stencils stopped the run with PaletteOverflow) steps down, the same on every rank: weighted sectors -> the commuting group with translations -> the commuting signed permutations about the origin (D2 of a cubic crystal) -> the full grid (the identity sector of an MPI run), with a NOTE in parsec.out | `off`: the full grid at once, as cells with unequal steps did before (a cube is still checked: it stopped before) |
 | `PARSEC_DEVICE_EWALD` | `auto` (default, since 2026-11-17): the Ewald ion-ion energy and forces of a cell of 1,024 atoms or more on the device where the run has one (`V_ion/ewald_device.py`, installed with the periodic setup): the real-space pairs from the host's images binned in cells of the cutoff, one thread per atom over the 27 cells around it, and the reciprocal sum as the host's block products in CuPy; the same terms, the sums to round-off (diamond, 64,000 atoms on 16 A100: 0.7 s instead of 16.8 s, the same printed energies) | `off`: the host sums, bit for bit |
 | `PARSEC_MPI_SHARED_EIGH_HELPER` | `on`: under the block route the root of a basis that three or more ranks share hands the eigensolve of its small solve to another rank (the whitened matrix there and the eigenvectors back, solved in that rank's summed pair), and the condition helper estimates on its own summed overlap instead of a copy; the same bits (bulk diamond on 16 A100, Gamma point, 5,832 atoms: 41.9 -> 38.3 GiB at the fullest GPU, 303.4 and 302.7 s). The block route forms the whitening in the summed pair either way; with both and the pool that the planner now chooses, 8,000 atoms took 71.6 -> 68.1 GiB and 657.9 -> 651.5 s on the same nodes | `off`: the eigensolve and a copy of the overlap on the root and the helper, as before |
+| `PARSEC_PERIODIC_LOCAL_ORBITS` | `auto` (since 2026-11-19): the local ionic and core-correction forces of a k-point run on the irreducible wedge of its mesh (`PARSEC_KPOINT_FORCE_WEDGE`, or a weighted list with `Symmetrize_Charge_Density`; the density averaged over the operations of the wedge) and of a Gamma cell in the sectors of an abelian group are summed for one atom per orbit of that group and turned onto the others (`Forces/total.py::_periodic_local_terms`, `Forces/periodic_local.py::orbit_local_forces`), as weighted sectors do since 2026-11-18 (`PARSEC_PERIODIC_SECTOR_LOCAL_FORCES`). `phase_seconds` of the forces then holds `local_representatives` and `local_site_asymmetry` (Ry/bohr, the checked atoms against their turned values): round-off for exactly symmetric structures, about 1e-10 Ry/bohr with the 12-decimal coordinates of `make_diamond.py`. With `PARSEC_PERIODIC_LOCAL_BALLS`: diamond 6^3 with the 3x3x3 mesh, one relaxation step on 16 A100 49.9 -> 42.3 s (forces 13.6 -> 0.49 s); the local terms of 8,000 atoms (10^3) of a k-point wedge on one A100 60.6 -> 0.49 s | `off`: every atom, bit for bit as before |
+| `PARSEC_PERIODIC_LOCAL_BALLS` | `auto` (since 2026-11-19): on a GPU the ball sums of the local forces of an orthorhombic cell are formed for many atoms per call (`Forces/periodic_local.py`, `fast_periodic_local_forces`; every route of the default routines that runs them there: the full grid, the identity sector, abelian and weighted sectors, the MPI runner, k-point runs whose plan uses a GPU): each atom gets an index box whose points outside the cell stand for its images, one elementwise kernel forms the distance, the radial slopes, the erf slope and the product with the density or XC field, and the batch is reduced axis by axis. The per-atom loop built every ball on the host, about 7.5 ms an atom. The same terms summed in another order: the forces to round-off (<= 2.5e-15 Ry/bohr measured). Diamond 20^3 (64,000 atoms) without symmetry: the local forces about 382 -> 5.1 s on one A100 (3.9 s of it the reciprocal series, `PARSEC_PERIODIC_FORCE_SERIES`); a molecular-dynamics step of 6^3 at Gamma on 16 ranks, one per GPU: 22.9 -> 9.8 s | `off`: the per-atom loop, bit for bit as before; host runs and oblique cells always keep it |
+| `PARSEC_GAMMA_HYBRID_SECTORS` | `auto` (since 2026-11-19): an unpolarized hybrid (PBE0, HSE, HF, native B3LYP) of a bulk orthorhombic cell at the Gamma point whose basis (grid points x `States_Num`) reaches 2^24 entries is solved in one process in the real sectors of its abelian group with the half-cell translations (`SCF/gamma_hybrid_route.py`, `driver._gamma_hybrid_in_sectors`; a hybrid keeps no weighted sectors), the exchange through one full-grid block (`PARSEC_CUPY_EXCHANGE_POOL`), the energies those of the full grid to the SCF convergence ("Hybrid functionals of periodic cells on the device"). One node of 4 A100, PBE0 SCF: Si64 31.2 -> 26.7 s (GPU 8.3 -> 3.7 GiB), diamond 216 atoms 45.4 -> 27.3 s, 512 atoms 337.4 -> 111.4 s. Smaller cells, spin, slabs, oblique cells, libxc and meta-GGA hybrids and the MPI runner keep their routes. `kpoint`: a large cell as the 1x1x1 k-point mesh of the reference solver in the k-point sectors of its little group (the same energies, 2-2.5x slower than the full grid on A100: kept for comparison) | `off`: the full grid of one process, bit for bit as before |
+| `PARSEC_CUPY_EXCHANGE_POOL` | `auto` (since 2026-11-19): the device Fock loop of sector orbitals of a periodic cell at the Gamma point (`PARSEC_GAMMA_HYBRID_SECTORS=auto`; their pair densities have no parity classes, the cuFFT pair solver of the cell takes the full grid) unfolds them once into one full-grid block, forms its `W` with the tiles of the full grid and folds it back to every sector once (`Hamiltonian/exchange_device.py::_apply_pooled_exchange`). Si64 PBE0 exchange 13-21 s -> 2.9 s per run. Since the review of 2026-11-19 a build takes the block only where it fits the free memory of its device (the block, its `W`, the tile and fold work and 2 % of the device, `pooled_exchange_fits`), else the tiles of `off` (the pair solver of each Fock iteration in `parsec.out` names the builds of that step that took them, "in k of n builds", the summary those of the run; each run of the cached solver, such as the next structure, starts without the record of the one before); the build of every column frees the block of the occupied build it completes (before, it stayed on the device through the next inner loop: 2 x 8 N M bytes, 4 x at the next build; one node of 4 A100, PBE0, the same energies and SCF times: GPU 0 peak of diamond 512 atoms 19.3 -> 13.6 GiB, of Si64 3.7 -> 3.1 GiB). A wrong value is refused at setup | `off`: the tiles pair the blocks of every sector, each unfolded where a tile reads it |
+| `PARSEC_GAMMA_SPIN_SECTORS` | `auto` (since 2026-11-19): a collinear spin-polarized bulk orthorhombic cell at the Gamma point with a native LDA or GGA (no LDA+U, TS, hybrid, meta-GGA, libxc or spin-orbit species), a single point in one process on CuPy or in the full-SCF runner, solves both channels in the abelian sectors of the cell with the half-cell translations (`SCF/gamma_spin.py`), with the guard of `Spin_Symmetry_Sectors` (README "Spin-polarized cells at the Gamma point"). V- in diamond 5^3 (999 atoms, S = 3/2): one process on one node SCF 40.6 -> 24.6 s, 10.4 -> 4.4 GB; 16 A100, the runner with one rank per GPU SCF 3.1 s against 10.6 s of the k-point pools of `main.py --mpi`; energies within 1e-9 Ry of the 1x1x1 driver | `off`: the reference CLI's 1x1x1 k-point driver, refused by the runner, as before |
+| `PARSEC_SPIN_GUARD_CELL_GROUP` | `auto` (since 2026-11-19): the density test (test 2) of the spin guard of a bulk cell tests generators of the operations `r -> R r + t` of the atoms, about a defect off the origin as well. The Gamma sectors (`SCF/spin_sectors.py`, `atom_group_images`): those of the sector group, of the atoms found from their environments (the atoms of the rarest environment, at most 32, carried onto each other: a defect off the origin of any cell), or, where no environment is rare (a crystal of many cells), of the cell group the detection of the sectors built (about its symmetric site with the half-cell translations; `kpoint_sectors.recent_cell_group_operations`, no second search), and the signed permutations about the origin; those beyond the sector group to 1e-6 bohr at most whatever `PARSEC_SYMMETRY_ATOM_TOLERANCE` (the sectors average the Hamiltonian over their group alone, so an operation that holds the atoms only to a looser tolerance measures the structure: 0.028 electrons for a diamond vacancy 2^3 with its atoms 3e-4 bohr off at 1e-3); rows of the periodic grid, 32-bit; the group followed up to 32,768 operations, an operation about the origin that would take it beyond tested on its own (a perfect crystal about a bond centre keeps all 12 of D3d, its inversion included). The k-point sectors of a spin loop (`PARSEC_KPOINT_SECTOR_GUARD`, `kpoint_sectors.SectorGuardGroup`: the 1x1x1 driver of forces, relaxations, MD, `main.py --mpi` and `PARSEC_GAMMA_SPIN_SECTORS=off`, and k-point meshes): their cell group and the operations found from the environments that the potential is taken to be invariant under (all at a single Gamma point; on a mesh those that map it onto itself, D2d of Td for a k-point along z). Built once per structure in 0.02-0.13 s on the CPU of a node for 63-1,728 atoms, as before. A diamond vacancy at (a/2, a/2, 0), whose Gamma sectors are D2 about it: Td (24 operations) where the test of before had the swap of x and y; the neutral vacancy 2^3 at 10 K with test 1 deferred (as the unconverged start levels of a large cell defer it) keeps a broken t2^2 state with integer occupations under `off` and fires test 2 under `auto` with 0.6991 electrons, as at the origin; V- at and off the origin passes with the same bits as `off` (A100). The cell group of 3^3 cubes keeps the swap alone about that vacancy (its search of the translations gives up after 32 candidates), and so do its k-point sectors: the neutral vacancy on the 1x1x1 driver (215 atoms, 18 points per cube, 10 K, test 1 deferred) fires test 2 under `auto` at the end of its first loop with 1.448 electrons (the twofold axis about the vacancy; 73.7 s on one A100 node), at the origin with 0.561 electrons (13.6 s); under `off` test 2 measured 0 (the swap, which the sectors hold) and the state left the sectors through test 3 alone (0.110 electrons in a level of the t2 multiplet, 376 s with the loop that followed) | `off`: the signed permutations about the origin alone on the Gamma sectors and the cell group alone on the k-point sectors, as before; clusters are not affected |
 | `PARSEC_SPINOR_FILTER_COLUMNS` | `32` in the k-point pools, `64` on one device: columns per chunk of the filter recurrence, of `H X` and of the residuals; the random start basis is drawn 64 columns at a time whatever the chunk (bulk diamond on 16 A100, same nodes, energies the same to the digits printed: 1,728 atoms 33.1 -> 26.9 GiB, 216.6 -> 197.4 s; 2,744 atoms 63.5 -> 54.8 GiB, 622.6 -> 606.6 s; 1,000 atoms with a 4x4x4 mesh 162.1 -> 138.3 s) | `64`: the chunk of the pools before (their start basis was drawn by chunks, so another chunk started from another basis) |
 | `PARSEC_CUPY_STREAMING_RITZ` | `auto`: a symmetry sector whose basis lies on one device keeps one `N x m` array; `H X` is projected a slab of columns at a time and the basis is rotated in place | `0`: two arrays |
 | `PARSEC_CUPY_ROTATE_COLUMN_COPY` | `1`: the tiles of that rotation are written back along columns | `0` |
@@ -2951,8 +2957,11 @@ with `PARSEC_CUPY_BATCH_FILTERS=1`, not the default.
 #### Point groups of periodic cells
 
 A bulk cell at the Gamma point that the route of the sectors takes
-(`driver.periodic_sector_refusal`: orthorhombic, unpolarized, a native LDA or
-GGA; the CuPy backend) looks for its point group about the origin of the cell
+(`driver.periodic_sector_refusal`: orthorhombic, a native LDA or GGA,
+unpolarized or, since 2026-11-19, collinear spin (`PARSEC_GAMMA_SPIN_SECTORS`)
+and unpolarized hybrids of 2^24 basis entries or more
+(`PARSEC_GAMMA_HYBRID_SECTORS`), both in abelian sectors; the CuPy backend)
+looks for its point group about the origin of the cell
 (`PARSEC_PERIODIC_SYMMETRY=auto`, since 2026-11-16): the Cartesian signed
 permutations that map the atoms, species by species and modulo the lattice
 (nearest images, a periodic k-d tree), and the periodic grid onto themselves.
@@ -3741,7 +3750,52 @@ device paths:
   PBE of `evaluate_spin_xc` only with `on` (`HOST_UNLESS_ASKED`: the kernel of
   `pbe_spin`); CA on the host.
 - A Gamma-only spin run of a wire or slab takes the 1x1x1 k-point driver on
-  the device, as a 3-D cell does (`cli.py::_gamma_spin_on_kpoint_driver`).
+  the device (`cli.py::_gamma_spin_on_kpoint_driver`), as a 3-D cell does
+  outside the route below.
+
+#### Spin-polarized cells at the Gamma point
+
+Since 2026-11-19 (`PARSEC_GAMMA_SPIN_SECTORS=auto`, `SCF/gamma_spin.py`) a
+collinear spin-polarized bulk cell runs on the accelerated Gamma route of the
+sectors when it is orthorhombic, sampled at the Gamma point only, with a
+native LDA or GGA (no LDA+U, TS, hybrid, meta-GGA, libxc or spin-orbit
+species), as a single point in one process on CuPy or in the full-SCF runner.
+Both channels are solved in the abelian sectors of the cell: the commuting
+signed-permutation involutions with the half-cell translations (a perfect
+diamond supercell 32 operations, 28 of them with a translation; a vacancy at
+the origin D2, 4 sectors; O2 along z D2h, 8). The orbitals are real; the
+channel densities, potentials and mixer history keep one value per orbit;
+the Hartree potential of the total density is solved by the periodic FFT on
+the device and the spin functional (CA, PBE) runs on the device on the
+orbits. The guard of `Spin_Symmetry_Sectors` applies unchanged (a partly
+filled multiplet of the start Hamiltonian; a channel density that breaks the
+operations of the atoms, for a cell the operations `r -> R r + t` that map
+the atoms onto themselves modulo the lattice: those of the sector group,
+those found from the environments of the atoms (a defect off the origin of
+any cell: Td about it), those of the cell group about its symmetric site with
+the half-cell translations, and the signed permutations about the origin,
+all beyond the sector group to 1e-6 bohr at most whatever
+`PARSEC_SYMMETRY_ATOM_TOLERANCE`, `PARSEC_SPIN_GUARD_CELL_GROUP`; a fractional
+occupation of a multiplet at the end): when it fires, parsec.out prints its
+NOTE and the run starts again on the full grid of one device in the same
+driver. Partly filled degenerate defect levels, such as the neutral vacancy,
+end there. The 1x1x1 k-point driver that the routes below keep tests the
+operations of its k-point sectors and those found from the environments of
+the atoms (`PARSEC_KPOINT_SECTOR_GUARD`): test 2 of either driver takes Td
+about a diamond vacancy at or off the origin.
+`PARSEC_GAMMA_SPIN_SECTORS=off`, `Spin_Symmetry_Sectors: off`,
+`Symmetrize_Charge_Density`, `occup.in`, `Restart_Run`, forces, relaxations
+and molecular dynamics, band structures, `Polarizability`,
+`Energy_Refinement`, `main.py --mpi` and other backends keep the 1x1x1
+k-point driver. The full-SCF runner refuses spin cells only under `off` or
+`Spin_Symmetry_Sectors: off`, and spin forces and relaxations on several
+ranks. Measured with the benchmark diamond inputs (`Spin_Polarization`, PBE,
+500 K, 2e-4 Ry), V- in diamond 5^3 (999 atoms, S = 3/2): 16 A100, the runner
+with one rank per GPU SCF 3.1 s, total 7.9 s, 1.8 GiB per GPU, against SCF
+10.6 s, total 12.7 s of the k-point pools of `main.py --mpi`; one node in one
+process SCF 24.6 against 40.6 s, peak 4.4 against 10.4 GB. The energies agree
+with the 1x1x1 driver to about 1e-9 Ry at a 1e-9 criterion, the moments to
+1e-14.
 
 | switch | values |
 | --- | --- |
@@ -3877,6 +3931,29 @@ their numbers are the host's to round-off:
   real-to-complex cuFFT of the FFT box (a slab's box zero-padded along z and
   the potentials cropped), is multiplied by the half spectrum of `K(G)` and
   transformed back.
+  Since 2026-11-19 a bulk orthorhombic cell whose basis (grid points x
+  `States_Num`) reaches 2^24 entries is solved in the real one-dimensional
+  sectors of its abelian group with the half-cell translations (the Gamma
+  sector route, `PARSEC_GAMMA_HYBRID_SECTORS=auto`, `SCF/gamma_hybrid_route.py`;
+  a hybrid keeps no weighted sectors). The exchange unfolds the sector
+  orbitals once into one full-grid block (`PARSEC_CUPY_EXCHANGE_POOL=auto`),
+  the cuFFT pair solver of the cell solves its pair densities on the full
+  grid, and `W` is folded back to every sector, whose ACE block
+  `-a_x xi_G xi_G^T` joins its Hamiltonian. The energies are those of the
+  full grid to the SCF convergence. One node of 4 A100, PBE0 SCF: Si64
+  31.2 -> 26.7 s (GPU 8.3 -> 3.7 GiB), diamond 216 atoms 45.4 -> 27.3 s,
+  512 atoms 337.4 -> 111.4 s (GPU 37.1 -> 19.3 GiB, host 8.3 -> 1.8 GiB;
+  the exchange is then 69.7 s of it; GPU 13.6 GiB since the build of every
+  column frees the pooled block of the occupied build it completes, and the
+  block is taken only where it fits the free memory of its device, else the
+  tiles of the sectors). Smaller cells, `off`, slabs, oblique
+  cells and libxc or meta-GGA hybrids keep the full grid of one process; the
+  MPI runner refuses periodic hybrids. `PARSEC_GAMMA_HYBRID_SECTORS=kpoint`
+  hands a large cell to the reference solver as the 1x1x1 k-point mesh in
+  the k-point sectors of its little group (complex Bloch factors, the same
+  energies); it measured 2-2.5x slower than the full grid (the level passes
+  of the Fock loop leave the k-point sectors, and the sector tasks are
+  small) and is kept for comparison.
 - **k-points, and spin** (also spin at the Gamma point, the 1x1x1 Bloch loop
   of the reference solver): the reference CLI runs the Fock loop with the
   k-point drivers on the device k-point pool (`SCF/kpoint_parallel.py`, one

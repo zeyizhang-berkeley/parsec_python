@@ -64,9 +64,10 @@ symmetrized over, ``KPointSectors.assumed``).  A spin-polarized state that break
 Jahn-Teller or magnetic order) cannot be held, as on the sectors of a cluster (``Spin_Symmetry_Sectors``,
 :mod:`.spin_sectors`), and the same three tests guard a spin-polarized loop (``PARSEC_KPOINT_SECTOR_GUARD=auto``):
 no partly filled multiplet across the sectors of such a k-point in the start Hamiltonian, channel densities
-invariant under the operations assumed (:class:`SectorGuardGroup`) at the end, and with Fermi-Dirac occupations no
-fractional occupation of such a multiplet at the end, each weighted by its k-point (the electrons it adds to the
-density).  A loop that fails one runs again with one task per k-point
+invariant under the operations assumed (:class:`SectorGuardGroup`; with those of the atoms found from their
+environments, about a defect off the origin as well, ``PARSEC_SPIN_GUARD_CELL_GROUP``) at the end, and with
+Fermi-Dirac occupations no fractional occupation of such a multiplet at the end, each weighted by its k-point (the
+electrons it adds to the density).  A loop that fails one runs again with one task per k-point
 (:func:`parsec_python.SCF.kpoints.run_scf_kpoints_spin_polarized`).  An unpolarized loop is not tested, as the
 unpolarized sectors of a cluster are not.
 """
@@ -269,15 +270,74 @@ class LittleGroupReduction(SignedPermutationReduction):
     atom_orbit_sizes: np.ndarray = None
 
 
+def _cell_group_key(grid, atoms, atom_tolerance: float, lattice_tolerance: float) -> bytes:
+    """What the operations of :class:`CellGroup` depend on, hashed: the atoms, the cell and its grid, the tolerances
+    and the switches its search reads."""
+
+    import hashlib
+
+    digest = hashlib.blake2b(digest_size=32)
+    digest.update(repr(tuple(atom.symbol for atom in atoms)).encode())
+    digest.update(np.ascontiguousarray([atom.position for atom in atoms], dtype=np.float64).tobytes())
+    digest.update(np.ascontiguousarray(grid.points_per_axis, dtype=np.int64).tobytes())
+    digest.update(np.ascontiguousarray(grid.cell.lattice_vectors, dtype=np.float64).tobytes())
+    digest.update(np.ascontiguousarray(grid.settings.shift, dtype=np.float64).tobytes())
+    digest.update(
+        repr(
+            (
+                type(grid).__name__,
+                tuple(getattr(grid, "boundary_modes", ())),
+                bool(getattr(grid, "is_orthorhombic", False)),
+                int(grid.size),
+                float(atom_tolerance),
+                float(lattice_tolerance),
+                tuple(
+                    os.environ.get(name, "")
+                    for name in (
+                        "PARSEC_PERIODIC_TRANSLATIONS",
+                        "PARSEC_PERIODIC_SYMMETRY_CENTRE",
+                        "PARSEC_PERIODIC_UNEQUAL_STEPS",
+                    )
+                ),
+            )
+        ).encode()
+    )
+    return digest.digest()
+
+
+# The operations of the last cell group built: (key, matrices, shifts) (recent_cell_group_operations).
+_RECENT_CELL_GROUP: tuple | None = None
+_RECENT_CELL_GROUP_LOCK = threading.Lock()
+
+
+def recent_cell_group_operations(grid, atoms, *, atom_tolerance: float = 1.0e-7, lattice_tolerance: float = 1.0e-10):
+    """``(matrices, shifts)`` of the :class:`CellGroup` of these very inputs where it is the last one built (the
+    detection of the sectors of a cell builds it: the symmetry guard of the spin sectors reads it here instead of
+    searching again, :mod:`.spin_sectors`), else ``None``.  The identity first, as :class:`CellGroup` holds them."""
+
+    try:
+        key = _cell_group_key(grid, atoms, atom_tolerance, lattice_tolerance)
+    except (AttributeError, TypeError, ValueError):
+        return None
+    with _RECENT_CELL_GROUP_LOCK:
+        recent = _RECENT_CELL_GROUP
+    if recent is None or recent[0] != key:
+        return None
+    return list(recent[1]), list(recent[2])
+
+
 class CellGroup:
     """The operations ``r -> R r + t`` of a bulk orthorhombic cell (the identity first) and their group table.
 
     Those of the sectors of the Gamma point (:func:`..Symmetry.axis_reflection._space_group_operations`): with the
     operations whose translation is a fraction of the cell where they close into a group, else the half-cell
-    translations alone.  ``table`` is ``None`` where the operations form no group.
+    translations alone.  ``table`` is ``None`` where the operations form no group.  The operations of the last group
+    built are kept for :func:`recent_cell_group_operations` (a few hundred small arrays, no reference to the grid).
     """
 
     def __init__(self, grid, atoms, *, atom_tolerance: float = 1.0e-7, lattice_tolerance: float = 1.0e-10) -> None:
+        global _RECENT_CELL_GROUP
+
         self.grid = grid
         self.atoms = tuple(atoms)
         self.atom_tolerance = float(atom_tolerance)
@@ -301,6 +361,18 @@ class CellGroup:
             self.shifts = shifts
             self.table = table
             break
+        if self.table is not None:
+            try:
+                key = _cell_group_key(grid, self.atoms, self.atom_tolerance, self.lattice_tolerance)
+            except (AttributeError, TypeError, ValueError):
+                key = None
+            if key is not None:
+                with _RECENT_CELL_GROUP_LOCK:
+                    _RECENT_CELL_GROUP = (
+                        key,
+                        tuple(matrix.copy() for matrix in self.matrices),
+                        tuple(shift.copy() for shift in self.shifts),
+                    )
 
     @property
     def order(self) -> int:
@@ -475,22 +547,38 @@ class PotentialInvariance:
         return found
 
     def _in_density_group(self, index: int) -> bool:
+        return self.symmetrized_over(self.cell.matrices[index], self.cell.shifts[index])
+
+    def symmetrized_over(self, matrix, shift) -> bool:
+        """Whether the density is symmetrized over ``r -> R r + t`` (``t`` in grid steps; any such operation of the
+        grid, also one outside the cell group: :meth:`admits`)."""
+
         if self._sample is None:
             return False
-        sampled = self.cell.row_map(index, self._sample)
+        grid, tolerance = self.cell.grid, self.cell.lattice_tolerance
+        sampled = _grid_row_mapping_operation(grid, matrix, tolerance, self._sample, translation=shift)
         if sampled is None:
             return False
         hits = np.flatnonzero(np.all(self._sampled == sampled[None, :], axis=1))
         if hits.size == 0:
             return False
         if self._row_table is None and _fast_maps_requested():
-            self._row_table = _RowOrderTable(self.cell.grid)
-        whole = self.cell.row_map(index, table=self._row_table)
+            self._row_table = _RowOrderTable(grid)
+        whole = _grid_row_mapping_operation(grid, matrix, tolerance, table=self._row_table, translation=shift)
         if whole is None:
             return False
         images = np.asarray(self.symmetry.images)
         # the maps of a group are the same set in either direction (it holds the inverses)
         return any(np.array_equal(images[hit], whole) for hit in hits)
+
+    def admits(self, matrix, shift) -> bool:
+        """:meth:`__call__` for an operation ``r -> R r + t`` of the atoms given by itself (one the cell group may
+        not hold: those found from the environments of the atoms, :class:`SectorGuardGroup`)."""
+
+        matrix = np.asarray(matrix)
+        if np.array_equal(matrix, np.eye(3, dtype=matrix.dtype)):
+            return True
+        return self.symmetrized_over(matrix, shift) or self._maps_kpoints(matrix)
 
     def _maps_kpoints(self, matrix: np.ndarray) -> bool:
         rotated = (self.k_points @ matrix.astype(np.float64).T) @ self.lattice.T / (2.0 * np.pi)
@@ -516,12 +604,24 @@ class SectorGuardGroup:
     density is symmetrized over (whose invariance holds by construction): a generating set of the subgroup they
     generate together, chosen in the order of the operations (the closure grows by right products, through the
     group table).  ``rows`` of an operation are the grid rows of its images ``R r + t``.
+
+    With ``environments`` (``PARSEC_SPIN_GUARD_CELL_GROUP=auto``, the default) the operations of the atoms found from
+    their environments follow (:func:`.spin_sectors._environment_operations`, at the atom tolerance of the cell group
+    and at most 1e-6 bohr), those the potential is taken to be invariant under and the subgroup so far does not hold
+    (:meth:`PotentialInvariance.admits`; at a single Gamma point all of them).  The cell group misses most of the
+    operations about a defect off the origin of a cell larger than 2 x 2 x 2 diamond cubes (its search of the
+    translation of each operation gives up after 32 candidates; a vacancy at ``(a/2, a/2, 0)`` of 3 x 3 x 3 cubes
+    keeps the swap of x and y), and so do its sectors: a broken state that fills two partners of the t2 level of
+    one sector of that swap would pass a test of the swap alone, and the test would fire on the same cell with the
+    vacancy at the origin.  These operations are given as their affine ``[[R, t], [0, 1]]`` (``t`` in grid steps) in
+    place of an index of the cell group.
     """
 
-    def __init__(self, cell: CellGroup, invariance: PotentialInvariance) -> None:
+    def __init__(self, cell: CellGroup, invariance: PotentialInvariance, *, environments: bool = False) -> None:
         self.cell = cell
         self.invariance = invariance
-        self._images: list[tuple[int, np.ndarray]] | None = None
+        self.environments = bool(environments)
+        self._images: list[tuple[int | np.ndarray, np.ndarray]] | None = None
 
     def _close(self, closure: set[int], generators: list[int]) -> None:
         table = self.cell.table
@@ -536,8 +636,9 @@ class SectorGuardGroup:
                         fresh.append(product_)
             frontier = fresh
 
-    def images(self) -> list[tuple[int, np.ndarray]]:
-        """``(operation, rows)`` of the operations to test (built once)."""
+    def images(self) -> list[tuple[int | np.ndarray, np.ndarray]]:
+        """``(operation, rows)`` of the operations to test (built once): ``operation`` the index of one of the cell
+        group, or the affine matrix of one found from the environments."""
 
         if self._images is not None:
             return self._images
@@ -549,7 +650,7 @@ class SectorGuardGroup:
             if index not in closure:
                 generators.append(index)
                 self._close(closure, generators)
-        tested: list[tuple[int, np.ndarray]] = []
+        tested: list[tuple[int | np.ndarray, np.ndarray]] = []
         table = _RowOrderTable(self.cell.grid) if _fast_maps_requested() else None
         for index in admitted:
             if index in closure:
@@ -560,12 +661,67 @@ class SectorGuardGroup:
             generators.append(index)
             self._close(closure, generators)
             tested.append((index, np.asarray(rows, dtype=np.int64)))
+        if self.environments:
+            tested += self._environment_images(generators, table)
         self._images = tested
         return tested
 
-    def operation_text(self, index: int) -> str:
-        matrix = np.asarray(self.cell.matrices[index], dtype=int).tolist()
-        shift = np.asarray(self.cell.shifts[index], dtype=int).tolist()
+    def _environment_images(self, generators: list[int], table) -> list[tuple[np.ndarray, np.ndarray]]:
+        """``(affine, rows)`` of the operations found from the environments of the atoms that the subgroup of
+        ``generators`` (of the cell group) does not hold and the potential is taken to be invariant under: those the
+        density is symmetrized over join that group untested, the others are tested (see the class)."""
+
+        from parsec_python.Forces.symmetry import POSITION_TOLERANCE
+
+        from .spin_sectors import _GUARD_GROUP_LIMIT, _AffineClosure, _affine, _environment_operations, _is_diagonal
+
+        cell = self.cell
+        try:
+            found = _environment_operations(cell.grid, cell.atoms, min(cell.atom_tolerance, POSITION_TOLERANCE))
+        except ValueError:
+            found = None
+        if not found:
+            return []
+        group = _AffineClosure(cell.counts)
+        for index in generators:
+            group.add(_affine(cell.matrices[index], cell.shifts[index]))
+
+        def kind(affine) -> int:
+            # the translations first, then the sign changes, then the others
+            matrix = affine[:3, :3]
+            return 0 if np.array_equal(matrix, np.eye(3)) else 1 if _is_diagonal(matrix) else 2
+
+        admitted, free = [], []
+        for affine in sorted(found, key=kind):
+            affine[:3, 3] = np.mod(affine[:3, 3], cell.counts)
+            if affine in group:
+                continue
+            if self.invariance.symmetrized_over(affine[:3, :3], affine[:3, 3]):
+                free.append(affine)
+            elif self.invariance.admits(affine[:3, :3], affine[:3, 3]):
+                admitted.append(affine)
+        for affine in free:
+            if affine not in group:
+                group.add(affine, limit=_GUARD_GROUP_LIMIT)
+        tested: list[tuple[np.ndarray, np.ndarray]] = []
+        for affine in admitted:
+            if affine in group:
+                continue
+            rows = _grid_row_mapping_operation(
+                cell.grid, affine[:3, :3], cell.lattice_tolerance, table=table, translation=affine[:3, 3]
+            )
+            if rows is None or not group.add(affine, limit=_GUARD_GROUP_LIMIT):
+                continue
+            tested.append((affine, np.asarray(rows, dtype=np.int64)))
+        return tested
+
+    def operation_text(self, operation) -> str:
+        if isinstance(operation, (int, np.integer)):
+            matrix = np.asarray(self.cell.matrices[operation], dtype=int).tolist()
+            shift = np.asarray(self.cell.shifts[operation], dtype=int).tolist()
+        else:
+            operation = np.asarray(operation, dtype=int)
+            matrix, shift = operation[:3, :3].tolist(), operation[:3, 3].tolist()
         return f"{matrix} + {shift} grid steps"
 
 
@@ -853,7 +1009,10 @@ def plan_sectors(job: KPointJob) -> list[KPointSectors | None] | None:
         plans.append(plan)
     if not any(plan is not None for plan in plans):
         return None
-    guard = SectorGuardGroup(cell, invariance)
+    from .spin_sectors import spin_guard_cell_group_setting
+
+    # (read here, before the first solve: a bad value stops the run before its first loop)
+    guard = SectorGuardGroup(cell, invariance, environments=spin_guard_cell_group_setting() == "auto")
     for plan in plans:
         if plan is not None:
             plan.guard_group = guard
