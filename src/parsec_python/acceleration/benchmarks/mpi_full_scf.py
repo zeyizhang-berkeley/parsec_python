@@ -260,6 +260,35 @@ def _serial_control_notes(cache):
     return lines
 
 
+def _placement_record(context):
+    """The placement of the sectors of a configured context: the rule and the ranks of every sector."""
+    from parsec_python.acceleration.experimental.mpi_scf import sector_placement_setting
+
+    try:
+        rule = sector_placement_setting()
+    except ValueError as exc:
+        rule = str(exc)
+    return dict(rule=rule, shared=bool(getattr(context, 'shared', False)),
+                divided_bases=bool(getattr(context, 'divided_bases', False)),
+                rank_groups=[list(group) for group in getattr(context, 'rank_groups', ())])
+
+
+def _placement_line(context):
+    """The line of parsec.out that names the ranks of every sector, or ``None`` (no context, one sector)."""
+    groups = tuple(getattr(context, 'rank_groups', ()) or ()) if context is not None else ()
+    if len(groups) < 2:
+        return None
+    by_group = {}
+    for sector, ranks in enumerate(groups):
+        by_group.setdefault(tuple(ranks), []).append(sector)
+    parts = []
+    for ranks, sectors in sorted(by_group.items()):
+        who = f'rank {ranks[0]}' if len(ranks) == 1 else f'ranks {ranks[0]}-{ranks[-1]}'
+        parts.append(f"{who}: {' '.join(str(sector) for sector in sectors)}")
+    record = _placement_record(context)
+    return f"Sector placement ({record['rule']}): " + '; '.join(parts)
+
+
 def _shared_first_solve_note(context, method):
     """The NOTE of a run whose ranks share sectors but whose first solve does not divide their bases, or ``None``.
 
@@ -1000,9 +1029,10 @@ def execute(args, cp, comm, MPI, initialization_seconds, initial_affinity=None):
         raise ValueError('--serial-control requires exactly one MPI rank')
     hosts = comm.allgather(socket.gethostname())
     # One rank per node divides the symmetry sectors among the nodes; several ranks per node, one GPU each,
-    # share the basis of the single sector of a run without symmetry, or, more ranks than sectors, the sectors
-    # of a symmetric run in groups of ranks that may span nodes (Eigensolvers/mpi_shared_basis.py,
-    # experimental/mpi_scf.sector_rank_groups).
+    # share the basis of the single sector of a run without symmetry, or the sectors of a symmetric run in groups
+    # of ranks that may span nodes and, after a CHEBFF first solve, solve several sectors one after another
+    # (Eigensolvers/mpi_shared_basis.py, experimental/mpi_scf.sector_rank_plan; placed by size unless
+    # PARSEC_SECTOR_PLACEMENT=cyclic).
     per_node = {host: hosts.count(host) for host in hosts}
     shared_ranks = size > 1 and max(per_node.values()) > 1
     if shared_ranks and len(set(per_node.values())) != 1:
@@ -1143,6 +1173,11 @@ def execute(args, cp, comm, MPI, initialization_seconds, initial_affinity=None):
         context.shared_ritz_route = 'block'
         # One GPU per rank: more ranks than the sectors of a symmetric run share them in groups.
         context.gpu_per_rank = shared_ranks
+        # A CHEBFF first solve divides each shared basis among the ranks of its group, so that a group may solve
+        # several sectors one after another where that balances the ranks better (PARSEC_SECTOR_PLACEMENT=size,
+        # experimental/mpi_scf.sector_rank_plan); after another one every rank holds the whole bases of its group.
+        context.divided_bases = str(getattr(getattr(translation.problem, 'eigensolver', None), 'method',
+                                            '')).strip().lower() == 'chebff'
     if context is not None and comm.size > 1:
         # An error of some ranks inside a step of a shared basis leaves the others in a collective that no
         # command of the context reaches: report it here and end the job (mpi_shared_basis.set_failure_handler).
@@ -1240,6 +1275,9 @@ def execute(args, cp, comm, MPI, initialization_seconds, initial_affinity=None):
                 context, getattr(getattr(translation.problem, 'eigensolver', None), 'method', 'chebff'))
             if shared_note is not None:
                 log.write(shared_note)
+            placement_line = _placement_line(context)
+            if placement_line is not None:
+                log.write(placement_line)
         if periodic and (translation.compute_forces or translation.relaxation is not None
                          or translation.molecular_dynamics is not None):
             # The sectors of a point group complete the forces over its full group (every rank decides alike).
@@ -1492,6 +1530,8 @@ def execute(args, cp, comm, MPI, initialization_seconds, initial_affinity=None):
         external_module_wall_seconds_through_archive=time.perf_counter()-_MODULE_STARTED,
         owned_sectors=None if context is None else context.owned_sectors,
         device_groups=None if context is None else context.device_groups,
+        # How the sectors were placed (PARSEC_SECTOR_PLACEMENT) and the ranks of every sector.
+        sector_placement=None if context is None else _placement_record(context),
         command_counts=None if context is None else context.command_counts,
         command_seconds=None if context is None else context.command_seconds,
         density_pool_release=getattr(density_builder, 'pool_release', None),

@@ -56,13 +56,45 @@ def _fast_maps_requested() -> bool:
     }
 
 
+_UNEQUAL_STEPS_SWITCH = "PARSEC_PERIODIC_UNEQUAL_STEPS"
+
+
+def periodic_unequal_steps_setting() -> str:
+    """``PARSEC_PERIODIC_UNEQUAL_STEPS``: ``auto`` (default) gives a bulk cell with its sides along the axes whose grid
+    has a different step on some axes (an orthorhombic or tetragonal cell on the grid of the input-file parser,
+    ``points_rule="fortran"``: sides 10.26 x 10.26 x 15.1 bohr at 0.5 bohr take 20 x 20 x 30 points) the sectors of its
+    point group: the mirrors and two-fold rotations of every axis, and the exchanges of axes of the same count and
+    side; ``off`` keeps such a cell on the full grid, as before."""
+
+    return _auto_or_off(_UNEQUAL_STEPS_SWITCH)
+
+
+def unequal_step_grid(grid) -> bool:
+    """Whether ``grid`` is a bulk cell of the default routines with its sides along the axes whose steps differ (the
+    grid :func:`_lattice_period` takes under ``PARSEC_PERIODIC_UNEQUAL_STEPS=auto``; its operators carry one step per
+    axis: :func:`parsec_python.acceleration.Symmetry.sector_stencil.axis_stencil_values`)."""
+
+    from parsec_python.Grid.pbc import PeriodicRealSpaceGrid
+
+    if type(grid) is not PeriodicRealSpaceGrid or getattr(grid, "is_orthorhombic", True):
+        return False
+    if getattr(getattr(grid, "settings", None), "fortran_routines", False):
+        return False
+    if tuple(getattr(grid, "boundary_modes", ())) != ("wrap", "wrap", "wrap"):
+        return False
+    lattice = np.asarray(grid.cell.lattice_vectors, dtype=np.float64)
+    return bool(np.all(np.abs(lattice - np.diag(np.diag(lattice))) <= 1.0e-10) and np.all(np.diag(lattice) > 0.0))
+
+
 def _lattice_period(grid) -> np.ndarray | None:
     """The side lengths of the cell of a periodic grid, or ``None`` for a cluster grid.
 
     The atoms of a periodic cell match their images modulo the lattice.  The Cartesian signed permutations
     about the origin are operations of the lattice only for an orthorhombic cell with its sides along the axes,
     periodic along all three (a bulk cell); any other periodic grid is refused here, and the caller keeps the
-    full grid.
+    full grid.  A cell of that shape whose grid steps differ between the axes (:func:`unequal_step_grid`) is taken
+    under ``PARSEC_PERIODIC_UNEQUAL_STEPS=auto``: :func:`_integer_signed_permutation_parameters` exchanges only axes
+    of the same count and side, so every operation it admits maps the grid onto itself.
     """
 
     if not (hasattr(grid, "cell") and hasattr(grid, "points_per_axis")):
@@ -70,10 +102,13 @@ def _lattice_period(grid) -> np.ndarray | None:
     if tuple(getattr(grid, "boundary_modes", ())) != ("wrap", "wrap", "wrap"):
         raise ValueError("point-group sectors of a periodic grid need a bulk cell (periodic along three axes)")
     lattice = np.asarray(grid.cell.lattice_vectors, dtype=np.float64)
-    if not getattr(grid, "is_orthorhombic", False) or np.any(np.abs(lattice - np.diag(np.diag(lattice))) > 1.0e-10):
+    if (
+        not getattr(grid, "is_orthorhombic", False) or np.any(np.abs(lattice - np.diag(np.diag(lattice))) > 1.0e-10)
+    ) and not (unequal_step_grid(grid) and periodic_unequal_steps_setting() == "auto"):
         raise ValueError(
             "point-group sectors of a periodic grid need an orthorhombic cell with its sides along the axes "
             "and one grid step"
+            + (" (PARSEC_PERIODIC_UNEQUAL_STEPS=off)" if unequal_step_grid(grid) else "")
         )
     return np.ascontiguousarray(np.diag(lattice), dtype=np.float64)
 
@@ -1105,6 +1140,50 @@ class PointGroupReduction(SignedPermutationReduction):
     def coset_count(self) -> int:
         return int(self.coset_images.shape[0])
 
+    def _partner_candidates(self, positions) -> list[int] | None:
+        """Where in ``positions`` (indices of operations of the full group) the left cosets ``g H`` begin.
+
+        The positions of the first operation of every left coset other than ``H`` itself, in their order, from
+        the group table of the operations with their translations (:func:`.orbital_groups.multiplication_table`,
+        ``table[g, h] = g h``); ``None`` where that table cannot be formed or ``H`` is not among the operations.
+        """
+
+        from .orbital_groups import _key, _reduced, multiplication_table
+
+        full = np.asarray(self.full_operations, dtype=np.int64)
+        subgroup = np.asarray(self.operations, dtype=np.int64)
+        periodic = self.full_translations is not None and self.grid is not None
+        modulus = np.asarray(self.grid.points_per_axis, dtype=np.int64) if periodic else None
+        full_shifts = (
+            np.asarray(self.full_translations, dtype=np.int64) if periodic else np.zeros((full.shape[0], 3), np.int64)
+        )
+        subgroup_shifts = (
+            np.asarray(self.translations, dtype=np.int64)
+            if periodic and self.translations is not None
+            else np.zeros((subgroup.shape[0], 3), np.int64)
+        )
+        elements = [_affine_matrix(operation, shift) for operation, shift in zip(full, full_shifts)]
+        try:
+            table = multiplication_table(elements, modulus=modulus)
+        except ValueError:
+            return None
+        index = {_key(_reduced(element, modulus)): number for number, element in enumerate(elements)}
+        members = []
+        for operation, shift in zip(subgroup, subgroup_shifts):
+            number = index.get(_key(_reduced(_affine_matrix(operation, shift), modulus)))
+            if number is None:
+                return None
+            members.append(number)
+        members = np.asarray(members, dtype=np.int64)
+        seen = {frozenset(int(element) for element in members)}
+        candidates = []
+        for position, operation in enumerate(positions):
+            coset = frozenset(int(element) for element in table[int(operation), members])
+            if coset not in seen:
+                seen.add(coset)
+                candidates.append(position)
+        return candidates
+
     def partner_states(self, vectors: np.ndarray, weights: np.ndarray) -> np.ndarray:
         """Full-grid states with the partners of every weighted one: ``sum(weights)`` columns.
 
@@ -1137,6 +1216,14 @@ class PointGroupReduction(SignedPermutationReduction):
         ]
         operations = [full[index] for index in kept]
         operation_shifts = [shifts[index] for index in kept]
+        # The images of a state of a sector under the operations of one left coset g H are the same state up to its
+        # character (g h psi = lambda(h) g psi): only the first operation of every coset but H's in the order of
+        # the operations can give a new partner, and the others leave every state as it was, bit for bit
+        # (PARSEC_PARTNER_STATE_COSETS=off tries every operation, as before).
+        candidates = (
+            self._partner_candidates(kept) if partner_state_cosets_setting() == "auto" else None
+        )
+        everything = range(len(operations))
         cache: dict[int, np.ndarray] = {}
 
         def row_map(index: int) -> np.ndarray:
@@ -1157,17 +1244,20 @@ class PointGroupReduction(SignedPermutationReduction):
             if weight == 1:
                 column += 1
                 continue
-            kept = [state / np.linalg.norm(state)]
-            for operation in range(len(operations)):
+            for tried in ((everything,) if candidates is None else (candidates, everything)):
+                kept = [state / np.linalg.norm(state)]
+                for operation in tried:
+                    if len(kept) == weight:
+                        break
+                    image = np.empty_like(state)
+                    image[row_map(operation)] = state
+                    for basis in kept:
+                        image -= np.dot(basis, image) * basis
+                    norm = np.linalg.norm(image)
+                    if norm > 1.0e-6 * np.linalg.norm(state):
+                        kept.append(image / norm)
                 if len(kept) == weight:
                     break
-                image = np.empty_like(state)
-                image[row_map(operation)] = state
-                for basis in kept:
-                    image -= np.dot(basis, image) * basis
-                norm = np.linalg.norm(image)
-                if norm > 1.0e-6 * np.linalg.norm(state):
-                    kept.append(image / norm)
             if len(kept) != weight:
                 raise RuntimeError("the images of a weighted state give too few partners")
             scale = np.linalg.norm(state)
@@ -1246,6 +1336,18 @@ _ATOM_TOLERANCE_SWITCH = "PARSEC_SYMMETRY_ATOM_TOLERANCE"
 DEFAULT_ATOM_TOLERANCE = 1.0e-7
 #: the distance (bohr) within which :func:`lost_operations_note` looks for the operations a tolerance lost
 LOOSE_ATOM_TOLERANCE = 1.0e-3
+
+
+_PARTNER_STATE_COSETS_SWITCH = "PARSEC_PARTNER_STATE_COSETS"
+
+
+def partner_state_cosets_setting() -> str:
+    """``PARSEC_PARTNER_STATE_COSETS``: ``auto`` (default) forms the partners of the weighted states of a
+    :class:`PointGroupReduction` (:meth:`PointGroupReduction.partner_states`, the full-grid orbitals of a result)
+    from the first operation of every left coset of the subgroup, the same states bit for bit; ``off`` tries every
+    operation of the full group in turn, as before (67 of the 80 s of a SCF of Si 4x4x4 on one A100 node)."""
+
+    return _auto_or_off(_PARTNER_STATE_COSETS_SWITCH)
 
 
 def periodic_trivial_origin_setting() -> str:
@@ -2093,7 +2195,13 @@ def detect_point_group_reduction(
     plan = orbital_group_plan(elements, modulus=modulus, required=required)
     # Taken where it solves at most PARSEC_ORBITAL_GROUP_MAX_COST of what the abelian group does (Td, Oh, T, Th: a
     # half to a quarter; D4h, D2d, D4, C4v: three quarters, the partner sectors of their E levels merged); a smaller
-    # gain keeps the group of before.
+    # gain keeps the group of before.  ``abelian`` is the group about the origin; a cell refused here takes its
+    # commuting involutions with translations (periodic_abelian_reduction; in every cell measured the abelian candidate
+    # of the plan), which solves no fewer rows x states than the plan in more sectors: on A100 the time of an SCF
+    # iteration follows the sectors per device times their rows x states, the same per sector on both routes (Si
+    # 4x4x4 on one node: 0.57 s per iteration with 10 weighted sectors, 1.71 s with 32 abelian ones; Si 3x3x2, 3/4 of
+    # the rows x states: 0.82 of the time), so the plan is the faster route also where it saves less than this
+    # threshold asks of the cell's abelian group (tests/test_plan_cost.py).
     if not plan.cost <= orbital_group_max_cost() / abelian.group_order + 1.0e-12:
         return abelian
     subgroup = [candidates[index] for index in plan.subgroup]

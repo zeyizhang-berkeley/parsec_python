@@ -142,11 +142,13 @@ static __device__ __forceinline__ double vector_sample(const double* flux, index
     return sample;
 }
 
-// pbe.py density_gradient / discrete_gga: (D f)_a at every value, 3 x count.
+// pbe.py density_gradient / discrete_gga: (D f)_a at every value, 3 x count.  The weights of axis a start at
+// weights + a * axis_stride: 0 for a grid of one spacing (one row of 2M+1 weights), 2M+1 for a periodic cell whose
+// steps differ between the axes (a row of weights / h_a per axis).
 #ifdef KERNEL_xc_gradient
 extern "C" __global__ void xc_gradient(
     index_t count, const double* values, const int* value_of_box, const int* positions,
-    int n0, int n1, int n2, int periodic, int width, const double* weights, double* gradient) {
+    int n0, int n1, int n2, int periodic, int width, int axis_stride, const double* weights, double* gradient) {
     index_t w = (index_t)blockIdx.x * blockDim.x + threadIdx.x;
     if (w >= count) return;
     const int lengths[3] = {n0, n1, n2};
@@ -154,13 +156,14 @@ extern "C" __global__ void xc_gradient(
     BoxPoint point = box_point((index_t)positions[w], n1, n2);
     double center = values[w];
     for (int axis = 0; axis < 3; ++axis) {
-        double sum = center * weights[width];
+        const double* axis_weights = weights + axis * axis_stride;
+        double sum = center * axis_weights[width];
         for (int j = -width; j < 0; ++j) {
             double left = scalar_sample(values, value_of_box,
                                         box_neighbor(point, axis, j, lengths, strides, periodic));
             double right = scalar_sample(values, value_of_box,
                                          box_neighbor(point, axis, -j, lengths, strides, periodic));
-            sum += (left - right) * weights[width + j];
+            sum += (left - right) * axis_weights[width + j];
         }
         gradient[axis * count + w] = sum;
     }
@@ -173,7 +176,7 @@ extern "C" __global__ void xc_gradient(
 extern "C" __global__ void xc_adjoint(
     index_t count, const double* flux, const int* value_of_box, const unsigned char* flips,
     int use_flips, const signed char* table, const int* positions, int n0, int n1, int n2, int periodic, int width,
-    const double* negated_weights, const double* base, double scale, double* out) {
+    int axis_stride, const double* negated_weights, const double* base, double scale, double* out) {
     index_t w = (index_t)blockIdx.x * blockDim.x + threadIdx.x;
     if (w >= count) return;
     const int lengths[3] = {n0, n1, n2};
@@ -182,13 +185,14 @@ extern "C" __global__ void xc_adjoint(
     double total = base[w];
     for (int axis = 0; axis < 3; ++axis) {
         const double* component = flux + axis * count;
-        double sum = component[w] * negated_weights[width];
+        const double* axis_weights = negated_weights + axis * axis_stride;
+        double sum = component[w] * axis_weights[width];
         for (int j = -width; j < 0; ++j) {
             double left = vector_sample(flux, count, value_of_box, flips, use_flips, table,
                                         box_neighbor(point, axis, j, lengths, strides, periodic), axis);
             double right = vector_sample(flux, count, value_of_box, flips, use_flips, table,
                                          box_neighbor(point, axis, -j, lengths, strides, periodic), axis);
-            sum += (left - right) * negated_weights[width + j];
+            sum += (left - right) * axis_weights[width + j];
         }
         total += sum;
     }

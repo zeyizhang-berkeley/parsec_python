@@ -16,7 +16,9 @@ arrays from exactly that description and visits no other row.
 The result is that of the former route with its native reduction, element
 for element.  That fixes three things:
 
-* the stencil values are those of ``build_negative_laplacian_buffers``;
+* the stencil values are those of ``build_negative_laplacian_buffers`` (a
+  periodic cell whose grid steps differ between the axes: those of its
+  full-grid matrix, one set per axis, :func:`axis_stencil_values`);
 * entries of a row with the same sector column are added in ascending order of
   their full-grid column, as ``reduce_sector_csr`` adds them, and a sum that is
   exactly zero is dropped;
@@ -26,8 +28,9 @@ for element.  That fixes three things:
 Two implementations exist.  The C++/OpenMP kernel ``build_sector_stencil``
 is used when the installed extension has it.  The NumPy one needs no
 extension and gives the same arrays; it serves an extension built before the
-kernel existed.  Both compare every entry with its transpose, the audit the
-former route made on the reduced CSR.
+kernel existed, and every periodic cell (the kernel builds no wrapped stencil
+and takes one grid spacing).  Both compare every entry with its transpose, the
+audit the former route made on the reduced CSR.
 """
 
 from __future__ import annotations
@@ -43,7 +46,7 @@ import scipy.sparse as sp
 
 from parsec_python.Grid import RealSpaceGrid
 
-from ..backends.cupy_stencil_major import StencilMajorHostMetadata
+from ..backends.cupy_stencil_major import PALETTE_CAPACITY, PaletteOverflow, StencilMajorHostMetadata
 from .representations import (
     ReflectionRepresentationDecomposition,
     operator_build_workers,
@@ -123,6 +126,34 @@ def stencil_values(expansion_order: int, spacing: float) -> tuple[float, ...]:
         -3.0 * center * inverse_spacing_squared,
         *(-value * inverse_spacing_squared for value in shells[1:]),
     )
+
+
+def _unequal_steps(grid) -> bool:
+    from .axis_reflection import unequal_step_grid
+
+    return unequal_step_grid(grid)
+
+
+def axis_stencil_values(grid) -> tuple[float, tuple[tuple[float, ...], ...]]:
+    """``(diagonal, shells)`` of the full-grid ``-nabla_FD^2`` of ``grid``: the diagonal entry and, per axis, the
+    entry of a neighbour ``1 .. M`` points away along it.
+
+    A grid of one spacing: :func:`stencil_values`, the same shells on every axis.  A bulk cell with its sides along
+    the axes whose steps differ (:func:`parsec_python.acceleration.Symmetry.axis_reflection.unequal_step_grid`):
+    the values of its full-grid matrix bit for bit, ``-sum_a p_a c_0`` and ``-p_a c_j`` with ``p_a`` the axial
+    coefficients of :func:`parsec_python.Laplacian.lattice_metric.second_derivative_plan` (``1/h_a^2``; the builder
+    of that matrix is ``_build_oblique_negative_laplacian`` of :mod:`parsec_python.Laplacian.finite_difference`).
+    """
+
+    if not _unequal_steps(grid):
+        values = stencil_values(grid.settings.expansion_order, grid.spacing)
+        return values[0], (tuple(values[1:]),) * 3
+    from ..Laplacian.deferred import unequal_step_values
+
+    try:
+        return unequal_step_values(grid)
+    except ValueError as error:
+        raise SectorStencilUnavailable(str(error)) from None
 
 
 def _sector_rows(
@@ -290,10 +321,16 @@ def _numpy_sector_stencil(
     decomposition: ReflectionRepresentationDecomposition,
     representation: int,
     padded: np.ndarray,
-) -> StencilMajorHostMetadata:
+    *,
+    palette_only: bool = False,
+) -> StencilMajorHostMetadata | int:
+    """The packed stencil of one sector; ``palette_only``: the number of its distinct coefficients instead (the
+    stencil before its codes and its audit, :func:`sector_palette_sizes`)."""
+
     reduction = decomposition.reduction
     width = int(grid.settings.expansion_order) // 2
-    values = stencil_values(grid.settings.expansion_order, grid.spacing)
+    # one value per axis and shell (the same on every axis of a grid of one spacing)
+    diagonal, axis_values = axis_stencil_values(grid)
     rows = _sector_rows(decomposition, representation)
     size = int(rows.size)
     full_size = int(reduction.full_size)
@@ -313,17 +350,15 @@ def _numpy_sector_stencil(
     # then every signed shell of each axis.
     strides = (padded.shape[1] * padded.shape[2], padded.shape[2], 1)
     offsets = [0]
-    shells = [0]
+    slot_values = [diagonal]
     for axis in range(3):
         for signed_shell in range(-width, width + 1):
             if signed_shell:
                 offsets.append(signed_shell * strides[axis])
-                shells.append(abs(signed_shell))
+                slot_values.append(axis_values[axis][abs(signed_shell) - 1])
     slots = len(offsets)
     offsets = np.asarray(offsets, dtype=np.int64)
-    slot_values = np.asarray(
-        [values[shell] for shell in shells], dtype=np.float64
-    )
+    slot_values = np.asarray(slot_values, dtype=np.float64)
     flat_lookup = padded.reshape(-1)
 
     # Every entry is one sortable integer: sector column, then full column,
@@ -447,8 +482,13 @@ def _numpy_sector_stencil(
         all_values = np.concatenate(merged_values)
         pieces.append(all_values[all_targets >= 0].view(np.uint64))
     palette_bits = np.unique(np.concatenate(pieces))
-    if palette_bits.size > 256:
-        raise ValueError("finite-difference operator has more than 256 coefficients")
+    if palette_only:
+        return int(palette_bits.size)
+    if palette_bits.size > PALETTE_CAPACITY:
+        raise PaletteOverflow(
+            f"finite-difference operator has more than {PALETTE_CAPACITY} coefficients "
+            f"({palette_bits.size} in sector {representation})"
+        )
     code_of_id = np.zeros(table_ids + 1, dtype=np.uint8)
     code_of_id[:table_ids] = np.minimum(
         np.searchsorted(palette_bits, table_bits), palette_bits.size - 1
@@ -499,8 +539,13 @@ def build_sector_stencils(
     wanted = decomposition._selected_representations(representations)
     if wrap and implementation == "native":
         raise ValueError("the native kernel builds no wrapped stencil")
+    # The native kernel takes one grid spacing: a cell whose steps differ between the axes takes NumPy's builder
+    # (axis_stencil_values; such a cell is periodic and wraps, which the kernel does not build either).
+    unequal = _unequal_steps(grid)
+    if unequal and implementation == "native":
+        raise SectorStencilUnavailable("the native kernel takes one grid step")
     native = None
-    if implementation != "numpy" and not wrap and native_kernel_available():
+    if implementation != "numpy" and not wrap and not unequal and native_kernel_available():
         from ..backends.native import _load_native
 
         native = _load_native()
@@ -539,10 +584,50 @@ def build_sector_stencils(
     return tuple(built)
 
 
+def sector_palette_sizes(
+    grid: RealSpaceGrid,
+    decomposition: ReflectionRepresentationDecomposition,
+    representations: Sequence[int] | None = None,
+    *,
+    wrap: bool = False,
+) -> tuple[int | None, ...]:
+    """The number of distinct coefficients of the stencil of every requested sector (NumPy's builder, as
+    :func:`build_sector_stencils` packs them, without the codes and the audit); ``None`` for a sector not requested.
+
+    The palette of a packed stencil holds :data:`PALETTE_CAPACITY` values.  A cubic cell stays below it at the usual
+    orders; a cell whose grid steps differ between the axes has two or three times the shells of values
+    (:func:`axis_stencil_values`), each multiplied by the phases and multiplicity ratios of the sector, and may not.
+    :class:`SectorStencilUnavailable`: an input the NumPy builder does not cover.
+    """
+
+    if decomposition.full_size != grid.size:
+        raise ValueError("grid does not match the representation decomposition")
+    wanted = decomposition._selected_representations(representations)
+    padded = _padded_lookup(grid, int(grid.settings.expansion_order) // 2, wrap)
+    sizes: list[int | None] = [None] * decomposition.representation_count
+
+    def count(index: int) -> int:
+        return _numpy_sector_stencil(grid, decomposition, index, padded, palette_only=True)
+
+    workers = operator_build_workers(len(wanted))
+    if workers == 1:
+        for index in wanted:
+            sizes[index] = count(index)
+        return tuple(sizes)
+    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="parsec-sector-palette") as executor:
+        for index, item in zip(wanted, executor.map(count, wanted)):
+            sizes[index] = item
+    return tuple(sizes)
+
+
 __all__ = [
+    "PALETTE_CAPACITY",
+    "PaletteOverflow",
     "SectorStencilUnavailable",
+    "axis_stencil_values",
     "build_sector_stencils",
     "native_kernel_available",
+    "sector_palette_sizes",
     "sector_stencil_route",
     "stencil_values",
 ]

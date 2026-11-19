@@ -449,6 +449,133 @@ _WEIGHTED_SECTOR_MARGIN = 0.10
 _SECTOR_MARGIN_BUDGET = "0.82"
 
 
+def first_sector_count(
+    size: int,
+    weights,
+    requested_states: int,
+    safety_buffer: int,
+    margin: float = _WEIGHTED_SECTOR_MARGIN,
+) -> int:
+    """The state count of a sector of ``size`` rows at its first solve (``_initial_sector_count``).
+
+    PARSEC initeigval: nadd + nstate/nrep (integer division).  The ceil guard matters only for an unusual user
+    choice nadd=0 and ensures the union contains at least the globally requested number of states.  With weighted
+    sectors (a subgroup's one-dimensional sectors, ``weights`` not all 1) every sector holds about
+    requested / sum(weights) of the states: the sum is the count of sectors of before.
+    """
+
+    weights = np.asarray(weights, dtype=np.int64)
+    shares = int(np.sum(weights))
+    if bool(np.any(weights != 1)):
+        # The sectors of a non-abelian subgroup hold different kinds of levels (Td in D2d: A1 with one
+        # partner of E, A2 with E, and one partner of T1 or T2), not equal shares of the lowest ones: on
+        # 16 A100 the A1 and T2 sectors of the nanodiamonds k14 and k15 needed 4 % more than the even
+        # share, failed the spectral bracket of the first solve and were solved again with half as many
+        # columns more, the first basis still held (k15: 55 GiB at the fullest GPU instead of about 25).
+        # Each starts with a margin instead.
+        share = -(-int(requested_states * (1.0 + margin)) // shares)
+        return min(int(size), max(1, share + safety_buffer))
+    count = max(
+        (requested_states + shares - 1) // shares,
+        requested_states // shares + safety_buffer,
+    )
+    return min(int(size), max(1, count))
+
+
+def sector_placement_costs(decomposition, filter_plan: FilterPlan | None = None) -> tuple[float, ...]:
+    """The cost of every sector for its place on the MPI ranks and GPUs (``experimental/mpi_scf.py``).
+
+    The rows of a sector times its state count at the first solve (:func:`first_sector_count` of the states and
+    buffer of ``filter_plan``): the memory of its basis and the work of its filter.  Without a plan the rows alone
+    (the counts of the sectors are equal but where a sector has fewer rows than its share).  Every rank computes
+    the same costs from the same decomposition, so that all of them place the sectors alike.
+    """
+
+    sizes = getattr(decomposition, "sector_sizes", None)
+    if sizes is None:
+        sizes = [decomposition.sector_size(index) for index in range(int(decomposition.representation_count))]
+    sizes = tuple(int(size) for size in sizes)
+    if filter_plan is None:
+        return tuple(float(size) for size in sizes)
+    weights = getattr(decomposition, "sector_weights", None)
+    weights = np.ones(len(sizes), dtype=np.int64) if weights is None else np.asarray(weights, dtype=np.int64)
+    return tuple(
+        float(size) * float(first_sector_count(size, weights, int(filter_plan.states), int(filter_plan.buffer)))
+        for size in sizes
+    )
+
+
+def sector_bases_divisible(decomposition, filter_plan: FilterPlan | None = None) -> tuple[bool, ...] | None:
+    """Whether a CHEBFF first solve divides the basis of each sector over the devices of a group.
+
+    The placement of the sectors on the GPUs of an MPI rank (``experimental/mpi_scf.sector_device_groups``,
+    ``divisible``) spreads several sectors over all of them only where their bases are divided there.  This asks
+    what :func:`distributed_state.shared_basis_devices` asks of a sector at its first counts
+    (:func:`first_sector_count`), without its operator: ``PARSEC_CUPY_DISTRIBUTED_STATE`` ``off`` divides none,
+    ``on`` every one, and ``auto`` (the default) those whose rows times columns squared reach the threshold of
+    the generalized Ritz step (:func:`rayleigh_ritz.generalized_ritz_requested`); below it the basis stays on
+    the first device of the group.  ``None`` without a plan (the counts are not known).  Every rank computes the
+    same flags from the same decomposition.
+    """
+
+    from .distributed_state import distributed_state_policy
+    from .rayleigh_ritz import generalized_ritz_requested
+
+    sizes = getattr(decomposition, "sector_sizes", None)
+    if sizes is None:
+        sizes = [decomposition.sector_size(index) for index in range(int(decomposition.representation_count))]
+    sizes = tuple(int(size) for size in sizes)
+    policy = distributed_state_policy()
+    if policy != "auto":
+        return (policy == "on",) * len(sizes)
+    if filter_plan is None:
+        return None
+    weights = getattr(decomposition, "sector_weights", None)
+    weights = np.ones(len(sizes), dtype=np.int64) if weights is None else np.asarray(weights, dtype=np.int64)
+    return tuple(
+        bool(generalized_ritz_requested(
+            size, first_sector_count(size, weights, int(filter_plan.states), int(filter_plan.buffer))))
+        for size in sizes
+    )
+
+
+def _first_solve_divides_bases(solver: Any, representation: int) -> bool:
+    """Whether the first solve of a sector divides its basis (CHEBFF) over a group of devices or ranks.
+
+    The memory rules of ``solver`` (a :class:`CuPySymmetrySCFEigensolver`) count before that solve, when the
+    sector solvers still hold the settings of their construction (CHEBFF, whatever the input names): an MPI
+    context says what the input names (``divided_bases``, which the full-SCF runner sets from its
+    ``Eigensolver``); without one, or with one that names nothing, the settings of the sector solver are read,
+    as before.
+    """
+
+    divided = getattr(getattr(solver, "mpi_context", None), "divided_bases", None)
+    if divided is not None:
+        return bool(divided)
+    return getattr(
+        getattr(solver._solvers[representation], "settings", None), "initial_method", "chebff"
+    ) == "chebff"
+
+
+def sector_scheduler_setting(mpi_context: Any | None = None, owned_representations=()) -> str:
+    """``PARSEC_CUPY_SECTOR_SCHEDULER`` (``sequential``, the default, or ``streams``) as this process takes it.
+
+    The sectors of a rank whose group of MPI ranks shares their bases (``mpi_context.shared``) run every
+    collective of their solves on the one communicator of the group (``sector_comm``) and share one set of
+    round buffers (``mpi_shared_basis.attach_shared_group``): a rank that solves several of them solves them one
+    after another, ``sequential`` whatever was named, since sectors on threads of their own would interleave
+    their collectives differently on the ranks of the group.
+    """
+
+    scheduler = os.environ.get("PARSEC_CUPY_SECTOR_SCHEDULER", "sequential").strip().lower()
+    if scheduler not in {"streams", "sequential"}:
+        raise ValueError("PARSEC_CUPY_SECTOR_SCHEDULER must be 'streams' or 'sequential'")
+    if (scheduler == "streams" and getattr(mpi_context, "shared", False)
+            and len(tuple(owned_representations)) > 1):
+        return "sequential"
+    return scheduler
+
+
 def sector_margin_policy() -> str:
     """``PARSEC_CUPY_SECTOR_MARGIN``: ``auto`` (the default) or ``fixed``.
 
@@ -719,20 +846,25 @@ class CuPySymmetrySCFEigensolver:
         self._owned_representations = tuple(range(decomposition.representation_count))
         self.sector_device_groups = {}
         if mpi_context is not None:
-            self.sector_device_groups = mpi_context.configure(decomposition.representation_count, device_ids)
+            # The ranks and GPUs of the sectors are chosen by their costs (experimental/mpi_scf.py,
+            # PARSEC_SECTOR_PLACEMENT); the driver planned the device of its Hartree objects from the same costs.
+            if getattr(mpi_context, "accepts_sector_costs", False):
+                # The GPUs of a rank pool several sectors only where their bases are divided over them.
+                self.sector_device_groups = mpi_context.configure(
+                    decomposition.representation_count, device_ids,
+                    costs=sector_placement_costs(decomposition, filter_plan),
+                    divisible=sector_bases_divisible(decomposition, filter_plan))
+            else:
+                self.sector_device_groups = mpi_context.configure(decomposition.representation_count, device_ids)
             self._owned_representations = mpi_context.owned_sectors
         self._sector_device_ids = tuple(
             self.sector_device_groups[index][0]
             if index in self.sector_device_groups else device_ids[index % len(device_ids)]
             for index in range(decomposition.representation_count)
         )
-        scheduler = os.environ.get(
-            "PARSEC_CUPY_SECTOR_SCHEDULER", "sequential"
-        ).strip().lower()
-        if scheduler not in {"streams", "sequential"}:
-            raise ValueError(
-                "PARSEC_CUPY_SECTOR_SCHEDULER must be 'streams' or 'sequential'"
-            )
+        # Several sectors of a shared group of ranks are solved one after another (their collectives share one
+        # communicator), whatever PARSEC_CUPY_SECTOR_SCHEDULER names.
+        scheduler = sector_scheduler_setting(mpi_context, self._owned_representations)
         requested_streams = int(
             os.environ.get(
                 "PARSEC_CUPY_SECTOR_STREAMS",
@@ -960,6 +1092,8 @@ class CuPySymmetrySCFEigensolver:
         shared_device_neighbors: dict[int, Any] = {}
         shared_device_potentials: dict[tuple[int, bytes], Any] = {}
         sector_local_potentials: list[Any] = []
+        # The round buffers of the shared bases of this rank (one device, sectors solved in turn).
+        shared_round_buffers: dict = {}
         for representation, (stencil_metadata, reduced_nonlocal) in enumerate(zip(
             static_operators.stencil_metadata,
             static_operators.nonlocal_operators,
@@ -1007,6 +1141,10 @@ class CuPySymmetrySCFEigensolver:
                             operator,
                             getattr(mpi_context, "sector_comm", mpi_context.comm),
                             ritz_route=getattr(mpi_context, "shared_ritz_route", "rows"),
+                            # A rank that solves several sectors of its group (placed by size,
+                            # experimental/mpi_scf.sector_rank_plan) does so one after another on its
+                            # device: one set of round buffers for all of them, as _state_fit_bytes counts.
+                            round_buffers=shared_round_buffers,
                         )
                 if neighbors_are_shared and device_id not in shared_device_neighbors:
                     selected_stencil = operator.compact_finite_difference
@@ -1841,8 +1979,10 @@ class CuPySymmetrySCFEigensolver:
         (:func:`distributed_state.shared_block_bytes`).  Whether they are
         to share it is asked as a CHEBFF first solve asks
         (:func:`distributed_state.shared_basis_devices`, with the device of
-        the sector current); another first solver leaves the basis on the
-        owner, which is then counted too low.  In a spin-polarized loop the
+        the sector current); after another first solver (CHEBDAV, the input
+        default) the basis lies whole on the owner and is counted there
+        (:func:`_first_solve_divides_bases`; before 2026-11-19 it was counted
+        as the shared blocks, too low on the owner).  In a spin-polarized loop the
         states (or this rank's columns of a basis shared by the MPI ranks of
         a group) count once per channel, since both channels' saved
         subspaces are kept; the buffers of a step count once.
@@ -1901,9 +2041,8 @@ class CuPySymmetrySCFEigensolver:
             rows = self.decomposition.sector_size(representation)
             owner = self._sector_device_ids[representation]
             group = getattr(self._operators[representation], "_mpi_shared_group", None)
-            if group is not None and getattr(
-                getattr(self._solvers[representation], "settings", None), "initial_method", "chebff"
-            ) != "chebff":
+            divided = _first_solve_divides_bases(self, representation)
+            if group is not None and not divided:
                 # Only a CHEBFF first solve divides the columns among the ranks of the group (a SharedBasis); after
                 # another one (CHEBDAV, the input default) every rank of it holds and filters the whole basis
                 # (experimental/mpi_scf.py, whole_basis_sectors), counted whole here as on one device.
@@ -1933,10 +2072,13 @@ class CuPySymmetrySCFEigensolver:
                     # of the row blocks, those 5,832 atoms counted 101.9 GB a rank and were sent to the
                     # direct allocator (35.3 GiB sampled, 1.3 % slower than the pool), their states to the
                     # host spill (which a shared basis does not take).
-                    states[owner] += (
-                        rows * share * np.dtype(np.float64).itemsize
-                        + 4 * exchange_bytes()
-                        + 11 * int(count) ** 2 * np.dtype(np.float64).itemsize
+                    # A rank that solves several sectors of its group one after another (placed by size,
+                    # experimental/mpi_scf.sector_rank_plan) keeps the columns of each and the buffers of one
+                    # step, the largest: those of one sector are counted as before.
+                    states[owner] += rows * share * np.dtype(np.float64).itemsize
+                    buffers[owner] = max(
+                        buffers[owner],
+                        4 * exchange_bytes() + 11 * int(count) ** 2 * np.dtype(np.float64).itemsize,
                     )
                 elif route == "rounds":
                     # The Ritz step in rounds (a periodic cell): this rank's
@@ -1948,21 +2090,30 @@ class CuPySymmetrySCFEigensolver:
                     # Ritz step ran out of memory on most of the ranks; with
                     # the pool they held at most 51.6 GiB of arrays (root
                     # 61.2), where this counts 55.0 GB.
-                    states[owner] += (
-                        2 * rows * share * np.dtype(np.float64).itemsize
+                    # (The columns of each sector of a group, the rest once: as above.)
+                    states[owner] += rows * share * np.dtype(np.float64).itemsize
+                    buffers[owner] = max(
+                        buffers[owner],
+                        rows * share * np.dtype(np.float64).itemsize
                         + 3 * exchange_bytes()
-                        + 2 * int(count) ** 2 * np.dtype(np.float64).itemsize
+                        + 2 * int(count) ** 2 * np.dtype(np.float64).itemsize,
                     )
                 else:
                     # The two row blocks: this rank's columns, H times them
                     # and the two row blocks of a Ritz step, and the two
-                    # buffers of an exchange round.
-                    states[owner] += 4 * rows * share * np.dtype(np.float64).itemsize + 2 * exchange_bytes()
+                    # buffers of an exchange round (the columns of each sector of a group, the rest once).
+                    states[owner] += rows * share * np.dtype(np.float64).itemsize
+                    buffers[owner] = max(
+                        buffers[owner], 3 * rows * share * np.dtype(np.float64).itemsize + 2 * exchange_bytes())
                 continue
-            with cp.cuda.Device(owner):
-                shared = shared_basis_devices(
-                    self._operators[representation], int(count)
-                )
+            shared = None
+            if divided:
+                # Another first solve (CHEBDAV) leaves the basis whole on the owner, whatever group the
+                # sector has (review of 2026-11-19: it was counted as shared blocks there).
+                with cp.cuda.Device(owner):
+                    shared = shared_basis_devices(
+                        self._operators[representation], int(count)
+                    )
             if shared is None:
                 # The subspaces of both channels of a spin-polarized loop.
                 states[owner] += rows * int(count) * np.dtype(np.float64).itemsize * self.spin_channel_count
@@ -2253,21 +2404,9 @@ class CuPySymmetrySCFEigensolver:
         # union contains at least the globally requested number of states.
         # With weighted sectors (a subgroup's one-dimensional sectors) every sector holds about
         # requested / sum(weights) of the states: the sum is the count of sectors of before.
-        shares = self._weight_total
-        if self._weighted:
-            # The sectors of a non-abelian subgroup hold different kinds of levels (Td in D2d: A1 with one
-            # partner of E, A2 with E, and one partner of T1 or T2), not equal shares of the lowest ones: on
-            # 16 A100 the A1 and T2 sectors of the nanodiamonds k14 and k15 needed 4 % more than the even
-            # share, failed the spectral bracket of the first solve and were solved again with half as many
-            # columns more, the first basis still held (k15: 55 GiB at the fullest GPU instead of about 25).
-            # Each starts with a margin instead.
-            share = -(-int(requested_states * (1.0 + margin)) // shares)
-            return min(self.decomposition.sector_size(representation), max(1, share + safety_buffer))
-        count = max(
-            (requested_states + shares - 1) // shares,
-            requested_states // shares + safety_buffer,
-        )
-        return min(self.decomposition.sector_size(representation), max(1, count))
+        return first_sector_count(
+            self.decomposition.sector_size(representation), self._sector_weight_array, requested_states,
+            safety_buffer, margin)
 
     def _fit_sector_margins(self, requested_states: int, safety_buffer: int) -> None:
         """Cut the margin of the first counts of weighted sectors where the devices cannot hold it.
@@ -3388,5 +3527,7 @@ __all__ = [
     "CuPySymmetryOrbitals",
     "CuPySymmetrySCFEigensolver",
     "SectorSpinChannel",
+    "first_sector_count",
+    "sector_placement_costs",
     "selected_device_ids",
 ]

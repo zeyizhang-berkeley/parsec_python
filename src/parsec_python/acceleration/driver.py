@@ -558,7 +558,10 @@ def _ranks_divide_sectors(reduction, mpi_context) -> bool:
     The sector context (:meth:`.experimental.mpi_scf.MPISectorContext.divides`) gives one rank with the GPUs of its
     node at least one sector: the weighted sectors of D2d (three) on four such ranks, or the two of a cell repeated
     twice, would stop the run in its sector configuration.  A group that a rank count cannot divide is not taken;
-    the orbitals keep the group of before (the abelian one about the origin), which ran there.
+    the orbitals keep the group of before (the abelian one about the origin), which ran there.  The placement of
+    the sectors by size (``PARSEC_SECTOR_PLACEMENT=size``, the default) asks the same: every rank of the GPUs of
+    its node still owns one group of sectors or more, and ranks of one GPU each take any count of sectors (a group
+    of them may solve several), so the counts that divide are those of the placement by count.
     """
 
     divides = getattr(mpi_context, "divides", None) if mpi_context is not None else None
@@ -636,6 +639,49 @@ def _orbital_reduction(symmetry_reduction, stabilizer_disabled: bool):
     ):
         return None
     return symmetry_reduction
+
+
+def _sector_palette_check(grid, reduction, build_decomposition, count=None):
+    """``(checked, refusal)`` of the sector stencils of a periodic cell whose grid steps differ between the axes.
+
+    A packed stencil codes its coefficients in one byte (``PALETTE_CAPACITY``, 256 values).  Such a cell has up to
+    ``1 + 3M`` shell values instead of the ``1 + M`` of a cube (``axis_stencil_values``), each times the phases and
+    the multiplicity ratios of a sector: a tetragonal 2x2x2 perovskite at the default order or Si at order 18 need
+    260 to 420, where the build of the stencils would stop the run.  Counted here with the builder itself
+    (``count``, by default ``sector_palette_sizes``: 0.1 s for the 180,000 points of a 3x3x3 Si cell, a fifth of
+    its detection), the same on every rank: ``refusal`` says why the cell keeps the full grid (the identity sector
+    of an MPI run), as under PARSEC_PERIODIC_UNEQUAL_STEPS=off.  ``checked`` is ``(orbital reduction,
+    decomposition)`` where the stencils fit, for the stage of the orbitals.  ``build_decomposition(orbital
+    reduction)`` gives what that stage would; nothing is checked where it fails, or for any other grid (the stage
+    of the orbitals goes on as before).
+    """
+
+    from .Symmetry.axis_reflection import unequal_step_grid
+
+    if reduction is None or reduction.group_order <= 1 or not unequal_step_grid(grid):
+        return None, None
+    try:
+        orbital = _orbital_reduction(reduction, _stabilizer_symmetry_disabled())
+    except ValueError:
+        # (refused where the stage of the orbitals reads it)
+        return None, None
+    if orbital is None or orbital.group_order <= 1:
+        return None, None
+    from .Symmetry.sector_stencil import PALETTE_CAPACITY, SectorStencilUnavailable, sector_palette_sizes
+
+    try:
+        built = build_decomposition(orbital)
+        sizes = (sector_palette_sizes if count is None else count)(grid, built[0], wrap=True)
+    except (SectorStencilUnavailable, ValueError, RuntimeError):
+        return None, None
+    largest = max((size for size in sizes if size is not None), default=0)
+    if largest <= PALETTE_CAPACITY:
+        return (orbital, built), None
+    return None, (
+        f"the sector stencils of this cell, whose grid steps differ between the axes, need {largest} distinct "
+        f"coefficients, more than the {PALETTE_CAPACITY} of their palette (Expansion_Order "
+        f"{int(grid.settings.expansion_order)})"
+    )
 
 
 def _readable_xc_label(xc_functional: str, *, spin_polarized: bool) -> str:
@@ -2056,18 +2102,26 @@ def _planned_sector_device_groups(
     representation_count: int,
     device_ids: tuple[int, ...],
     mpi_context,
+    costs=None,
+    divisible=None,
 ) -> dict[int, tuple[int, ...]]:
     """Return the device group of every sector this process will own.
 
     This is the assignment ``CuPySymmetrySCFEigensolver`` makes, computed
     without it: the boundary geometry is uploaded while that constructor
-    still runs.  An MPI rank gets the groups of its sector context; one
+    still runs.  An MPI rank gets the groups of its sector context, placed by
+    ``costs`` (``Eigensolvers.symmetry.sector_placement_costs``, what the
+    constructor passes; ``PARSEC_SECTOR_PLACEMENT``) and by whether a CHEBFF
+    first solve divides each basis over the devices of a group
+    (``divisible``, ``Eigensolvers.symmetry.sector_bases_divisible``); one
     process spreads all sectors over its devices in turn.
     """
 
     if mpi_context is not None:
         planned = getattr(mpi_context, "planned_groups", None)
         if callable(planned):
+            if costs is not None and getattr(mpi_context, "accepts_sector_costs", False):
+                return planned(representation_count, device_ids, costs=costs, divisible=divisible)
             return planned(representation_count, device_ids)
         from .experimental.mpi_scf import sector_device_groups
 
@@ -2083,6 +2137,22 @@ def _planned_sector_device_groups(
         index: (device_ids[index % len(device_ids)],)
         for index in range(representation_count)
     }
+
+
+def _sector_placement_costs(decomposition, filter_plan):
+    """The placement costs of the sectors, as the sector eigensolver computes them for its MPI context."""
+
+    from .Eigensolvers.symmetry import sector_placement_costs
+
+    return sector_placement_costs(decomposition, filter_plan)
+
+
+def _sector_bases_divisible(decomposition, filter_plan):
+    """Which sector bases a CHEBFF first solve divides over a group of devices, as the sector eigensolver asks."""
+
+    from .Eigensolvers.symmetry import sector_bases_divisible
+
+    return sector_bases_divisible(decomposition, filter_plan)
 
 
 def _select_hartree_device(
@@ -3750,6 +3820,43 @@ def _prepare_single_point(
                 symmetry_detection += "; " + lost_note
             if undivided_note is not None:
                 symmetry_detection += "; " + undivided_note
+    # A cell whose grid steps differ between the axes, where its sector stencils would need more coefficients than
+    # their palette holds: the full grid, decided before the identity sector of an MPI run is chosen.
+    palette_checked = None
+    if (
+        is_periodic
+        and symmetry_reduction is not None
+        and selection.selected == "cupy"
+        and not (spin_polarized and spin_sector_refusal is not None)
+    ):
+        from .Symmetry import load_or_build_reflection_decomposition
+        from .Symmetry.sector_stencil import sector_palette_sizes
+
+        def palette_decomposition(orbital):
+            # what the stage of the orbitals below builds, or takes from the thread of the maps
+            built = symmetry_maps.decomposition(orbital) if maps_beside else None
+            if built is None:
+                built = stages.timed("symmetry_decomposition", load_or_build_reflection_decomposition)(
+                    reference.grid,
+                    orbital,
+                    reduction_key=getattr(symmetry_geometry_cache_info, "key", None),
+                    cache_directory=symmetry_cache_directory,
+                )
+            return built
+
+        palette_checked, palette_refusal = _sector_palette_check(
+            reference.grid,
+            symmetry_reduction,
+            palette_decomposition,
+            stages.timed("sector_palette_check", sector_palette_sizes),
+        )
+        if palette_refusal is not None:
+            if symmetry_mode == "on":
+                raise ValueError(f"symmetry='on' requested, but {palette_refusal}")
+            symmetry_detection = (
+                f"automatic detection fell back to full grid: {palette_refusal}; found: {symmetry_detection}"
+            )
+            symmetry_reduction = None
     # Without a point group the orbitals may still take the route of the
     # sectors, as one sector of the identity, so that the devices of the
     # process share its basis (PARSEC_CUPY_SINGLE_SECTOR).
@@ -3826,9 +3933,12 @@ def _prepare_single_point(
 
         try:
             # The decomposition the thread of the maps built of this very
-            # reduction, where it built one; in line otherwise.
+            # reduction, where it built one (or the check of the palette
+            # above); in line otherwise.
             built = (
-                symmetry_maps.decomposition(orbital_reduction)
+                palette_checked[1]
+                if palette_checked is not None and palette_checked[0] is orbital_reduction
+                else symmetry_maps.decomposition(orbital_reduction)
                 if maps_beside
                 else None
             )
@@ -4012,6 +4122,16 @@ def _prepare_single_point(
                     orbital_decomposition.representation_count,
                     process_devices,
                     mpi_context,
+                    costs=(
+                        None
+                        if mpi_context is None
+                        else _sector_placement_costs(orbital_decomposition, _filter_plan(reference))
+                    ),
+                    divisible=(
+                        None
+                        if mpi_context is None
+                        else _sector_bases_divisible(orbital_decomposition, _filter_plan(reference))
+                    ),
                 )
             ),
         )

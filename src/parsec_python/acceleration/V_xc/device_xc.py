@@ -232,9 +232,10 @@ def device_grid_supported(grid) -> bool:
         grid, "is_confined_periodic", False
     ):
         return False
-    if _is_periodic(grid) and not getattr(grid, "is_orthorhombic", True):
-        # A grid of Andrew Grieder's routines with oblique or unequal steps, or his slab: the gradients carry the
-        # metric of the cell (V_xc.pbe._oblique_mix), which these kernels do not.
+    if _is_periodic(grid) and not getattr(grid, "is_orthorhombic", True) and not _unequal_steps(grid):
+        # A grid of Andrew Grieder's routines with oblique steps, or his slab: the gradients carry the metric of the
+        # cell (V_xc.pbe._oblique_mix), which these kernels do not.  A cell with its sides along the axes whose steps
+        # differ takes a row of weights per axis (_StencilGeometry; PARSEC_PERIODIC_UNEQUAL_STEPS=off: the host).
         return False
     shape = tuple(int(value) for value in getattr(grid, "shape", ()))
     if len(shape) != 3 or int(np.prod(shape)) >= 2**31:
@@ -248,6 +249,18 @@ def device_grid_supported(grid) -> bool:
 def _is_periodic(grid) -> bool:
     # As parsec_python.V_xc.pbe._is_periodic.
     return hasattr(grid, "cell") and hasattr(grid, "points_per_axis")
+
+
+def _unequal_steps(grid) -> bool:
+    """A bulk cell with its sides along the axes whose steps differ, under ``PARSEC_PERIODIC_UNEQUAL_STEPS=auto``
+    (:func:`parsec_python.acceleration.Symmetry.axis_reflection.unequal_step_grid`): the kernels take its gradient
+    with a step per axis (``V_xc.pbe`` differentiates it with the metric of its diagonal lattice)."""
+
+    if not _is_periodic(grid):
+        return False
+    from ..Symmetry.axis_reflection import periodic_unequal_steps_setting, unequal_step_grid
+
+    return unequal_step_grid(grid) and periodic_unequal_steps_setting() == "auto"
 
 
 def _display_name(functional: str) -> str:
@@ -516,8 +529,18 @@ class _StencilGeometry:
         self.width = int(grid.settings.expansion_order) // 2
         weights = first_derivative_coefficients(grid.settings.expansion_order)
         # pbe.py _derivative_stencil: the weights in 1/bohr; the transpose
-        # correlates with their negatives.
-        weights = weights / grid.spacing
+        # correlates with their negatives.  A periodic cell whose steps differ
+        # between the axes (unequal_step_grid): a row per axis, weights / h_a
+        # (V_xc.pbe._oblique_mix of a diagonal lattice, the steps applied to
+        # every weight instead of the sum), the kernels reading row a at
+        # a * axis_stride.
+        self.axis_stride = 0
+        if _unequal_steps(grid):
+            steps = np.diag(np.asarray(grid.step_vectors, dtype=np.float64))
+            weights = np.ascontiguousarray(weights[None, :] / steps[:, None])
+            self.axis_stride = int(weights.shape[1])
+        else:
+            weights = weights / grid.spacing
         self.weights = cp.asarray(weights)
         self.negated_weights = cp.asarray(-weights)
         self.flips = None
@@ -593,6 +616,7 @@ class _StencilGeometry:
             np.int32(n2),
             np.int32(1 if self.periodic else 0),
             np.int32(self.width),
+            np.int32(self.axis_stride),
         )
 
     def gradient(self, cp, kernels, values):

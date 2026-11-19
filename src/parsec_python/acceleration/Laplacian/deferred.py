@@ -340,6 +340,9 @@ class DeferredPeriodicNegativeLaplacian(DeferredNativeNegativeLaplacian):
         digest.update(np.int64(self.grid.settings.expansion_order).tobytes())
         digest.update(np.float64(self.grid.spacing).tobytes())
         _hash_array(digest, "points_per_axis", np.asarray(self.grid.points_per_axis, dtype=np.int64))
+        if _unequal_step_box(self.grid):
+            # a step per axis (a cell of one spacing keeps the key of before)
+            _hash_array(digest, "axis_steps", np.diag(np.asarray(self.grid.step_vectors, dtype=np.float64)))
         self.hash_seconds += perf_counter() - started
         return digest.hexdigest()
 
@@ -374,17 +377,23 @@ class DeferredPeriodicNegativeLaplacian(DeferredNativeNegativeLaplacian):
         shape = tuple(int(value) for value in self.grid.points_per_axis)
         strides = (shape[1] * shape[2], shape[2], 1)
         width = int(self.grid.settings.stencil_half_width)
-        coeff = second_derivative_coefficients(self.grid.settings.expansion_order)
-        inv_h2 = 1.0 / float(self.grid.spacing) ** 2
         point = (index // strides[0], (index // strides[1]) % shape[1], index % shape[2])
-        entries = {int(index): -3.0 * coeff[width] * inv_h2}
+        if _unequal_step_box(self.grid):
+            # a step per axis: the values of the builder of such a cell (unequal_step_values)
+            diagonal, shells = unequal_step_values(self.grid)
+            entries = {int(index): diagonal}
+        else:
+            coeff = second_derivative_coefficients(self.grid.settings.expansion_order)
+            inv_h2 = 1.0 / float(self.grid.spacing) ** 2
+            entries = {int(index): -3.0 * coeff[width] * inv_h2}
+            shells = (tuple(-coeff[width + shell] * inv_h2 for shell in range(1, width + 1)),) * 3
         for axis in range(3):
             for shift in range(-width, width + 1):
                 if shift:
                     moved = list(point)
                     moved[axis] = (moved[axis] + shift) % shape[axis]
                     column = moved[0] * strides[0] + moved[1] * strides[1] + moved[2]
-                    entries[column] = -coeff[width + abs(shift)] * inv_h2
+                    entries[column] = shells[axis][abs(shift) - 1]
         columns = np.array(sorted(entries), dtype=np.int64)
         values = np.array([entries[column] for column in columns], dtype=np.float64)
         return sp.csr_matrix((values, columns, np.array([0, columns.size])), shape=(1, self.shape[1]))
@@ -415,15 +424,67 @@ def periodic_laplacian_builder():
     return periodic_negative_laplacian if value == "auto" else None
 
 
+def _unequal_step_box(grid) -> bool:
+    """Whether ``grid`` is a bulk box of the default routines with its sides along the axes whose steps differ, every
+    point a row in row-major order and each axis longer than ``2 M`` (``_wrapped_box`` of
+    :mod:`parsec_python.Laplacian.finite_difference` but for the one spacing), under
+    ``PARSEC_PERIODIC_UNEQUAL_STEPS=auto``: its matrix is the wrapped axial stencil with a step per axis (the builder
+    of oblique cells, without mixed terms), ``6 M + 1`` entries a row."""
+
+    from parsec_python.acceleration.Symmetry.axis_reflection import periodic_unequal_steps_setting, unequal_step_grid
+
+    if not unequal_step_grid(grid) or periodic_unequal_steps_setting() != "auto":
+        return False
+    from parsec_python.Laplacian.lattice_metric import second_derivative_plan
+
+    if second_derivative_plan(grid.step_vectors).directions:
+        return False
+    shape = tuple(int(value) for value in grid.points_per_axis)
+    lookup = np.asarray(grid.lookup)
+    width = int(grid.settings.stencil_half_width)
+    return (
+        lookup.shape == shape
+        and int(grid.size) == int(np.prod(shape))
+        and min(shape) > 2 * width
+        and int(lookup.reshape(-1)[0]) == 0
+        and int(lookup.reshape(-1)[-1]) == int(grid.size) - 1
+    )
+
+
+def unequal_step_values(grid) -> tuple[float, tuple[tuple[float, ...], ...]]:
+    """``(diagonal, shells)`` of ``-nabla_FD^2`` on a box of a step per axis, bit for bit the entries of its built
+    matrix (``_build_oblique_negative_laplacian`` of :mod:`parsec_python.Laplacian.finite_difference`):
+    ``-sum_a p_a c_0`` and, per axis, ``-p_a c_j`` for ``j = 1 .. M``, with ``p_a`` (``1/h_a^2``) the axial
+    coefficients of :func:`parsec_python.Laplacian.lattice_metric.second_derivative_plan`."""
+
+    from parsec_python.Laplacian.finite_difference import second_derivative_coefficients
+    from parsec_python.Laplacian.lattice_metric import second_derivative_plan
+
+    plan = second_derivative_plan(grid.step_vectors)
+    if plan.directions:
+        raise ValueError("the cell has mixed derivatives: no axial stencil")
+    coeff = second_derivative_coefficients(grid.settings.expansion_order)
+    width = int(grid.settings.stencil_half_width)
+    total = float(np.sum(plan.axial)) + float(np.sum(plan.weights))
+    diagonal = float(-total * coeff[width])
+    shells = tuple(
+        tuple(float(-plan.axial[axis] * coeff[width + shell]) for shell in range(1, width + 1)) for axis in range(3)
+    )
+    return diagonal, shells
+
+
 def periodic_negative_laplacian(grid):
     """The deferred wrapped Laplacian of a periodic box (:class:`DeferredPeriodicNegativeLaplacian`), or the built
     matrix of :func:`parsec_python.Laplacian.finite_difference.build_negative_laplacian` for every other grid (oblique
-    or general cells, an axis of ``2 M`` points or fewer, whose stencil folds onto itself)."""
+    or general cells, an axis of ``2 M`` points or fewer, whose stencil folds onto itself).
+
+    A box whose steps differ between the axes (:func:`_unequal_step_box`, ``PARSEC_PERIODIC_UNEQUAL_STEPS=auto``) is
+    deferred too; ``off`` builds its matrix at once, as before."""
 
     from parsec_python.Laplacian.finite_difference import _wrapped_box, build_negative_laplacian
 
     # _wrapped_box: an orthorhombic bulk box of every point in row-major order, each axis longer than 2 M
-    if not getattr(grid, "is_general_periodic", False) and _wrapped_box(grid):
+    if not getattr(grid, "is_general_periodic", False) and (_wrapped_box(grid) or _unequal_step_box(grid)):
         return DeferredPeriodicNegativeLaplacian(grid)
     return build_negative_laplacian(grid)
 
@@ -446,4 +507,5 @@ __all__ = [
     "materialize_negative_laplacian",
     "periodic_laplacian_builder",
     "periodic_negative_laplacian",
+    "unequal_step_values",
 ]

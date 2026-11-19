@@ -283,6 +283,7 @@ sectors from the start), 78.8 GiB on the fullest GPU; `PARSEC_CUPY_SECTOR_MARGIN
 GiB). By default the margin is cut for memory, a sector then misses states and grows from a new start in the second
 step, and that growth runs out of memory: the GPUs of a rank hold three sector bases of 19.3 GiB each. One rank per GPU
 (sector groups of ranks) does not fit either: the ranks are dealt to the sectors in equal numbers, not by their sizes.
+Since 2026-11-18 the default margin converges there (the SCF loop no longer holds the basis of a regrowing sector: 1044 s, 18 steps), and with the sectors placed by their cost (`PARSEC_SECTOR_PLACEMENT=size`) one rank per GPU (`--rank-per-gpu`, `Eigensolver: chebff`) runs n = 22 with the default settings in 322.9 s, 8 steps, without a margin cut, 66.4 GiB on the fullest GPU.
 
 ### Gamma point: forces and relaxations in the sectors (2026-11-18)
 
