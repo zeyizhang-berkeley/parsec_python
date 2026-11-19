@@ -3003,6 +3003,10 @@ def _parse_parsec_input(
     general_periodic_grid = False
     monkhorst_pack_dimensions: tuple[int, int, int] | None = None
     monkhorst_pack_shift: tuple[float, float, float] | None = None
+    # The zero monkhorst_pack_shift of a Monkhorst_Pack_Grid without a shift block on the Fortran-derived routines
+    # (PARSEC 1.5's mpshift, PARSEC_MP_UNSHIFTED_MESH=fortran): where its reduction would be refused by name, the
+    # mesh falls back below (time reversal alone for a bulk cell, the former mesh for a wire or slab).
+    implied_zero_shift = False
     # The Monkhorst_Pack_Grid and Monkhorst_Pack_Shift of a bulk cell on the default routines (a mesh of more than
     # one point), whose wedge _default_routines_wedge may take instead of the full list.
     default_routines_mesh: tuple | None = None
@@ -3203,8 +3207,28 @@ def _parse_parsec_input(
             monkhorst_pack_dimensions = tuple(int(value) for value in values)
             if any(value != original for value, original in zip(monkhorst_pack_dimensions, values)):
                 raise ParsecInputError("Monkhorst_Pack_Grid values must be integers")
-            if "monkhorst_pack_shift" in blocks:
-                if periodicity == 3:
+            # PARSEC 1.5 without a Monkhorst_Pack_Shift block (PARSEC_MP_UNSHIFTED_MESH=fortran, the default since
+            # 2026-11-18): usrinputfile.F90:976-994 leaves mpshift as it is, zero (elec_st is a variable of the main
+            # program, static storage), and init_var.F90:281-289 reduces the Gamma-centred grid (i-1)/n with irrbz
+            # as for any shift; usrinputfile.F90:2548-2552 turns Symmetrize_Charge_Density on for every k-point run.
+            # The mesh here is that of a zero Monkhorst_Pack_Shift on either set of routines, without choosing the
+            # Fortran-derived routines as the block does.  A mesh of one point (1 1 1) is the Gamma point either way
+            # and keeps its Gamma-point routes.  =port keeps this port's former unreduced (2i-n-1)/(2n) mesh.
+            from ..Grid.kpoints import unshifted_mesh_setting
+
+            fortran_unshifted = (
+                "monkhorst_pack_shift" not in blocks
+                and monkhorst_pack_dimensions != (1, 1, 1)
+                and unshifted_mesh_setting() == "fortran"
+            )
+            if fortran_unshifted:
+                kpoint_notes.append(
+                    "Monkhorst_Pack_Grid without Monkhorst_Pack_Shift: PARSEC 1.5's Gamma-centred mesh k = (i-1)/n "
+                    "(shift 0), reduced to its irreducible wedge as with a zero Monkhorst_Pack_Shift "
+                    "(PARSEC_MP_UNSHIFTED_MESH=port keeps the former unreduced mesh (2i-n-1)/(2n))"
+                )
+            if "monkhorst_pack_shift" in blocks or fortran_unshifted:
+                if periodicity == 3 and not fortran_unshifted:
                     # a bulk cell's shifted grid runs on the Fortran-derived routines (Fortran's wedge and weights)
                     # unless the input says Use_Fortran_Routines: .false.
                     fortran_by_default(_routines_module.SHIFTED_MESH_FEATURE)
@@ -3215,14 +3239,23 @@ def _parse_parsec_input(
                     # reciprocal lattice vectors, so a zero shift gives a Gamma-centred mesh.  The mesh is kept as an
                     # explicit list of equally weighted points, except where a bulk cell's mesh is reduced to its
                     # irreducible wedge below (_default_routines_wedge).
-                    shift_blocks = blocks["monkhorst_pack_shift"]
-                    if len(shift_blocks) != 1 or len(shift_blocks[0].value) != 1:
-                        raise ParsecInputError("Monkhorst_Pack_Shift needs one line of numbers")
-                    shift_values, shift_unit = _block_numbers(shift_blocks[0].value, label="Monkhorst_Pack_Shift")
-                    if andrew_slab and len(shift_values) == 2:
-                        shift_values = [*shift_values, 0.0]
-                    if len(shift_values) != 3 or shift_unit:
-                        raise ParsecInputError("Monkhorst_Pack_Shift must contain " + ("two (slab) or three" if andrew_slab else "three") + " numbers")
+                    if fortran_unshifted:
+                        shift_values = [0.0, 0.0, 0.0]
+                    else:
+                        shift_blocks = blocks["monkhorst_pack_shift"]
+                        if len(shift_blocks) != 1 or len(shift_blocks[0].value) != 1:
+                            raise ParsecInputError("Monkhorst_Pack_Shift needs one line of numbers")
+                        shift_values, shift_unit = _block_numbers(
+                            shift_blocks[0].value, label="Monkhorst_Pack_Shift"
+                        )
+                        if andrew_slab and len(shift_values) == 2:
+                            shift_values = [*shift_values, 0.0]
+                        if len(shift_values) != 3 or shift_unit:
+                            raise ParsecInputError(
+                                "Monkhorst_Pack_Shift must contain "
+                                + ("two (slab) or three" if andrew_slab else "three")
+                                + " numbers"
+                            )
                     axes = [
                         (np.arange(count) + offset) / count
                         for count, offset in zip(monkhorst_pack_dimensions, shift_values)
@@ -3244,11 +3277,17 @@ def _parse_parsec_input(
                             tuple(float(value) for value in shift_values),
                         )
                     monkhorst_pack_dimensions = None
+                elif fortran_unshifted:
+                    # PARSEC 1.5's mpshift without the block: zero (see above)
+                    monkhorst_pack_shift = (0.0, 0.0, 0.0)
+                    implied_zero_shift = True
                 else:
                     # usrinputfile.F90:977-993: one line, the shift of each
                     # periodic direction, >= 0 (errors 116, 117).  With it the
                     # grid is Fortran's ((i-1)+s)/n, reduced to the irreducible
-                    # wedge (irrbz.f90); without it this port's own grid is kept.
+                    # wedge (irrbz.f90); without it PARSEC's mpshift is zero
+                    # (above), or this port's former grid is kept with
+                    # PARSEC_MP_UNSHIFTED_MESH=port.
                     shift_blocks = blocks["monkhorst_pack_shift"]
                     if len(shift_blocks) != 1 or len(shift_blocks[0].value) != 1:
                         raise ParsecInputError(
@@ -4964,34 +5003,70 @@ def _parse_parsec_input(
             and not np.allclose(explicit_kpoint_weights, explicit_kpoint_weights[0])
         )
         forces_requested = atoms_move or single_point_forces
-        symmetrize_density, space_group, grid = _periodic_symmetry(
-            atoms,
-            periodic_cell,
-            grid,
-            general_periodic_grid=general_periodic_grid,
-            ignore_symmetry=ignore_symmetry,
-            monkhorst_pack_shift=monkhorst_pack_shift,
-            symmetrize_density=symmetrize_density,
-            symmetrize_given="symmetrize_charge_density" in scalar,
-            noncollinear=noncollinear,
-            warnings=warnings,
-            forces_of_weighted_kpoints=forces_requested and weighted_kpoints,
-            search_info=_bulk_symmetry_search_info(
+        unsymmetrized_grid = grid
+
+        def bulk_symmetry(shift, notes: list[str]):
+            """_periodic_symmetry with the k-point shift ``shift``, and the movements its wedge cannot follow."""
+
+            symmetrized, group, symmetric_grid = _periodic_symmetry(
+                atoms,
                 periodic_cell,
+                unsymmetrized_grid,
+                general_periodic_grid=general_periodic_grid,
                 ignore_symmetry=ignore_symmetry,
-                kpoints=monkhorst_pack_dimensions is not None or explicit_kpoint_array is not None,
-                spinors=bool(
-                    noncollinear
-                    or self_consistent_spin_orbit
-                    or any(specification.spin_orbit for specification in specifications.values())
+                monkhorst_pack_shift=shift,
+                symmetrize_density=symmetrize_density,
+                symmetrize_given="symmetrize_charge_density" in scalar,
+                noncollinear=noncollinear,
+                warnings=notes,
+                forces_of_weighted_kpoints=forces_requested and weighted_kpoints,
+                search_info=_bulk_symmetry_search_info(
+                    periodic_cell,
+                    ignore_symmetry=ignore_symmetry,
+                    kpoints=monkhorst_pack_dimensions is not None or explicit_kpoint_array is not None,
+                    spinors=bool(
+                        noncollinear
+                        or self_consistent_spin_orbit
+                        or any(specification.spin_orbit for specification in specifications.values())
+                    ),
+                    bands=bool(blocks.get("bandstruc")),
+                    nscf="nscf_kpoints" in blocks,
+                    molecular_dynamics=molecular_dynamics.enabled,
+                    manual_movement=minimization == "manual",
+                    requested_shift=requested_grid_shift,
                 ),
-                bands=bool(blocks.get("bandstruc")),
-                nscf="nscf_kpoints" in blocks,
-                molecular_dynamics=molecular_dynamics.enabled,
-                manual_movement=minimization == "manual",
-                requested_shift=requested_grid_shift,
-            ),
-        )
+            )
+            if forces_requested:
+                _check_reduced_kpoint_movements(
+                    atoms,
+                    periodic_cell,
+                    group,
+                    movable=movable,
+                    relaxation=minimization in {"bfgs", "simple"},
+                    molecular_dynamics=molecular_dynamics.enabled or minimization == "manual",
+                    reduced=bool(shift is not None or weighted_kpoints),
+                    ignore_symmetry=ignore_symmetry,
+                )
+            return symmetrized, group, symmetric_grid
+
+        bulk_notes: list[str] = []
+        try:
+            symmetrize_density, space_group, grid = bulk_symmetry(monkhorst_pack_shift, bulk_notes)
+        except UnsupportedParsecOptionError as error:
+            if not implied_zero_shift or "symmetrize_charge_density" in scalar:
+                raise
+            # PARSEC 1.5 would reduce the mesh by a group that its grid or the relaxation does not keep (a zero
+            # Monkhorst_Pack_Shift block stops here by name): PARSEC 1.5's points are reduced by time reversal
+            # alone and the density is not symmetrized, as this input was before 2026-11-18
+            bulk_notes = []
+            symmetrize_density, space_group, grid = bulk_symmetry(None, bulk_notes)
+            space_group = None
+            bulk_notes.append(
+                "Monkhorst_Pack_Grid without Monkhorst_Pack_Shift: the irreducible wedge of the space group is not "
+                f"used ({error}); PARSEC 1.5's mesh is reduced by time reversal alone and the density is not "
+                "symmetrized"
+            )
+        warnings.extend(bulk_notes)
         # The space group's fractional translations are in the grid settings now: the counts of adjust_step decide
         # between the orthorhombic grid and Fortran's general grid.
         general_periodic_grid = uses_general_periodic_grid(periodic_cell, grid)
@@ -5001,17 +5076,6 @@ def _parse_parsec_input(
                 "Double_Grid_Order > 1 is not implemented on Fortran's general "
                 "periodic grid (non-orthogonal lattice vectors, or steps that "
                 "differ between the lattice directions): its projectors use one grid step"
-            )
-        if forces_requested:
-            _check_reduced_kpoint_movements(
-                atoms,
-                periodic_cell,
-                space_group,
-                movable=movable,
-                relaxation=minimization in {"bfgs", "simple"},
-                molecular_dynamics=molecular_dynamics.enabled or minimization == "manual",
-                reduced=bool(monkhorst_pack_shift is not None or weighted_kpoints),
-                ignore_symmetry=ignore_symmetry,
             )
     elif symmetrize_density:
         # The isolated spin-orbit and non-collinear drivers average their
@@ -5398,7 +5462,11 @@ def _parse_parsec_input(
         warnings=warnings,
         output_gw=output_gw,
         monkhorst_pack_shift=monkhorst_pack_shift,
+        implied_shift=implied_zero_shift,
     )
+    if post_processing.monkhorst_pack_shift is not None:
+        # the restarted SCF of Create_DOS runs with the shift of the DOS (implied where no block gives it)
+        implied_zero_shift = post_processing.implied_monkhorst_pack_shift
     if post_processing.nscf is not None and eigensolver.fixed_state_count:
         # calc_nscf.F90:146-147 sets the number of eigenpairs of the NSCF
         # solve itself (nn = nstate): Fix_Number_Eigenvalues changes nothing.
@@ -5413,59 +5481,77 @@ def _parse_parsec_input(
     ):
         monkhorst_pack_shift = post_processing.monkhorst_pack_shift
         if not wire_or_slab:
-            symmetrize_density, space_group, grid = _periodic_symmetry(
-                atoms,
-                periodic_cell,
-                grid,
-                general_periodic_grid=general_periodic_grid,
-                ignore_symmetry=ignore_symmetry,
-                monkhorst_pack_shift=monkhorst_pack_shift,
-                symmetrize_density=optional_bool("symmetrize_charge_density"),
-                symmetrize_given="symmetrize_charge_density" in scalar,
-                noncollinear=noncollinear,
-                warnings=warnings,
-                # The restarted SCF runs on the DOS grid (no weighted list).
-                search_info=_bulk_symmetry_search_info(
-                    periodic_cell,
-                    ignore_symmetry=ignore_symmetry,
-                    kpoints=True,
-                    spinors=bool(
-                        noncollinear
-                        or self_consistent_spin_orbit
-                        or any(
-                            specification.spin_orbit for specification in specifications.values()
-                        )
-                    ),
-                    bands=band_settings is not None,
-                    nscf=post_processing.nscf is not None,
-                    molecular_dynamics=molecular_dynamics.enabled,
-                    manual_movement=minimization == "manual",
-                    requested_shift=requested_grid_shift,
-                ),
-            )
-            if routines.fortran:
-                general_periodic_grid = uses_general_periodic_grid(periodic_cell, grid)
-                grid = _fortran_bulk_box_lengths(grid, periodic_cell, general_periodic_grid)
-                if general_periodic_grid and double_grid_order > 1:
-                    raise UnsupportedParsecOptionError(
-                        "Double_Grid_Order > 1 is not implemented on Fortran's general "
-                        "periodic grid (non-orthogonal lattice vectors, or steps that "
-                        "differ between the lattice directions): its projectors use one grid step"
-                    )
-            scf = replace(scf, symmetrize_density=bool(symmetrize_density))
-            if forces_requested:
-                _check_reduced_kpoint_movements(
+            restart_notes: list[str] = []
+            try:
+                rebuilt = _periodic_symmetry(
                     atoms,
                     periodic_cell,
-                    space_group,
-                    movable=movable,
-                    relaxation=minimization in {"bfgs", "simple"},
-                    molecular_dynamics=(
-                        molecular_dynamics.enabled or minimization == "manual"
-                    ),
-                    reduced=True,
+                    grid,
+                    general_periodic_grid=general_periodic_grid,
                     ignore_symmetry=ignore_symmetry,
+                    monkhorst_pack_shift=monkhorst_pack_shift,
+                    symmetrize_density=optional_bool("symmetrize_charge_density"),
+                    symmetrize_given="symmetrize_charge_density" in scalar,
+                    noncollinear=noncollinear,
+                    warnings=restart_notes,
+                    # The restarted SCF runs on the DOS grid (no weighted list).
+                    search_info=_bulk_symmetry_search_info(
+                        periodic_cell,
+                        ignore_symmetry=ignore_symmetry,
+                        kpoints=True,
+                        spinors=bool(
+                            noncollinear
+                            or self_consistent_spin_orbit
+                            or any(
+                                specification.spin_orbit for specification in specifications.values()
+                            )
+                        ),
+                        bands=band_settings is not None,
+                        nscf=post_processing.nscf is not None,
+                        molecular_dynamics=molecular_dynamics.enabled,
+                        manual_movement=minimization == "manual",
+                        requested_shift=requested_grid_shift,
+                    ),
                 )
+                if forces_requested:
+                    _check_reduced_kpoint_movements(
+                        atoms,
+                        periodic_cell,
+                        rebuilt[1],
+                        movable=movable,
+                        relaxation=minimization in {"bfgs", "simple"},
+                        molecular_dynamics=(
+                            molecular_dynamics.enabled or minimization == "manual"
+                        ),
+                        reduced=True,
+                        ignore_symmetry=ignore_symmetry,
+                    )
+            except UnsupportedParsecOptionError as error:
+                if not post_processing.implied_monkhorst_pack_shift or "symmetrize_charge_density" in scalar:
+                    raise
+                # PARSEC 1.5's zero shift of a DOS_MP_Grid without DOS_MP_Shift, whose wedge the grid or the
+                # movements do not keep (a DOS_MP_Shift block stops here by name): as the bulk mesh without
+                # Monkhorst_Pack_Shift, PARSEC 1.5's points reduced by time reversal alone, the density not
+                # symmetrized, the grid of the input's own shift
+                symmetrize_density, space_group = False, None
+                restart_notes = [
+                    "DOS_MP_Grid without DOS_MP_Shift: the irreducible wedge of the space group is not used "
+                    f"({error}); the mesh of the restarted SCF is reduced by time reversal alone and the density "
+                    "is not symmetrized"
+                ]
+            else:
+                symmetrize_density, space_group, grid = rebuilt
+                if routines.fortran:
+                    general_periodic_grid = uses_general_periodic_grid(periodic_cell, grid)
+                    grid = _fortran_bulk_box_lengths(grid, periodic_cell, general_periodic_grid)
+                    if general_periodic_grid and double_grid_order > 1:
+                        raise UnsupportedParsecOptionError(
+                            "Double_Grid_Order > 1 is not implemented on Fortran's general "
+                            "periodic grid (non-orthogonal lattice vectors, or steps that "
+                            "differ between the lattice directions): its projectors use one grid step"
+                        )
+            warnings.extend(restart_notes)
+            scf = replace(scf, symmetrize_density=bool(symmetrize_density))
     monkhorst_pack_dimensions = post_processing.monkhorst_pack_dimensions
     explicit_kpoint_array = post_processing.kpoints
     explicit_kpoint_weights = post_processing.kpoint_weights
@@ -5482,6 +5568,63 @@ def _parse_parsec_input(
             "(parsec.F90 l.1098): bandstruc, forces (Skip_Force: false), "
             "Minimization and Molecular_Dynamics are not run with it; remove them"
         )
+    if wire_or_slab and implied_zero_shift:
+        # PARSEC 1.5's zero shift of a wire or slab mesh without the block (PARSEC_MP_UNSHIFTED_MESH=fortran): where
+        # the symmetrization or the movements of its wedge would be refused by name, the former unreduced mesh
+        # (which a zero Monkhorst_Pack_Shift block does not fall back to); with Create_DOS and Restart_Run the zero
+        # of a DOS_MP_Grid without DOS_MP_Shift (implied_zero_shift is then that of the DOS shift)
+        try:
+            trial = _wire_slab_symmetry(
+                atoms,
+                periodic_cell,
+                grid,
+                periodicity=periodicity,
+                ignore_symmetry=ignore_symmetry,
+                monkhorst_pack_shift=monkhorst_pack_shift,
+                symmetrize_density=symmetrize_density,
+                symmetrize_given="symmetrize_charge_density" in scalar,
+                noncollinear=noncollinear,
+                spin_orbit=bool(
+                    noncollinear
+                    or any(specification.spin_orbit for specification in specifications.values())
+                ),
+                bands=band_settings is not None,
+                nscf=post_processing.nscf is not None,
+                no_symmetry=bool(molecular_dynamics.enabled or polarizability or minimization == "manual"),
+                warnings=[],
+            )
+            if compute_forces:
+                _check_wire_slab_kpoint_movements(
+                    atoms,
+                    periodic_cell,
+                    trial[2],
+                    trial[1],
+                    periodicity=periodicity,
+                    movable=movable,
+                    relaxation=minimization in {"bfgs", "simple"},
+                    molecular_dynamics=molecular_dynamics.enabled or minimization == "manual",
+                    weighted_kpoints=False,
+                    monkhorst_pack_shift=monkhorst_pack_shift,
+                    ignore_symmetry=ignore_symmetry,
+                    slab_symmetry_on=bool(
+                        band_settings is not None
+                        or post_processing.nscf is not None
+                        or noncollinear
+                        or any(specification.spin_orbit for specification in specifications.values())
+                    ),
+                )
+        except UnsupportedParsecOptionError as error:
+            if "symmetrize_charge_density" in scalar:
+                raise
+            monkhorst_pack_shift = None
+            warnings.append(
+                (
+                    "DOS_MP_Grid without DOS_MP_Shift"
+                    if post_processing.monkhorst_pack_shift is not None and "dos_mp_grid" in blocks
+                    else "Monkhorst_Pack_Grid without Monkhorst_Pack_Shift"
+                )
+                + f": the irreducible wedge is not used ({error}); the former unreduced mesh (2i-n-1)/(2n) runs"
+            )
     if wire_or_slab:
         symmetrize_density, space_group, grid = _wire_slab_symmetry(
             atoms,
@@ -6120,6 +6263,9 @@ def _default_routines_wedge(
 ):
     """The symmetry of a ``Monkhorst_Pack_Shift`` mesh of a bulk cell on the default routines.
 
+    A ``Monkhorst_Pack_Grid`` without the block takes this path with a zero shift (PARSEC 1.5's ``mpshift``,
+    ``PARSEC_MP_UNSHIFTED_MESH=fortran``, since 2026-11-18).
+
     ``mesh`` is ``(Monkhorst_Pack_Grid, Monkhorst_Pack_Shift)``.  Returns ``(symmetrize_density, space_group)``; the
     caller keeps the mesh as Fortran's grid ``k = (i + s)/n`` (``monkhorst_pack_shift``), which
     :func:`parsec_python.Grid.kpoints.kpoint_sampling_details` reduces by ``space_group`` (the identity for
@@ -6667,6 +6813,11 @@ class _PostProcessingInput:
     # Create_DOS with Restart_Run on Fortran's Monkhorst-Pack path: the shift
     # of the restarted SCF (``mpshift = dos_mpshift``), ``None``: unchanged.
     monkhorst_pack_shift: tuple[float, float, float] | None = None
+    # That shift is PARSEC 1.5's zero of a missing block (DOS_MP_Grid without
+    # DOS_MP_Shift, or the implied shift of the SCF's mesh), which falls back
+    # to time reversal where its wedge is refused, as Monkhorst_Pack_Grid
+    # without Monkhorst_Pack_Shift does; a written block stops there.
+    implied_monkhorst_pack_shift: bool = False
 
 
 #: The NSCF keys ``usrinputfile.F90`` reads only with ``Output_GW``.
@@ -6745,6 +6896,7 @@ def _post_processing_input(
     output_gw: bool = False,
     noncollinear: bool = False,
     monkhorst_pack_shift: tuple[float, float, float] | None = None,
+    implied_shift: bool = False,
 ) -> _PostProcessingInput:
     """``nscf_*``, ``Create_DOS`` and its keys, ``Calc_Hartree_G`` (``usrinputfile.F90``).
 
@@ -6760,6 +6912,8 @@ def _post_processing_input(
     run on the DOS grid (l.1188-1193), so the returned k-point sampling
     replaces the input's.  ``Calc_Hartree_G`` (l.907-912, bulk only).
     Keys PARSEC does not read in a given setting are accepted with a warning.
+    ``monkhorst_pack_shift`` is the shift of the SCF's mesh, ``implied_shift``
+    whether it is PARSEC 1.5's zero of a missing ``Monkhorst_Pack_Shift``.
     """
 
     nscf_keys_given = sorted(
@@ -6900,6 +7054,7 @@ def _post_processing_input(
             dos_grid = tuple(int(value) for value in values)
         dos_shift = None
         restart_shift = None
+        implied_restart_shift = False
         if "dos_mp_shift" in blocks:
             if dos_grid is None:
                 warnings.append(
@@ -6937,17 +7092,28 @@ def _post_processing_input(
                         "Create_DOS with Restart_Run for a Gamma-point input needs "
                         "DOS_MP_Grid"
                     )
-                if dos_shift is not None or monkhorst_pack_shift is not None:
+                from ..Grid.kpoints import unshifted_mesh_setting
+
+                # PARSEC 1.5 reduces this grid with irrbz too, its mpshift zero without a block (a grid of more
+                # than one point; PARSEC_MP_UNSHIFTED_MESH=port keeps this port's former unreduced grid)
+                fortran_zero_shift = (
+                    tuple(int(value) for value in dos_grid) != (1, 1, 1) and unshifted_mesh_setting() == "fortran"
+                )
+                if dos_shift is not None or monkhorst_pack_shift is not None or fortran_zero_shift:
                     # PARSEC's Monkhorst-Pack path (the shift block of the SCF
                     # or DOS_MP_Shift): mpshift = dos_mpshift, the block of
                     # DOS_MP_Shift, zero without it when DOS_MP_Grid is given,
-                    # and the shift of the SCF without DOS_MP_Grid.  Without
-                    # either block this port's grid of the DOS divisions is
-                    # used, as for every input without a shift block.
+                    # and the shift of the SCF without DOS_MP_Grid (zero
+                    # without its block).  With PARSEC_MP_UNSHIFTED_MESH=port
+                    # and neither block this port's grid of the DOS divisions
+                    # is used, as for every input without a shift block.
                     if "dos_mp_grid" in blocks:
                         restart_shift = dos_shift if dos_shift is not None else (0.0, 0.0, 0.0)
+                        # (with =port the zero of a missing DOS_MP_Shift stops where its wedge is refused, as before)
+                        implied_restart_shift = dos_shift is None and fortran_zero_shift
                     else:
-                        restart_shift = monkhorst_pack_shift
+                        restart_shift = monkhorst_pack_shift if monkhorst_pack_shift is not None else (0.0, 0.0, 0.0)
+                        implied_restart_shift = bool(implied_shift or monkhorst_pack_shift is None)
                     dos_shift = restart_shift
                 monkhorst_pack_dimensions = dos_grid
                 kpoints = None
@@ -7024,6 +7190,7 @@ def _post_processing_input(
         gw_kshift=gw_kshift,
         gw_fermi_level=gw_fermi_level,
         monkhorst_pack_shift=restart_shift if create_dos and is_periodic else None,
+        implied_monkhorst_pack_shift=bool(create_dos and is_periodic and restart_shift is not None and implied_restart_shift),
     )
 
 

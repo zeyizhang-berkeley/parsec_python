@@ -116,14 +116,18 @@ def _sector_atom_forces(system, sectors, terms: np.ndarray, operator, atom_count
     (:func:`..Symmetry.axis_reflection.compress_projectors_for_sectors`): the terms then belong to the labels of their
     gradients (``projector_force_labels``), each ``n_a`` times the term of one atom of its orbit, and the average over
     the full group of a :class:`..Symmetry.axis_reflection.PointGroupReduction` gives every atom its term and the
-    partners of the weighted levels theirs (:mod:`.sector_symmetry`), whatever the symmetrization asked for.
+    partners of the weighted levels theirs (:mod:`.sector_symmetry`), whatever the symmetrization asked for; the
+    average over the group of Abelian sectors with such projectors gives every atom of an orbit its term
+    (:func:`.sector_symmetry.abelian_orbit_operations`).
     """
 
-    from .sector_symmetry import sector_force_operations
+    from .sector_symmetry import abelian_orbit_operations, sector_force_operations
 
     labels = getattr(sectors, "projector_force_labels", None)
     forces = _atom_sums(terms, operator.labels if not labels else labels, atom_count)
     operations = sector_force_operations(system)
+    if operations is None:
+        operations = abelian_orbit_operations(system)
     if operations is not None:
         forces = symmetrize_forces(forces, operations)
     return forces

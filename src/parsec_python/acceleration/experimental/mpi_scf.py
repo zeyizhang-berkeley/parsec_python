@@ -194,6 +194,20 @@ class MPISectorContext:
         return sector_device_groups(representations, self.size, self.rank, devices,
                                     shared=self._shared(representations), exchange=self.exchange)
 
+    def divides(self, representations):
+        """Whether :meth:`configure` can give ``representations`` sectors to the ranks (no MPI call).
+
+        A rank with the GPUs of its node owns one sector or more, so more ranks than several sectors need one GPU
+        per rank (``gpu_per_rank``: groups of ranks share a sector) or a hybrid's exchange (ranks without a
+        sector).  The driver keeps the group of before where a larger one has too few sectors for the ranks.
+        """
+        try:
+            sector_device_groups(representations, self.size, self.rank, (0,), shared=self._shared(representations),
+                                 exchange=self.exchange)
+        except ValueError:
+            return False
+        return True
+
     def _shared(self, representations):
         # More ranks than sectors share their bases: the one sector of a run without symmetry, or several with
         # one GPU per rank (not with a hybrid).

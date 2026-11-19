@@ -115,8 +115,9 @@ def abelian_cell_operations(system):
     A cell whose sectors are those of an Abelian group (an
     :class:`..Symmetry.axis_reflection.AxisReflectionReduction` or a
     :class:`..Symmetry.axis_reflection.SignedPermutationReduction` of order above one, not a
-    :class:`..Symmetry.axis_reflection.PointGroupReduction`) solves every level, so its forces need no completion; but
-    its moved atoms must keep ``H`` (:func:`check_sector_atoms`), and the round-off of its unsymmetrized forces on
+    :class:`..Symmetry.axis_reflection.PointGroupReduction`) solves every level, so its forces need no completion
+    beyond that of the projectors of one atom per orbit (:func:`abelian_orbit_operations`, which takes these); but its
+    moved atoms must keep ``H`` (:func:`check_sector_atoms`), and the round-off of its unsymmetrized forces on
     atoms that ``H`` fixes would move them (by about ``Min_Step`` in a steepest-descent step).  These operations
     average its forces and moved positions over ``H`` in the ionic loop (:func:`sector_symmetry_operations`).
     ``None`` for a cluster, a cell without sectors or with those of a point group.
@@ -164,6 +165,76 @@ def abelian_cell_operations(system):
             lattice_vectors=vectors.copy(),
             translation=None if shifts is None or not np.any(shifts[g]) else -matrices[g].T @ (shifts[g] * steps),
         )
+        for g in order
+    )
+
+
+def abelian_orbit_operations(system):
+    """``H`` of Abelian sectors whose projectors hold one atom per orbit, on the atoms, the identity first, or ``None``.
+
+    Such sectors (:func:`..Symmetry.axis_reflection.attach_abelian_atom_orbits`) contract the projector gradients of
+    the representative of every orbit, each ``n_a`` times the term of one atom of its orbit, and none of the other
+    atoms (:func:`..Symmetry.axis_reflection.compress_gradients_for_sectors`).  ``H`` is Abelian with real
+    one-dimensional characters, so every level is solved and the density matrix of the solved states is invariant
+    under it: the term of atom ``h a`` is ``R_h`` times that of ``a``, and that of ``a`` is invariant under the
+    operations that fix ``a``.  The average over ``H`` (:func:`parsec_python.Forces.symmetry.symmetrize_forces`) then
+    gives every atom of an orbit its own term exactly: ``|H| / n_a`` operations carry ``a`` onto each of them.
+    :class:`parsec_python.Forces.AtomSymmetryOperation` for a cluster, those of :func:`abelian_cell_operations` for a
+    periodic cell.  ``None`` for a point-group reduction (:func:`sector_force_operations` completes those), sectors
+    without the orbits of their atoms (the projectors of every atom, nothing to complete), or
+    ``PARSEC_SECTOR_PROJECTOR_ORBITS=off``.
+    """
+
+    from parsec_python.Forces import AtomSymmetryOperation
+
+    from ..Symmetry.axis_reflection import (
+        AxisReflectionReduction,
+        PointGroupReduction,
+        abelian_sector_operations,
+        atom_image_table,
+        sector_projector_orbits_setting,
+    )
+
+    sectors = getattr(getattr(system, "backend", None), "symmetry_eigensolver", None)
+    reduction = getattr(getattr(sectors, "decomposition", None), "reduction", None)
+    if (
+        not isinstance(reduction, AxisReflectionReduction)
+        or isinstance(reduction, PointGroupReduction)
+        or int(getattr(reduction, "group_order", 1)) <= 1
+    ):
+        return None
+    sizes = getattr(reduction, "atom_orbit_sizes", None)
+    if (
+        getattr(reduction, "atom_representatives", None) is None
+        or sizes is None
+        or not np.any(np.asarray(sizes) > 1)
+        or sector_projector_orbits_setting() == "off"
+    ):
+        return None
+    if getattr(getattr(system, "input", None), "periodic_cell", None) is not None:
+        return abelian_cell_operations(system)
+    matrices = abelian_sector_operations(reduction).astype(np.float64)
+    shifts = getattr(reduction, "translations", None)
+    grid = getattr(reduction, "grid", None)
+    if grid is None:
+        grid = system.grid
+    images = atom_image_table(
+        tuple(system.atoms),
+        matrices,
+        None if shifts is None else np.asarray(shifts, dtype=np.int64).reshape(-1, 3),
+        grid,
+        max(ATOM_TOLERANCE, MOVE_TOLERANCE),
+    )
+    if images is None:
+        raise ValueError("an operation of the group of the sectors carries an atom onto no atom of its species")
+    identity = np.flatnonzero(
+        [np.array_equal(m, np.eye(3)) and (shifts is None or not np.any(shifts[g])) for g, m in enumerate(matrices)]
+    )
+    if identity.size != 1:
+        raise ValueError("the operations of the group of the sectors hold no single identity")
+    order = [int(identity[0])] + [g for g in range(len(matrices)) if g != identity[0]]
+    return tuple(
+        AtomSymmetryOperation(matrix=matrices[g].copy(), image=np.asarray(images[g], dtype=np.int64).copy())
         for g in order
     )
 
@@ -299,6 +370,7 @@ __all__ = [
     "ATOM_TOLERANCE",
     "MOVE_TOLERANCE",
     "abelian_cell_operations",
+    "abelian_orbit_operations",
     "check_sector_atoms",
     "sector_force_operations",
     "sector_group_operations",

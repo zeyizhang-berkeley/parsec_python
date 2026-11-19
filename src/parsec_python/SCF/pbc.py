@@ -600,6 +600,39 @@ def atom_outside_cell(lattice_vectors: np.ndarray, atoms) -> Atom | None:
     return None
 
 
+#: How far (bohr) an atom of a 3-D cell on the default routines may lie outside a face of the cell and still be
+#: prepared, folded into the cell for the builders (:func:`atoms_for_cell_builders`).  A relaxation keeps the
+#: coordinates it moves atoms to, also outside the cell (:func:`update_periodic_geometry`), so an atom on a face
+#: may be written to ``relax_restart.dat`` at -1.1e-9 bohr; before 2026-11-18 the restart from that file was refused
+#: as an atom outside the cell.
+CELL_FACE_TOLERANCE_BOHR = 1.0e-6
+
+
+def atoms_for_cell_builders(lattice_vectors: np.ndarray, atoms) -> tuple[tuple, Atom | None]:
+    """``(atoms the builders take, the first atom too far outside the cell or None)`` of a 3-D cell.
+
+    An atom inside the cell (the test of :func:`atom_outside_cell`) is taken as it is: where all are, the atoms are
+    returned unchanged, bit for bit as before.  An atom outside by no more than :data:`CELL_FACE_TOLERANCE_BOHR`
+    along a lattice vector lies on a face of the cell to the round-off of a relaxation: the builders get the atoms
+    folded into the cell (:func:`fold_atoms_into_cell`), as they do after every move of a relaxation, and the
+    prepared system keeps the coordinates as given.  An atom farther outside is returned second, for the caller's
+    refusal.
+    """
+
+    atoms = tuple(atoms)
+    if atom_outside_cell(lattice_vectors, atoms) is None:
+        return atoms, None
+    lattice = np.asarray(lattice_vectors, dtype=np.float64)
+    inverse = np.linalg.inv(lattice)
+    # the tolerance as a fraction of each lattice vector
+    margin = CELL_FACE_TOLERANCE_BOHR / np.linalg.norm(lattice, axis=1)
+    for atom in atoms:
+        fraction = np.asarray(atom.position, dtype=np.float64) @ inverse
+        if np.any(fraction < -margin) or np.any(fraction >= 1.0 + margin):
+            return atoms, atom
+    return fold_atoms_into_cell(atoms, lattice), None
+
+
 def _prepare_fortran_periodic_single_point(
     problem: SinglePointInput,
 ) -> PeriodicPreparedSinglePointSystem:
@@ -1247,7 +1280,10 @@ def prepare_periodic_single_point(
     bohr with each component in ``[0, side_length)`` -- since this path does
     not recenter geometry the way the isolated path does (that convention
     is specific to a sphere/box centered on the origin, and would be wrong
-    here).
+    here).  An atom of a 3-D cell outside a face by no more than
+    :data:`CELL_FACE_TOLERANCE_BOHR` (a ``relax_restart.dat`` of an atom on a
+    face) is folded into the cell for the builders, and ``system.atoms``
+    keeps it as given, as after a move (:func:`atoms_for_cell_builders`).
 
     These are Andrew Grieder's routines, the default; ``problem.grid.fortran_routines``
     (``Use_Fortran_Routines``) selects :func:`_prepare_fortran_periodic_single_point`.
@@ -1284,7 +1320,14 @@ def prepare_periodic_single_point(
     orthorhombic = np.allclose(lattice_vectors, np.diag(np.diag(lattice_vectors)), atol=1.0e-10)
     side_lengths = np.diag(lattice_vectors)
     inverse_lattice = None if orthorhombic else np.linalg.inv(lattice_vectors)
-    for atom in atoms:
+    # The atoms of the builders: those of the problem, or, for a 3-D cell with an atom on a face to round-off (a
+    # relax_restart.dat), folded into the cell (atoms_for_cell_builders); the system keeps the problem's.
+    builder_atoms = atoms
+    checked = atoms
+    if dimensions != 2:
+        builder_atoms, beyond = atoms_for_cell_builders(lattice_vectors, atoms)
+        checked = () if beyond is None else (beyond,)
+    for atom in checked:
         position = np.asarray(atom.position, dtype=float)
         if dimensions == 2:
             # in-plane fractional coordinates in [0, 1); along z the atom must sit inside the box
@@ -1319,7 +1362,7 @@ def prepare_periodic_single_point(
     # 3. The terms that depend on the positions: local and Kleinman--Bylander nonlocal ionic terms, the starting and
     # core densities, the ion--ion energy.
     terms = _geometry_terms(
-        problem, grid, atoms, pseudopotentials, electron_count, negative_laplacian=negative_laplacian
+        problem, grid, builder_atoms, pseudopotentials, electron_count, negative_laplacian=negative_laplacian
     )
     atomic_reference_correction = float(
         sum(
@@ -1364,6 +1407,7 @@ __all__ = [
     "LazyGradient",
     "PeriodicPreparedSinglePointSystem",
     "atom_outside_cell",
+    "atoms_for_cell_builders",
     "fold_atoms_into_cell",
     "zero_average_local_potential",
     "fortran_update_periodic_geometry",

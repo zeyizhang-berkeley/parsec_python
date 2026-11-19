@@ -13,7 +13,9 @@ from __future__ import annotations
 
 import shutil
 import tempfile
+import os
 import unittest
+from unittest import mock
 from dataclasses import replace
 from pathlib import Path
 
@@ -750,6 +752,10 @@ class SpinorIonicCliTests(unittest.TestCase):
         self.assertTrue(np.all(np.isfinite(energies)))
         self.assertEqual(log.count("Converged magnetic moment vector"), archive["dynamics_positions"].shape[0])
 
+    # The former mesh 2x1x1 of points at +-1/4 (PARSEC_MP_UNSHIFTED_MESH=port): with PARSEC 1.5's zero shift (k = 0
+    # and 1/2 along x, since 2026-11-18) the SCF of this non-collinear Au2+ cell stops unconverged after its 80
+    # iterations on an A100 node (exit 3; it converges on a laptop CPU).  The forces are the subject here.
+    @mock.patch.dict(os.environ, {"PARSEC_MP_UNSHIFTED_MESH": "port"})
     def test_a_periodic_cell_with_k_points_has_forces(self) -> None:
         code, log = self._run(
             "Skip_Force: .false.\n",

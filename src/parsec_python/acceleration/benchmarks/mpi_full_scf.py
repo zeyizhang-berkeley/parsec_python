@@ -260,6 +260,32 @@ def _serial_control_notes(cache):
     return lines
 
 
+def _shared_first_solve_note(context, method):
+    """The NOTE of a run whose ranks share sectors but whose first solve does not divide their bases, or ``None``.
+
+    Only a CHEBFF first solve gives the ranks of a sector's group a share of
+    its basis each (``mpi_shared_basis.SharedBasis``).  After another one
+    (CHEBDAV, the input default where the input names no ``Eigensolver``)
+    every rank of the group holds and filters the whole basis of the sector
+    (``MPISectorContext.whole_basis_sectors``), so the ranks beyond the first
+    of a group save neither memory nor time.  ``context`` is the configured
+    sector context, ``method`` the ``Eigensolver`` of the input.  Nothing
+    changes; before 2026-11-18 the run said nothing of it.
+    """
+    if context is None or not getattr(context, 'shared', False) or str(method).lower() == 'chebff':
+        return None
+    groups = [group for group in getattr(context, 'rank_groups', ()) if len(group) > 1]
+    if not groups:
+        return None
+    sizes = sorted({len(group) for group in groups})
+    return (f'NOTE: {len(groups)} sector(s) are shared by groups of '
+            + '/'.join(str(size) for size in sizes)
+            + f' MPI ranks, but the first solve is Eigensolver: {method} (the input default where none is named): '
+            'every rank of a group then holds and filters the whole basis of its sector, so the further ranks of a '
+            'group save neither memory nor time. Eigensolver: chebff divides each basis among the ranks of its '
+            'group.')
+
+
 def _digest(path):
     value = hashlib.sha256()
     with Path(path).open('rb') as handle:
@@ -1208,6 +1234,12 @@ def execute(args, cp, comm, MPI, initialization_seconds, initial_affinity=None):
         solver = getattr(system.backend, 'symmetry_eigensolver', None)
         if context is not None and (solver is None or not (context.owned_sectors or context.exchange)):
             raise RuntimeError('MPI full SCF requires the configured symmetry-sector eigensolver')
+        if rank == 0:
+            # Ranks that share sectors after a CHEBDAV first solve each hold the whole basis: say so.
+            shared_note = _shared_first_solve_note(
+                context, getattr(getattr(translation.problem, 'eigensolver', None), 'method', 'chebff'))
+            if shared_note is not None:
+                log.write(shared_note)
         if periodic and (translation.compute_forces or translation.relaxation is not None
                          or translation.molecular_dynamics is not None):
             # The sectors of a point group complete the forces over its full group (every rank decides alike).

@@ -1015,6 +1015,26 @@ def periodic_sector_forces_setting() -> str:
     return value
 
 
+_PERIODIC_SECTOR_BANDS_SWITCH = "PARSEC_PERIODIC_SECTOR_BANDS"
+
+
+def periodic_sector_bands_setting() -> str:
+    """``PARSEC_PERIODIC_SECTOR_BANDS``: ``auto`` (the default) or ``off``.
+
+    ``auto`` lets the SCF of a bulk cell at the Gamma point that asks for a band structure (``bandstruc``) keep the
+    sectors of its point group.  ``calc_bands`` reads only what the SCF leaves on the full grid: the converged
+    effective potential (the result of the sectors holds it expanded from the orbits of the grid), the Fermi level
+    and the number of states (:func:`.Output.post_scf.band_hand_over`); the bands of every k-point of the path are
+    solved on the full grid afresh, as before.  ``off`` solves the whole SCF of such a cell on the full grid, as
+    before the hand-over existed.
+    """
+
+    value = os.environ.get(_PERIODIC_SECTOR_BANDS_SWITCH, "auto").strip().lower() or "auto"
+    if value not in {"auto", "off"}:
+        raise ValueError(f"{_PERIODIC_SECTOR_BANDS_SWITCH} must be auto or off, not {value!r}")
+    return value
+
+
 def periodic_sector_forces_refusal(translation, *, supercell: bool = False) -> str | None:
     """Why the forces or the moved atoms of a periodic cell keep the full grid, or ``None`` where sectors take them.
 
@@ -1026,7 +1046,8 @@ def periodic_sector_forces_refusal(translation, *, supercell: bool = False) -> s
     The rest stays on the full grid: molecular dynamics and manual movements (``parsec.F90`` uses no symmetry there),
     ``Move_Flag`` fixing atoms (a fixed atom that ``G`` exchanges with a movable one leaves the group), the
     Fortran-derived routines (``Use_Fortran_Routines``, whose forces read the full grid), point charges, a band
-    structure, a non-self-consistent run, a restart from ``wfn.dat`` (full-grid states), an electric field
+    structure under ``PARSEC_PERIODIC_SECTOR_BANDS=off`` (under ``auto`` the bands take the expanded potential of the
+    sectors), a non-self-consistent run, a restart from ``wfn.dat`` (full-grid states), an electric field
     (``Polarizability``), k-point sampling beyond the Gamma point (its own routes, e.g. the force wedge of the mesh)
     and the supercell that stands for a mesh of the time-reversal invariant points (``supercell``: it repeats the
     atoms of the input).  ``PARSEC_PERIODIC_SECTOR_FORCES=off`` keeps every one on the full grid, as before.
@@ -1055,9 +1076,11 @@ def periodic_sector_forces_refusal(translation, *, supercell: bool = False) -> s
         return "point charges (Add_Point_Charges)"
     if getattr(translation, "polarizability_field", None) is not None:
         return "an electric field (Polarizability)"
-    if problem.bands is not None:
+    if problem.bands is not None and periodic_sector_bands_setting() == "off":
+        # Under PARSEC_PERIODIC_SECTOR_BANDS=auto the bands take the expanded potential of the sectors.
         return "a band structure"
     if getattr(translation, "nscf", None) is not None:
+        # nscf_kpoints runs no SCF (Restart_Run is required; the reference CLI runs it): never reached from main.
         return "a non-self-consistent run"
     if getattr(translation, "restart_run", False) and getattr(translation, "restart_from_wfndat", False):
         return "Restart_From_Wfndat (the stored orbitals seed the eigensolver of the full grid)"
@@ -1075,37 +1098,36 @@ def _periodic_sector_forces_line(system, operations) -> str | None:
     sectors keep (one per orbit of the group of the sectors:
     :func:`.Symmetry.axis_reflection.compress_projectors_for_sectors`, ``PARSEC_SECTOR_PROJECTOR_ORBITS``; the
     nonlocal forces contract the gradients of the same columns) and their columns.  The sectors of an Abelian group
-    solve every level and keep every projector: their forces need no average.
+    solve every level; they keep the projectors of one atom per orbit where the reduction knows the orbits of its atoms
+    (their nonlocal term completed by the average over the group), of every atom otherwise.
     """
 
     from .Forces.sector_symmetry import sector_reduction
-    from .Symmetry.axis_reflection import sector_projector_orbits_setting
+    from .Symmetry.axis_reflection import projector_orbit_counts
 
     sectors = getattr(getattr(system, "backend", None), "symmetry_eigensolver", None)
     solved = getattr(getattr(sectors, "decomposition", None), "reduction", None)
     if solved is None or int(getattr(solved, "group_order", 1)) <= 1:
         return None
-    if operations is None:
-        return (
-            f" Forces of the periodic cell in the sectors of its point group: an Abelian group of "
-            f"{int(solved.group_order)} operations, every level solved, the projectors of every atom "
-            f"({_PERIODIC_SECTOR_FORCES_SWITCH}=auto)"
-        )
-    reduction = sector_reduction(system)
     atom_count = len(system.atoms)
     operator = getattr(system, "nonlocal_operator", None)
     labels = () if operator is None else tuple(getattr(operator, "labels", ()))
-    representatives = None if reduction is None else getattr(reduction, "atom_representatives", None)
-    sizes = None if reduction is None else getattr(reduction, "atom_orbit_sizes", None)
-    kept_atoms, kept_columns = atom_count, len(labels)
-    if representatives is not None and sizes is not None and sector_projector_orbits_setting() == "auto":
-        representatives = np.asarray(representatives, dtype=np.int64)
-        if representatives.size == atom_count:
-            kept_atoms = int(np.count_nonzero(representatives == np.arange(atom_count)))
-            if labels:
-                atom_of_column = np.fromiter((int(label[0]) for label in labels), dtype=np.int64, count=len(labels))
-                if atom_of_column.min() >= 0 and atom_of_column.max() < atom_count:
-                    kept_columns = int(np.count_nonzero(representatives[atom_of_column] == atom_of_column))
+    if operations is None:
+        # Abelian sectors: the projectors of one atom per orbit where the reduction was given the orbits
+        # (Symmetry/axis_reflection.attach_abelian_atom_orbits), every atom otherwise.
+        kept_atoms, kept_columns = projector_orbit_counts(solved, labels, atom_count)
+        return (
+            f" Forces of the periodic cell in the sectors of its point group: an Abelian group of "
+            f"{int(solved.group_order)} operations, every level solved, "
+            + (
+                "the projectors of every atom "
+                if kept_columns == len(labels)
+                else f"projectors of {kept_atoms} of {atom_count} atoms ({kept_columns} of {len(labels)} columns) "
+            )
+            + f"({_PERIODIC_SECTOR_FORCES_SWITCH}=auto)"
+        )
+    reduction = sector_reduction(system)
+    kept_atoms, kept_columns = projector_orbit_counts(reduction, labels, atom_count)
     return (
         f" Forces of the periodic cell in the sectors of its point group: averaged over {len(operations)} "
         f"operations; projectors of {kept_atoms} of {atom_count} atoms ({kept_columns} of {len(labels)} columns) "
@@ -1533,10 +1555,11 @@ def _run(
             "NOTE: Restart_Run of a spin-polarized calculation: both channels on the full grid "
             "(Spin_Symmetry_Sectors: off for the restart)",
         ]
-    # PARSEC_PERIODIC_SECTOR_FORCES, read in every run so that a value it does
-    # not know is refused.
+    # PARSEC_PERIODIC_SECTOR_FORCES and PARSEC_PERIODIC_SECTOR_BANDS, read in
+    # every run so that a value they do not know is refused.
     try:
         periodic_sector_forces_setting()
+        periodic_sector_bands_setting()
     except ValueError as error:
         print(f"Input error: {error}", file=sys.stderr)
         return 2
@@ -1552,9 +1575,13 @@ def _run(
         # relaxations by an optimizer keep those sectors too, their forces and
         # moved positions averaged over the full group of the sectors
         # (PARSEC_PERIODIC_SECTOR_FORCES=auto); molecular dynamics, manual
-        # movements, Move_Flag with fixed atoms, the Fortran-derived routines,
-        # the bands and the non-self-consistent runs of a cell read the full
-        # grid (periodic_sector_forces_refusal).
+        # movements, Move_Flag with fixed atoms and the Fortran-derived routines
+        # read the full grid (periodic_sector_forces_refusal).  A band structure
+        # keeps the sectors of the SCF under PARSEC_PERIODIC_SECTOR_BANDS=auto:
+        # the bands read the potential the result holds on the full grid
+        # (Output/post_scf.band_hand_over); under off the whole run reads the
+        # full grid, as before.  nscf_kpoints runs no SCF here (Restart_Run is
+        # required and the reference CLI runs it).
         moving_or_forces = (
             translation.relaxation is not None
             or translation.molecular_dynamics is not None
@@ -1572,7 +1599,7 @@ def _run(
             else "forces"
             if translation.compute_forces
             else "a band structure"
-            if translation.problem.bands is not None
+            if translation.problem.bands is not None and periodic_sector_bands_setting() == "off"
             else "a non-self-consistent run"
             if getattr(translation, "nscf", None) is not None
             else None
@@ -1799,6 +1826,12 @@ def _run(
                 symmetry=solver_symmetry_mode,
                 symmetry_cache_directory=symmetry_cache_directory,
             )
+            if _context is None or _context.is_root:
+                # What of a cluster with a point group runs on the full grid for want of the native extension
+                # (also a NOTE line of parsec.out).
+                for key, value in getattr(getattr(system, "backend_info", None), "details", ()):
+                    if key == "symmetry_full_grid_note":
+                        print(f"NOTE: {value}", file=sys.stderr)
             # Wavefunctions are much larger than all scalar observables and
             # are absent from the default archive.  Keep symmetry-sector
             # orbitals resident/lazy unless the user explicitly requests
@@ -2108,8 +2141,17 @@ def _run(
             from parsec_python.Output.afm_scan import scan_lines_after_run
 
             scan_lines_after_run(translation, outcome, log.write, input_directory)
-            # bandstruc of a Gamma-point cell, Create_DOS of a cluster.
-            run_post_scf_outputs(system, translation, result, reporter, log.write, input_directory)
+            # bandstruc of a Gamma-point cell, Create_DOS of a cluster: of the
+            # last structure where the atoms moved (parsec.F90 calls calc_bands
+            # after the movement loop, with the projectors of the last positions).
+            last_system = (
+                outcome.system
+                if outcome is not None
+                else dynamics.system
+                if dynamics is not None
+                else system
+            )
+            run_post_scf_outputs(last_system, translation, result, reporter, log.write, input_directory)
             log.write(f"Text log: {log_path}")
             if dynamics is not None:
                 return 3 if dynamics.scf_failed else 0

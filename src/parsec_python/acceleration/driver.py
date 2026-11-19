@@ -440,11 +440,15 @@ def single_sector_setting() -> str:
     """``PARSEC_CUPY_SINGLE_SECTOR``: ``auto`` (default), ``on`` or ``off``.
 
     ``on`` gives a CuPy calculation without point-group symmetry one sector
-    of the identity, so that the devices of the process share its basis;
-    ``auto`` does so in the sector context of the full-SCF runner, where
-    that basis is shared (molecular dynamics, structures without symmetry),
-    and leaves the other routes as they were.  ``off`` never does.  The
-    numbers are those of the full grid.
+    of the identity; ``auto`` does so in the sector context of the full-SCF
+    runner (molecular dynamics, structures without symmetry), and leaves the
+    other routes as they were.  ``off`` never does.  The numbers are those
+    of the full grid.  The basis of that sector is shared where a sector
+    context gives it a group: by the MPI ranks of the runner, or by the GPUs
+    of its node where it runs one rank.  ``main.py`` has no such context
+    (``Eigensolvers/symmetry.py`` sets ``distributed_filter_devices`` from
+    the context alone), so there the basis lies on the first GPU of the
+    process, as the full grid did (measured on four A100, 2026-11-18).
     """
 
     value = os.environ.get("PARSEC_CUPY_SINGLE_SECTOR", "auto").strip().lower() or "auto"
@@ -458,16 +462,23 @@ def single_sector_setting() -> str:
 
 
 def periodic_sector_refusal(problem) -> str | None:
-    """Why a periodic cell cannot be solved as one sector of the identity, or ``None``.
+    """Why a periodic cell cannot be solved in the sectors of the Gamma route, or ``None``.
 
-    The route of the sectors (one sector of the identity, whose basis the
-    devices of a process or the MPI ranks of the full-SCF runner share) takes
-    a bulk cell at the Gamma point with real orbitals: an orthorhombic cell,
-    unpolarized, with a native LDA or GGA, its local potential, Hartree solve
-    and XC functional on the full grid as on one device.  It has not been
-    built or validated for the other periodic calculations named here; a
-    calculation that names one keeps the full grid of one device (``main.py``),
-    and the MPI runner refuses it.
+    The route of the sectors takes a bulk cell at the Gamma point with real
+    orbitals: an orthorhombic cell, unpolarized, with a native LDA or GGA.
+    Its orbitals are solved in the sectors of the point group of the cell
+    about its origin (``PARSEC_PERIODIC_SYMMETRY=auto``, the default), whose
+    density, potentials and mixer keep one value per orbit, the Hartree
+    potential solved on the full grid of the cell and reduced again; or, for
+    a cell without a group or with ``PARSEC_PERIODIC_SYMMETRY=off``, as one
+    sector of the identity, whose basis the MPI ranks of the full-SCF runner
+    share (in one process, ``PARSEC_CUPY_SINGLE_SECTOR=on``: one GPU holds
+    it), every field on the full grid.  The route has not been built or
+    validated for the other periodic calculations named here; a calculation
+    that names one keeps the full grid of one device in ``main.py`` (a
+    spin-polarized cell goes to the k-point driver, whose k-point sectors may
+    still split the Gamma point: ``SCF/kpoint_sectors.py``), and the MPI
+    runner refuses it.
     """
 
     from parsec_python.Grid import kpoint_sampling
@@ -528,6 +539,84 @@ def _orbital_group_refusal(problem, spin_polarized: bool, mpi_context) -> str | 
     if getattr(getattr(problem, "eigensolver", None), "fixed_state_count", False):
         return "Fix_Number_Eigenvalues (the state counts of a restart file, sector by sector)"
     return None
+
+
+def _sector_count(reduction) -> int:
+    """The number of orbital sectors of ``reduction``: its order for an abelian group, the solved one-dimensional
+    sectors of the subgroup for the weighted sectors of a point group (fewer than its order)."""
+
+    from .Symmetry import PointGroupReduction
+
+    if isinstance(reduction, PointGroupReduction):
+        return int(np.asarray(reduction.sector_characters).shape[0])
+    return int(reduction.group_order)
+
+
+def _ranks_divide_sectors(reduction, mpi_context) -> bool:
+    """Whether the ranks of an MPI run can take the sectors of ``reduction`` (``True`` in one process).
+
+    The sector context (:meth:`.experimental.mpi_scf.MPISectorContext.divides`) gives one rank with the GPUs of its
+    node at least one sector: the weighted sectors of D2d (three) on four such ranks, or the two of a cell repeated
+    twice, would stop the run in its sector configuration.  A group that a rank count cannot divide is not taken;
+    the orbitals keep the group of before (the abelian one about the origin), which ran there.
+    """
+
+    divides = getattr(mpi_context, "divides", None) if mpi_context is not None else None
+    if not callable(divides):
+        return True
+    return bool(divides(_sector_count(reduction)))
+
+
+def _native_extension_reason(selection) -> str:
+    """Why the native C++ extension serves no component of a CuPy run: ``--backend cupy``, or no extension."""
+
+    if selection.requested == "cupy":
+        return "the CuPy backend was named (--backend cupy), which leaves the native C++ extension unused"
+    reasons = "; ".join(str(reason) for reason in getattr(selection, "fallback_reasons", ()))
+    return "the native C++ extension is not available" + (f" ({reasons})" if reasons else "")
+
+
+def _cluster_full_grid_notes(selection, *, periodic: bool, group_found: bool, orbitals_in_sectors: bool) -> list[str]:
+    """The NOTE of a cluster with a point group whose Hartree solve takes the full grid for want of the extension.
+
+    The symmetry-reduced Hartree solve of a cluster (the CG on the wedge and
+    its boundary values) is a route of the native extension.  With the CuPy
+    backend alone, an explicit ``--backend cupy`` or ``auto`` where the
+    extension is not built, the Poisson CG runs on the full grid with the
+    full-grid finite-difference matrix on the device, while the orbitals stay
+    in the sectors: more memory and time for a large cluster.  Nothing of the
+    run changes here; before 2026-11-18 only the ``hartree_backend`` line of
+    the report showed it.  Empty for a periodic cell (its Hartree solve has
+    a route of its own), a cluster without a group and the native Hartree
+    backend.
+    """
+
+    if periodic or not group_found or selection.selected != "cupy" or selection.hartree_backend == "native":
+        return []
+    return [
+        "the Hartree solve of this cluster runs on the full grid (a CuPy CG with the full-grid finite-difference "
+        "matrix on the device), not on the wedge of its point group, because "
+        + _native_extension_reason(selection)
+        + ("; the orbitals stay in the symmetry sectors" if orbitals_in_sectors else "")
+        + ". The default backend (auto) with the native extension solves it on the wedge."
+    ]
+
+
+def _cluster_xc_full_grid_note(selection, *, functional: str) -> str:
+    """The NOTE of a cluster in the sectors whose CA-LDA is evaluated on the full grid of the host.
+
+    The CA-LDA evaluator on the orbits (``NativeCALDAEvaluator``) is a kernel
+    of the native extension; without it the orbit density is expanded to the
+    full grid every step, evaluated by the reference functional on the host
+    and reduced again (an exact adapter, the same numbers).
+    """
+
+    return (
+        f"the XC functional ({functional}) of this cluster is evaluated on the full grid of the host every SCF "
+        "step (the orbit fields expanded and reduced again), because "
+        + _native_extension_reason(selection)
+        + ". The default backend (auto) with the native extension evaluates it on the orbits."
+    )
 
 
 def _orbital_reduction(symmetry_reduction, stabilizer_disabled: bool):
@@ -657,6 +746,9 @@ class _OverlappedSymmetryMaps:
         # Set by the caller where the weighted sectors serve the orbitals (no refusal of
         # ``_orbital_group_refusal``): :meth:`start` then detects them on this thread.
         self.point_group_wanted = False
+        # Whether the MPI ranks can take the sectors of a reduction (_ranks_divide_sectors; None: one process).
+        # Where they cannot take the weighted ones, the caller keeps the reduction of before, which is decomposed.
+        self.ranks_divide = None
         self.seconds = 0.0
         self.wait_seconds = 0.0
 
@@ -685,7 +777,10 @@ class _OverlappedSymmetryMaps:
             load_or_build_reflection_decomposition,
             load_or_detect_reflection_reduction,
         )
+        from .Symmetry.axis_reflection import symmetry_atom_tolerance
 
+        # (the tolerance of the detection in line, PARSEC_SYMMETRY_ATOM_TOLERANCE)
+        atom_tolerance = symmetry_atom_tolerance()
         self._grid, self._atoms = grid, atoms
         stages, cache_directory = self._stages, self._cache_directory
 
@@ -694,7 +789,7 @@ class _OverlappedSymmetryMaps:
             try:
                 try:
                     found = load_or_detect_reflection_reduction(
-                        grid, atoms, cache_directory=cache_directory
+                        grid, atoms, cache_directory=cache_directory, atom_tolerance=atom_tolerance
                     )
                 except BaseException as error:
                     self._reduction.set_exception(error)
@@ -709,13 +804,21 @@ class _OverlappedSymmetryMaps:
 
                     mark = perf_counter()
                     try:
-                        candidate = detect_point_group_reduction(grid, atoms, candidate)
+                        candidate = detect_point_group_reduction(
+                            grid, atoms, candidate, atom_tolerance=atom_tolerance
+                        )
                     except BaseException as error:
                         self._point_group.set_exception(error)
                         return
                     finally:
                         stages.add("orbital_group", mark)
                     self._point_group.set_result(candidate)
+                    if (
+                        candidate is not found[0]
+                        and self.ranks_divide is not None
+                        and not self.ranks_divide(candidate)
+                    ):
+                        candidate = found[0]
                 if not decompose or candidate.group_order <= 1:
                     return
                 try:
@@ -1567,7 +1670,9 @@ def _prepare_periodic_orbital_operators(problem):
     grid = periodic.build_periodic_grid(problem.periodic_cell, problem.grid)
     grid_seconds = perf_counter() - stage
     lattice_vectors = problem.periodic_cell.lattice_vectors
-    outside = periodic.atom_outside_cell(lattice_vectors, atoms)
+    # An atom on a face to round-off (a relax_restart.dat) is folded into the cell for the projectors, as the full
+    # preparation folds it for its builders (pbc.atoms_for_cell_builders); one farther outside is refused.
+    builder_atoms, outside = periodic.atoms_for_cell_builders(lattice_vectors, atoms)
     if outside is not None:
         raise ValueError(
             f"atom {outside.symbol} at {np.asarray(outside.position)} lies outside the periodic cell "
@@ -1580,7 +1685,7 @@ def _prepare_periodic_orbital_operators(problem):
     finite_difference_seconds = perf_counter() - stage
     stage = perf_counter()
     nonlocal_operator = periodic.build_nonlocal_projectors(
-        grid, atoms, pseudopotentials, problem.pseudopotentials, lattice_vectors, periodic_dimensions=3
+        grid, builder_atoms, pseudopotentials, problem.pseudopotentials, lattice_vectors, periodic_dimensions=3
     )
     nonlocal_seconds = perf_counter() - stage
     return periodic.PeriodicPreparedSinglePointSystem(
@@ -3365,9 +3470,21 @@ def _prepare_single_point(
         preparation.join_on_exit(ionic_fields.close)
     symmetry_mode = _normalize_symmetry_mode(symmetry)
     from .Symmetry import periodic_symmetry_setting
+    from .Symmetry.axis_reflection import (
+        periodic_abelian_translation_setting,
+        periodic_centre_setting,
+        periodic_trivial_origin_setting,
+        symmetry_atom_tolerance,
+    )
 
     # Read in every run, so that a value it does not know is refused.
     periodic_symmetry_mode = periodic_symmetry_setting()
+    # (and so are the switches of the detection: PARSEC_SYMMETRY_ATOM_TOLERANCE, PARSEC_PERIODIC_TRIVIAL_ORIGIN,
+    # PARSEC_PERIODIC_SYMMETRY_CENTRE, PARSEC_PERIODIC_ABELIAN_TRANSLATIONS)
+    atom_tolerance = symmetry_atom_tolerance()
+    trivial_origin_mode = periodic_trivial_origin_setting()
+    periodic_centre_setting()
+    periodic_abelian_translation_setting()
     # A periodic cell in an MPI sector context: one sector of the identity
     # whose basis the ranks share (a bulk cell at Gamma; see
     # periodic_sector_refusal for what that route does not take).
@@ -3436,6 +3553,8 @@ def _prepare_single_point(
         preparation.symmetry_maps.point_group_wanted = (
             _orbital_group_refusal(problem, spin_polarized, mpi_context) is None
         )
+        if mpi_context is not None:
+            preparation.symmetry_maps.ranks_divide = lambda reduction: _ranks_divide_sectors(reduction, mpi_context)
         preparation.join_on_exit(preparation.symmetry_maps.close)
     selection, reference, preparation_overlap = _resolve_and_prepare_reference(
         problem,
@@ -3465,6 +3584,7 @@ def _prepare_single_point(
     symmetry_representation_cache_info = None
     detected_group_order = 1
     symmetry_detection = "disabled by option"
+    undivided_note = None
     symmetry_maps = preparation.symmetry_maps
     maps_beside = False
     periodic_on_host = periodic_symmetry and selection.selected != "cupy"
@@ -3509,6 +3629,7 @@ def _prepare_single_point(
                     reference.grid,
                     getattr(reference, "atoms", ()),
                     cache_directory=symmetry_cache_directory,
+                    atom_tolerance=atom_tolerance,
                 )
         except (ValueError, RuntimeError) as error:
             if symmetry_mode == "on":
@@ -3523,7 +3644,14 @@ def _prepare_single_point(
         else:
             detected_group_order = candidate.group_order
             refusal = _orbital_group_refusal(problem, spin_polarized, mpi_context)
-            if candidate.group_order > 1 and refusal is None:
+            # A periodic cell looks for its group even where its abelian group about the origin is the identity
+            # alone: the half-cell translations of a cell that repeats a smaller one, the operations about a
+            # centre off the origin (PARSEC_PERIODIC_TRIVIAL_ORIGIN=off: only where that group is larger).
+            search_cell = is_periodic and trivial_origin_mode == "auto"
+            # The group about the origin, kept where the MPI ranks cannot divide the sectors of a larger one
+            # (_ranks_divide_sectors), which is then named in the report.
+            origin_group, undivided = candidate, None
+            if (candidate.group_order > 1 or search_cell) and refusal is None:
                 # The one-dimensional sectors of a larger subgroup of the full point group, with weights,
                 # where they solve less (Symmetry/orbital_groups.py; PARSEC_ORBITAL_GROUP=abelian keeps
                 # the group of before): detected by the thread of the maps where it was asked to
@@ -3535,10 +3663,40 @@ def _prepare_single_point(
                     from .Symmetry import detect_point_group_reduction
 
                     candidate = stages.timed("orbital_group", detect_point_group_reduction)(
-                        reference.grid, getattr(reference, "atoms", ()), candidate
+                        reference.grid, getattr(reference, "atoms", ()), candidate, atom_tolerance=atom_tolerance
                     )
+                if candidate is not origin_group and not _ranks_divide_sectors(candidate, mpi_context):
+                    candidate, undivided = origin_group, candidate
+            from .Symmetry import PointGroupReduction
+
+            if is_periodic and (candidate.group_order > 1 or search_cell) and not isinstance(
+                candidate, PointGroupReduction
+            ):
+                # The orbitals of a cell that keep an abelian group take its commuting involutions with their
+                # translations (PARSEC_PERIODIC_ABELIAN_TRANSLATIONS=off: those about the origin, as before).
+                from .Symmetry.axis_reflection import periodic_abelian_reduction
+
+                abelian_group = stages.timed("orbital_group", periodic_abelian_reduction)(
+                    reference.grid, getattr(reference, "atoms", ()), candidate, atom_tolerance=atom_tolerance
+                )
+                if abelian_group is candidate or _ranks_divide_sectors(abelian_group, mpi_context):
+                    candidate = abelian_group
+                elif undivided is None:
+                    undivided = abelian_group
+            if undivided is not None:
+                undivided_note = (
+                    f"the {_sector_count(undivided)} sectors of the larger group found are fewer than the "
+                    f"{mpi_context.size} MPI ranks, which take one or more each (ranks share a sector with one GPU "
+                    f"per rank): the orbitals keep the group about the origin"
+                )
             if candidate.group_order > 1:
                 symmetry_reduction = candidate
+                if getattr(reference, "hubbard", None) is None:
+                    # Abelian sectors take the projectors of one atom per orbit, as those of a point group do
+                    # (PARSEC_SECTOR_PROJECTOR_ORBITS; the device LDA+U columns follow every KB column).
+                    from .Symmetry.axis_reflection import attach_abelian_atom_orbits
+
+                    attach_abelian_atom_orbits(candidate, getattr(reference, "atoms", ()), reference.grid)
                 from .Symmetry import PointGroupReduction, SignedPermutationReduction
 
                 symmetry_detection = (
@@ -3546,14 +3704,22 @@ def _prepare_single_point(
                         f"exact group of {candidate.full_operations.shape[0]} operations detected (signed "
                         f"permutations, "
                         f"{int(np.count_nonzero(np.any(np.asarray(candidate.full_translations) != 0, axis=1)))}"
-                        f" of them with a translation, by half the cell or, non-symmorphic, a fraction of it; "
-                        f"PARSEC_PERIODIC_TRANSLATIONS)"
+                        f" of them with a translation, by half the cell or, non-symmorphic, a fraction of it, or "
+                        f"about a symmetric site off the origin; PARSEC_PERIODIC_TRANSLATIONS, "
+                        f"PARSEC_PERIODIC_SYMMETRY_CENTRE)"
                         if getattr(candidate, "full_translations", None) is not None
                         else f"exact point group of {candidate.full_operations.shape[0]} signed permutations detected"
                     )
                     + f"; the orbitals use the one-dimensional sectors of a subgroup of {candidate.group_order} "
                     f"(weights {', '.join(str(int(w)) for w in candidate.sector_weights)})"
                     if isinstance(candidate, PointGroupReduction)
+                    else (
+                        f"exact commuting group of {candidate.group_order} operations detected (signed "
+                        f"permutations, "
+                        f"{int(np.count_nonzero(np.any(np.asarray(candidate.translations) != 0, axis=1)))} of them "
+                        f"with a translation; PARSEC_PERIODIC_ABELIAN_TRANSLATIONS)"
+                    )
+                    if getattr(candidate, "translations", None) is not None
                     else "exact commuting signed-permutation subgroup detected"
                     if isinstance(candidate, SignedPermutationReduction)
                     else "exact Cartesian axis-reflection subgroup detected"
@@ -3567,6 +3733,23 @@ def _prepare_single_point(
                         "symmetry='on' requested, but only the identity "
                         "operation preserves the labeled atoms and active grid"
                     )
+            from .Symmetry.axis_reflection import lost_operations_note
+
+            # Operations the atoms keep only to more than the atom tolerance (PARSEC_SYMMETRY_ATOM_TOLERANCE):
+            # said in the report, since the positions are not symmetrized.
+            try:
+                lost_note = lost_operations_note(
+                    reference.grid,
+                    getattr(reference, "atoms", ()),
+                    candidate,
+                    atom_tolerance=atom_tolerance,
+                )
+            except (ValueError, RuntimeError, AttributeError):
+                lost_note = None
+            if lost_note is not None:
+                symmetry_detection += "; " + lost_note
+            if undivided_note is not None:
+                symmetry_detection += "; " + undivided_note
     # Without a point group the orbitals may still take the route of the
     # sectors, as one sector of the identity, so that the devices of the
     # process share its basis (PARSEC_CUPY_SINGLE_SECTOR).
@@ -3751,6 +3934,15 @@ def _prepare_single_point(
             )
         hartree_reduction = None
         hartree_full_grid_for_spin = True
+    # What of a cluster with a point group runs on the full grid only because the
+    # native extension is not used (``symmetry_full_grid_note`` of the details,
+    # a NOTE line of parsec.out and of the command line's stderr).
+    full_grid_notes = _cluster_full_grid_notes(
+        selection,
+        periodic=is_periodic,
+        group_found=symmetry_reduction is not None and int(getattr(symmetry_reduction, "group_order", 1)) > 1,
+        orbitals_in_sectors=orbital_decomposition is not None,
+    )
     if (
         symmetry_mode == "on"
         and orbital_decomposition is None
@@ -4168,6 +4360,16 @@ def _prepare_single_point(
             )
 
         native_xc_evaluator = symmetry_xc_evaluator
+        if (
+            not is_periodic
+            and not spin_polarized
+            and not sector_worker
+            and xc_functional == "ca"
+            and selection.selected == "cupy"
+            and selection.hartree_backend != "native"
+        ):
+            # The CA-LDA kernel on the orbits is the native extension's (above).
+            full_grid_notes.append(_cluster_xc_full_grid_note(selection, functional="CA-LDA"))
     if spin_sectors and spin_xc_evaluator is None:
         # A spin functional the device does not evaluate, on the orbit fields
         # of the sectors: expanded, evaluated on the host, reduced (exact for
@@ -4911,6 +5113,9 @@ def _prepare_single_point(
             else str(Path(symmetry_cache_directory).resolve()),
         ),
         ("orbital_symmetry", orbital_symmetry),
+        # What of a cluster with a point group runs on the full grid for want of the native extension (a NOTE line of
+        # parsec.out, _cluster_full_grid_notes).
+        *(("symmetry_full_grid_note", note) for note in full_grid_notes),
         # PARSEC_FAST_GRID, as the reference preparation read it.  The grid
         # of a periodic cell has the reference builder alone.
         (
@@ -5023,7 +5228,8 @@ def _prepare_single_point(
                 if spin_polarized
                 else "cached C++/OpenMP float64 CA/PZ-LDA"
                 if xc_functional == "ca"
-                and native_xc_evaluator is not None
+                # (not the host adapter of the orbits: a periodic cell under PARSEC_PERIODIC_CA_XC=host)
+                and type(native_xc_evaluator).__name__ == "NativeCALDAEvaluator"
                 else (
                     "vectorized NumPy discrete-variational PBE"
                     if xc_functional == "pbe"

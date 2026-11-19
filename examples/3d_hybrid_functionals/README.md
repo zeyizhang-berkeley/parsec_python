@@ -67,11 +67,14 @@ order 12, `Convergence_Criterion 1e-6 Ry`, `Cubic_Spline: .true.` for every spec
 `Fermi_Temp 1 K` (O2: `-1 K` with `occup.in`), `States_Num` = occupied + 4 (O2: 11 per channel; Si64: 140). The
 k-points are QE's `K_POINTS automatic n n n 0 0 0` written out as a `Kpoint_List` of every point of the mesh with
 equal weights; a hybrid reduces the list by time reversal only (Si 2x2x2: 8 points, 4x4x4: 36, 3x3x3: 14, h-BN
-6x6x1: 20), and its exchange sums over the whole mesh, as QE's with `nqx = n`. (`Monkhorst_Pack_Grid n n n` with a
-`Monkhorst_Pack_Shift` block of zeros gives the same points, but such a block also turns on the space group of
+6x6x1: 20), and its exchange sums over the whole mesh, as QE's with `nqx = n`. (`Monkhorst_Pack_Grid n n n`, with
+or without a `Monkhorst_Pack_Shift` block of zeros, gives the same points, but it also turns on the space group of
 PARSEC's k-point machinery, which the displaced Si cell does not admit on its grid; the lists keep every input
-alike.) The Si64 cells are timing cases: `Si64_k222` takes this code's own `Monkhorst_Pack_Grid 2 2 2` (points at
-+-1/4 of the reciprocal vectors). Everything else is the default: PBE start of the Fock loop, ACE of the
+alike.) The Si64 cells are timing cases: `Si64_k222` takes `Monkhorst_Pack_Grid 2 2 2` without a shift block. Its
+outputs were made with this code's former mesh of such an input (points at +-1/4 of the reciprocal vectors: 8
+points for PBE, 4 time-reversal pairs for PBE0), which `PARSEC_MP_UNSHIFTED_MESH=port` keeps; since 18 November
+2026 the default is PARSEC 1.5's Gamma-centred mesh (0 and 1/2: the irreducible wedge for PBE, all 8 points for
+PBE0, each its own time-reversal partner). Everything else is the default: PBE start of the Fock loop, ACE of the
 `States_Num` states of every k-point, the adaptive inner criterion, outer DIIS, HSE06 with omega = 0.11 1/bohr in
 both parts. The Fock-loop keywords that differ from input to input are those of the Coulomb singularity:
 

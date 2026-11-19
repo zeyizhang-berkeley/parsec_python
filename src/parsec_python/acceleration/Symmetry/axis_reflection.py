@@ -1002,7 +1002,9 @@ def orbital_group_policy() -> str:
     ``auto`` lets the orbitals use the one-dimensional sectors of the subgroup of the full point group that
     :func:`.orbital_groups.orbital_group_plan` chooses (:class:`PointGroupReduction`) where that solves less
     than the abelian group of before, for a calculation that the sectors with weights serve (see the driver);
-    ``abelian`` keeps the reflection or commuting signed-permutation group of before, bit for bit.
+    ``abelian`` keeps the reflection or commuting signed-permutation group of before, bit for bit for a cluster.  A
+    periodic cell then takes its commuting involutions with the translations of the cell
+    (:func:`periodic_abelian_reduction`; ``PARSEC_PERIODIC_ABELIAN_TRANSLATIONS=off``: those about the origin).
     """
 
     value = os.environ.get("PARSEC_ORBITAL_GROUP", "auto").strip().lower() or "auto"
@@ -1011,14 +1013,45 @@ def orbital_group_policy() -> str:
     return value
 
 
+_ORBITAL_GROUP_MAX_COST_SWITCH = "PARSEC_ORBITAL_GROUP_MAX_COST"
+#: The default of ``PARSEC_ORBITAL_GROUP_MAX_COST`` (see :func:`orbital_group_max_cost`).
+ORBITAL_GROUP_MAX_COST = 0.75
+
+
+def orbital_group_max_cost() -> float:
+    """``PARSEC_ORBITAL_GROUP_MAX_COST``: the largest fraction of the work of the abelian sectors (rows times states,
+    :func:`.orbital_groups.orbital_group_plan`) at which :func:`detect_point_group_reduction` takes the weighted
+    sectors of a larger subgroup.
+
+    ``0.75`` (the default since 2026-11-18) takes the plans that merge the partner sectors of the two-dimensional
+    levels of D4h, D2d, D4 and C4v (three quarters of the abelian work) as well as those of Td, Oh, T and Th (a half
+    to a quarter); ``0.5`` keeps the D4h-type plans on the abelian group, as before that date.  A number in
+    ``(0, 1]``.  An MPI run whose ranks cannot divide the weighted sectors (three of D2d on four ranks with the GPUs
+    of their nodes) keeps the abelian group (the driver's ``_ranks_divide_sectors``).
+    """
+
+    raw = os.environ.get(_ORBITAL_GROUP_MAX_COST_SWITCH, "").strip()
+    if not raw:
+        return ORBITAL_GROUP_MAX_COST
+    try:
+        value = float(raw)
+    except ValueError:
+        value = float("nan")
+    if not 0.0 < value <= 1.0:
+        raise ValueError(f"{_ORBITAL_GROUP_MAX_COST_SWITCH} must be a number in (0, 1], not {raw!r}")
+    return value
+
+
 def periodic_symmetry_setting() -> str:
     """``PARSEC_PERIODIC_SYMMETRY``: ``auto`` (the default) or ``off``.
 
     ``auto`` looks for the point group of a bulk orthorhombic cell at the Gamma point that the route of the
-    sectors takes (``driver.periodic_sector_refusal``): the Cartesian signed permutations about the origin of
-    the cell that map its atoms modulo the lattice and its periodic grid onto themselves.  The orbitals then
-    use the sectors of that group, as for a cluster.  ``off`` keeps the one sector of the identity of before,
-    bit for bit.
+    sectors takes (``driver.periodic_sector_refusal``): the Cartesian signed permutations that map its atoms
+    modulo the lattice and its periodic grid onto themselves, with a translation of whole grid steps where they
+    need one (by half the cell, a fraction of it, or about a symmetric site off the origin:
+    :func:`_space_group_operations`), whatever the group about the origin (``PARSEC_PERIODIC_TRIVIAL_ORIGIN``).
+    The orbitals then use the sectors of that group, as for a cluster.  ``off`` keeps the one sector of the
+    identity of before, bit for bit.
     """
 
     value = os.environ.get("PARSEC_PERIODIC_SYMMETRY", "auto").strip().lower() or "auto"
@@ -1198,6 +1231,74 @@ def periodic_translation_setting() -> str:
     return value
 
 
+def _auto_or_off(name: str) -> str:
+    value = os.environ.get(name, "auto").strip().lower() or "auto"
+    if value not in {"auto", "off"}:
+        raise ValueError(f"{name} must be auto or off, not {value!r}")
+    return value
+
+
+_TRIVIAL_ORIGIN_SWITCH = "PARSEC_PERIODIC_TRIVIAL_ORIGIN"
+_CENTRE_SWITCH = "PARSEC_PERIODIC_SYMMETRY_CENTRE"
+_ABELIAN_TRANSLATIONS_SWITCH = "PARSEC_PERIODIC_ABELIAN_TRANSLATIONS"
+_ATOM_TOLERANCE_SWITCH = "PARSEC_SYMMETRY_ATOM_TOLERANCE"
+#: the atom tolerance of the detection (bohr) unless ``PARSEC_SYMMETRY_ATOM_TOLERANCE`` says otherwise
+DEFAULT_ATOM_TOLERANCE = 1.0e-7
+#: the distance (bohr) within which :func:`lost_operations_note` looks for the operations a tolerance lost
+LOOSE_ATOM_TOLERANCE = 1.0e-3
+
+
+def periodic_trivial_origin_setting() -> str:
+    """``PARSEC_PERIODIC_TRIVIAL_ORIGIN``: ``auto`` (default) looks for the group of a periodic cell whose abelian
+    group about the origin is the identity alone (:func:`detect_point_group_reduction`: the half-cell translations of
+    a cell that repeats a smaller one, the operations about a centre off the origin); ``off`` keeps such a cell in one
+    sector of the identity, as before."""
+
+    return _auto_or_off(_TRIVIAL_ORIGIN_SWITCH)
+
+
+def periodic_centre_setting() -> str:
+    """``PARSEC_PERIODIC_SYMMETRY_CENTRE``: ``auto`` (default) lets a crystal with pure translations beyond the
+    half-cell ones (a supercell of a smaller cell) take the point group about a symmetric site off the origin
+    (:func:`_symmetry_centre`); ``off`` keeps the operations about the origin and the half-cell points, bit for bit as
+    before.  The search runs only under ``PARSEC_PERIODIC_TRANSLATIONS=auto``: ``half`` and ``off`` keep their
+    groups whatever this says."""
+
+    return _auto_or_off(_CENTRE_SWITCH)
+
+
+def periodic_abelian_translation_setting() -> str:
+    """``PARSEC_PERIODIC_ABELIAN_TRANSLATIONS``: ``auto`` (default) gives the orbitals of a periodic cell that keep an
+    abelian group (``occup.in``, ``Fix_Number_Eigenvalues``, ``PARSEC_ORBITAL_GROUP=abelian``, a plan of weighted
+    sectors that gains too little) the largest group of commuting involutions ``r -> R r + t`` of the cell, with its
+    translations (:func:`periodic_abelian_reduction`); ``off`` keeps the commuting signed permutations about the
+    origin, bit for bit as before."""
+
+    return _auto_or_off(_ABELIAN_TRANSLATIONS_SWITCH)
+
+
+def symmetry_atom_tolerance() -> float:
+    """``PARSEC_SYMMETRY_ATOM_TOLERANCE``: the distance (bohr) within which an operation must carry every atom onto an
+    atom of its species to be a symmetry of the structure, ``1e-7`` by default.
+
+    The positions are not symmetrized: a larger tolerance accepts the operations of a structure symmetric only to
+    within it, and the sectors then solve the Hamiltonian averaged over the group (its orbit averages of the local
+    potential, the projectors of one atom per orbit), which differs from that of the input by about the distance the
+    atoms are off.  Forces and moves in the sectors check the atoms to 1e-6 bohr and refuse a structure off by more.
+    """
+
+    raw = os.environ.get(_ATOM_TOLERANCE_SWITCH, "").strip()
+    if not raw:
+        return DEFAULT_ATOM_TOLERANCE
+    try:
+        value = float(raw)
+    except ValueError:
+        raise ValueError(f"{_ATOM_TOLERANCE_SWITCH} must be a distance in bohr, not {raw!r}") from None
+    if not (np.isfinite(value) and 0.0 < value <= 0.1):
+        raise ValueError(f"{_ATOM_TOLERANCE_SWITCH} must be above 0 and at most 0.1 bohr, not {raw!r}")
+    return value
+
+
 def _half_cell_translations(
     grid: RealSpaceGrid, species: dict, atom_tolerance: float, trees: dict | None = None
 ) -> list[np.ndarray]:
@@ -1286,7 +1387,10 @@ def _translations_mapping(species: dict, trees: dict, operation, period, steps, 
     candidates = candidates - period * np.floor(candidates / period)
     in_steps = candidates / steps
     rounded = np.rint(in_steps)
-    keep = np.all(np.abs(in_steps - rounded) <= 1.0e-6, axis=1)
+    # whole steps to round-off; a looser atom tolerance (PARSEC_SYMMETRY_ATOM_TOLERANCE) lets the candidates be off a
+    # whole step by as much as two atoms are off their images
+    limit = 1.0e-6 if tolerance <= 1.0e-7 else np.maximum(1.0e-6, 2.5 * tolerance / np.asarray(steps, dtype=np.float64))
+    keep = np.all(np.abs(in_steps - rounded) <= limit, axis=1)
     whole = np.unique(np.mod(rounded[keep].astype(np.int64), counts), axis=0)
     if excluded:
         drop = {tuple(int(v) for v in np.mod(np.asarray(step, dtype=np.int64), counts)) for step in excluded}
@@ -1332,6 +1436,107 @@ def _fractional_translation(species, trees, operation, period, steps, counts, to
     return found[0] if found and found is not _UNDECIDED else None
 
 
+# Atoms of every species tried as the symmetric site of a supercell (spread over its list), and nearest neighbours of
+# the first atom of the smallest species whose midpoints with it are tried too.
+_CENTRE_ATOMS = 8
+_CENTRE_NEIGHBOURS = 8
+
+
+def _centre_offset(operation, centre_steps, counts, tolerance: float, steps) -> np.ndarray | None:
+    """``(I - R) x0`` in whole grid steps modulo the counts, ``None`` where it is not a whole number of steps.
+
+    ``centre_steps`` is ``x0`` in grid steps along the axes; ``R`` carries only axes of one step onto each other
+    (:func:`_integer_signed_permutation_parameters`), so ``R`` acts on it as on the Cartesian ``x0``.
+    """
+
+    centre_steps = np.asarray(centre_steps, dtype=np.float64)
+    offset = centre_steps - np.asarray(operation, dtype=np.float64) @ centre_steps
+    rounded = np.rint(offset)
+    limit = 1.0e-6 if tolerance <= 1.0e-7 else np.maximum(1.0e-6, 2.5 * tolerance / np.asarray(steps, dtype=np.float64))
+    if np.any(np.abs(offset - rounded) > limit):
+        return None
+    return np.mod(rounded.astype(np.int64), np.asarray(counts, dtype=np.int64))
+
+
+def _centre_candidates(species: dict, trees: dict, period: np.ndarray) -> np.ndarray:
+    """Cartesian candidates for the symmetric site of a supercell: atoms and bond midpoints, folded into the cell.
+
+    The site of the largest point group of a crystal is an atom, a bond midpoint or an empty site of the smaller
+    cell it repeats; any image of it under a pure translation gives a group as large.  Tried: up to
+    ``_CENTRE_ATOMS`` atoms of every species (the smallest species first: a defect or a dopant is the natural centre
+    of its supercell), and the midpoints of the first atom of the smallest species with its ``_CENTRE_NEIGHBOURS``
+    nearest neighbours of every species.
+    """
+
+    ordered = sorted(species, key=lambda name: (len(species[name]), name))
+    found = []
+    for name in ordered:
+        positions = species[name]
+        picks = np.unique(np.linspace(0, len(positions) - 1, min(len(positions), _CENTRE_ATOMS)).astype(int))
+        found.extend(positions[picks])
+    first = np.asarray(species[ordered[0]][0], dtype=np.float64)
+    for name in ordered:
+        tree = trees.get(name)
+        if tree is None:
+            tree = trees[name] = _matching_tree(species[name], period)
+        count = min(len(species[name]), _CENTRE_NEIGHBOURS + 1)
+        _, nearest = tree.query(_folded(first[None, :], period), k=count)
+        for index in np.atleast_1d(np.asarray(nearest).reshape(-1)):
+            difference = _minimum_image(species[name][int(index)] - first, period)
+            if np.linalg.norm(difference) > 1.0e-6:
+                found.append(first + 0.5 * difference)
+    candidates = _folded(np.asarray(found, dtype=np.float64).reshape(-1, 3), period)
+    # one candidate per point (to 1e-6 bohr), in the order found
+    _, first_index = np.unique(np.round(candidates * 1.0e6).astype(np.int64), axis=0, return_index=True)
+    return candidates[np.sort(first_index)]
+
+
+def _symmetry_centre(species, trees, operations, half_steps, counts, steps, tolerance, period):
+    """``(x0, origin_count)``: the symmetric site (grid steps) of a supercell about which more operations map the
+    sampled atoms than about the origin, and the count of those about the origin; ``None`` where none does better.
+
+    An operation counts about ``x0`` where ``(I - R) x0`` is whole grid steps and ``r -> R r + (I - R) x0 + h`` (``h``
+    a half-cell step, as about the origin) carries the first atoms of every species near atoms of it
+    (:func:`_plausible`, a necessary condition of the full matching).  The candidates are those of
+    :func:`_centre_candidates`; the first of the largest count wins.
+    """
+
+    counts = np.asarray(counts, dtype=np.int64)
+    steps = np.asarray(steps, dtype=np.float64)
+    if not operations:
+        return None
+    # the origin first, then the candidates (grid steps)
+    centres = np.vstack([np.zeros((1, 3)), _centre_candidates(species, trees, period) / steps])
+    limit = 1.0e-6 if tolerance <= 1.0e-7 else np.maximum(1.0e-6, 2.5 * tolerance / steps)
+    radius = 2.0 * (tolerance * (1.0 + 1.0e-9) + 1.0e-12)
+    half = np.asarray(half_steps, dtype=np.int64).reshape(-1, 3)
+    scores = np.zeros(centres.shape[0], dtype=np.int64)
+    for operation in operations:
+        matrix = np.asarray(operation, dtype=np.float64)
+        offsets = centres - centres @ matrix.T
+        rounded = np.rint(offsets)
+        whole = np.all(np.abs(offsets - rounded) <= limit, axis=1)
+        if not np.any(whole):
+            continue
+        # every centre with every half-cell step at once: (centres, steps, 3) translations in bohr
+        shifts = np.mod(rounded[whole].astype(np.int64)[:, None, :] + half[None, :, :], counts) * steps
+        passing = np.ones(shifts.shape[:2], dtype=bool)
+        for symbol, positions in species.items():
+            tree = trees.get(symbol)
+            if tree is None:
+                tree = trees[symbol] = _matching_tree(positions, period)
+            sample = positions[:_SAMPLE_ATOMS] @ matrix.T
+            images = _folded(shifts[:, :, None, :] + sample[None, None, :, :], period)
+            distances, _ = tree.query(images.reshape(-1, 3), k=1, distance_upper_bound=radius, workers=1)
+            passing &= np.all(np.isfinite(distances).reshape(images.shape[:3]), axis=2)
+        scores[np.flatnonzero(whole)] += np.any(passing, axis=1)
+    origin = int(scores[0])
+    best = int(np.argmax(scores))
+    if scores[best] <= origin:
+        return None
+    return centres[best], origin
+
+
 def _space_group_operations(grid, atoms, atom_tolerance, lattice_tolerance, *, fractional: bool = True):
     """``(matrices, translations)`` of the operations ``r -> R r + t`` of a periodic cell, the identity first.
 
@@ -1339,6 +1544,11 @@ def _space_group_operations(grid, atoms, atom_tolerance, lattice_tolerance, *, f
     translations ``T`` of :func:`_half_cell_translations`.  The ``t`` that go with one ``R`` form a coset of
     ``T``: one is searched (the zero first), the others follow.  With ``T`` the zero translation alone these are
     the operations of :func:`_point_group_operations`, in its order.
+
+    A crystal with pure translations beyond ``T`` (a supercell) takes no translation by a fraction of the cell
+    (``fractional``, below), so its operations are those about the origin and the half-cell points.  Where its
+    symmetric site lies elsewhere (:func:`_symmetry_centre`, ``PARSEC_PERIODIC_SYMMETRY_CENTRE``) they are taken
+    about that site ``x0`` instead: ``t = (I - R) x0`` plus a half-cell step, whole grid steps.
     """
 
     species = _positions_by_species(atoms)
@@ -1368,27 +1578,65 @@ def _space_group_operations(grid, atoms, atom_tolerance, lattice_tolerance, *, f
     )
     if fractional and steps is None:
         steps = np.diag(np.asarray(grid.cell.lattice_vectors, dtype=np.float64)) / counts
-    for operation in _signed_permutation_operations():
-        if np.array_equal(operation, identity):
-            continue
-        if _integer_signed_permutation_parameters(grid, operation, lattice_tolerance) is None:
-            continue
-        found = None
-        for candidate in ([translations[0]] if len(translations) == 1 else _all_half_cell_steps(counts)):
-            cartesian = None if len(translations) == 1 else candidate * steps
-            if _plausible(species, trees, operation, cartesian, atom_tolerance, period) and _atoms_are_invariant_operation(
-                species, operation, atom_tolerance, period, cartesian
-            ):
-                found = candidate
-                break
-        if found is None and fractional:
-            found = _fractional_translation(species, trees, operation, period, steps, counts, atom_tolerance)
-        if found is None:
-            continue
-        for translation in translations:
-            matrices.append(operation)
-            shifts.append((found + translation) % counts)
-    return matrices, shifts
+    half_steps = [translations[0]] if len(translations) == 1 else _all_half_cell_steps(counts)
+    admissible = [
+        operation
+        for operation in _signed_permutation_operations()
+        if not np.array_equal(operation, identity)
+        and _integer_signed_permutation_parameters(grid, operation, lattice_tolerance) is not None
+    ]
+
+    def about(centre_steps, operation_steps):
+        """The operations about the origin (``None``) or about ``centre_steps`` (grid steps)."""
+
+        found_matrices, found_shifts = list(matrices), list(shifts)
+        for operation in admissible:
+            offset = None
+            if centre_steps is not None:
+                # (I - R) x0: the operation about the centre (whole grid steps, or not an operation of the grid there)
+                offset = _centre_offset(operation, centre_steps, counts, atom_tolerance, operation_steps)
+                if offset is None:
+                    continue
+            found = None
+            for candidate in half_steps:
+                if offset is not None:
+                    candidate = (candidate + offset) % counts
+                cartesian = None if len(translations) == 1 and offset is None else candidate * operation_steps
+                if _plausible(species, trees, operation, cartesian, atom_tolerance, period) and (
+                    _atoms_are_invariant_operation(species, operation, atom_tolerance, period, cartesian)
+                ):
+                    found = candidate
+                    break
+            if found is None and fractional:
+                found = _fractional_translation(species, trees, operation, period, operation_steps, counts, atom_tolerance)
+            if found is None:
+                continue
+            for translation in translations:
+                found_matrices.append(operation)
+                found_shifts.append((found + translation) % counts)
+        return found_matrices, found_shifts
+
+    # (I - R) x0 is a translation of its own: PARSEC_PERIODIC_TRANSLATIONS=half (the half-cell translations alone)
+    # and off (the point group about the origin alone) keep their groups.
+    if (
+        not fractional
+        and period is not None
+        and periodic_translation_setting() == "auto"
+        and periodic_centre_setting() == "auto"
+    ):
+        lattice_steps = np.diag(np.asarray(grid.cell.lattice_vectors, dtype=np.float64)) / counts
+        searched = _symmetry_centre(species, trees, admissible, half_steps, counts, lattice_steps, atom_tolerance, period)
+        if searched is not None:
+            centre, origin_score = searched
+            result = about(centre, lattice_steps)
+            # every operation about the centre that the sampled atoms allowed may have failed on the others: the
+            # origin is kept where it does as well (its sampled count bounds its own)
+            kept = (len(result[0]) - len(translations)) // len(translations)
+            if kept > origin_score:
+                return result
+            origin = about(None, steps)
+            return origin if len(origin[0]) >= len(result[0]) else result
+    return about(None, steps)
 
 
 def _affine_matrix(operation: np.ndarray, translation: np.ndarray) -> np.ndarray:
@@ -1416,13 +1664,16 @@ _PROJECTOR_ORBITS_SWITCH = "PARSEC_SECTOR_PROJECTOR_ORBITS"
 
 
 def sector_projector_orbits_setting() -> str:
-    """``PARSEC_SECTOR_PROJECTOR_ORBITS``: ``auto`` (default) gives the sectors of a point-group reduction the
-    projectors of one atom per orbit (:func:`compress_projectors_for_sectors`); ``off`` those of every atom, bit
-    for bit as before."""
+    """``PARSEC_SECTOR_PROJECTOR_ORBITS``: ``auto`` (default) gives the sectors of every reduction that knows the
+    orbits of its atoms the projectors of one atom per orbit (:func:`compress_projectors_for_sectors`): those of a
+    point-group reduction and of the little group of a k-point, and since 2026-11-18 the Abelian sectors of clusters
+    and Gamma cells (:func:`attach_abelian_atom_orbits`); ``weighted`` keeps the Abelian sectors of clusters and Gamma
+    cells on the projectors of every atom, bit for bit as before that date; ``off`` gives every sector the
+    projectors of every atom, bit for bit as before the compression."""
 
     value = os.environ.get(_PROJECTOR_ORBITS_SWITCH, "auto").strip().lower() or "auto"
-    if value not in {"auto", "off"}:
-        raise ValueError(f"{_PROJECTOR_ORBITS_SWITCH} must be auto or off, not {value!r}")
+    if value not in {"auto", "weighted", "off"}:
+        raise ValueError(f"{_PROJECTOR_ORBITS_SWITCH} must be auto, weighted or off, not {value!r}")
     return value
 
 
@@ -1553,6 +1804,89 @@ def _atom_orbits(atoms, operations, translations, grid, tolerance: float):
     return representatives, sizes.astype(np.int64)
 
 
+def abelian_sector_operations(reduction) -> np.ndarray:
+    """The signed permutation matrices of an Abelian reduction (``operations``, or the diagonal ``signs`` of an
+    :class:`AxisReflectionReduction`), as ``(order, 3, 3)`` integers."""
+
+    operations = getattr(reduction, "operations", None)
+    if operations is None:
+        operations = [np.diag(signs) for signs in np.asarray(reduction.signs)]
+    return np.asarray(operations, dtype=np.int64).reshape(-1, 3, 3)
+
+
+def attach_abelian_atom_orbits(reduction, atoms, grid, *, tolerance: float = 1.0e-7) -> bool:
+    """Give the Abelian sectors of ``reduction`` the projectors of one atom per orbit; whether they now have them.
+
+    An :class:`AxisReflectionReduction` or :class:`SignedPermutationReduction` of a cluster or a Gamma cell
+    (``r -> R r`` about the origin; a periodic grid matches the images modulo its cell) gets the orbits of ``atoms``
+    under its group (:func:`_atom_orbits`) as ``atom_representatives`` and ``atom_orbit_sizes``, the attributes
+    :class:`PointGroupReduction` carries: every sector of a real one-dimensional character takes the columns of the
+    representative atom scaled by the square root of the orbit size (:func:`compress_projectors_for_sectors`), the
+    forces read the gradients of those atoms (:func:`sector_gradient_atoms`) and complete the other atoms of each orbit
+    by the average over the group (:func:`..Forces.sector_symmetry.abelian_orbit_operations`), and moved atoms of a
+    cell must keep the orbits (:func:`..Forces.sector_symmetry.check_sector_atoms`).  The group of the sectors is
+    Abelian with real characters, so every level is solved and the average over it completes every atom exactly (the
+    term of the representative, ``n_a`` times its own, turned onto the ``n_a`` atoms of its orbit; the stabilizer of
+    the atom leaves its term unchanged for the invariant density matrix of the solved states).
+
+    The orbits are set on the frozen instance in place (it carries no such fields), so the decomposition, the Hartree
+    reduction and every other holder of this very reduction see them.  Nothing is set, and ``False`` returned, for a
+    reduction of order one, one that knows its orbits already (a point group, the little group of a k-point), atoms
+    that are each their own orbit, an image that matches no atom, or ``PARSEC_SECTOR_PROJECTOR_ORBITS`` other than
+    ``auto`` (``weighted``: the projectors of every atom, bit for bit as before).
+    """
+
+    if (
+        reduction is None
+        or not atoms
+        or isinstance(reduction, PointGroupReduction)
+        or getattr(reduction, "atom_representatives", None) is not None
+        or int(getattr(reduction, "group_order", 1)) <= 1
+        or sector_projector_orbits_setting() != "auto"
+    ):
+        return False
+    translations = getattr(reduction, "translations", None)
+    orbits = _atom_orbits(
+        tuple(atoms),
+        abelian_sector_operations(reduction),
+        None if translations is None else np.asarray(translations, dtype=np.int64).reshape(-1, 3),
+        grid,
+        tolerance,
+    )
+    if orbits is None or not np.any(orbits[1] > 1):
+        return False
+    representatives, sizes = orbits
+    representatives = np.ascontiguousarray(representatives, dtype=np.int64)
+    sizes = np.ascontiguousarray(sizes, dtype=np.int64)
+    representatives.setflags(write=False)
+    sizes.setflags(write=False)
+    object.__setattr__(reduction, "atom_representatives", representatives)
+    object.__setattr__(reduction, "atom_orbit_sizes", sizes)
+    return True
+
+
+def projector_orbit_counts(reduction, labels, atom_count: int) -> tuple[int, int]:
+    """``(atoms, columns)`` of the projectors that the sectors of ``reduction`` keep (:func:`compress_projectors_for_sectors`):
+    one atom per orbit where the reduction knows the orbits and ``PARSEC_SECTOR_PROJECTOR_ORBITS`` is not ``off``,
+    every atom and every column of ``labels`` otherwise."""
+
+    labels = tuple(labels)
+    representatives = None if reduction is None else getattr(reduction, "atom_representatives", None)
+    sizes = None if reduction is None else getattr(reduction, "atom_orbit_sizes", None)
+    if representatives is None or sizes is None or sector_projector_orbits_setting() == "off":
+        return int(atom_count), len(labels)
+    representatives = np.asarray(representatives, dtype=np.int64)
+    if representatives.size != atom_count:
+        return int(atom_count), len(labels)
+    kept_atoms = int(np.count_nonzero(representatives == np.arange(atom_count)))
+    kept_columns = len(labels)
+    if labels:
+        atom_of_column = np.fromiter((int(label[0]) for label in labels), dtype=np.int64, count=len(labels))
+        if atom_of_column.min() >= 0 and atom_of_column.max() < atom_count:
+            kept_columns = int(np.count_nonzero(representatives[atom_of_column] == atom_of_column))
+    return kept_atoms, kept_columns
+
+
 def compress_projectors_for_sectors(operator, reduction):
     """The projectors that give every sector of ``reduction`` its nonlocal operator, one atom per orbit.
 
@@ -1564,7 +1898,9 @@ def compress_projectors_for_sectors(operator, reduction):
     the square root of the orbit size give their sum: ``1/|orbit|`` of the columns, the same operator up to
     round-off.  ``operator`` unchanged where the reduction knows no orbits, ``PARSEC_SECTOR_PROJECTOR_ORBITS=off``,
     or every atom is its own orbit.  The projector gradients of the forces are compressed by the same rule
-    (:func:`compress_gradients_for_sectors`).
+    (:func:`compress_gradients_for_sectors`).  The reductions that know the orbits of their atoms: a
+    :class:`PointGroupReduction`, the little group of a k-point and, where :func:`attach_abelian_atom_orbits` gave
+    them theirs, the Abelian reductions of clusters and Gamma cells.
     """
 
     representatives = getattr(reduction, "atom_representatives", None)
@@ -1601,7 +1937,8 @@ def compress_gradients_for_sectors(gradients, reduction):
 
     The nonlocal force terms that a sector then contracts are those of the representatives, ``n_a`` times the term of
     one atom of the orbit; the average over the group of the reduction gives every atom of the orbit its term
-    (:mod:`parsec_python.acceleration.Forces.sector_symmetry`).  ``gradients`` unchanged where the projectors are.
+    (:mod:`parsec_python.acceleration.Forces.sector_symmetry`: the full group ``G`` of a point-group reduction, the
+    group itself of Abelian sectors).  ``gradients`` unchanged where the projectors are.
 
     The columns are matched by their labels, so ``gradients`` may hold every atom or the representatives alone
     (:func:`sector_gradient_atoms`): both give the same matrices bit for bit.  Where every column is that of a
@@ -1694,8 +2031,8 @@ def detect_point_group_reduction(
     The full group ``G`` is every signed permutation that maps the atoms (species by species) and the active
     grid (row by row, exactly) onto themselves; :func:`.orbital_groups.orbital_group_plan` chooses ``H`` and
     its sectors.  ``abelian`` is returned unchanged where ``G`` is no group (an atom tolerance that accepts
-    two operations and refuses their product), where the plan solves no less than ``abelian`` does
-    (``1/|abelian|`` of the rows times states), or under ``PARSEC_ORBITAL_GROUP=abelian``.
+    two operations and refuses their product), where the plan solves more than :func:`orbital_group_max_cost` of
+    what ``abelian`` does (``1/|abelian|`` of the rows times states), or under ``PARSEC_ORBITAL_GROUP=abelian``.
     """
 
     if orbital_group_policy() == "abelian" or not atoms:
@@ -1754,9 +2091,10 @@ def detect_point_group_reduction(
         )
     )
     plan = orbital_group_plan(elements, modulus=modulus, required=required)
-    # Taken where it solves at most half of what the abelian group does (Td, Oh, T, Th: a half to a quarter);
-    # a smaller gain (D4h: three quarters) keeps the group of before.
-    if not plan.cost <= 0.5 / abelian.group_order + 1.0e-12:
+    # Taken where it solves at most PARSEC_ORBITAL_GROUP_MAX_COST of what the abelian group does (Td, Oh, T, Th: a
+    # half to a quarter; D4h, D2d, D4, C4v: three quarters, the partner sectors of their E levels merged); a smaller
+    # gain keeps the group of before.
+    if not plan.cost <= orbital_group_max_cost() / abelian.group_order + 1.0e-12:
         return abelian
     subgroup = [candidates[index] for index in plan.subgroup]
     # The smallest image of every row under H, map by map: the maps are not kept together (32 maps of the 46.7 M
@@ -1821,6 +2159,171 @@ def detect_point_group_reduction(
     )
 
 
+def periodic_abelian_reduction(
+    grid: RealSpaceGrid,
+    atoms: Sequence[Atom],
+    abelian: AxisReflectionReduction,
+    *,
+    atom_tolerance: float = DEFAULT_ATOM_TOLERANCE,
+    lattice_tolerance: float = 1.0e-10,
+) -> AxisReflectionReduction:
+    """The largest group of commuting involutions ``r -> R r + t`` of a periodic cell, or ``abelian`` where it is
+    no larger.
+
+    The orbitals of a cell that keep an abelian group (``occup.in``, ``Fix_Number_Eigenvalues``,
+    ``PARSEC_ORBITAL_GROUP=abelian``, or a plan of weighted sectors that gains too little) take the commuting signed
+    permutations about the origin (:meth:`SignedPermutationReduction.detect`).  The operations of the cell with their
+    translations (:func:`_space_group_operations`: the half-cell translations of a cell that repeats a smaller one,
+    the operations about a centre off the origin) hold a larger one: for a diamond supercell 32 operations (the
+    seven half-cell translations with D2) instead of the four of D2.  Its elements commute and square to the
+    identity, so its sectors have the real characters ``+-1`` of every element, as those of ``abelian``: the group
+    of the commuting involutions of the Gamma point of the k-point sectors
+    (:func:`..SCF.kpoint_sectors.little_group_reduction`, which keeps the translations and the atom orbits).
+    ``abelian`` itself for a cluster, a grid whose rows are not its box, under ``PARSEC_PERIODIC_TRANSLATIONS=off``
+    or ``PARSEC_PERIODIC_ABELIAN_TRANSLATIONS=off``, and where the operations form no group.
+    """
+
+    if (
+        not atoms
+        or periodic_abelian_translation_setting() == "off"
+        or periodic_translation_setting() == "off"
+        or _lattice_period(grid) is None
+        or not _periodic_row_major(grid)
+    ):
+        return abelian
+    from ..SCF.kpoint_sectors import CellGroup, largest_commuting_involutions, little_group_reduction
+
+    cell = CellGroup(grid, atoms, atom_tolerance=atom_tolerance, lattice_tolerance=lattice_tolerance)
+    if cell.table is None:
+        return abelian
+    elements, generators = largest_commuting_involutions(cell.table, range(cell.order))
+    if len(elements) <= abelian.group_order:
+        return abelian
+    reduction = little_group_reduction(cell, elements, generators)
+    return abelian if reduction is None else reduction
+
+
+def lost_operations_note(
+    grid: RealSpaceGrid,
+    atoms: Sequence[Atom],
+    reduction: AxisReflectionReduction | None,
+    *,
+    atom_tolerance: float = DEFAULT_ATOM_TOLERANCE,
+    loose_tolerance: float = LOOSE_ATOM_TOLERANCE,
+    lattice_tolerance: float = 1.0e-10,
+) -> str | None:
+    """A line for the report where the atom tolerance cost the structure operations, ``None`` where it did not.
+
+    The operations of the grid (signed permutations ``R`` that map it onto itself, for a periodic cell with a
+    translation of whole grid steps) that carry every atom within ``loose_tolerance`` onto an atom of its species, but
+    not within ``atom_tolerance``, are lost to the tolerance alone: the input is symmetric only to about the
+    largest distance its atoms are off.  Those already in ``reduction`` (its signed permutations; its translations by
+    half the cell for a periodic cell) are not tested again, nor the operations that miss the atoms by more than
+    ``loose_tolerance`` (a sample of the atoms decides most of them, :func:`_plausible`).
+    """
+
+    if not atoms or not loose_tolerance > atom_tolerance:
+        return None
+    try:
+        period = _lattice_period(grid)
+    except ValueError:
+        return None
+    species = _positions_by_species(atoms)
+    kept: set[bytes] = set()
+    found_half: set[tuple[int, ...]] = set()
+    if reduction is not None:
+        operations = getattr(reduction, "full_operations", None)
+        if operations is None:
+            operations = getattr(reduction, "operations", None)
+        if operations is None:
+            operations = [np.diag(signs) for signs in np.asarray(reduction.signs)]
+        kept = {np.asarray(matrix, dtype=np.int8).tobytes() for matrix in operations}
+        translations = getattr(reduction, "full_translations", None)
+        if translations is None:
+            translations = getattr(reduction, "translations", None)
+        if translations is not None:
+            for matrix, shift in zip(operations, translations):
+                if np.array_equal(matrix, np.eye(3)):
+                    found_half.add(tuple(int(value) for value in shift))
+    identity = np.eye(3, dtype=np.int8)
+    kept.add(identity.tobytes())
+    trees: dict = {}
+    counts = steps = None
+    if period is not None:
+        counts = np.asarray(grid.points_per_axis, dtype=np.int64)
+        steps = period / counts
+    lost, worst = [], 0.0
+
+    def mismatch(operation, translation) -> float:
+        """The largest distance from an image of an atom to the nearest atom of its species (bohr)."""
+
+        largest = 0.0
+        matrix = np.asarray(operation, dtype=np.float64)
+        for positions in species.values():
+            images = positions @ matrix.T + (0.0 if translation is None else translation)
+            queries = images if period is None else _folded(images, period)
+            distances, _ = _matching_tree(positions, period).query(queries, k=1, workers=_QUERY_WORKERS)
+            largest = max(largest, float(np.max(distances)))
+        return largest
+
+    for operation in _signed_permutation_operations():
+        if operation.tobytes() in kept:
+            continue
+        if _integer_signed_permutation_parameters(grid, operation, lattice_tolerance) is None:
+            continue
+        if period is None:
+            # (an operation the atoms keep within the tolerance but the domain does not is no loss of the tolerance)
+            if not _plausible(species, trees, operation, None, loose_tolerance, None):
+                continue
+            if _atoms_are_invariant_operation(species, operation, atom_tolerance, None):
+                continue
+            if not _atoms_are_invariant_operation(species, operation, loose_tolerance, None):
+                continue
+            lost.append(operation)
+            worst = max(worst, mismatch(operation, None))
+            continue
+        loose = _translations_mapping(species, trees, operation, period, steps, counts, loose_tolerance)
+        if not loose or loose is _UNDECIDED:
+            continue
+        strict = _translations_mapping(species, trees, operation, period, steps, counts, atom_tolerance)
+        if strict:
+            continue
+        lost.append(operation)
+        worst = max(worst, mismatch(operation, np.asarray(loose[0]) * steps))
+    lost_half = []
+    if period is not None and _periodic_row_major(grid):
+        for bits in product((0, 1), repeat=3):
+            bits = np.asarray(bits, dtype=np.int64)
+            if not np.any(bits) or np.any((bits == 1) & (counts % 2 == 1)):
+                continue
+            shift = bits * (counts // 2)
+            if tuple(int(value) for value in shift) in found_half:
+                continue
+            translation = shift * steps
+            if all(
+                _has_tolerance_perfect_matching(positions + translation, positions, loose_tolerance, period)
+                for positions in species.values()
+            ) and not all(
+                _has_tolerance_perfect_matching(positions + translation, positions, atom_tolerance, period)
+                for positions in species.values()
+            ):
+                lost_half.append(shift)
+                worst = max(worst, mismatch(identity, translation))
+    if not lost and not lost_half:
+        return None
+    parts = []
+    if lost:
+        parts.append(f"{len(lost)} rotation{'s' if len(lost) != 1 else ''} or mirror{'s' if len(lost) != 1 else ''}")
+    if lost_half:
+        parts.append(f"{len(lost_half)} translation{'s' if len(lost_half) != 1 else ''} by half the cell")
+    return (
+        f"{' and '.join(parts)} map the atoms within {loose_tolerance:g} bohr but not within the atom tolerance "
+        f"{atom_tolerance:g} bohr: the input is symmetric only to {worst:.2g} bohr and loses them "
+        f"(symmetrize the positions, or set {_ATOM_TOLERANCE_SWITCH} above {worst:.2g}; the positions are not "
+        "symmetrized)"
+    )
+
+
 def diagonal_subgroup_reduction(
     grid: RealSpaceGrid,
     operations: np.ndarray,
@@ -1875,9 +2378,19 @@ __all__ = [
     "_RowOrderTable",
     "_fast_maps_requested",
     "_grid_row_mapping_operation",
+    "abelian_sector_operations",
+    "attach_abelian_atom_orbits",
     "compress_projectors_for_sectors",
     "detect_point_group_reduction",
+    "orbital_group_max_cost",
+    "projector_orbit_counts",
     "diagonal_subgroup_reduction",
+    "lost_operations_note",
     "orbital_group_policy",
+    "periodic_abelian_reduction",
+    "periodic_abelian_translation_setting",
+    "periodic_centre_setting",
     "periodic_symmetry_setting",
+    "periodic_trivial_origin_setting",
+    "symmetry_atom_tolerance",
 ]

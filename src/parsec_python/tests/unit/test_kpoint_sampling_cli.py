@@ -71,6 +71,8 @@ class KPointSamplingCliTests(unittest.TestCase):
         path.write_text(_BASE_INPUT + extra, encoding="utf-8")
         return path
 
+    # the former unreduced 2x2x2 mesh (PARSEC_MP_UNSHIFTED_MESH=port; the default reduces it since 2026-11-18)
+    @mock.patch.dict(os.environ, {"PARSEC_MP_UNSHIFTED_MESH": "port"})
     def test_full_2x2x2_run_converges(self) -> None:
         input_path = self._write_input("parsec.in")
         exit_code = cli_main([str(input_path), "--quiet"])

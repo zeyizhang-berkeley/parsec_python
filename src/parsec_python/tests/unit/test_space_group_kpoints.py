@@ -18,10 +18,12 @@ WSL binary on the ``tests/orthorhombic`` and ``tests/hexagonal`` examples).
 # here are those of the Fortran parity round.
 from __future__ import annotations
 
+import os
 import shutil
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import numpy as np
 
@@ -525,8 +527,19 @@ class InputTests(unittest.TestCase):
         self.assertEqual(k_points.shape, (4, 3))
         self.assertIn("monkhorst_pack_shift", repr(problem))
 
-    def test_without_shift_nothing_changes(self) -> None:
-        problem = self._parse(shift="").problem
+    def test_without_shift_the_shift_is_zero(self) -> None:
+        # PARSEC 1.5's mpshift without the block is zero (since 2026-11-18; test_mp_unshifted_mesh)
+        translation = self._parse(shift="")
+        reference = self._parse()
+        self.assertEqual(translation.problem.monkhorst_pack_shift, (0.0, 0.0, 0.0))
+        self.assertEqual(translation.problem.space_group.order, reference.problem.space_group.order)
+        self.assertTrue(translation.problem.scf.symmetrize_density)
+        for ours, theirs in zip(kpoint_sampling(translation.problem), kpoint_sampling(reference.problem)):
+            np.testing.assert_array_equal(ours, theirs)
+
+    def test_without_shift_and_port_nothing_changes(self) -> None:
+        with mock.patch.dict(os.environ, {"PARSEC_MP_UNSHIFTED_MESH": "port"}):
+            problem = self._parse(shift="").problem
         self.assertIsNone(problem.monkhorst_pack_shift)
         self.assertIsNone(problem.space_group)
         self.assertFalse(problem.scf.symmetrize_density)

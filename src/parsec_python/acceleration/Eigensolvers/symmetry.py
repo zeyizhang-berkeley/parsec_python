@@ -44,7 +44,7 @@ from ..backends.implicit_stencil import (
     regular_tile_share,
 )
 from .distributed_state import shared_basis_devices, shared_block_bytes
-from .eigval import CuPyEigvalResult, CuPyEigvalSolver, spill_download_order
+from .eigval import DEVICE_ITERATIVE_SOLVERS, CuPyEigvalResult, CuPyEigvalSolver, spill_download_order
 from .filter_graph import graph_route_name
 from .handover import (
     CORRECTION_BYTES,
@@ -476,6 +476,75 @@ def sector_margin_budget() -> float:
     return value
 
 
+def sector_growth_release_setting() -> str:
+    """``PARSEC_CUPY_SECTOR_GROWTH_RELEASE``: ``auto`` (the default) or ``off``.
+
+    A sector that misses states in the spectral bracket
+    (:meth:`CuPySymmetrySCFEigensolver._ensure_spectral_bracket`) is solved
+    again with more states by a first solve, which reads nothing of the
+    basis it replaces.  ``auto`` gives that basis back before the new one is
+    formed, for every growing sector, as the sectors whose margin was cut
+    did already.  ``off`` keeps the basis of a sector that grows by half
+    until its new one is formed, as before: its devices then hold both, 2.5
+    times the states of the sector (a 22^3 diamond cell on 16 A100 ran out
+    of memory there).  Neither changes a result.  An ARPACK solve continues
+    the LAPACK seed of the saved state, which it keeps under either.
+    """
+
+    value = os.environ.get("PARSEC_CUPY_SECTOR_GROWTH_RELEASE", "auto").strip().lower() or "auto"
+    if value not in {"auto", "off"}:
+        raise ValueError("PARSEC_CUPY_SECTOR_GROWTH_RELEASE must be auto or off")
+    return value
+
+
+def cut_sectors_first_setting() -> str:
+    """``PARSEC_CUPY_CUT_SECTORS_FIRST``: ``auto`` (the default) or ``off``.
+
+    In a round of the spectral bracket in which sectors whose margin was cut
+    for memory (:func:`sector_margin_policy`) miss states, ``auto`` grows
+    those alone, from a new start, and tests the bracket again with their
+    new states before any other sector grows.  The states they miss lie
+    below the cutoff of that round, which therefore lies too high, so that
+    a sector that holds every state below the true cutoff can fail it too:
+    a 22^3 diamond cell on 16 A100 grew a sector of another rank by half in
+    the same round of its second step (a first solve of 1.5 times its
+    states, which ran out of memory beside its former basis).  ``off``
+    grows every failing sector in the same round, as before.  A run whose
+    margins are not cut is the same under both.
+    """
+
+    value = os.environ.get("PARSEC_CUPY_CUT_SECTORS_FIRST", "auto").strip().lower() or "auto"
+    if value not in {"auto", "off"}:
+        raise ValueError("PARSEC_CUPY_CUT_SECTORS_FIRST must be auto or off")
+    return value
+
+
+def regrown_trim_setting() -> str:
+    """``PARSEC_CUPY_REGROWN_SECTOR_TRIM``: ``auto`` (the default) or ``off``.
+
+    A sector whose margin was cut for memory and that misses states grows
+    from a new start (:meth:`CuPySymmetrySCFEigensolver._ensure_spectral_bracket`):
+    its states are then those of a first solve, whose uppermost Ritz values
+    lie above the levels they stand for.  The trim of PARSEC that follows
+    every step (:meth:`CuPySymmetrySCFEigensolver._trim_sector_states_like_parsec`)
+    keeps at most six of its states above those selected; the next pass
+    lowers them below the cutoff, and the sector grows from a new start
+    again.  A 22^3 diamond cell on 16 A100 did so in every step from its
+    second on (67 to 177 s of eigensolves a step against 18 s), and its SCF
+    diverged; with ``auto`` it converged in 18 steps to the energy of the
+    full margin.  ``auto`` leaves the states of a sector that grew from a
+    new start untrimmed in that step, so that the next pass refines all of
+    them; the trims of the later steps apply as before.  ``off`` trims it in
+    the same step, as before.  A run whose margins are not cut is the same
+    under both.
+    """
+
+    value = os.environ.get("PARSEC_CUPY_REGROWN_SECTOR_TRIM", "auto").strip().lower() or "auto"
+    if value not in {"auto", "off"}:
+        raise ValueError("PARSEC_CUPY_REGROWN_SECTOR_TRIM must be auto or off")
+    return value
+
+
 def regrown_count(count: int, increment: int) -> int:
     """The count of a sector after one growth from a new start at most (:meth:`_ensure_spectral_bracket`)."""
 
@@ -638,6 +707,10 @@ class CuPySymmetrySCFEigensolver:
         # per sector, what its Ritz steps handed over (_record_handover).
         self.ritz_handover_policy = validate_handover_settings()
         self._handover_passes: dict[int, dict] = {}
+        # Read by the spectral bracket where a sector grows: a value they do not know stops the run here.
+        sector_growth_release_setting()
+        cut_sectors_first_setting()
+        regrown_trim_setting()
 
         cp, _ = require_cupy()
         self._primary_device_id = int(cp.cuda.Device().id)
@@ -1769,7 +1842,10 @@ class CuPySymmetrySCFEigensolver:
         to share it is asked as a CHEBFF first solve asks
         (:func:`distributed_state.shared_basis_devices`, with the device of
         the sector current); another first solver leaves the basis on the
-        owner, which is then counted too low.
+        owner, which is then counted too low.  In a spin-polarized loop the
+        states (or this rank's columns of a basis shared by the MPI ranks of
+        a group) count once per channel, since both channels' saved
+        subspaces are kept; the buffers of a step count once.
 
         For a basis on one device the count is a lower limit of what the
         device must hold in a Ritz step and nothing else: the operators,
@@ -1838,6 +1914,12 @@ class CuPySymmetrySCFEigensolver:
                 from .mpi_shared_basis import exchange_bytes, shared_ritz_route
 
                 share = -(-int(count) // group.size)
+                # This rank's columns of the basis of each channel of a spin-polarized loop: a rank keeps the saved
+                # subspaces of both channels (their sector solvers) and solves them in turn, so the columns count
+                # once per channel, the buffers of a step once (as on one device above).  Before 2026-11-18 the
+                # columns of the second channel were left out here.
+                channel_columns = (self.spin_channel_count - 1) * rows * share * np.dtype(np.float64).itemsize
+                states[owner] += channel_columns
                 route = shared_ritz_route(group.ritz_route)
                 if route == "block":
                     # The block route (the default): this rank's columns in an allocation with the room of
@@ -2861,10 +2943,16 @@ class CuPySymmetrySCFEigensolver:
         requested_states: int,
         settings: EigvalSettings,
     ) -> tuple[list[CuPyEigvalResult], bool, list[str]]:
-        """Grow sectors whose last computed value does not bracket the cutoff."""
+        """Grow sectors whose last computed value does not bracket the cutoff.
+
+        The sectors that grew from a new start are left in
+        ``_regrown_from_new_start`` for the trim of the step
+        (:func:`regrown_trim_setting`).
+        """
 
         restarted = False
         reasons: list[str] = []
+        self._regrown_from_new_start = set()
         for _ in range(8):
             values, representations, _ = self._global_order(results)
             leading = self._leading_states(representations, requested_states)
@@ -2872,12 +2960,15 @@ class CuPySymmetrySCFEigensolver:
                 raise RuntimeError("symmetry sectors returned too few eigenvalues")
             cutoff = float(values[leading - 1])
             grow: list[int] = []
-            for representation, result in enumerate(results):
+            # By index: a loop variable would hold the result of the last sector, and with it its basis,
+            # through the growth below.
+            for representation in range(len(results)):
                 sector_size = self.decomposition.sector_size(representation)
                 if counts[representation] >= sector_size:
                     continue
-                scale = max(1.0, abs(cutoff), abs(float(result.eigenvalues[-1])))
-                if float(result.eigenvalues[-1]) <= cutoff + 1.0e-11 * scale:
+                last = float(results[representation].eigenvalues[-1])
+                scale = max(1.0, abs(cutoff), abs(last))
+                if last <= cutoff + 1.0e-11 * scale:
                     grow.append(representation)
             if not grow:
                 return results, restarted, reasons
@@ -2885,11 +2976,21 @@ class CuPySymmetrySCFEigensolver:
             increment = max(1, settings.safety_buffer)
             sector_settings = replace(settings, safety_buffer=0)
             # A sector whose margin was cut for memory (_fit_sector_margins) grows by its estimated
-            # deficit (bracket_deficits), at most 2 % per step, from a new start: its basis is given back
-            # first, where the growth of the others holds it beside half as many columns more.
+            # deficit (bracket_deficits), at most 2 % per step, from a new start.  Where such sectors
+            # fail, they grow alone in this round (PARSEC_CUPY_CUT_SECTORS_FIRST): the states they miss
+            # put the cutoff too high for the others, which are tested again in the next round.
             cut = getattr(self, "_margin_cut", None) or {}
             fresh = tuple(representation for representation in grow if representation in cut)
+            if fresh and cut_sectors_first_setting() == "auto":
+                grow = list(fresh)
             kept = tuple(representation for representation in grow if representation not in cut)
+            # Every growth is a first solve, which reads nothing of the basis it replaces: the others
+            # give theirs back first as well (PARSEC_CUPY_SECTOR_GROWTH_RELEASE), or their devices hold
+            # it beside half as many columns more.  ARPACK continues the seed of the saved state.
+            release = (
+                sector_growth_release_setting() == "auto"
+                and settings.initial_method not in DEVICE_ITERATIVE_SOLVERS
+            )
             deficits = (
                 bracket_deficits(
                     [result.eigenvalues for result in results], self._sector_weight_array,
@@ -2918,8 +3019,12 @@ class CuPySymmetrySCFEigensolver:
                 for representation in fresh:
                     results[representation] = None
                 grown.update(self._run_sector_jobs(fresh, counts, sector_settings, reset=True))
+                self._regrown_from_new_start.update(fresh)
             if kept:
-                grown.update(self._run_sector_jobs(kept, counts, sector_settings, reset=False))
+                if release:
+                    for representation in kept:
+                        results[representation] = None
+                grown.update(self._run_sector_jobs(kept, counts, sector_settings, reset=release))
             for representation in grow:
                 results[representation] = grown[representation]
                 self._record_filter_precision(
@@ -2937,6 +3042,7 @@ class CuPySymmetrySCFEigensolver:
         counts: list[int],
         requested_states: int,
         safety_buffer: int,
+        keep: frozenset = frozenset(),
     ) -> None:
         """Apply ``eigen_sort``'s active-state count for the next SCF step.
 
@@ -2945,6 +3051,7 @@ class CuPySymmetrySCFEigensolver:
         additional values per representation from the remainder.  Its
         eigenspace allocation is not shrunk, but ``nn`` limits later work.
         Here a device view of the leading Ritz columns is the equivalent.
+        The sectors in ``keep`` are not trimmed in this step.
         """
 
         if safety_buffer < 1:
@@ -2967,6 +3074,8 @@ class CuPySymmetrySCFEigensolver:
         changes = []
         for representation, solver in enumerate(self._solvers):
             new_count = min(counts[representation], int(desired[representation]))
+            if representation in keep:
+                new_count = counts[representation]
             if new_count < counts[representation]:
                 step = getattr(results[representation], "handover_step", None)
                 if step is not None and step.get("holds"):
@@ -3190,6 +3299,12 @@ class CuPySymmetrySCFEigensolver:
                 counts,
                 requested_states,
                 settings.safety_buffer,
+                # Those that grew from a new start in this step keep their states (regrown_trim_setting).
+                keep=(
+                    frozenset(getattr(self, "_regrown_from_new_start", None) or ())
+                    if not frozen and regrown_trim_setting() == "auto"
+                    else frozenset()
+                ),
             )
         iterative_counts = None
         if all(getattr(result, "iterative_counts", None) is not None for result in results):

@@ -989,8 +989,9 @@ ranks, one per node. A structure without point-group symmetry, a relaxation
 whose movable flags break the symmetry, a `manual` run and molecular
 dynamics have one sector, the identity. Launched with one rank, the runner
 solves it on the GPUs of one node, which share its basis column by column
-(`PARSEC_CUPY_SINGLE_SECTOR=auto`, the default; `on` takes this route outside
-the runner too, `off` never). The numbers are those of the full grid; each
+(`PARSEC_CUPY_SINGLE_SECTOR=auto`, the default; `on` gives `main.py` the one
+sector of the identity too, but without a sector context its basis stays on
+the first GPU there; `off` never). The numbers are those of the full grid; each
 GPU holds a quarter of the orbitals. `--serial-control` keeps the former
 route, on which the first GPU holds them all.
 

@@ -419,7 +419,9 @@ of perfect diamond cubes on 16 A100 (one rank per node): 6^3 9.6 s, 10^3 14.6 s,
 GPU), 22^3 (85,184 atoms, `PARSEC_CUPY_SECTOR_MARGIN=fixed`,
 `PARSEC_CUPY_FORCE_PREFETCH=off`) 304.1 s at 79.1 GiB. A single process takes the sectors of the point
 group of the cell where it has one; one sector of the identity with
-`PARSEC_CUPY_SINGLE_SECTOR=on` (the GPUs of the process share the sector);
+`PARSEC_CUPY_SINGLE_SECTOR=on`, whose basis stays on the first GPU of the
+process (`main.py` has no sector context to give it a device group; the
+runner shares it among the GPUs of its node even with one rank);
 otherwise a cell keeps the full grid of one GPU, as before.
 
 Measured on A100 nodes (2026-11-08, bulk diamond `examples/3d_diamond_benchmark`,

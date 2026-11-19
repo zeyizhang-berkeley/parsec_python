@@ -192,6 +192,17 @@ def density_symmetrization_lines(reports) -> list[str]:
 def spin_sector_fallback_lines(record) -> list[str]:
     """``parsec.out`` lines of a :class:`parsec_python.models.SpinSectorFallbackRecord`."""
 
+    if getattr(record, "route", "spin") == "kpoint":
+        return [
+            "",
+            f" NOTE: k-point sectors: {record.reason} after {record.stage}",
+            f"       ({record.measure} = {record.largest_fractional_occupation:.3E}, "
+            f"kept only below {record.tolerance:.0E}).",
+            "       The sectors of the k-points cannot hold a state that breaks the symmetry they assume;",
+            "       the loop starts again with one task per k-point (PARSEC_KPOINT_SECTOR_GUARD=off keeps the sectors).",
+            *(f"       {line}" for line in record.multiplets),
+            "",
+        ]
     return [
         "",
         f" NOTE: Spin_Symmetry_Sectors: {getattr(record, 'reason', 'fractional occupations')} after {record.stage}",
@@ -2955,7 +2966,15 @@ class ParsecTextReporter:
         A leaner counterpart to :meth:`iteration`: the spin-polarized driver
         does not yet carry per-stage timing instrumentation (see its module
         docstring), so this omits the timing breakdown ``iteration`` prints.
+        The note that a spin-polarized k-point loop leaves the sectors of its
+        k-points (``SpinSectorFallbackRecord``, the symmetry guard) has no
+        levels of its own: its lines, as :meth:`iteration` writes them.
         """
+        from ..models import SpinSectorFallbackRecord
+
+        if isinstance(step, SpinSectorFallbackRecord):
+            self.write("\n".join(spin_sector_fallback_lines(step)))
+            return
         energies = step.energies
         atom_count = len(self.problem.atoms)
         energy_per_atom_ev = energies.total * RYDBERG_TO_EV / max(atom_count, 1)
