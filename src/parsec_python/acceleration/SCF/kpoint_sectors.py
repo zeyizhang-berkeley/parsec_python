@@ -6,9 +6,12 @@ signed permutation ``R`` with a translation ``t`` of whole grid steps,
 :func:`..Symmetry.axis_reflection._space_group_operations`) permutes the grid points, ``(P_g f)(r) = f(g^-1 r)``,
 and commutes with ``H``.  It moves the phase, ``P_g e^{ik.r} P_g^-1 = e^{i (R k).(r - t)}``, so where ``R k = k``
 it commutes with ``H_k`` as well (the constant ``e^{-ik.t}`` drops out).  ``R k = k`` exactly, not modulo a
-reciprocal lattice vector: the finite-difference ``-nabla^2 - 2ik.grad + |k|^2`` of the u gauge (and the Bloch
-Laplacian of ``PARSEC_KPOINT_KINETIC=bloch``) is not invariant under the change of gauge ``u -> e^{-iG.r} u``
-that ``R k = k + G`` would need.  These operations form the little group ``G_k``.
+reciprocal lattice vector: where ``R k = k + G``, ``P_g`` carries ``H_k`` into ``H_{k+G} = e^{-iG.r} H_k e^{iG.r}``,
+so the operator that commutes with ``H_k`` is ``e^{iG.r} P_g``, a complex operator whose characters are not the
+real ``+-1`` of the sector bases below.  (The Bloch form of ``PARSEC_KPOINT_KINETIC=bloch``, ``e^{-ik.r} L e^{ik.r}``
+of the finite-difference Laplacian ``L``, obeys that identity exactly, since ``e^{iG.r}`` is periodic on the grid;
+the default ``-nabla^2 - 2ik.grad + |k|^2`` of the u gauge only to its discretization, about 1e-8 Ry on the even
+meshes of the tests.)  These operations form the little group ``G_k``.
 
 On the grid each term commutes with ``P_g``: the Laplacian and the first derivatives of a uniform periodic grid
 are invariant under its translations and turn as a scalar and a vector under ``R`` (the coefficients along the
@@ -1270,30 +1273,15 @@ class SectorKPointSolver:
         weight of its k-point (the electrons it adds to the density; 1 at a single Gamma point).
         """
 
-        from .spin_sectors import (
-            SPIN_SECTOR_OCCUPATION_TOLERANCE,
-            START_MULTIPLET_WIDTH,
-            FractionalOccupations,
-            sector_multiplets,
-        )
+        from .spin_sectors import SPIN_SECTOR_OCCUPATION_TOLERANCE, FractionalOccupations
 
         largest = 0.0
         lines: list[str] = []
-        for task in self.guarded_tasks():
-            values, filled, sectors = self._guard_levels(task, levels, occupations, capacity)
-            weight = self._task_weight(task)
-            for group in sector_multiplets(values, sectors):
-                electrons = float(np.sum(filled[group]))
-                part = weight * min(electrons, len(group) - electrons)
-                if part <= SPIN_SECTOR_OCCUPATION_TOLERANCE:
-                    continue
-                largest = max(largest, part)
-                text = " ".join(f"{values[member] * 13.605693122994:.4f}" for member in group)
-                labels = " ".join(str(int(sectors[member])) for member in group)
-                lines.append(
-                    f"task {task} (k-point weight {weight:.4g}): {len(group)} levels within {START_MULTIPLET_WIDTH:g} "
-                    f"Ry at {text} eV hold {electrons:.4f} electrons (sectors {labels})"
-                )
+        for part, line in self._start_multiplet_parts(levels, occupations, capacity):
+            if part <= SPIN_SECTOR_OCCUPATION_TOLERANCE:
+                continue
+            largest = max(largest, part)
+            lines.append(line())
         if not lines:
             return None
         return FractionalOccupations(
@@ -1303,6 +1291,35 @@ class SectorKPointSolver:
             reason="a partly filled multiplet",
             measure="largest w_k min(n, d - n) of d levels holding n electrons",
         )
+
+    def _start_multiplet_parts(self, levels, occupations, capacity: float):
+        """``(w_k min(n, d - n), line)`` of every multiplet of :meth:`start_spectrum_report`, below its tolerance as
+        well; ``line()`` describes it."""
+
+        from .spin_sectors import START_MULTIPLET_WIDTH, sector_multiplets
+
+        for task in self.guarded_tasks():
+            values, filled, sectors = self._guard_levels(task, levels, occupations, capacity)
+            weight = self._task_weight(task)
+            for group in sector_multiplets(values, sectors):
+                electrons = float(np.sum(filled[group]))
+                part = weight * min(electrons, len(group) - electrons)
+
+                def line(task=task, weight=weight, group=group, electrons=electrons, values=values, sectors=sectors):
+                    text = " ".join(f"{values[member] * 13.605693122994:.4f}" for member in group)
+                    labels = " ".join(str(int(sectors[member])) for member in group)
+                    return (
+                        f"task {task} (k-point weight {weight:.4g}): {len(group)} levels within "
+                        f"{START_MULTIPLET_WIDTH:g} Ry at {text} eV hold {electrons:.4f} electrons (sectors {labels})"
+                    )
+
+                yield part, line
+
+    def start_spectrum_measure(self, levels, occupations, *, capacity: float = 1.0) -> float:
+        """The value test 1 compares with its tolerance: the largest ``w_k min(n, d - n)`` of the multiplets of
+        :meth:`start_spectrum_report`, 0 where there are none (for the report of the guard that passed)."""
+
+        return max((part for part, _ in self._start_multiplet_parts(levels, occupations, capacity)), default=0.0)
 
     def density_symmetry_measure(self, densities, volume_element: float) -> float:
         """Test 2 of the guard: the largest ``int |rho(g r) - rho(r)|`` (electrons) of the channel ``densities``
@@ -1353,16 +1370,28 @@ class SectorKPointSolver:
         :data:`.spin_sectors.SPIN_SECTOR_OCCUPATION_TOLERANCE` (:func:`.spin_sectors.fractional_occupations`), else
         ``None``."""
 
-        from .spin_sectors import (
-            MULTIPLET_WIDTH,
-            SPIN_SECTOR_OCCUPATION_TOLERANCE,
-            FractionalOccupations,
-            _multiplets,
-            sector_multiplets,
-        )
+        from .spin_sectors import SPIN_SECTOR_OCCUPATION_TOLERANCE, FractionalOccupations
 
         largest = 0.0
         lines: list[str] = []
+        for part, line in self._fractional_parts(levels, occupations, capacity):
+            if part < SPIN_SECTOR_OCCUPATION_TOLERANCE:
+                continue
+            largest = max(largest, part)
+            lines.append(line())
+        if not lines:
+            return None
+        return FractionalOccupations(
+            largest=largest, tolerance=float(SPIN_SECTOR_OCCUPATION_TOLERANCE), lines=tuple(lines),
+            measure="largest w_k min(f, 1-f)",
+        )
+
+    def _fractional_parts(self, levels, occupations, capacity: float):
+        """``(w_k max min(f, 1 - f), line)`` of every multiplet of :meth:`fractional_report`, below its tolerance as
+        well; ``line()`` describes it."""
+
+        from .spin_sectors import MULTIPLET_WIDTH, _multiplets, sector_multiplets
+
         for task in self.guarded_tasks():
             values, filled, sectors = self._guard_levels(task, levels, occupations, capacity)
             weight = self._task_weight(task)
@@ -1372,22 +1401,23 @@ class SectorKPointSolver:
             groups += [group for group in sector_multiplets(values, sectors) if tuple(group) not in exact]
             for group in groups:
                 part = float(np.max(fractional[group]))
-                if part < SPIN_SECTOR_OCCUPATION_TOLERANCE:
-                    continue
-                largest = max(largest, part)
-                text = " ".join(f"{values[member] * 13.605693122994:.4f}" for member in group)
-                shares = " ".join(f"{filled[member]:.4f}" for member in group)
-                labels = " ".join(str(int(sectors[member])) for member in group)
-                lines.append(
-                    f"task {task} (k-point weight {weight:.4g}): {len(group)} level(s) at {text} eV "
-                    f"(occupations {shares}; sectors {labels})"
-                )
-        if not lines:
-            return None
-        return FractionalOccupations(
-            largest=largest, tolerance=float(SPIN_SECTOR_OCCUPATION_TOLERANCE), lines=tuple(lines),
-            measure="largest w_k min(f, 1-f)",
-        )
+
+                def line(task=task, weight=weight, group=group, values=values, filled=filled, sectors=sectors):
+                    text = " ".join(f"{values[member] * 13.605693122994:.4f}" for member in group)
+                    shares = " ".join(f"{filled[member]:.4f}" for member in group)
+                    labels = " ".join(str(int(sectors[member])) for member in group)
+                    return (
+                        f"task {task} (k-point weight {weight:.4g}): {len(group)} level(s) at {text} eV "
+                        f"(occupations {shares}; sectors {labels})"
+                    )
+
+                yield part, line
+
+    def fractional_measure(self, levels, occupations, *, capacity: float = 1.0) -> float:
+        """The value test 3 compares with its tolerance: the largest ``w_k min(f, 1 - f)`` of the multiplets of
+        :meth:`fractional_report`, 0 where there are none (for the report of the guard that passed)."""
+
+        return max((part for part, _ in self._fractional_parts(levels, occupations, capacity)), default=0.0)
 
     def _layout(self) -> list[tuple[int, int, int]]:
         return [(int(k), -1 if sector is None else int(sector), self._rows((k, sector))) for k, sector in self._items]

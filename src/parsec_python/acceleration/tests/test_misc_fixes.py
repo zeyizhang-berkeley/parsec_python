@@ -13,7 +13,10 @@
   (``mpi_full_scf._shared_first_solve_note``).
 * A ``relax_restart.dat`` that holds an atom of a cell on the default
   routines at -1e-9 bohr (on a face to round-off) is prepared, folded into
-  the cell for the builders (``SCF.pbc.atoms_for_cell_builders``).
+  the cell for the builders (``SCF.pbc.atoms_for_cell_builders``); since
+  2026-11-19 also one that crossed a face (refused before), and the current
+  positions of an ``mdinit.dat`` (``Restart_mode``), with the energy and the
+  forces of the input folded into the cell.
 
 All tests run on the CPU: the count reads no device for a shared group.
 """
@@ -224,13 +227,12 @@ class RestartOnCellFaceTests(unittest.TestCase):
         atoms = restarted.problem.atoms
         np.testing.assert_array_equal(atoms[0].position, [-1.0e-9, 0.0, -1.1e-9])
         lattice = restarted.problem.periodic_cell.lattice_vectors
-        folded, beyond = atoms_for_cell_builders(lattice, atoms)
-        self.assertIsNone(beyond)
+        folded = atoms_for_cell_builders(lattice, atoms)
         self.assertTrue(np.all(np.asarray(folded[0].position) >= 0.0))
         self.assertTrue(all(new is old for new, old in zip(folded[1:], atoms[1:])))
         # Inside the cell nothing changes: the same atoms, bit for bit.
         inside = original.problem.atoms
-        self.assertIs(atoms_for_cell_builders(lattice, inside)[0][0], inside[0])
+        self.assertIs(atoms_for_cell_builders(lattice, inside)[0], inside[0])
         system = prepare_periodic_single_point(restarted.problem)
         # The system keeps the coordinates of the file (an optimizer continues from them); its fields are those of
         # the atoms folded into the cell, and within round-off those of the atom at the corner.
@@ -242,12 +244,108 @@ class RestartOnCellFaceTests(unittest.TestCase):
         np.testing.assert_allclose(system.ionic_potential, at_corner.ionic_potential, rtol=0.0, atol=1.0e-6)
         self.assertAlmostEqual(system.ion_ion_energy, at_corner.ion_ion_energy, delta=1.0e-6)
 
-    def test_an_atom_farther_outside_is_still_refused(self) -> None:
-        from parsec_python.SCF.pbc import prepare_periodic_single_point
+    def test_an_atom_that_crossed_a_face_is_the_folded_input(self) -> None:
+        # Since 2026-11-19 (the user's decision): an atom of relax_restart.dat outside the cell by more than round-off
+        # (refused before) is prepared folded into the cell for the builders, as after every move, and the system
+        # keeps the coordinates of the file, which the BFGS block of the file refers to.  The energy and the forces
+        # are those of the input with the atom folded into the cell, bit for bit.
+        from dataclasses import replace
 
-        _original, restarted = self.restarted([-1.0e-3, 0.0, 0.0])
-        with self.assertRaisesRegex(ValueError, "lies outside the periodic cell"):
-            prepare_periodic_single_point(restarted.problem)
+        from parsec_python.Forces import compute_periodic_forces
+        from parsec_python.SCF import run_scf
+        from parsec_python.SCF.pbc import fold_atoms_into_cell, prepare_periodic_single_point
+
+        side = 10.26
+        _original, restarted = self.restarted([-0.31, side + 0.12, 0.05 - 2.0 * side])
+        atoms = restarted.problem.atoms
+        np.testing.assert_allclose(atoms[0].position, [-0.31, side + 0.12, 0.05 - 2.0 * side], rtol=0.0, atol=1e-12)
+        folded = fold_atoms_into_cell(atoms, restarted.problem.periodic_cell.lattice_vectors)
+        np.testing.assert_allclose(folded[0].position, [side - 0.31, 0.12, 0.05], rtol=0.0, atol=1e-12)
+        system = prepare_periodic_single_point(restarted.problem)
+        np.testing.assert_array_equal(system.atoms[0].position, atoms[0].position)
+        at_folded = prepare_periodic_single_point(replace(restarted.problem, atoms=folded))
+        _assert_same_fields(self, system, at_folded)
+        result, reference = run_scf(system), run_scf(at_folded)
+        self.assertTrue(result.converged)
+        self.assertEqual(result.energies.total, reference.energies.total)
+        np.testing.assert_array_equal(
+            compute_periodic_forces(system, result).total, compute_periodic_forces(at_folded, reference).total
+        )
+
+    def test_a_dynamics_restart_with_an_atom_outside_is_the_folded_input(self) -> None:
+        # Restart_mode: the current positions of mdinit.dat, one atom 0.4 bohr beyond a face (thermal motion of a
+        # corner atom), are prepared folded for the builders; the system keeps them, as the integrator does with
+        # the previous positions of the file.  The orbital operators of an MPI rank that shares a sector basis
+        # (driver._prepare_periodic_orbital_operators) fold them alike.
+        from dataclasses import replace
+
+        from parsec_python.acceleration.driver import _prepare_periodic_orbital_operators
+        from parsec_python.Input.parsec_input import parse_parsec_input
+        from parsec_python.MolecularDynamics.md_files import format_md_restart
+        from parsec_python.MolecularDynamics.moldyn import MolecularDynamicsState
+        from parsec_python.MolecularDynamics.run import restart_structure
+        from parsec_python.SCF.pbc import fold_atoms_into_cell, prepare_periodic_single_point
+
+        text = _SILICON.replace("Minimization: simple\nMovement_Num: 1\nRelax_Restart: .true.\n", "")
+        text = text.replace(
+            "Eigensolver: chebff\n",
+            "Eigensolver: chebff\nMolecular_Dynamics: .true.\nRestart_mode: .true.\nTinit: 300\nT_Final: 200\n"
+            "T_Step: 10\nTime_Step: 20\nStep_Num: 1\n",
+        )
+        (self.directory / "parsec.in").write_text(text, encoding="utf-8")
+        translation = parse_parsec_input(self.directory / "parsec.in")
+        self.assertFalse(translation.problem.grid.fortran_routines, translation.routines.reasons)
+        self.assertIsNotNone(translation.molecular_dynamics)
+        current = np.array([atom.position for atom in translation.problem.atoms], dtype=np.float64)
+        current[0] = [-0.4, 0.1, 10.26 + 0.2]
+        previous = current - 0.01
+        count = len(current)
+        state = MolecularDynamicsState(
+            masses=np.full(count, 28.0855 * 1822.888486),
+            movable=np.ones(count, dtype=np.int64),
+            current_positions=current,
+            previous_positions=previous,
+            velocities=np.zeros((count, 3)),
+            accelerations=np.zeros((count, 3)),
+            temperature=300.0,
+            frame=3,
+        )
+        (self.directory / "mdinit.dat").write_text(format_md_restart(state), encoding="utf-8")
+        restarted, restart, notes = restart_structure(translation, self.directory)
+        self.assertIsNotNone(restart)
+        self.assertTrue(any("mdinit.dat" in note for note in notes))
+        atoms = restarted.problem.atoms
+        np.testing.assert_allclose(atoms[0].position, [-0.4, 0.1, 10.46], rtol=0.0, atol=1e-6)
+        system = prepare_periodic_single_point(restarted.problem)
+        np.testing.assert_array_equal(system.atoms[0].position, atoms[0].position)
+        folded = fold_atoms_into_cell(atoms, restarted.problem.periodic_cell.lattice_vectors)
+        self.assertTrue(np.all((np.asarray(folded[0].position) >= 0.0) & (np.asarray(folded[0].position) < 10.26)))
+        _assert_same_fields(self, system, prepare_periodic_single_point(replace(restarted.problem, atoms=folded)))
+        operators = _prepare_periodic_orbital_operators(restarted.problem)
+        np.testing.assert_array_equal(operators.atoms[0].position, atoms[0].position)
+        _assert_same_projectors(self, operators.nonlocal_operator, system.nonlocal_operator)
+
+
+def _assert_same_projectors(case, first, second) -> None:
+    """The Kleinman-Bylander factors of two prepared systems agree element for element."""
+
+    case.assertEqual(first.labels, second.labels)
+    for name in ("projectors", "signs"):
+        a, b = getattr(first, name), getattr(second, name)
+        a = a.toarray() if hasattr(a, "toarray") else np.asarray(a)
+        b = b.toarray() if hasattr(b, "toarray") else np.asarray(b)
+        np.testing.assert_array_equal(a, b)
+
+
+def _assert_same_fields(case, system, other) -> None:
+    """The position-dependent fields of two prepared periodic systems agree bit for bit."""
+
+    np.testing.assert_array_equal(system.ionic_potential, other.ionic_potential)
+    np.testing.assert_array_equal(system.initial_density, other.initial_density)
+    if system.core_density is not None or other.core_density is not None:
+        np.testing.assert_array_equal(system.core_density, other.core_density)
+    case.assertEqual(system.ion_ion_energy, other.ion_ion_energy)
+    _assert_same_projectors(case, system.nonlocal_operator, other.nonlocal_operator)
 
 
 if __name__ == "__main__":

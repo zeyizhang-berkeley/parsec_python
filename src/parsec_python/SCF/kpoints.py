@@ -849,13 +849,15 @@ class KPointSectorsAbandoned(RuntimeError):
 
     ``stage`` names the loop (``the start Hamiltonian``, ``the SCF loop``), ``report`` what was found (a
     ``FractionalOccupations`` of :mod:`parsec_python.acceleration.SCF.spin_sectors`), ``passes`` the further solves
-    of the start Hamiltonian before a report of test 1 counted.
+    of the start Hamiltonian before a report of test 1 counted, ``measured`` what the tests measured up to then
+    (the ``kpoint_guard_*`` entries of ``timings.detail``, which the loop without sectors then carries).
     """
 
-    def __init__(self, stage: str, report, passes: int = 0) -> None:
+    def __init__(self, stage: str, report, passes: int = 0, *, measured: dict | None = None) -> None:
         self.stage = stage
         self.report = report
         self.passes = int(passes)
+        self.measured = dict(measured or {})
         super().__init__(
             f"k-point sectors: {report.reason} after {stage} "
             f"({report.measure} = {report.largest:.3e} >= {report.tolerance:.0e}): " + "; ".join(report.lines)
@@ -896,6 +898,10 @@ def run_scf_kpoints_spin_polarized(
     then first receives a :class:`parsec_python.models.SpinSectorFallbackRecord` (``route`` ``kpoint``: the note
     of ``parsec.out``), the result's ``timings.detail`` holds ``kpoint_sector_abandoned`` = 1, and the later loops
     of the structure (those that share ``projector_cache``: the Fock loop of a hybrid) take no sectors either.
+    Whether the sectors stay or not, ``timings.detail`` holds what the tests of the guard measured
+    (``kpoint_guard_start_share``, ``kpoint_guard_density_asymmetry``, ``kpoint_guard_fractional_share``, with
+    ``kpoint_guard_start_passes``, ``kpoint_guard_density_asymmetry_first`` and ``kpoint_guard_tightenings``),
+    which ``parsec.out`` prints beside their tolerances.
     """
 
     projector_cache = {} if projector_cache is None else projector_cache
@@ -921,8 +927,8 @@ def run_scf_kpoints_spin_polarized(
         return _spin_kpoint_loop(system, k_points, weights, **arguments)
     except KPointSectorsAbandoned as error:
         # only the report leaves this block: the frames of the loop in the sectors, and their orbitals, go
-        abandoned = (error.stage, error.report, error.passes)
-    stage, report, passes = abandoned
+        abandoned = (error.stage, error.report, error.passes, error.measured)
+    stage, report, passes, measured = abandoned
     projector_cache[_SECTORS_ABANDONED_KEY] = True
     if callback is not None:
         from ..models import SpinSectorFallbackRecord
@@ -945,6 +951,8 @@ def run_scf_kpoints_spin_polarized(
     detail = getattr(getattr(result, "timings", None), "detail", None)
     if isinstance(detail, dict):
         detail["kpoint_sector_abandoned"] = 1.0
+        # what the guard measured in the sectors it left (parsec.out prints it beside the note)
+        detail.update({name: float(value) for name, value in measured.items()})
     return result
 
 
@@ -1303,6 +1311,9 @@ def _spin_kpoint_loop(
     symmetry_tightenings = 0
     last_asymmetry = None
     met_criterion = False
+    # The values the tests of the guard measured, written to timings.detail (and so to parsec.out) whether they pass
+    # or not, so that the margin to the tolerances can be seen on large cells (2026-11-19).
+    guard_values: dict[str, float] = {}
 
     with solver:
         if isinstance(carried_states, dict) and carried_states:
@@ -1363,7 +1374,15 @@ def _spin_kpoint_loop(
                         if report is None:
                             break
                         if passes and change <= START_LEVEL_CHANGE:
-                            raise KPointSectorsAbandoned("the start Hamiltonian", report, passes)
+                            raise KPointSectorsAbandoned(
+                                "the start Hamiltonian",
+                                report,
+                                passes,
+                                measured={
+                                    "kpoint_guard_start_share": float(report.largest),
+                                    "kpoint_guard_start_passes": float(passes),
+                                },
+                            )
                         if passes >= START_SPECTRUM_PASSES:
                             break  # still moving: tests 2 and 3 decide at the end
                         previous = pooled.copy()
@@ -1380,6 +1399,11 @@ def _spin_kpoint_loop(
                         below = previous <= window
                         change = float(np.max(np.abs(pooled[below] - previous[below]), initial=0.0))
                         passes += 1
+                    # what test 1 measured on the levels it kept, also where it passed (timings.detail, parsec.out)
+                    guard_values["kpoint_guard_start_share"] = guard.start_spectrum_measure(
+                        by_task, occupations_by_task
+                    )
+                    guard_values["kpoint_guard_start_passes"] = float(passes)
                 parts = solver.accumulate(occupations_by_task)
                 density_up = parts.get("up", np.zeros(n_grid))
                 density_down = parts.get("down", np.zeros(n_grid))
@@ -1607,6 +1631,7 @@ def _spin_kpoint_loop(
                     # tolerance and the noise bound the loop goes on to a criterion ten times tighter.
                     met_criterion = True
                     asymmetry = guard.density_symmetry_measure((density_up, density_down), system.grid.volume_element)
+                    guard_values.setdefault("kpoint_guard_density_asymmetry_first", asymmetry)
                     if (
                         DENSITY_SYMMETRY_TOLERANCE <= asymmetry < DENSITY_SYMMETRY_NOISE_BOUND
                         and symmetry_tightenings < DENSITY_SYMMETRY_TIGHTENINGS
@@ -1628,12 +1653,23 @@ def _spin_kpoint_loop(
         if guard is not None:
             # Tests 2 and 3 of the guard at the end of the loop: the densities, and (Fermi-Dirac occupations) no
             # fractional occupation in a multiplet across the sectors.
-            report = guard.density_symmetry_report((density_up, density_down), system.grid.volume_element)
+            asymmetry = guard.density_symmetry_measure((density_up, density_down), system.grid.volume_element)
+            guard_values["kpoint_guard_density_asymmetry"] = asymmetry
+            guard_values["kpoint_guard_tightenings"] = float(symmetry_tightenings)
+            report = (
+                guard.density_symmetry_report((density_up, density_down), system.grid.volume_element)
+                if asymmetry >= DENSITY_SYMMETRY_TOLERANCE
+                else None
+            )
+            if settings.fixed_occupations is None:
+                guard_values["kpoint_guard_fractional_share"] = guard.fractional_measure(by_task, occupations_by_task)
             if report is None and settings.fixed_occupations is None:
                 report = guard.fractional_report(by_task, occupations_by_task)
             if report is not None:
-                raise KPointSectorsAbandoned("the SCF loop", report)
+                raise KPointSectorsAbandoned("the SCF loop", report, measured=guard_values)
         timings = _run_timings(system, timer, solver, started, levels)
+        if guard_values:
+            timings.detail.update(guard_values)
         k_wavefunctions = (
             tuple(
                 tuple(

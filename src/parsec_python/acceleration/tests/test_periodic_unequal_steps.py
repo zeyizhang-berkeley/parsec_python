@@ -333,12 +333,21 @@ class PaletteTests(unittest.TestCase):
         self.assertIn(f"need {max(sizes)} distinct coefficients, more than the {PALETTE_CAPACITY}", refusal)
         self.assertEqual(asked, [reduction])
 
-    def test_other_grids_are_not_counted(self) -> None:
+    def test_cubes_are_checked_too(self) -> None:
+        # since 2026-11-19 (tests/test_sector_palette.py): a cube whose orbits differ in size overflows too
         cube = _grid((10.26,) * 3, 0.5, order=18)
         self.assertFalse(unequal_step_grid(cube))
         reduction = _detect(cube, _stretched_diamond((10.26,) * 3))
         self.assertGreater(reduction.group_order, 1)
-        self.assertEqual(self._check(cube, reduction), ((None, None), []))
+        sizes = sector_palette_sizes(cube, ReflectionRepresentationDecomposition.build(cube, reduction), wrap=True)
+        (checked, refusal), asked = self._check(cube, reduction)
+        self.assertEqual(asked, [reduction])
+        if max(sizes) <= PALETTE_CAPACITY:
+            self.assertIsNone(refusal)
+            self.assertIs(checked[0], reduction)
+        else:
+            self.assertIsNone(checked)
+            self.assertIn(f"need {max(sizes)} distinct coefficients", refusal)
         grid = _grid(self.sides, 0.5, order=18)
         self.assertEqual(self._check(grid, None), ((None, None), []))
 
@@ -496,15 +505,23 @@ class UnequalStepSCFTests(unittest.TestCase):
 
     def test_a_cell_beyond_the_palette_keeps_the_full_grid(self) -> None:
         # Order 18 on 20 x 20 x 22 points: one sector stencil needs 306 coefficients (PaletteTests), where the build
-        # of the stencils stopped the run; the full grid, and the identity sector the MPI runs take then.
+        # of the stencils stopped the run.  The ladder of 2026-11-19 (tests/test_sector_palette.py): the commuting
+        # group with translations needs 307, the mirrors about the origin fit; PARSEC_SECTOR_PALETTE_LADDER=off: the
+        # full grid, and the identity sector the MPI runs take then, as before.
         problem = tetragonal_silicon(12.0, 0.5)
         problem = replace(problem, grid=replace(problem.grid, expansion_order=18))
-        kept, details, _ = self._run(problem, {})
+        lower, lower_details, _ = self._run(problem, {})
+        self.assertIn("need 306 distinct coefficients", lower_details["symmetry_detection"])
+        self.assertIn("PARSEC_SECTOR_PALETTE_LADDER=auto", lower_details["symmetry_detection"])
+        self.assertTrue(lower_details["symmetry_detection"].startswith("exact Cartesian axis-reflection subgroup"))
+        off = {"PARSEC_SECTOR_PALETTE_LADDER": "off"}
+        kept, details, _ = self._run(problem, off)
         self.assertIn("fell back to full grid", details["symmetry_detection"])
         self.assertIn(f"more than the {PALETTE_CAPACITY} of their palette", details["symmetry_detection"])
-        identity, identity_details, _ = self._run(problem, {"PARSEC_CUPY_SINGLE_SECTOR": "on"})
+        identity, identity_details, _ = self._run(problem, dict(off, PARSEC_CUPY_SINGLE_SECTOR="on"))
         self.assertIn("one sector of the identity", identity_details["symmetry_detection"])
         full, _, _ = self._run(problem, {"PARSEC_PERIODIC_SYMMETRY": "off"})
+        self._assert_same(lower, full, "beyond the palette, the mirrors about the origin")
         self._assert_same(kept, full, "beyond the palette")
         self._assert_same(identity, full, "beyond the palette, identity sector")
 

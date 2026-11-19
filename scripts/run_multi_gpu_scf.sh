@@ -12,8 +12,8 @@
 # real orbitals, an orthorhombic cell, no spin and a native LDA or GGA, as one
 # sector whose orbitals the ranks share: on several nodes launch it with
 # --rank-per-gpu (one rank per GPU), on one node either layout. A cell with a
-# point group about its origin runs in the sectors of that group, on either
-# layout; its forces (Skip_Force: false) and its relaxations (bfgs, simple,
+# point group (about its origin or a symmetric site off it, with half-cell
+# translations) runs in the sectors of that group, on either layout; its forces (Skip_Force: false) and its relaxations (bfgs, simple,
 # every atom movable) on the default routines run there too, every rank
 # moving the projectors of its sectors. Molecular dynamics, manual movements
 # and fixed atoms (Move_Flag) of a cell, and every forces or moving run under
@@ -62,8 +62,11 @@
 #   --rank-per-gpu    G ranks per node, one GPU each, for a run without
 #                symmetry (molecular dynamics, a periodic cell) on several nodes, or
 #                for a cluster with fewer symmetry sectors than nodes: more ranks
-#                than sectors share them in groups of consecutive ranks, one group
-#                per sector, which may span nodes. Their
+#                than sectors share them in groups of consecutive ranks, which
+#                may span nodes, placed by the cost of the sectors
+#                (PARSEC_SECTOR_PLACEMENT=size; after a CHEBFF first solve a
+#                group may solve several sectors; cyclic: one group per
+#                sector, as before). Their
 #                exchanges pass GPU arrays to MPI: Cray MPICH needs mpi4py
 #                built with craype-accel-nvidia80 loaded (it links
 #                libmpi_gtl_cuda); PARSEC_MPI_SHARED_TRANSPORT=host stages

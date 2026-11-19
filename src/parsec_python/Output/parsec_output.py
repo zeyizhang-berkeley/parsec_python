@@ -3209,7 +3209,42 @@ class ParsecTextReporter:
                 f" {'Rows x states^2 of the whole':30s} : {detail.get('kpoint_sector_work_fraction', 0.0):12.4f}"
                 f"   (states added and solved again {int(detail.get('kpoint_sector_regrowths', 0))} time(s))"
             )
+        lines.extend(ParsecTextReporter._kpoint_guard_lines(detail))
         lines.append(" --------------------------------------------------")
+        return lines
+
+    @staticmethod
+    def _kpoint_guard_lines(detail) -> list[str]:
+        """What the tests of the symmetry guard of the k-point sectors measured (``PARSEC_KPOINT_SECTOR_GUARD``,
+        ``SCF/kpoints.py``), also where they passed, beside their tolerances; none without the guard."""
+
+        if not any(key.startswith("kpoint_guard_") for key in detail):
+            return []
+        from ..acceleration.SCF.spin_sectors import DENSITY_SYMMETRY_TOLERANCE, SPIN_SECTOR_OCCUPATION_TOLERANCE
+
+        lines = [
+            " K-point sector guard (measured, tolerance"
+            + ("; in the sectors the loop left)" if detail.get("kpoint_sector_abandoned") else ")")
+        ]
+        if "kpoint_guard_start_share" in detail:
+            lines.append(
+                f"   {'Test 1, start multiplets':28s} : {detail['kpoint_guard_start_share']:12.4E}"
+                f"   (largest w_k min(n, d-n); {SPIN_SECTOR_OCCUPATION_TOLERANCE:.0E};"
+                f" {int(detail.get('kpoint_guard_start_passes', 0))} further solve(s))"
+            )
+        if "kpoint_guard_density_asymmetry" in detail:
+            first = detail.get("kpoint_guard_density_asymmetry_first")
+            lines.append(
+                f"   {'Test 2, density asymmetry':28s} : {detail['kpoint_guard_density_asymmetry']:12.4E}"
+                f"   (largest int |rho(g r) - rho(r)| [e]; {DENSITY_SYMMETRY_TOLERANCE:.0E};"
+                + ("" if first is None else f" {first:.4E} where the criterion was first met,")
+                + f" {int(detail.get('kpoint_guard_tightenings', 0))} tightening(s))"
+            )
+        if "kpoint_guard_fractional_share" in detail:
+            lines.append(
+                f"   {'Test 3, fractional levels':28s} : {detail['kpoint_guard_fractional_share']:12.4E}"
+                f"   (largest w_k min(f, 1-f); {SPIN_SECTOR_OCCUPATION_TOLERANCE:.0E})"
+            )
         return lines
 
     def finish_spin_polarized(

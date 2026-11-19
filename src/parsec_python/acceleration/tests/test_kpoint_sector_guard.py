@@ -6,7 +6,9 @@ states.
 * The symmetry guard of a spin-polarized loop in the sectors (``PARSEC_KPOINT_SECTOR_GUARD``), the analogue of the
   guard of ``Spin_Symmetry_Sectors`` on clusters: its three tests on made-up levels and densities, and the oxygen
   atom in a periodic cube at the Gamma point (a partly filled minority p shell across three sectors), which leaves
-  the sectors after the start Hamiltonian and is then the loop with one task per k-point, bit for bit.
+  the sectors after the start Hamiltonian and is then the loop with one task per k-point, bit for bit.  What the
+  tests measured goes to ``timings.detail`` and ``parsec.out`` whether they pass (a spin-polarized silicon cube at
+  the Gamma point) or not (since 2026-11-19).
 * The refit of the states of the sectors after the first solve (``PARSEC_KPOINT_SECTOR_REFIT``): the Ritz states cut
   to their lowest pairs (host and device kinds), and the SCF of a mesh with the refit gives the energy without it.
 """
@@ -162,6 +164,12 @@ class GuardTestsOnMadeUpLevels(unittest.TestCase):
         self.assertIsNone(_guard_solver([_Plan(4)], [1.0 / 27], kept).start_spectrum_report(levels, filled))
         full = [np.array([1.0, 1.0, 1.0, 1.0, 0.0])]
         self.assertIsNone(_guard_solver([_Plan(4)], [1.0], kept).start_spectrum_report(levels, full))
+        # what test 1 measured, also where it passes (timings.detail and parsec.out, since 2026-11-19)
+        self.assertEqual(_guard_solver([_Plan(4)], [1.0], kept).start_spectrum_measure(levels, filled), report.largest)
+        self.assertAlmostEqual(
+            _guard_solver([_Plan(4)], [1.0 / 27], kept).start_spectrum_measure(levels, filled), 1.0 / 27, delta=1e-15
+        )
+        self.assertEqual(_guard_solver([_Plan(4)], [1.0], kept).start_spectrum_measure(levels, full), 0.0)
         # partners within one sector mix there freely: not reported; nor on a task whose sectors assume nothing
         one = {0: (np.array([0, 1, 1, 1, 0]), np.arange(5))}
         self.assertIsNone(_guard_solver([_Plan(4)], [1.0], one).start_spectrum_report(levels, filled))
@@ -179,6 +187,12 @@ class GuardTestsOnMadeUpLevels(unittest.TestCase):
         self.assertTrue(report.lines[0].startswith("task 0"))
         integer = [np.array([1.0, 1.0, 0.0, 0.0, 0.0])] * 2
         self.assertIsNone(solver.fractional_report(levels, integer))
+        # what test 3 measured, also where it passes
+        self.assertEqual(solver.fractional_measure(levels, filled), report.largest)
+        self.assertEqual(solver.fractional_measure(levels, integer), 0.0)
+        light = _guard_solver([_Plan(4), _Plan(4)], [1.0 / 27], kept, k_of_task=[0, 0])
+        self.assertIsNone(light.fractional_report(levels, filled))
+        self.assertAlmostEqual(light.fractional_measure(levels, filled), report.largest / 27, delta=1e-15)
 
     def test_the_densities_against_the_operations_of_the_cell(self) -> None:
         # the silicon cube at the Gamma point alone, no symmetrized density: every operation of the cell is assumed,
@@ -281,6 +295,14 @@ class GuardRunTests(unittest.TestCase):
         self.assertTrue(result.converged)
         self.assertEqual(result.timings.detail.get("kpoint_sector_abandoned"), 1.0)
         self.assertNotIn("kpoint_sector_tasks", result.timings.detail)
+        # the loop without sectors carries what test 1 measured in the sectors it left, and parsec.out prints it
+        from parsec_python.Output.parsec_output import ParsecTextReporter
+
+        self.assertEqual(result.timings.detail["kpoint_guard_start_share"], notes[0].largest_fractional_occupation)
+        self.assertNotIn("kpoint_guard_density_asymmetry", result.timings.detail)
+        lines = ParsecTextReporter._kpoint_detail_lines(result.timings)
+        self.assertIn(" K-point sector guard (measured, tolerance; in the sectors the loop left)", lines)
+        self.assertTrue(any(line.lstrip().startswith("Test 1, start multiplets") for line in lines), lines)
         self.assertAlmostEqual(result.energies.total, whole.energies.total, delta=1.0e-9)
         np.testing.assert_allclose(result.eigenvalues_down, whole.eigenvalues_down, rtol=0.0, atol=1.0e-8)
 
@@ -293,7 +315,41 @@ class GuardRunTests(unittest.TestCase):
         self.assertFalse([record for record in records if isinstance(record, SpinSectorFallbackRecord)])
         self.assertGreater(result.timings.detail["kpoint_sector_tasks"], 2.0)
         self.assertNotIn("kpoint_sector_abandoned", result.timings.detail)
+        self.assertFalse([key for key in result.timings.detail if key.startswith("kpoint_guard_")])
         self.assertGreater(result.energies.total - whole.energies.total, 1.0e-3)
+
+    def test_a_guard_that_passes_reports_what_it_measured(self) -> None:
+        # The silicon cube at the Gamma point, spin-polarized without a moment: the guard keeps the sectors, and
+        # timings.detail and parsec.out hold the values of its three tests below their tolerances (2026-11-19).
+        from parsec_python.Output.parsec_output import ParsecTextReporter
+        from parsec_python.SCF.kpoints import run_scf_kpoints_spin_polarized
+        from parsec_python.SCF.pbc import prepare_periodic_single_point
+        from parsec_python.acceleration.SCF.spin_sectors import (
+            DENSITY_SYMMETRY_TOLERANCE,
+            SPIN_SECTOR_OCCUPATION_TOLERANCE,
+        )
+        from parsec_python.acceleration.tests.test_periodic_point_group import silicon
+
+        problem = silicon("ca", spacing=0.855)
+        problem = replace(problem, scf=replace(problem.scf, spin_polarized=True, convergence_criterion=1.0e-6))
+        with mock.patch.dict(os.environ, {"PARSEC_KPOINT_SECTORS": "auto"}), warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            system = prepare_periodic_single_point(problem)
+            result = run_scf_kpoints_spin_polarized(system, np.zeros((1, 3)), np.ones(1))
+        detail = result.timings.detail
+        self.assertTrue(result.converged)
+        self.assertGreater(detail["kpoint_sector_tasks"], 2.0)
+        self.assertNotIn("kpoint_sector_abandoned", detail)
+        self.assertLessEqual(detail["kpoint_guard_start_share"], SPIN_SECTOR_OCCUPATION_TOLERANCE)
+        self.assertEqual(detail["kpoint_guard_start_passes"], 0.0)
+        self.assertLess(detail["kpoint_guard_density_asymmetry"], DENSITY_SYMMETRY_TOLERANCE)
+        self.assertIn("kpoint_guard_density_asymmetry_first", detail)
+        self.assertEqual(detail["kpoint_guard_tightenings"], 0.0)
+        self.assertLess(detail["kpoint_guard_fractional_share"], SPIN_SECTOR_OCCUPATION_TOLERANCE)
+        lines = ParsecTextReporter._kpoint_detail_lines(result.timings)
+        self.assertIn(" K-point sector guard (measured, tolerance)", lines)
+        for label in ("Test 1, start multiplets", "Test 2, density asymmetry", "Test 3, fractional levels"):
+            self.assertTrue(any(line.lstrip().startswith(label) for line in lines), (label, lines))
 
 
 class RefitTests(unittest.TestCase):

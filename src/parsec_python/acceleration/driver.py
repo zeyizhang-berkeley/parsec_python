@@ -641,24 +641,89 @@ def _orbital_reduction(symmetry_reduction, stabilizer_disabled: bool):
     return symmetry_reduction
 
 
-def _sector_palette_check(grid, reduction, build_decomposition, count=None):
-    """``(checked, refusal)`` of the sector stencils of a periodic cell whose grid steps differ between the axes.
+def sector_palette_ladder_setting() -> str:
+    """``PARSEC_SECTOR_PALETTE_LADDER``: ``auto`` (default) or ``off``.
 
-    A packed stencil codes its coefficients in one byte (``PALETTE_CAPACITY``, 256 values).  Such a cell has up to
-    ``1 + 3M`` shell values instead of the ``1 + M`` of a cube (``axis_stencil_values``), each times the phases and
-    the multiplicity ratios of a sector: a tetragonal 2x2x2 perovskite at the default order or Si at order 18 need
-    260 to 420, where the build of the stencils would stop the run.  Counted here with the builder itself
-    (``count``, by default ``sector_palette_sizes``: 0.1 s for the 180,000 points of a 3x3x3 Si cell, a fifth of
-    its detection), the same on every rank: ``refusal`` says why the cell keeps the full grid (the identity sector
-    of an MPI run), as under PARSEC_PERIODIC_UNEQUAL_STEPS=off.  ``checked`` is ``(orbital reduction,
-    decomposition)`` where the stencils fit, for the stage of the orbitals.  ``build_decomposition(orbital
-    reduction)`` gives what that stage would; nothing is checked where it fails, or for any other grid (the stage
-    of the orbitals goes on as before).
+    The sector stencils of a periodic cell code their coefficients in one byte (256 values,
+    :func:`_sector_palette_check`).  Where those of the group detected need more, ``auto`` steps down to a group whose
+    stencils fit, the same on every MPI rank: the weighted sectors of a subgroup of the point group, then the
+    commuting involutions with their translations (:func:`.Symmetry.axis_reflection.periodic_abelian_reduction`), then
+    the commuting signed permutations about the origin (D2 for a cubic crystal), then the full grid (the identity
+    sector of an MPI run).  ``off`` goes to the full grid at once, as a cell whose grid steps differ between the axes
+    did before 2026-11-19; a cube was not checked then and stopped in the build of its stencils.
     """
 
-    from .Symmetry.axis_reflection import unequal_step_grid
+    value = os.environ.get("PARSEC_SECTOR_PALETTE_LADDER", "auto").strip().lower() or "auto"
+    if value not in {"auto", "off"}:
+        raise ValueError(f"PARSEC_SECTOR_PALETTE_LADDER must be auto or off, not {value!r}")
+    return value
 
-    if reduction is None or reduction.group_order <= 1 or not unequal_step_grid(grid):
+
+def _symmetry_detection_text(candidate) -> str:
+    """The ``symmetry_detection`` of the backend details for the group the orbitals of a run take."""
+
+    from .Symmetry import PointGroupReduction, SignedPermutationReduction
+
+    return (
+        (
+            f"exact group of {candidate.full_operations.shape[0]} operations detected (signed "
+            f"permutations, "
+            f"{int(np.count_nonzero(np.any(np.asarray(candidate.full_translations) != 0, axis=1)))}"
+            f" of them with a translation, by half the cell or, non-symmorphic, a fraction of it, or "
+            f"about a symmetric site off the origin; PARSEC_PERIODIC_TRANSLATIONS, "
+            f"PARSEC_PERIODIC_SYMMETRY_CENTRE)"
+            if getattr(candidate, "full_translations", None) is not None
+            else f"exact point group of {candidate.full_operations.shape[0]} signed permutations detected"
+        )
+        + f"; the orbitals use the one-dimensional sectors of a subgroup of {candidate.group_order} "
+        f"(weights {', '.join(str(int(w)) for w in candidate.sector_weights)})"
+        if isinstance(candidate, PointGroupReduction)
+        else (
+            f"exact commuting group of {candidate.group_order} operations detected (signed "
+            f"permutations, "
+            f"{int(np.count_nonzero(np.any(np.asarray(candidate.translations) != 0, axis=1)))} of them "
+            f"with a translation; PARSEC_PERIODIC_ABELIAN_TRANSLATIONS)"
+        )
+        if getattr(candidate, "translations", None) is not None
+        else "exact commuting signed-permutation subgroup detected"
+        if isinstance(candidate, SignedPermutationReduction)
+        else "exact Cartesian axis-reflection subgroup detected"
+    )
+
+
+def _palette_group_label(reduction) -> str:
+    """What the NOTE of the palette ladder calls the sectors of ``reduction``."""
+
+    from .Symmetry import PointGroupReduction
+
+    if isinstance(reduction, PointGroupReduction):
+        return f"the weighted sectors of a subgroup of {int(reduction.group_order)} operations of the point group"
+    translations = getattr(reduction, "translations", None)
+    if translations is not None and np.any(np.asarray(translations) != 0):
+        return f"the sectors of the {int(reduction.group_order)} commuting operations with their translations"
+    return f"the sectors of the {int(reduction.group_order)} commuting signed permutations about the origin"
+
+
+def _sector_palette_check(grid, reduction, build_decomposition, count=None, bound=None, *, label=None):
+    """``(checked, refusal)`` of the sector stencils of a periodic cell.
+
+    A packed stencil codes its coefficients in one byte (``PALETTE_CAPACITY``, 256 values).  Those of a sector are its
+    stencil values (``1 + M`` on a cube, up to ``1 + 3M`` where the grid steps differ between the axes) times the
+    phases ``+-1`` and the multiplicity ratios ``sqrt(m_row / m_column)`` of its orbits, and the sums of the rows
+    whose stencil holds two points of one orbit.  A cube whose orbits differ in size (an even repeat of a smaller
+    cell on ``n = 2 mod 4`` points per edge: Si 2x2x2 at Grid_Spacing 0.6, 34^3 points, 295 values at the default
+    order 12), a tetragonal 2x2x2 perovskite at the default order or Si at order 18 need more than 256, where the
+    build of the stencils would stop the run.  Checked here on every grid, the same on every rank: first a bound
+    (``bound``, by default ``sector_palette_bounds``: the whole table of values and the exact sums of the rows near
+    a symmetry element, 1/|H| of the grid and a few percent of its rows; nothing more for the 18 points per edge of
+    the diamond benchmarks), then the count of the builder itself (``count``, by default ``sector_palette_sizes``)
+    for the sectors whose bound exceeds the palette.  ``refusal`` says why the stencils of ``reduction`` (``label``)
+    do not fit; ``checked`` is ``(orbital reduction, decomposition)`` where they do, for the stage of the orbitals.
+    ``build_decomposition(orbital reduction)`` gives what that stage would; nothing is checked where it fails (the
+    stage of the orbitals goes on as before).
+    """
+
+    if reduction is None or reduction.group_order <= 1:
         return None, None
     try:
         orbital = _orbital_reduction(reduction, _stabilizer_symmetry_disabled())
@@ -667,20 +732,26 @@ def _sector_palette_check(grid, reduction, build_decomposition, count=None):
         return None, None
     if orbital is None or orbital.group_order <= 1:
         return None, None
-    from .Symmetry.sector_stencil import PALETTE_CAPACITY, SectorStencilUnavailable, sector_palette_sizes
+    from .Symmetry.sector_stencil import (
+        PALETTE_CAPACITY,
+        SectorStencilUnavailable,
+        sector_palette_bounds,
+        sector_palette_sizes,
+    )
 
     try:
         built = build_decomposition(orbital)
-        sizes = (sector_palette_sizes if count is None else count)(grid, built[0], wrap=True)
+        bounds = (sector_palette_bounds if bound is None else bound)(grid, built[0], wrap=True)
+        over = [index for index, size in enumerate(bounds) if size is not None and size > PALETTE_CAPACITY]
+        sizes = (sector_palette_sizes if count is None else count)(grid, built[0], over, wrap=True) if over else ()
     except (SectorStencilUnavailable, ValueError, RuntimeError):
         return None, None
     largest = max((size for size in sizes if size is not None), default=0)
     if largest <= PALETTE_CAPACITY:
         return (orbital, built), None
     return None, (
-        f"the sector stencils of this cell, whose grid steps differ between the axes, need {largest} distinct "
-        f"coefficients, more than the {PALETTE_CAPACITY} of their palette (Expansion_Order "
-        f"{int(grid.settings.expansion_order)})"
+        f"the sector stencils of {label or _palette_group_label(orbital)} need {largest} distinct coefficients, more "
+        f"than the {PALETTE_CAPACITY} of their palette (Expansion_Order {int(grid.settings.expansion_order)})"
     )
 
 
@@ -1716,14 +1787,10 @@ def _prepare_periodic_orbital_operators(problem):
     grid = periodic.build_periodic_grid(problem.periodic_cell, problem.grid)
     grid_seconds = perf_counter() - stage
     lattice_vectors = problem.periodic_cell.lattice_vectors
-    # An atom on a face to round-off (a relax_restart.dat) is folded into the cell for the projectors, as the full
-    # preparation folds it for its builders (pbc.atoms_for_cell_builders); one farther outside is refused.
-    builder_atoms, outside = periodic.atoms_for_cell_builders(lattice_vectors, atoms)
-    if outside is not None:
-        raise ValueError(
-            f"atom {outside.symbol} at {np.asarray(outside.position)} lies outside the periodic cell "
-            f"[0, {np.diag(np.asarray(lattice_vectors)).tolist()}); this path does not recenter geometry"
-        )
+    # An atom outside the cell (a relax_restart.dat or mdinit.dat of an atom that crossed a face) is folded into it
+    # for the projectors, as the full preparation folds it for its builders (pbc.atoms_for_cell_builders); the
+    # system keeps the coordinates as given.
+    builder_atoms = periodic.atoms_for_cell_builders(lattice_vectors, atoms)
     stage = perf_counter()
     from .Laplacian import periodic_laplacian_builder
 
@@ -3655,6 +3722,8 @@ def _prepare_single_point(
     detected_group_order = 1
     symmetry_detection = "disabled by option"
     undivided_note = None
+    # the commuting signed permutations about the origin (the last group of the palette ladder below)
+    origin_group = None
     symmetry_maps = preparation.symmetry_maps
     maps_beside = False
     periodic_on_host = periodic_symmetry and selection.selected != "cupy"
@@ -3767,33 +3836,7 @@ def _prepare_single_point(
                     from .Symmetry.axis_reflection import attach_abelian_atom_orbits
 
                     attach_abelian_atom_orbits(candidate, getattr(reference, "atoms", ()), reference.grid)
-                from .Symmetry import PointGroupReduction, SignedPermutationReduction
-
-                symmetry_detection = (
-                    (
-                        f"exact group of {candidate.full_operations.shape[0]} operations detected (signed "
-                        f"permutations, "
-                        f"{int(np.count_nonzero(np.any(np.asarray(candidate.full_translations) != 0, axis=1)))}"
-                        f" of them with a translation, by half the cell or, non-symmorphic, a fraction of it, or "
-                        f"about a symmetric site off the origin; PARSEC_PERIODIC_TRANSLATIONS, "
-                        f"PARSEC_PERIODIC_SYMMETRY_CENTRE)"
-                        if getattr(candidate, "full_translations", None) is not None
-                        else f"exact point group of {candidate.full_operations.shape[0]} signed permutations detected"
-                    )
-                    + f"; the orbitals use the one-dimensional sectors of a subgroup of {candidate.group_order} "
-                    f"(weights {', '.join(str(int(w)) for w in candidate.sector_weights)})"
-                    if isinstance(candidate, PointGroupReduction)
-                    else (
-                        f"exact commuting group of {candidate.group_order} operations detected (signed "
-                        f"permutations, "
-                        f"{int(np.count_nonzero(np.any(np.asarray(candidate.translations) != 0, axis=1)))} of them "
-                        f"with a translation; PARSEC_PERIODIC_ABELIAN_TRANSLATIONS)"
-                    )
-                    if getattr(candidate, "translations", None) is not None
-                    else "exact commuting signed-permutation subgroup detected"
-                    if isinstance(candidate, SignedPermutationReduction)
-                    else "exact Cartesian axis-reflection subgroup detected"
-                )
+                symmetry_detection = _symmetry_detection_text(candidate)
             else:
                 symmetry_detection = (
                     "identity only; no nontrivial supported symmetry detected"
@@ -3820,9 +3863,13 @@ def _prepare_single_point(
                 symmetry_detection += "; " + lost_note
             if undivided_note is not None:
                 symmetry_detection += "; " + undivided_note
-    # A cell whose grid steps differ between the axes, where its sector stencils would need more coefficients than
-    # their palette holds: the full grid, decided before the identity sector of an MPI run is chosen.
+    # A cell whose sector stencils would need more coefficients than their palette holds (_sector_palette_check):
+    # a smaller group whose stencils fit, or the full grid, decided before the identity sector of an MPI run is
+    # chosen, from the same inputs on every rank (PARSEC_SECTOR_PALETTE_LADDER).
     palette_checked = None
+    palette_note = None
+    # (read in every run, so that a value it does not know is refused)
+    palette_ladder = sector_palette_ladder_setting()
     if (
         is_periodic
         and symmetry_reduction is not None
@@ -3830,7 +3877,7 @@ def _prepare_single_point(
         and not (spin_polarized and spin_sector_refusal is not None)
     ):
         from .Symmetry import load_or_build_reflection_decomposition
-        from .Symmetry.sector_stencil import sector_palette_sizes
+        from .Symmetry.sector_stencil import sector_palette_bounds, sector_palette_sizes
 
         def palette_decomposition(orbital):
             # what the stage of the orbitals below builds, or takes from the thread of the maps
@@ -3844,19 +3891,79 @@ def _prepare_single_point(
                 )
             return built
 
-        palette_checked, palette_refusal = _sector_palette_check(
-            reference.grid,
-            symmetry_reduction,
-            palette_decomposition,
-            stages.timed("sector_palette_check", sector_palette_sizes),
-        )
-        if palette_refusal is not None:
-            if symmetry_mode == "on":
-                raise ValueError(f"symmetry='on' requested, but {palette_refusal}")
-            symmetry_detection = (
-                f"automatic detection fell back to full grid: {palette_refusal}; found: {symmetry_detection}"
+        def palette_check(reduction):
+            return _sector_palette_check(
+                reference.grid,
+                reduction,
+                palette_decomposition,
+                stages.timed("sector_palette_check", sector_palette_sizes),
+                stages.timed("sector_palette_bound", sector_palette_bounds),
             )
-            symmetry_reduction = None
+
+        def lower_groups():
+            # The groups below the one detected whose stencils may fit: the commuting operations with their
+            # translations, below the weighted sectors of a point group; the commuting signed permutations about
+            # the origin, which keep the palette small (D2 of a cubic crystal: 40 values at order 12, 123 at 20).
+            from .Symmetry import PointGroupReduction
+
+            if isinstance(symmetry_reduction, PointGroupReduction) and origin_group is not None:
+                from .Symmetry.axis_reflection import periodic_abelian_reduction
+
+                try:
+                    abelian = stages.timed("orbital_group", periodic_abelian_reduction)(
+                        reference.grid, getattr(reference, "atoms", ()), origin_group, atom_tolerance=atom_tolerance
+                    )
+                except (ValueError, RuntimeError):
+                    abelian = None
+                if abelian is not None and abelian is not origin_group and abelian.group_order > 1:
+                    yield abelian
+            if origin_group is not None and origin_group is not symmetry_reduction and origin_group.group_order > 1:
+                yield origin_group
+
+        palette_checked, palette_refusal = palette_check(symmetry_reduction)
+        if palette_refusal is not None:
+            refusals = [palette_refusal]
+            chosen = None
+            if palette_ladder == "auto":
+                for lower in lower_groups():
+                    if not _ranks_divide_sectors(lower, mpi_context):
+                        continue
+                    checked, refusal = palette_check(lower)
+                    if refusal is None:
+                        palette_checked, chosen = checked, lower
+                        break
+                    refusals.append(refusal)
+            if chosen is not None:
+                if getattr(reference, "hubbard", None) is None:
+                    from .Symmetry.axis_reflection import attach_abelian_atom_orbits
+
+                    attach_abelian_atom_orbits(chosen, getattr(reference, "atoms", ()), reference.grid)
+                palette_note = (
+                    "; ".join(refusals)
+                    + f": the orbitals take {_palette_group_label(chosen)}, whose stencils fit "
+                    "(PARSEC_SECTOR_PALETTE_LADDER=auto)"
+                )
+                symmetry_detection = (
+                    f"{_symmetry_detection_text(chosen)}; {palette_note}; found first: {symmetry_detection}"
+                )
+                symmetry_reduction = chosen
+            else:
+                if symmetry_mode == "on":
+                    raise ValueError(f"symmetry='on' requested, but {'; '.join(refusals)}")
+                palette_note = (
+                    "; ".join(refusals)
+                    + ": the orbitals take the full grid"
+                    + (", one sector of the identity" if mpi_context is not None else "")
+                    + (
+                        " (PARSEC_SECTOR_PALETTE_LADDER=off)"
+                        if palette_ladder == "off"
+                        else " (PARSEC_SECTOR_PALETTE_LADDER)"
+                    )
+                )
+                symmetry_detection = (
+                    f"automatic detection fell back to full grid: {'; '.join(refusals)}; found: {symmetry_detection}"
+                )
+                symmetry_reduction = None
     # Without a point group the orbitals may still take the route of the
     # sectors, as one sector of the identity, so that the devices of the
     # process share its basis (PARSEC_CUPY_SINGLE_SECTOR).
@@ -4053,6 +4160,9 @@ def _prepare_single_point(
         group_found=symmetry_reduction is not None and int(getattr(symmetry_reduction, "group_order", 1)) > 1,
         orbitals_in_sectors=orbital_decomposition is not None,
     )
+    if palette_note is not None:
+        # the group the palette of the sector stencils left the orbitals (_sector_palette_check), at every output level
+        full_grid_notes.append(palette_note)
     if (
         symmetry_mode == "on"
         and orbital_decomposition is None

@@ -3,8 +3,8 @@
 Supercells of bulk diamond from 8 to 64,000 atoms, at the Gamma point and with Gamma-centred Monkhorst-Pack meshes,
 computed on 16 NVIDIA A100 80 GB GPUs (four Perlmutter nodes). The series measures how large a periodic cell this
 code can treat: the orbitals of one cell are shared by all ranks (one rank per GPU, any number of nodes), or, where
-the cell has a point group about its origin, divided into its symmetry sectors; with k-points the ranks form pools
-of k-points.
+the cell has a point group (about its origin or, since 2026-11-18, a symmetric site off it, with the translations by
+half the cell), divided into its symmetry sectors; with k-points the ranks form pools of k-points.
 
 ## Settings
 
@@ -146,7 +146,9 @@ n = 10 on, as above. SCF to 1e-7 Ry, the translations give the energy of the poi
 (n = 1, 96 operations), 2e-13 Ry (n = 2), 2e-12 Ry (n = 3) and 2e-12 Ry (n = 4); at the 2e-4 Ry of the series the
 two SCFs take different paths (7 to 8 steps instead of 9 to 10) and their energies differ by up to 5e-4 Ry for
 32,768 atoms (1.5e-8 Ry per atom). The ten sectors of n = 16 hold 2,054 states each, on 16 GPUs six of them on two
-GPUs and four on one; its first eigensolve takes 71 s and a later SCF step 12 s.
+GPUs and four on one (the placement by count of these runs, `PARSEC_SECTOR_PLACEMENT=cyclic` since 2026-11-18; the
+default placement by the cost of the sectors groups them otherwise, `src/parsec_python/acceleration/MULTI_GPU.md`);
+its first eigensolve takes 71 s and a later SCF step 12 s.
 
 ### Gamma point: projectors of one atom per orbit, binned densities (2026-11-16)
 
@@ -226,6 +228,12 @@ host memory beside small tasks, four of them on one node, more than its 256 GB; 
 (20.3 GiB) to 87.7 s, n = 8 from 105.6 s (14.8 GiB) to 85.9 s and n = 10 from 404.7 s (51.0 GiB, two subspaces of each
 rank in host memory, 37 GiB per rank) to 374.1 s with every subspace on the GPU; it keeps the same total energies to
 the last digit. n = 6 has the same plan either way.
+
+These are the runs of 2026-11-17. Since 2026-11-18 each sector keeps after the first solve only the levels it holds
+among those of its k-point plus a buffer (`PARSEC_KPOINT_SECTOR_REFIT=auto`), which cuts the later steps by 15 to
+21 % (n = 7: 86.6 -> 81.8 s on one allocation) and moves the energies within the SCF criterion (about 1e-6 Ry);
+times also vary between allocations by about as much (n = 6 took about 21 s with the code of 2026-11-18 on another
+allocation).
 
 The other drivers of k-points take the sectors too (2026-11-17; the same inputs with one keyword changed, first runs):
 

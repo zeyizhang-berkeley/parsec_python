@@ -312,7 +312,8 @@ Forces (`Forces.compute_periodic_forces`; the Fortran routines are `forpbc.f90`,
    (since 2026-11-17: each rank adds the terms of its columns, summed over the ranks).
 4. The **net force is removed**, as Fortran does for a crystal, and no torque is reported; the force report prints
    `(Ewald forces included)` as Fortran's. At the Gamma point and on the whole mesh (or its time-reversal pairs) the
-   forces are **not symmetrized**. A Monkhorst-Pack mesh (`Monkhorst_Pack_Shift`) of the forces of a single point or of a
+   forces are **not symmetrized**. A Monkhorst-Pack mesh (with or without a `Monkhorst_Pack_Shift` block, which since
+   2026-11-18 is PARSEC 1.5's Gamma-centred mesh, `PARSEC_MP_UNSHIFTED_MESH`) of the forces of a single point or of a
    `bfgs`/`simple` relaxation runs its irreducible wedge since 2026-11-18 (`PARSEC_KPOINT_FORCE_WEDGE`, `auto` by
    default), as a single point without forces and Fortran's routines do: the operations of the space group that map the
    grid of `Grid_Spacing` onto itself reduce the mesh and symmetrize the density, the nonlocal force of the wedge is
@@ -631,16 +632,17 @@ real-space Ewald split instead of the G-space `v_first`/`pot_local`):
   energy `E - TS`, not of the printed total energy (as in Fortran).
 
 Symmetrization (`symm_forces.f90`): where the problem carries Fortran's space
-group (`Monkhorst_Pack_Shift`, `Symmetrize_Charge_Density`, or a weighted
-`Kpoint_List` with forces) the forces are averaged over its operations,
+group (a Monkhorst-Pack mesh with `Monkhorst_Pack_Shift`, or since 2026-11-18
+without it, `Symmetrize_Charge_Density`, or a weighted `Kpoint_List` with
+forces) the forces are averaged over its operations,
 non-symmorphic ones included (`T(r) = U (r - A t)`: the image of an atom is
 found modulo lattice vectors as `symm_forces` finds it, the force turns with
 `U`), and a relaxation averages its positions over the same operations with
 their translations. Otherwise the point operations about the origin that map
 the lattice, the grid, the atoms (modulo lattice vectors) and the k-points onto
 themselves are used, as before. Molecular dynamics and manual movements use
-none, as in PARSEC (`parsec.F90` sets no symmetry for them: with
-`Monkhorst_Pack_Shift` their wedge is that of time reversal alone); no torque
+none, as in PARSEC (`parsec.F90` sets no symmetry for them: on a
+Monkhorst-Pack mesh their wedge is that of time reversal alone); no torque
 is reported.
 
 An irreducible k-point wedge gives the nonlocal forces of its own points
@@ -864,7 +866,8 @@ Nothing leaves the devices that a single point keeps there.
   sectors (command `geometry`), restarts its solvers (`new_scf_loop`) and
   contracts its part of the nonlocal force (`forces`); the root sums them.
 - **Projectors of one atom per orbit** (a point group with weighted sectors, Td or
-  Oh): the sector operators hold the projectors of one atom of each orbit of the
+  Oh, and since 2026-11-18 the abelian sectors of clusters and Gamma cells,
+  `PARSEC_SECTOR_PROJECTOR_ORBITS=auto`; not with LDA+U): the sector operators hold the projectors of one atom of each orbit of the
   group of the sectors, scaled by the square root of the orbit size, and since
   2026-11-18 the projector gradients of the forces are compressed by the same rule
   (`compress_gradients_for_sectors`): the terms belong to the representatives,
@@ -929,14 +932,18 @@ Nothing leaves the devices that a single point keeps there.
     them; `parsec.out` says `Forces of the periodic cell in the sectors of its
     point group: averaged over |G| operations; projectors of n of N atoms ...`.
     Molecular dynamics, manual movements, a `Move_Flag` fixing atoms,
-    `Use_Fortran_Routines`, point charges, `Polarizability`, bands, nscf,
+    `Use_Fortran_Routines`, point charges, `Polarizability`, nscf,
     `Restart_From_Wfndat`, k-points beyond Gamma and the TRIM supercell keep the
-    full grid; `Ignore_Symmetry` too unless `--symmetry on` is given; `off` puts
+    full grid, and so do bands under `PARSEC_PERIODIC_SECTOR_BANDS=off` (under
+    `auto`, the default since 2026-11-18, a band structure keeps the sectors of
+    its SCF); `Ignore_Symmetry` too unless `--symmetry on` is given; `off` puts
     every forces, relaxation or MD run of a cell on the full grid, bit for bit as
-    before. A cell in the sectors of an Abelian group (every level solved, no
-    completion) has its forces and moved positions averaged over that group
-    (`sector_symmetry.abelian_cell_operations`), so that the atoms it fixes stay
-    on it. Steepest descent moves the components of every nonzero force by about
+    before. A cell in the sectors of an Abelian group (every level solved; since
+    2026-11-18 its projectors and their gradients are those of one atom per orbit,
+    the force of every other atom its representative's turned by the operation
+    that carries it there) has its forces and moved positions averaged over that
+    group (`sector_symmetry.abelian_cell_operations`), so that the atoms it fixes
+    stay on it. Steepest descent moves the components of every nonzero force by about
     `Min_Step`: on the full grid the round-off forces of the atoms that the group
     fixes move them (~1e-4 bohr in the tests), in the sectors they stay.
   - *Several nodes* (`benchmarks/mpi_full_scf.py`, `scripts/run_multi_gpu_scf.sh`):
@@ -971,8 +978,10 @@ Nothing leaves the devices that a single point keeps there.
   (the way the fast ionic potential is made). The sums are written against an array module: NumPy on the host, CuPy
   (with `cupyx.scipy.special.erf`) when the calculation ran on a GPU, which then forms the radial slopes, products and sums
   and the FFT; the balls themselves are generated on the host from index ranges. The forces are those of the readable routine
-  to 1e-7 Ry/bohr (the splitting of the Ewald sum; 1e-13 for a table cut at 14 bohr). Not accelerated: k-points, spin,
-  several nodes (an MPI context is refused for a periodic cell), and the Ewald ion-ion force, which stays on the host.
+  to 1e-7 Ry/bohr (the splitting of the Ewald sum; 1e-13 for a table cut at 14 bohr). Not on this path: k-points (next
+  item) and spin. Several nodes run the forces of a Gamma cell in the MPI runner since 2026-11-18 (above), and the Ewald
+  ion-ion force of a cell of 1,024 atoms or more runs on the device since 2026-11-17 (`PARSEC_DEVICE_EWALD`); smaller
+  cells keep it on the host.
 - **Periodic cells with k-points**: the accelerated command line hands such an input to the reference driver, whose k-point
   solver puts one worker thread on each CUDA device (the output names the device under "Execution resources"). Its
   eigenproblems, the density of each k-point and now the forces run there: the nonlocal force of a k-point is contracted on

@@ -174,14 +174,41 @@ on the GPUs of one node, or one rank per GPU on several nodes
 
 A symmetric cluster with fewer sectors than nodes (one rank per node leaves
 the other nodes idle, and the runner refuses more ranks than sectors) runs
-with one rank per GPU as well: the ranks are divided into one group of
-consecutive ranks per sector (`experimental/mpi_scf.sector_rank_groups`,
-balanced counts, a group may span nodes), and each group shares the basis of
-its sector as above, in a communicator of its own; the commands of the SCF,
-the density and the forces stay on the world communicator, and only the
+with one rank per GPU as well: the ranks are divided into groups of
+consecutive ranks (a group may span nodes), and each group shares the bases
+of its sectors as above, in a communicator of its own; the commands of the
+SCF, the density and the forces stay on the world communicator, and only the
 first rank of a group reports the Ritz values of its sector. One rank per
 node keeps the node-local route of before, which is the faster one where it
-can use all the nodes. Measured on A100 nodes (CA-LDA, first runs), a
+can use all the nodes.
+
+Since 2026-11-18 the sectors are placed by their cost, rows times first state
+count (`PARSEC_SECTOR_PLACEMENT=size`, `experimental/mpi_scf.sector_rank_plan`
+and `plan_sector_groups`): of the splits of the ranks into near-equal groups
+the one whose fullest group holds the least cost per rank is taken (of those
+within 10 % of it, the one with the most groups), the costliest sectors are
+placed first, and the group of the root takes the lightest load. Where the
+first solve divides every basis among the ranks of its group
+(`Eigensolver: chebff`, as the benchmark inputs write it) a group may solve
+several sectors one after another: ten sectors on sixteen ranks become two
+groups of eight with five sectors each (5/8 of a basis per GPU) instead of six
+pairs and four single ranks (a whole basis on one GPU); after a CHEBDAV first
+solve (the default `Eigensolver`) every rank of a group holds whole bases, and
+the groups keep one sector each, in the shape by count. With one rank per node every rank
+takes a balanced group of sectors the same way, and the GPUs of a rank take
+shares in proportion to the cost (the device pool of all its GPUs where that
+lowers the fullest GPU by more than 5 %). The sectors, their counts and so the
+results are those of the placement by count, up to the order of MPI sums.
+Diamond of 22^3 cubes (85,184 atoms) with the default settings and
+`--rank-per-gpu` on 16 A100 ran in 322.9 s with 66.4 GiB on the fullest GPU,
+where the placement by count ran out of memory (one rank per node still cuts
+the margin of its ten nearly equal sectors on four nodes).
+`PARSEC_SECTOR_PLACEMENT=cyclic` keeps the placement by count of before: one
+group of consecutive ranks per sector with balanced counts
+(`sector_rank_groups`), or sector `s` on rank `s mod size` with one rank per
+node.
+
+Measured on A100 nodes with the placement by count (CA-LDA, first runs), a
 nanodiamond of 5,589 atoms made C2 (two hydrogens moved by 0.02 Å, two
 sectors): one rank per node on 2 nodes, the most it can use, 212.0 s and
 59.8 GiB at the fullest GPU; groups of eight ranks on 4 nodes 166.3 s and
@@ -335,7 +362,10 @@ orthorhombic cell, no spin, a native LDA or GGA (`ca`, `pbe` and the other
 functionals of `V_xc/device_xc.py`). The driver looks for the point group of
 the cell about its origin (`PARSEC_PERIODIC_SYMMETRY=auto`, since 2026-11-16):
 the Cartesian signed permutations that map the atoms modulo the lattice and the
-periodic grid onto themselves (the row maps wrap around the cell). Where it
+periodic grid onto themselves (the row maps wrap around the cell); since
+2026-11-18 also about a symmetric site off the origin, where the group about
+the origin is the identity alone, and on grids of a different step on each
+axis (README "Point groups of periodic cells"). Where it
 finds one, the orbitals take its sectors as a cluster's do, with the weighted
 sectors of a larger subgroup where they solve less (Td of diamond about an
 atom: D2d, 1/16 of the grid times the states; Oh of rocksalt: D4h, 1/32), and
@@ -389,7 +419,8 @@ runner): k-points beyond Gamma (`parsec_python/main.py --mpi`, whose ranks
 take the k-points), spin, spin-orbit and non-collinear runs, hybrids,
 meta-GGAs, libxc functionals, oblique cells, wires and slabs, LDA+U, the TS
 correction, the band structure and `nscf` runs (all `parsec_python/main.py`,
-where these keep the full grid of a cell), the forces and moves of the
+on its own routes: the band structure of a Gamma cell keeps the sectors of its
+SCF there, `PARSEC_PERIODIC_SECTOR_BANDS`), the forces and moves of the
 Fortran-derived routines and of a k-point supercell (`PARSEC_KPOINT_SUPERCELL`),
 and Fortran's general grid (`Use_Fortran_Routines` with sides of different
 steps).
