@@ -1,4 +1,6 @@
-"""The complex eigenproblem of one k-point with its basis shared by the ranks of a pool, column by column.
+"""The complex eigenproblem of one k-point with its basis shared by the ranks of a pool, column by column (a real one
+where the operator is real, ``real_arithmetic``: the Gamma point and the psi gauge of a time-reversal invariant point,
+:mod:`..SCF.kpoint_real`; every array of the solve then float64).
 
 :func:`.chebff_spinor.solve_spinor_eigval` solves a Bloch Hamiltonian on one device: the first SCF
 iteration runs CHEBFF (``filter_cycles`` cycles of filter / orthonormalization / Rayleigh-Ritz from a
@@ -63,6 +65,7 @@ from .chebff_spinor import (
     _filter_group,
     _filter_group_fused,
     _lanczos_upper_bound,
+    _real_arithmetic,
     _residual_period,
     _row_chunk,
     _solve_triangular_inverse,
@@ -258,7 +261,7 @@ class _ColumnRounds:
     def region(xp, row_block, starts, step):
         """The columns of round ``step`` of the column-major row block: one contiguous buffer."""
         piece = row_block.T[starts[step] : starts[step + 1]]
-        return piece.reshape(-1) if piece.size else xp.empty(1, dtype=xp.complex128)
+        return piece.reshape(-1) if piece.size else xp.empty(1, dtype=row_block.dtype)
 
 
 # --------------------------------------------------------------------------- layout
@@ -469,9 +472,9 @@ class ColumnGroup:
         self._sync()
         started = time.perf_counter()
         xp = self.xp
-        if self.transport == "cuda" and np.dtype(dtype) == np.complex128 and self.route == "block":
+        if self.transport == "cuda" and np.dtype(dtype) in (np.complex128, np.float64) and self.route == "block":
             # one allocation for the run (see _round_buffer): the factors and rotations of every pass
-            buffer = self._round_buffer("bcast", int(np.prod(shape))).reshape(shape)
+            buffer = self._round_buffer("bcast", int(np.prod(shape)), dtype).reshape(shape)
             if self.is_root:
                 buffer[...] = xp.asarray(array, dtype=dtype)
             self._sync()
@@ -496,10 +499,12 @@ class ColumnGroup:
         return buffer
 
     def _exchange(self, send, send_counts, receive, receive_counts) -> None:
-        """One ``Alltoallv`` of complex buffers (``counts`` in complex elements), as float64 views."""
+        """One ``Alltoallv`` of complex (or, for a real basis, float64) buffers (``counts`` in their elements), as
+        float64 views."""
         xp = self.xp
-        sends = np.asarray(send_counts, dtype=np.int64) * 2
-        receives = np.asarray(receive_counts, dtype=np.int64) * 2
+        parts = 2 if np.dtype(send.dtype).kind == "c" else 1
+        sends = np.asarray(send_counts, dtype=np.int64) * parts
+        receives = np.asarray(receive_counts, dtype=np.int64) * parts
 
         def offsets(counts):
             return np.concatenate(([0], np.cumsum(counts[:-1]))).astype(np.int64)
@@ -510,7 +515,7 @@ class ColumnGroup:
             send_buffer, receive_buffer = send.view(xp.float64), receive.view(xp.float64)
         else:
             send_buffer = np.ascontiguousarray(self._host(send)).view(np.float64)
-            receive_buffer = np.empty(2 * int(receive.size), dtype=np.float64)
+            receive_buffer = np.empty(parts * int(receive.size), dtype=np.float64)
         send_spec = [send_buffer, (sends, offsets(sends))]
         receive_spec = [receive_buffer, (receives, offsets(receives))]
         if self.mpi is not None:
@@ -518,16 +523,16 @@ class ColumnGroup:
             receive_spec.append(self.mpi.DOUBLE)
         self.comm.Alltoallv(send_spec, receive_spec)
         if self.transport != "cuda":
-            host = receive_buffer.view(np.complex128)
+            host = receive_buffer.view(np.complex128) if parts == 2 else receive_buffer
             if xp is np:
                 receive[...] = host
             else:
                 receive.set(host)
 
     # ----- moves between columns and rows --------------------------------------
-    def _round_rows(self, columns: int) -> int:
+    def _round_rows(self, columns: int, itemsize: int = 16) -> int:
         """Rows per rank and round, so that a round's buffers hold at most :func:`exchange_bytes`."""
-        return max(1, exchange_bytes() // (16 * max(int(columns), 1)))
+        return max(1, exchange_bytes() // (int(itemsize) * max(int(columns), 1)))
 
     def to_rows(self, local, layout: ColumnLayout, dimension: int):
         """This rank's block of rows ``(N_r, m)`` (C order) of the basis whose columns the ranks hold.
@@ -539,17 +544,18 @@ class ColumnGroup:
         self._sync()
         started = time.perf_counter()
         xp = self.xp
+        dtype = local.dtype
         edges = row_edges(dimension, self.size)
         heights = [edges[q + 1] - edges[q] for q in range(self.size)]
         own = heights[self.rank]
         width = layout.widths[self.rank]
-        result = xp.empty((own, layout.columns), dtype=xp.complex128)
-        step = self._round_rows(layout.columns)
+        result = xp.empty((own, layout.columns), dtype=dtype)
+        step = self._round_rows(layout.columns, np.dtype(dtype).itemsize)
         rounds = -(-max(heights) // step) if max(heights) else 0
         for index in range(rounds):
             first = index * step
             counts = [max(0, min(step, height - first)) for height in heights]
-            send = xp.empty(max(1, sum(counts) * width), dtype=xp.complex128)
+            send = xp.empty(max(1, sum(counts) * width), dtype=dtype)
             offset = 0
             for q, count in enumerate(counts):
                 if count and width:
@@ -559,7 +565,7 @@ class ColumnGroup:
                 offset += count * width
             mine = counts[self.rank]
             receive_counts = [mine * w for w in layout.widths]
-            receive = xp.empty(max(1, sum(receive_counts)), dtype=xp.complex128)
+            receive = xp.empty(max(1, sum(receive_counts)), dtype=dtype)
             self._exchange(send, [count * width for count in counts], receive, receive_counts)
             del send
             offset = 0
@@ -584,20 +590,21 @@ class ColumnGroup:
         self._sync()
         started = time.perf_counter()
         xp = self.xp
+        dtype = rows.dtype
         edges = row_edges(dimension, self.size)
         heights = [edges[q + 1] - edges[q] for q in range(self.size)]
         width = layout.widths[self.rank]
         target = out
-        if target is None or tuple(target.shape) != (dimension, width):
-            target = xp.empty((dimension, width), dtype=xp.complex128)
-        step = self._round_rows(layout.columns)
+        if target is None or tuple(target.shape) != (dimension, width) or target.dtype != dtype:
+            target = xp.empty((dimension, width), dtype=dtype)
+        step = self._round_rows(layout.columns, np.dtype(dtype).itemsize)
         rounds = -(-max(heights) // step) if max(heights) else 0
         for index in range(rounds):
             first = index * step
             counts = [max(0, min(step, height - first)) for height in heights]
             mine = counts[self.rank]
             send_counts = [mine * w for w in layout.widths]
-            send = xp.empty(max(1, sum(send_counts)), dtype=xp.complex128)
+            send = xp.empty(max(1, sum(send_counts)), dtype=dtype)
             offset = 0
             for destination, w in enumerate(layout.widths):
                 if mine and w:
@@ -606,7 +613,7 @@ class ColumnGroup:
                         piece[:, l0 : l0 + count] = rows[first : first + mine, g0 : g0 + count]
                 offset += mine * w
             receive_counts = [count * width for count in counts]
-            receive = xp.empty(max(1, sum(receive_counts)), dtype=xp.complex128)
+            receive = xp.empty(max(1, sum(receive_counts)), dtype=dtype)
             self._exchange(send, send_counts, receive, receive_counts)
             del send
             offset = 0
@@ -622,58 +629,69 @@ class ColumnGroup:
         return target
 
     # ----- the block route (PARSEC_KPOINT_RITZ=block) ----------------------------
-    def block_rounds(self, layout: ColumnLayout, dimension: int) -> _ColumnRounds:
-        """The rounds of the block route for ``layout``: buffers of at most :func:`exchange_bytes`."""
-        width = max(1, exchange_bytes() // (16 * max(int(dimension), 1)))
+    def block_rounds(self, layout: ColumnLayout, dimension: int, dtype=np.complex128) -> _ColumnRounds:
+        """The rounds of the block route for ``layout``: buffers of at most :func:`exchange_bytes` (``dtype`` that
+        of the basis: complex, or float64 for a real one)."""
+        width = max(1, exchange_bytes() // (np.dtype(dtype).itemsize * max(int(dimension), 1)))
         return _ColumnRounds(layout, self.rank, self.size, dimension, width)
 
-    def allocate_block(self, layout: ColumnLayout, dimension: int):
-        """This rank's columns, column-major, in an allocation with room for its rows (complex128)."""
+    def allocate_block(self, layout: ColumnLayout, dimension: int, dtype=np.complex128):
+        """This rank's columns, column-major, in an allocation with room for its rows (complex128, or ``dtype``)."""
         xp = self.xp
         width = layout.widths[self.rank]
-        _offset, capacity = self.block_rounds(layout, dimension).block_storage()
-        backing = xp.empty(max(int(capacity), int(dimension) * width, 1), dtype=xp.complex128)
+        _offset, capacity = self.block_rounds(layout, dimension, dtype).block_storage()
+        backing = xp.empty(max(int(capacity), int(dimension) * width, 1), dtype=dtype)
         return backing[: int(dimension) * width].reshape((width, int(dimension))).T
 
     def has_block_room(self, block, layout: ColumnLayout, dimension: int) -> bool:
         """Whether ``block`` is column-major and its allocation holds the rows of the block route."""
         if self.size == 1:
             return bool(block.flags.f_contiguous)
-        _offset, capacity = self.block_rounds(layout, dimension).block_storage()
+        _offset, capacity = self.block_rounds(layout, dimension, block.dtype).block_storage()
         return bool(block.flags.f_contiguous) and _room(self.xp, block) >= capacity
 
-    def _round_buffer(self, name: str, elements: int):
-        """A flat complex buffer of at least ``elements``, the same allocation in every round and solve.
+    def _round_buffer(self, name: str, elements: int, dtype=np.complex128):
+        """A flat complex (or float64) buffer of at least ``elements``, the same allocation in every round and
+        solve.
 
         As for the real shared basis (:meth:`.mpi_shared_basis.MPIShardGroup._round_buffer`): buffers
-        taken anew in every round stay resident under the CUDA IPC handles that GPU-aware MPI keeps.
+        taken anew in every round stay resident under the CUDA IPC handles that GPU-aware MPI keeps.  One allocation
+        per name serves both dtypes (the real Gamma point of a pool beside its complex k-points): it is kept as float64
+        words, an even number of them, grown only when the bytes asked for exceed it, and handed out as a view in
+        ``dtype``.
         """
         elements = max(1, int(elements))
+        dtype = np.dtype(dtype)
+        if dtype not in (np.dtype(np.complex128), np.dtype(np.float64)):
+            raise TypeError(f"the round buffers hold complex128 or float64 blocks, not {dtype}")
+        words = elements * (dtype.itemsize // 8)
         buffer = self._buffers.get(name)
-        if buffer is None or buffer.size < elements:
+        if buffer is None or buffer.size < words:
             self._buffers.pop(name, None)
             del buffer
-            buffer = self.xp.empty(elements, dtype=self.xp.complex128)
+            buffer = self.xp.empty(words + (words & 1), dtype=np.float64)
             self._buffers[name] = buffer
-        return buffer[:elements]
+        return buffer[:words].view(dtype)
 
     def row_block_in(self, columns, plan: _ColumnRounds):
         """The column-major row block in the allocation of ``columns`` (or a new one, counted)."""
         xp = self.xp
         if self.size == 1:
             return columns, False
+        dtype = columns.dtype
+        itemsize = np.dtype(dtype).itemsize
         offset, capacity = plan.block_storage()
         if columns.flags.f_contiguous and _room(xp, columns) >= capacity:
             shape = (plan.layout.columns, plan.own)
             if xp is np:
                 base = _base(xp, columns)
                 skip = columns.__array_interface__["data"][0] - base.__array_interface__["data"][0]
-                rows = np.ndarray(shape, dtype=np.complex128, buffer=base, offset=skip + 16 * offset)
+                rows = np.ndarray(shape, dtype=dtype, buffer=base, offset=skip + itemsize * offset)
             else:
-                rows = xp.ndarray(shape, dtype=xp.complex128, memptr=columns.data + 16 * offset)
+                rows = xp.ndarray(shape, dtype=dtype, memptr=columns.data + itemsize * offset)
             return rows.T, False
         self.separate_row_blocks += 1
-        return xp.empty((plan.layout.columns, plan.own), dtype=xp.complex128).T, True
+        return xp.empty((plan.layout.columns, plan.own), dtype=dtype).T, True
 
     def columns_to_rows_block(self, columns, row_block, plan: _ColumnRounds, starts) -> None:
         """This rank's columns to its rows of the block route, rounds in decreasing order (no ``H``)."""
@@ -683,7 +701,7 @@ class ColumnGroup:
         self._sync()
         started = time.perf_counter()
         sent, _received = plan.sizes()
-        send = self._round_buffer("send", sent)
+        send = self._round_buffer("send", sent, columns.dtype)
         for step in reversed(range(plan.rounds)):
             buffer, send_counts, receive_counts = plan.pack(xp, columns, step, send)
             self._exchange(buffer, send_counts, plan.region(xp, row_block, starts, step), receive_counts)
@@ -698,7 +716,7 @@ class ColumnGroup:
         self._sync()
         started = time.perf_counter()
         sent, _received = plan.sizes()
-        receive = self._round_buffer("receive", max(sent, _received))
+        receive = self._round_buffer("receive", max(sent, _received), columns.dtype)
         for step in range(plan.rounds):
             counts = plan.counts(step)
             receive_counts = [height * counts[self.rank] for height in plan.heights()]
@@ -730,17 +748,25 @@ def _gram(xp, rows, chunk: int):
 
     On the device the real view ``Y = [Re X | Im X]`` (columns interleaved) gives it with one symmetric
     rank-k update, half the products of a complex matrix product:
-    ``X^H X = (Y^T Y)[re, re] + (Y^T Y)[im, im] + i ((Y^T Y)[re, im] - (Y^T Y)[im, re])``.
+    ``X^H X = (Y^T Y)[re, re] + (Y^T Y)[im, im] + i ((Y^T Y)[re, im] - (Y^T Y)[im, re])``.  A real basis (the
+    real Gamma point) takes ``X^T X`` from one symmetric rank-k update of ``X`` itself.
     """
     own, count = rows.shape
+    real_basis = np.dtype(rows.dtype) == np.float64
     if xp is np:
-        gram = np.zeros((count, count), dtype=np.complex128)
+        gram = np.zeros((count, count), dtype=rows.dtype)
         for r0 in range(0, own, chunk):
             block = rows[r0 : min(r0 + chunk, own)]
             gram += block.conj().T @ block
         return gram
     from cupy import cublas
 
+    if real_basis:
+        gram = xp.zeros((count, count), dtype=xp.float64)
+        for r0 in range(0, own, chunk):
+            block = xp.ascontiguousarray(rows[r0 : min(r0 + chunk, own)])
+            cublas.syrk("T", block, out=gram, alpha=1.0, beta=1.0, lower=True)
+        return xp.ascontiguousarray(xp.tril(gram) + xp.tril(gram, -1).T)
     real = xp.zeros((2 * count, 2 * count), dtype=xp.float64)
     for r0 in range(0, own, chunk):
         block = xp.ascontiguousarray(rows[r0 : min(r0 + chunk, own)]).view(xp.float64)
@@ -777,6 +803,7 @@ def _cholesky_qr_rows(xp, rows, group: ColumnGroup, dimension: int) -> None:
     arithmetic of :func:`.chebff_spinor._distributed_orthonormalize`, with the factor taken on one rank.
     """
     own, count = rows.shape
+    dtype = rows.dtype
     chunk = _row_chunk(count)
     eps = float(np.finfo(np.float64).eps)
     for pass_index in range(3):
@@ -788,7 +815,7 @@ def _cholesky_qr_rows(xp, rows, group: ColumnGroup, dimension: int) -> None:
             shift = 11.0 * (dimension * count + count * (count + 1)) * eps * trace if pass_index == 0 else 0.0
             for _attempt in range(4):
                 try:
-                    lower = xp.linalg.cholesky(gram + shift * xp.eye(count, dtype=xp.complex128))
+                    lower = xp.linalg.cholesky(gram + shift * xp.eye(count, dtype=dtype))
                     if bool(xp.all(xp.isfinite(lower))):
                         factor = lower
                         break
@@ -801,7 +828,7 @@ def _cholesky_qr_rows(xp, rows, group: ColumnGroup, dimension: int) -> None:
         status = group.bcast(status)
         if status is not None:
             raise FloatingPointError(status)
-        factor = group.bcast_array(factor, (count, count), np.complex128)
+        factor = group.bcast_array(factor, (count, count), np.dtype(dtype))
         _right_solve(xp, rows, factor, chunk)
         del factor
 
@@ -815,16 +842,17 @@ def _base(xp, array):
 
 
 def _room(xp, block) -> int:
-    """Complex elements from the first one of ``block`` to the end of its allocation."""
+    """Elements (complex, or float64 of a real basis) from the first one of ``block`` to the end of its allocation."""
+    itemsize = np.dtype(block.dtype).itemsize
     if xp is np:
         base = _base(xp, block)
         start = block.__array_interface__["data"][0]
         end = base.__array_interface__["data"][0] + base.nbytes
-        return max(0, end - start) // 16
+        return max(0, end - start) // itemsize
     memory = getattr(block.data, "mem", None)
     if memory is None:
         return 0
-    return max(0, int(memory.ptr) + int(memory.size) - int(block.data.ptr)) // 16
+    return max(0, int(memory.ptr) + int(memory.size) - int(block.data.ptr)) // itemsize
 
 
 def _conjugate_product(xp, left, right):
@@ -833,7 +861,8 @@ def _conjugate_product(xp, left, right):
         return left.conj().T @ right
     from cupy import cublas
 
-    return cublas.gemm("H", "N", xp.asfortranarray(left), xp.asfortranarray(right))
+    transpose = "T" if np.dtype(left.dtype) == np.float64 else "H"
+    return cublas.gemm(transpose, "N", xp.asfortranarray(left), xp.asfortranarray(right))
 
 
 _RESIDUAL_SQUARES = {}
@@ -848,7 +877,24 @@ def _residual_squares(xp, applied, block, levels):
     """
     if xp is np:
         difference = applied - block * levels[None, :]
+        if np.dtype(difference.dtype) == np.float64:
+            return (difference * difference).sum(axis=0)
         return (difference.real * difference.real + difference.imag * difference.imag).sum(axis=0)
+    if np.dtype(applied.dtype) == np.float64:
+        # a real basis (the real Gamma point)
+        kernel = _RESIDUAL_SQUARES.get("real")
+        if kernel is None:
+            kernel = xp.ReductionKernel(
+                "float64 h, float64 x, float64 e",
+                "float64 y",
+                "(h - e * x) * (h - e * x)",
+                "a + b",
+                "y = a",
+                "0",
+                "kpoint_residual_squares_real",
+            )
+            _RESIDUAL_SQUARES["real"] = kernel
+        return kernel(applied, block, levels[None, :], axis=0)
     kernel = _RESIDUAL_SQUARES.get("kernel")
     if kernel is None:
         kernel = xp.ReductionKernel(
@@ -903,7 +949,8 @@ def _orthonormal_ritz_block(
     """
     columns = holder.pop()
     count = int(layout.columns)
-    plan = group.block_rounds(layout, dimension)
+    dtype = np.dtype(columns.dtype)  # complex128, or float64 of a real basis
+    plan = group.block_rounds(layout, dimension, dtype)
     if group.size == 1:
         order, starts = np.arange(count, dtype=np.int64), [0, count]
         rounds = 1
@@ -917,12 +964,12 @@ def _orthonormal_ritz_block(
             _cholesky_qr_rows(xp, row_block, group, dimension)
             group.rows_to_columns_block(row_block, columns, plan, starts)
     with stats.timed("ritz_seconds"):
-        projection = xp.zeros((count, count), dtype=xp.complex128)
+        projection = xp.zeros((count, count), dtype=dtype)
         widest = max(plan.counts(0)[group.rank], 1) if group.size > 1 else 1
         sent, received = plan.sizes()
-        applied_buffer = group._round_buffer("applied", int(dimension) * widest) if group.size > 1 else None
-        send_buffer = group._round_buffer("send", sent) if group.size > 1 else None
-        receive_buffer = group._round_buffer("receive", max(sent, received)) if group.size > 1 else None
+        applied_buffer = group._round_buffer("applied", int(dimension) * widest, dtype) if group.size > 1 else None
+        send_buffer = group._round_buffer("send", sent, dtype) if group.size > 1 else None
+        receive_buffer = group._round_buffer("receive", max(sent, received), dtype) if group.size > 1 else None
         if group.size == 1:
             # one rank: the columns are the rows; H X a chunk at a time, projected as it comes
             for c0 in range(0, count, chunk):
@@ -988,8 +1035,8 @@ def _orthonormal_ritz_block(
         if generalized:
             stats.add("generalized_ritz_passes", 1.0)
         values = group.bcast(values)
-        rotations = group.bcast_array(rotations, (count, count), np.complex128)
-        tile = max(1, exchange_bytes() // (16 * max(count, 1)))
+        rotations = group.bcast_array(rotations, (count, count), dtype)
+        tile = max(1, exchange_bytes() // (dtype.itemsize * max(count, 1)))
         _rotate_rows_in_place(xp, row_block, rotations, tile)
         del rotations
         group.rows_to_columns_block(row_block, columns, plan, starts)
@@ -1017,8 +1064,9 @@ def _block_columns(xp, vectors, group: ColumnGroup, layout: ColumnLayout, dimens
     on_device = not isinstance(vectors, np.ndarray) or xp is np
     if on_device and group.has_block_room(vectors, layout, dimension):
         return vectors
-    block = group.allocate_block(layout, dimension) if group.size > 1 else xp.empty(
-        (int(dimension), layout.widths[group.rank]), dtype=xp.complex128, order="F")
+    dtype = np.dtype(vectors.dtype)  # complex128, or float64 of a real basis
+    block = group.allocate_block(layout, dimension, dtype) if group.size > 1 else xp.empty(
+        (int(dimension), layout.widths[group.rank]), dtype=dtype, order="F")
     if isinstance(vectors, np.ndarray) and xp is not np:
         block.set(np.asfortranarray(vectors))
     else:
@@ -1059,7 +1107,7 @@ def _orthonormal_ritz(
         del columns
         own, count = rows.shape
         row_chunk = _row_chunk(count)
-        projection = xp.zeros((count, count), dtype=xp.complex128)
+        projection = xp.zeros((count, count), dtype=rows.dtype)
         for r0 in range(0, own, row_chunk):
             r1 = min(r0 + row_chunk, own)
             projection += rows[r0:r1].conj().T @ applied[r0:r1]
@@ -1073,7 +1121,7 @@ def _orthonormal_ritz(
             values = np.ascontiguousarray(group._host(values), dtype=np.float64)
         del lower
         values = group.bcast(values)
-        rotations = group.bcast_array(rotations, (count, count), np.complex128)
+        rotations = group.bcast_array(rotations, (count, count), np.dtype(rows.dtype))
         for r0 in range(0, own, row_chunk):
             r1 = min(r0 + row_chunk, own)
             rows[r0:r1] = rows[r0:r1] @ rotations
@@ -1113,24 +1161,33 @@ def _bounds(
 
 
 def _random_columns(xp, seed: int, dimension: int, working: int, layout: ColumnLayout, rank: int, chunk: int,
-                    group: ColumnGroup | None = None):
+                    group: ColumnGroup | None = None, real_basis: bool = False):
     """This rank's columns of the start basis of :func:`.chebff_spinor._first_solve`: the same stream
     (``default_rng(seed)``, real then imaginary parts, :data:`.chebff_spinor.START_COLUMNS` columns at a
-    time, whatever ``chunk`` is), replayed in full.
+    time, whatever ``chunk`` is), replayed in full.  ``real_basis`` (a real operator, the real Gamma point): the
+    real parts alone, as the one-device solver draws them.
 
     With ``group`` (the block route) the columns are column-major in an allocation with room for the rows.
     """
     rng = xp.random.default_rng(seed)
+    dtype = xp.float64 if real_basis else xp.complex128
     if group is None:
-        local = xp.empty((dimension, layout.widths[rank]), dtype=xp.complex128)
+        local = xp.empty((dimension, layout.widths[rank]), dtype=dtype)
     elif group.size > 1:
-        local = group.allocate_block(layout, dimension)
+        local = group.allocate_block(layout, dimension, dtype)
     else:
-        local = xp.empty((dimension, layout.widths[rank]), dtype=xp.complex128, order="F")
+        local = xp.empty((dimension, layout.widths[rank]), dtype=dtype, order="F")
     spans = layout.spans(rank)
     for c0 in range(0, working, START_COLUMNS):
         c1 = min(c0 + START_COLUMNS, working)
         real = rng.uniform(-1.0, 1.0, (dimension, c1 - c0))
+        if real_basis:
+            for g0, l0, count in spans:
+                first, last = max(g0, c0), min(g0 + count, c1)
+                if last > first:
+                    local[:, l0 + first - g0 : l0 + last - g0] = real[:, first - c0 : last - c0]
+            del real
+            continue
         imaginary = rng.uniform(-1.0, 1.0, (dimension, c1 - c0))
         for g0, l0, count in spans:
             first, last = max(g0, c0), min(g0 + count, c1)
@@ -1220,6 +1277,8 @@ def solve_column_eigval(
         and state.operator_dimension == dimension
         and state.working_states == working
         and state.layout == layout
+        # a real subspace for a real operator (the real Gamma point), a complex one otherwise
+        and (np.dtype(state.vectors.dtype) == np.float64) == _real_arithmetic(operator)
     )
     if not reusable:
         chebff = settings.chebff
@@ -1232,7 +1291,8 @@ def solve_column_eigval(
                 max_extra_cycles = int(env) if env.isdigit() else 24
             extra = int(max_extra_cycles)
         vectors = _random_columns(
-            xp, chebff.random_seed, dimension, working, layout, group.rank, chunk, group if block_route else None
+            xp, chebff.random_seed, dimension, working, layout, group.rank, chunk, group if block_route else None,
+            real_basis=_real_arithmetic(operator),
         )
         bound_rule, bound_steps = bound_request(chebff)
         upper_bound, smallest_ritz = _bounds(

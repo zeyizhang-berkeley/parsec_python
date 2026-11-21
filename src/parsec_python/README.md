@@ -217,7 +217,9 @@ Currently supported:
     (collinear spin too), band structures, forces (also with collinear spin
     and weighted or irreducible k-points), relaxation and molecular dynamics
     (`Relaxation.wire_slab_backend`), Fortran's space group of a wire or slab
-    (`alatt` with `4 rmax` along the confined directions; a slab has none
+    (`alatt` with `4 rmax` along the confined directions, without the
+    operations that do not map the charged sheets onto sheets of the same
+    charge, which PARSEC keeps; a slab has none
     unless bands, spin-orbit or NSCF turn it on, or, beyond PARSEC 1.5, a
     Monkhorst-Pack mesh of scalar or collinear-spin LDA/GGA orbitals:
     `PARSEC_SLAB_MESH_SYMMETRY`, the operations that keep its grid and its
@@ -240,7 +242,12 @@ Currently supported:
     folded into `(-1/2, 1/2]` of the reciprocal lattice (PARSEC 1.5 keeps them in
     `[0, 1)`; the finite-difference Bloch operator is not invariant under
     `k -> k + G`, so the folded set makes a run without symmetry agree with the
-    symmetric one; Andrew Grieder's routines fold their shifted grid alike), and the density is
+    symmetric one; Andrew Grieder's routines take the shortest image of each
+    point instead, the first Brillouin zone, `PARSEC_KPOINT_FOLD=shortest`
+    since 2026-11-21, which differs from the folded point on an oblique cell
+    only, where a point of the zone boundary takes all its equally short
+    images with equal shares of its weight; `centred` folds as before), and
+    the density is
     symmetrized over the space group (`Symmetrize_Charge_Density`, then true by
     default); weighted `Kpoint_List` rows; reference solver only.  Without the
     shift block the shift is zero, as in PARSEC 1.5 (its `mpshift` keeps its
@@ -251,16 +258,20 @@ Currently supported:
     of one point stays the Gamma point).  On Andrew
     Grieder's routines (`Use_Fortran_Routines: .false.`) the shifted grid of a
     bulk single point is reduced by the operations that map their grid (that of
-    `Grid_Spacing`) and the mesh onto themselves, with time reversal, and the
-    density averaged with them (`Grid.space_group.find_grid_space_group`,
-    `Grid.kpoints.mesh_preserving_operations`; README "Irreducible k-points on
+    `Grid_Spacing`), the mesh and (since 2026-11-21, `PARSEC_SCALAR_KPOINT_WEDGE`)
+    the grid's finite-difference operators onto themselves, with time reversal,
+    and the density averaged with them (`Grid.space_group.find_grid_space_group`,
+    `Grid.kpoints.mesh_preserving_operations`,
+    `Grid.kpoints.stencil_preserving_operations`; README "Irreducible k-points on
     the default routines").
   - in every SCF driver (cluster, Gamma, k-points, periodic spin, spin-orbit,
     non-collinear): `Dynamic_Diag_Tol` (off with `Restart_Run`, as PARSEC),
     `Save_Intermediate_Charge_Density` / `Save_Intermediate_Eigenvalues`
     (`parsec.dat` and `eigen.dat` after every iteration),
     `Fix_Number_Eigenvalues` with `Restart_Run` (the eigensolver keeps the
-    stored `States_Num` states, no buffer); `nscf_kpoints` of a spin-orbit run
+    stored `States_Num` states without a buffer, as PARSEC; since 2026-11-21
+    the symmetry sectors of the accelerated driver keep the buffer and their
+    own counts, `PARSEC_FIXED_STATES_BUFFER=off` freezes them as before); `nscf_kpoints` of a spin-orbit run
     (from its spinor `parsec.dat`, `Spin_z` of every state); PARSEC's symmetry
     report (`symchk`, Abelian subgroup and character table, the
     multiplication tables at `Output_Level >= 2`) and ion-ion force table for
@@ -1021,7 +1032,17 @@ host loop to round-off ([acceleration/README.md](acceleration/README.md),
   (`V_xc/bloch_exchange.py`, `MeshStars`; `SCF/hybrid_periodic.py`,
   `hybrid_mesh_stars`; on the Fortran-derived routines the density average
   keeps the whole space group, the wedge and the images only the operations
-  that keep the mesh). Forces, moving atoms, a `Kpoint_List`, a mesh that
+  that keep the mesh). The pair of an occupied target with an image source
+  and the pair of the image's mirror (the source `P_(g^-1) u_t` of the
+  other target) come from one transform (`PARSEC_HYBRID_IMAGE_PAIRS`, on by
+  default: the same `W` to round-off). Forces and moving atoms take the same
+  route (`PARSEC_HYBRID_KPOINT_FORCE_WEDGE=auto`, since 21 November 2026:
+  `bfgs`, `simple` and the forces of a single point; the group keeps movable
+  and fixed atoms apart, the nonlocal forces of the wedge are completed over
+  it and the forces averaged over it; a relaxation keeps the route its first
+  structure took, `BlochExchange.adopt_carried`). Forces and moving atoms
+  under `PARSEC_HYBRID_KPOINT_FORCE_WEDGE=off`, molecular dynamics, `manual`
+  movements, a `Kpoint_List`, a mesh that
   time reversal does not keep (a shift other than 0 or 1/2) and
   `PARSEC_HYBRID_KPOINT_WEDGE=off` take the mesh reduced by time reversal
   only (`qpoints.dat` and the report list the points solved). The SCF then
@@ -1780,7 +1801,12 @@ end Atom_Coord
 
 `Initial_Spin_Polarization` scales the atomic starting density of a species
 by one plus it for the up channel and one minus it for the down channel. The
-SCF loop then finds the moment: `parsec.out` reports the electrons of each
+loops of the readable solver that began from one polarization fraction of the
+whole system (the collinear k-point loop, the spin-orbit loops with spin and
+the host loop of spin-orbit species) start so as well where the species start
+with values of both signs, an antiferromagnetic or broken-symmetry start of
+two labels, whose fraction would be zero (since 21 November 2026,
+`PARSEC_SPIN_START`). The SCF loop then finds the moment: `parsec.out` reports the electrons of each
 channel, the net magnetic moment, the Fermi level and the levels of each
 channel at every step, in PARSEC's layout. With `Fermi_Temp` negative,
 `occup.in` holds one section per channel, the up channel first, and an
@@ -1807,7 +1833,15 @@ decides whether `main.py` on the CuPy backend solves the two channels in the
 symmetry sectors of the point group of the atoms (`auto`), as it solves an
 unpolarized run, or on the full grid (`off`). The default is `auto` for every
 `Correlation_Type` (until 7 November 2026 it was `off` for the semilocal
-functionals; `off` gives their earlier results bit for bit). With
+functionals; `off` gives their earlier results bit for bit). The keyword
+decides nothing else: on a periodic cell it keeps the routines, grid and local
+potential the input has without it (since 21 November 2026; before, any written
+value moved a periodic input to the Fortran-derived routines, whose local
+potential follows `Cubic_Spline`, so that `off` gave 6.1e-4 Ry for a Cr2 pair
+in a 14.4 bohr cube and 2.3e-2 Ry for MnO in 64 atoms away from the sectors and
+from `--symmetry off`; `PARSEC_SYMMETRY_KEYWORD_ROUTINES=fortran` restores
+that). PARSEC 1.5 has no such keyword; its `Ignore_Symmetry`, which both sets
+of routines read, is the symmetry keyword there. With
 `auto` each channel has its own subspace in every sector, the channel and
 total densities, the Hartree potential (solved on the symmetry wedge), the
 spin functional (on the device for PBE, PW91, PW92, LB94, Casida-Salahub and
@@ -1882,7 +1916,8 @@ state ends invariant and integer; a state that passes through a partly filled
 multiplet during the SCF and returns to an invariant integer one.
 Since 19 November 2026 a point group larger than its abelian subgroup (Td,
 Oh, D4h, ...) gives both channels the weighted sectors of a subgroup in one
-process, as an unpolarized run has them (`PARSEC_ORBITAL_GROUP_SPIN=auto`;
+process (since 21 November on several MPI ranks too,
+`PARSEC_ORBITAL_GROUP_MPI`), as an unpolarized run has them (`PARSEC_ORBITAL_GROUP_SPIN=auto`;
 `off` keeps the abelian sectors): one state stands for its degenerate
 partners, each channel's density is averaged over the whole group, and the
 guard counts that state as its partner levels in distinct sectors (a triplet
@@ -1893,9 +1928,13 @@ well, since test 2 sees no asymmetry in an averaged density). With
 weighted state, and degenerate ones that several sectors hold, such as the e
 of Td in two sectors of D2d) take equal entries in each channel. A run the guard
 or that check stops there starts again in the abelian sectors, and from there,
-where their guard stops it too, on the full grid (two `NOTE`s).
-The reference solver (`reference_main.py`) and the MPI runner keep the
-full grid in every case; without `Spin_Polarization` the keyword is ignored
+where their guard stops it too, on the full grid (two `NOTE`s); since 21
+November a cluster, or a cell whose operations take no translation, whose
+reported multiplet the abelian sectors would split as well (a t2 of Td, not
+its e) goes to the full grid at once (`PARSEC_WEIGHTED_GUARD_SHORTCUT`).
+The reference solver (`reference_main.py`) keeps the full grid in every
+case; the MPI runner takes the sectors as one process does (the weighted ones
+since 21 November); without `Spin_Polarization` the keyword is ignored
 with a WARNING. `Generate_Complete_Parsec_In` writes it for a spin-polarized hybrid
 and wherever the input sets it to `off`.
 
@@ -1951,7 +1990,11 @@ accelerated driver, with the term in its device Hamiltonians (also in the
 symmetry sectors and on several GPUs) and its occupation matrices and forces
 formed where the orbitals are (`acceleration/README.md`, "LDA+U and the TS
 correction"), and so it runs a bulk cell at the Gamma point, with its forces,
-relaxations and dynamics. Its k-point and periodic spin runs go to the
+relaxations and dynamics (since 2026-11-21 in the sectors of its point group
+from 2^26 grid points x states on, one atom per orbit, the weighted sectors of
+the group, a spin-polarized cell in the spin sectors: `PARSEC_GAMMA_LDAU_SECTORS`
+and the `PARSEC_LDAU_*` switches of `acceleration/README.md`). Its k-point runs
+and the periodic spin runs that those switches leave go to the
 reference solver, whose k-point workers apply the term in their device Bloch
 operators and form the occupation matrices from their device orbitals when a
 GPU is visible; so do its band structures and the Gamma-point spin runs of a
@@ -1976,7 +2019,13 @@ density (`efvdw.f90`) to the total energy of the report after convergence
 SCF driver (k-points, periodic spin, spin-orbit and non-collinear loops too;
 not for wires and slabs, where PARSEC needs a bulk cell). It needs
 `Correlation_Type: pbe` and `Ignore_Symmetry: true`, as in PARSEC; a periodic
-cell reads `Hf_One`, `Hf_Two` and `Hf_Three`, the Hirshfeld cells. The
+cell reads `Hf_One`, `Hf_Two` and `Hf_Three`, the Hirshfeld cells. Since
+2026-11-21 the accelerated command line reads that `Ignore_Symmetry` of an
+unpolarized bulk cell at the Gamma point from 2^27 grid points times states
+on as PARSEC's requirement of the correction and solves its loop in the
+symmetry sectors of the cell, with the energy of the full grid and a NOTE
+(`acceleration/README.md`, `PARSEC_GAMMA_TS_SECTORS`; `off` keeps the full
+grid). The
 Hirshfeld volumes are those of the structure of each SCF loop (PARSEC keeps
 those of the input structure). On a GPU `main.py` forms the Hirshfeld sums
 and the pair sum on the device: of a cluster and of a bulk cell at the Gamma
@@ -2130,6 +2179,11 @@ layer, with 1.5's validation (`Input/parsec_input.py`, block `_INPUT15_*`):
 - `Periodic_System` is never read by PARSEC: without the line it follows `Boundary_Conditions`.
 - Warnings where 1.5 would stop or warn: `States_Num` below `N_val/2 + 2` (1.5's ierr 213), a CA pseudopotential in a
   PBE run.  `Fermi_Temp` takes ESDF's energy units (`0.05 eV` is 580.226 K, as in 1.5).
+- Beyond 1.5 (since 2026-11-21): an SCF loop that ends without convergence while its highest computed state holds an
+  occupation above 1e-6 says so after `Maximum SCF iterations reached without convergence.`
+  (`Output/state_truncation.py`; the scalar, k-point, collinear-spin and self-consistent spin-orbit reports): `States_Num` may cut a degenerate multiplet whose partners `Fermi_Temp` occupies,
+  and the eigensolver then returns another part of it every iteration, so the density cannot settle (an 8-atom
+  silicon cube at Gamma with 20 states at 300 K; 22 states converge in 15 iterations).  Nothing else changes.
 
 Eigensolver and SCF controls (`Input/solver_options.py`, measured in the 1.5 round):
 
@@ -2141,7 +2195,10 @@ Eigensolver and SCF controls (`Input/solver_options.py`, measured in the 1.5 rou
   iterations, energies within 1.1e-4 Ry). 1.5's range 0..50 is accepted and a value outside resets to 3. With 0,
   1.5 runs no first-filter cycle: it keeps the wavefunctions of an HDF5 restart (`restart.h5`, its
   `restart_run_just_check_force` tests), random vectors otherwise; this port reads no `restart.h5`, so 0 runs the
-  default 3 cycles, with a warning. `Bands_FF_MaxIter` defaults to `FF_MaxIter`, as in 1.5.
+  default 3 cycles, with a warning. `Bands_FF_MaxIter` defaults to `FF_MaxIter`, as in 1.5. Since 2026-11-21 the
+  band and `nscf` k-points of a CHEBFF run go on past those cycles until their residuals pass CHEBDAV's test
+  with `Diag_Tolerance` (1e-4 without a positive one), at most `PARSEC_KPOINT_EXTRA_CYCLES` (24) more
+  (`PARSEC_BAND_CONVERGENCE=auto`; `off` keeps 1.5's fixed cycles).
 - The later-SCF Chebyshev degree may be lowered by one at the end of every iteration after the fourth (PARSEC 1.5's
   `iter > 4`; before 4 November 2026 after the fifth). `Chebyshev_Degree_Decrease_After: 5` (an extension of this port) gives the earlier rule bit
   for bit; `Convergence_Criterion_Approach` (default 100 x `Convergence_Criterion`; 1.5's is 2 x) sets the SRE below

@@ -529,6 +529,13 @@ def periodic_backend(
     def forces(system, result, *, symmetrize=False, operations=None):
         if symmetrize or operations is not None:
             raise ValueError("a periodic cell has no point-group symmetrization of its forces here")
+        if sampled and getattr(system.input.scf, "is_hybrid", False):
+            # a hybrid whose Fock loop moved to the deferred wedge of its mesh (PARSEC_HYBRID_KPOINT_FORCE_WEDGE=auto,
+            # the default, with PARSEC_HYBRID_KPOINT_WEDGE=auto): its forces are completed and averaged over the
+            # wedge's group
+            from ..SCF.hybrid_periodic import hybrid_force_system
+
+            system = hybrid_force_system(system, result)
         return compute_periodic_forces(system, result)
 
     keywords = extrapolation_keywords(potential_extrapolation)

@@ -155,9 +155,13 @@ def move_flag_subgroup_setting() -> str:
     structure keeps it.  ``auto`` keeps that subgroup: a cluster keeps it for its forces and, on the accelerated
     driver, for the sectors of its SCF, whose detection takes the fixed atoms as a species of their own
     (:func:`symmetry_fixed_atoms`); a periodic cell at the Gamma point keeps the sectors of the group its detection
-    finds so (``acceleration.cli.periodic_sector_forces_refusal``).  ``off`` uses no symmetry for such a
-    relaxation of a cluster and keeps every cell with a fixed atom on the full grid, as before 2026-11-19 (PARSEC 1.5
-    takes no account of ``Move_Flag`` in its group).  A subgroup of the identity alone is no symmetry under both.
+    finds so (``acceleration.cli.periodic_sector_forces_refusal``); a cell whose problem carries a space group (a
+    Monkhorst-Pack mesh, ``Symmetrize_Charge_Density``) carries the subgroup instead under
+    ``PARSEC_MOVE_FLAG_SPACE_GROUP=auto`` as well (since 2026-11-21: its k-point wedge, density average and forces;
+    :func:`parsec_python.Input.parsec_input._move_flag_space_group`).  ``off`` uses no symmetry for such a
+    relaxation of a cluster and keeps every cell with a fixed atom on the full grid, and the space group of a cell
+    as the routes of before 2026-11-21 had it, as before 2026-11-19 (PARSEC 1.5 takes no account of ``Move_Flag`` in
+    its group).  A subgroup of the identity alone is no symmetry under both.
     """
 
     import os

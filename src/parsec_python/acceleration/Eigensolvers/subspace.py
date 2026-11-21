@@ -22,6 +22,7 @@ from .rayleigh_ritz import (
     generalized_rayleigh_ritz,
     generalized_ritz_requested,
     rayleigh_ritz,
+    ritz_route_rows,
     streaming_ritz_requested,
 )
 from .spectral_bounds import LanczosBoundResult, lanczos_upper_bound
@@ -246,7 +247,7 @@ def run_subspace_filter(
         )
     use_generalized_ritz = bool(
         not state.generalized_ritz_failed
-        and generalized_ritz_requested(*map(int, filtered.shape))
+        and generalized_ritz_requested(ritz_route_rows(operator, int(filtered.shape[0])), int(filtered.shape[1]))
     )
     generalized_ritz_failed = state.generalized_ritz_failed
     if use_generalized_ritz:

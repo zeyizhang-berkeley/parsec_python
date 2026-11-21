@@ -20,7 +20,7 @@ Written by `analyze.py --write` from the logs in `cases/`.
 | molecule | experiment | PP-PBE here | paper | difference | PP-PBE(B3LYP) here | paper | difference |
 |---|---:|---:|---:|---:|---:|---:|---:|
 | H2S | 0.00 | 0.000 | 0.00 | +0.000 | 0.000 | 0.00 | +0.000 |
-| SO2 | 5.20 | 4.872 | 4.88 | -0.008 | 5.386 | 5.39 | -0.004 |
+| SO2 | 5.20 | 4.873 | 4.88 | -0.007 | 5.387 | 5.39 | -0.003 |
 | SF6 | 11.60 | 10.527 | 10.53 | -0.003 | 11.404 | 11.40 | +0.004 |
 
 ## P 1s: shifts relative to P(CH3)3, eV
@@ -42,7 +42,7 @@ Written by `analyze.py --write` from the logs in `cases/`.
 | molecule | experiment | PP-PBE here | paper | difference | PP-PBE(B3LYP) here | paper | difference |
 |---|---:|---:|---:|---:|---:|---:|---:|
 | S8 | 0.00 | 0.000 | 0.00 | +0.000 | 0.000 | 0.00 | +0.000 |
-| CS2 | 0.00 | 0.423 | 0.42 | +0.003 | 0.339 | 0.34 | -0.001 |
+| CS2 | 0.00 | 0.424 | 0.42 | +0.004 | 0.340 | 0.34 | -0.000 |
 | H2S | 0.30 | 0.738 | 0.73 | +0.008 | 0.683 | 0.67 | +0.013 |
 | COS | 0.80 | 1.171 | 1.17 | +0.001 | 1.114 | 1.11 | +0.004 |
 | N2S2 | 2.38 | 2.339 | 2.37 | -0.031 | 2.369 | 2.40 | -0.031 |
@@ -64,7 +64,7 @@ Written by `analyze.py --write` from the logs in `cases/`.
 | molecule | experiment | PP-PBE here | paper | difference | PP-PBE(B3LYP) here | paper | difference |
 |---|---:|---:|---:|---:|---:|---:|---:|
 | S(CH3)2 | 0.00 | 0.000 | 0.00 | +0.000 | 0.000 | 0.00 | +0.000 |
-| CS2 | 0.94 | 0.952 | 0.94 | +0.012 | 1.015 | 1.00 | +0.015 |
+| CS2 | 0.94 | 0.953 | 0.94 | +0.013 | 1.015 | 1.00 | +0.015 |
 | H2S | 1.35 | 1.267 | 1.25 | +0.017 | 1.360 | 1.34 | +0.020 |
 | COS | 1.68 | 1.703 | 1.66 | +0.043 | 1.793 | 1.75 | +0.043 |
 | N2S2 | 3.35 | 2.892 | 2.93 | -0.038 | 3.068 | 3.11 | -0.042 |
@@ -90,7 +90,7 @@ Mean absolute error (MAE) of the shifts against experiment and differences from 
 
 | core level | molecules | method | MAE here | MAE of the paper's values | mean abs. difference from the paper | largest |
 |---|---:|---|---:|---:|---:|---:|
-| S 1s | 2 | PP-PBE | 0.700 | 0.695 | 0.005 | 0.008 |
+| S 1s | 2 | PP-PBE | 0.700 | 0.695 | 0.005 | 0.007 |
 | S 1s | 2 | PP-PBE(B3LYP) | 0.191 | 0.195 | 0.004 | 0.004 |
 | P 1s | 8 | PP-PBE | 0.319 | 0.324 | 0.019 | 0.047 |
 | P 1s | 8 | PP-PBE(B3LYP) | 0.199 | 0.190 | 0.022 | 0.055 |

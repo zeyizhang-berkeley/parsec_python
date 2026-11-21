@@ -427,8 +427,13 @@ meta-GGAs, oblique cells, wires, slabs and the forces of a cell go to
 `main.py`, and the runner refuses them by name. A spin-polarized cluster
 or bulk cell at the Gamma point runs its single point, and its forces and
 relaxations that keep the symmetry sectors (`PARSEC_SPIN_SECTOR_FORCES`), on
-several ranks; its molecular dynamics needs one rank (`--serial-control`)
-or `main.py`.
+several ranks, and its molecular dynamics, manual movements and the other
+forces and relaxations that use no point group (`Move_Flag` fixing atoms of a
+cell, or those of a cluster under `PARSEC_MOVE_FLAG_SUBGROUP=off` or where
+only the identity respects them; `Ignore_Symmetry`, `--symmetry off`) as one
+sector of the identity of both channels whose basis the ranks share. Spin runs
+on the runner need `PARSEC_CUPY_DISTRIBUTED_FILTER=0`, which overrides the 1
+of `scripts/run_multi_gpu_scf.sh`.
 `src/parsec_python/acceleration/MULTI_GPU.md` ("Several nodes", "Periodic
 cells at the Gamma point on several nodes") lists the settings and says
 which ones the solver chooses for itself.
@@ -729,7 +734,10 @@ device workers (the residual test of the converged first solve). LDA+U keeps the
 CPU workers (the device operator has no LDA+U term). The k-point drivers print an `SCF timing analysis` (initial potentials, diagonalization,
 density, Hartree, XC, mixing), the diagonalization time of every iteration and a `K-point solver detail`
 block (worker start-up, Bloch projectors, operator upload, eigensolver, eigenvector download and the
-device eigensolver's own seconds and counters, summed over the workers). A Gamma-only periodic
+device eigensolver's own seconds and counters, summed over the workers). Since 2026-11-21 the line
+`kpoint_symmetry_detection`, the cell group of the k-point sectors and the atom tolerance it was built at, or why
+there are none, is written at every `Output_Level` when the k-point solver is made, before the first SCF iteration,
+and again at the head of that block (acceleration README, "The sectors of a k-point"). A Gamma-only periodic
 spin-polarized run (no `Kpoint_Method`) goes through the 1x1x1 k-point driver when the k-points run on a
 device, because the Gamma-point spin driver has no device path (since 2026-11-19 a single point of a bulk
 orthorhombic cell with a native LDA or GGA takes the Gamma sector route of the accelerated driver instead,
@@ -796,7 +804,10 @@ k-points on the shortest segment (default 20); longer segments get proportionall
 density along the path is constant. Without the keyword a segment's share is truncated to an
 integer, as before; a written `bandstruc_points` rounds it to the nearest integer, as PARSEC 1.5
 does (1.5's own default is 100). `Bands_FF_MaxIter` (PARSEC 1.5) sets the CHEBFF filter cycles of
-the band k-points (default `FF_MaxIter`):
+the band k-points (default `FF_MaxIter`); since 2026-11-21 a k-point whose bands have not reached
+CHEBDAV's residual test with `Diag_Tolerance` after them takes more cycles until they do, at most
+`PARSEC_KPOINT_EXTRA_CYCLES` (24) more (`PARSEC_BAND_CONVERGENCE=auto`; `off` keeps PARSEC 1.5's
+fixed cycles):
 
 ```
 begin bandstruc
@@ -1009,18 +1020,40 @@ wedge with the averaged density is the full mesh: the 8-atom cube at 18 points p
 the axes of the grid are orthogonal. On an oblique cell the gradient of these routines differentiates along the grid
 axes, and an operation that turns an axis onto another direction of the Laplacian's stencil (the six- and three-fold
 axes of a hexagonal cell, the three-fold axes of the primitive fcc cell off its body diagonal) changes the discrete
-Hamiltonian at the order of the discretization: scalar orbitals, which keep every operation that maps the grid onto
-itself, give the wedge of fcc Au (one atom, 0.3 bohr, 4x4x4) 1.1e-4 Ry and that of hcp Au2 (0.3 bohr, 4x4x2) 7.7e-3 Ry
-away from time reversal alone on the same points. The whole mesh of these routines also takes its points folded into
-(-1/2, 1/2] in lattice coordinates rather than `irrbz`'s shortest ones, which the Bloch operator of an oblique grid
-does not treat alike (spin-orbit coupling: fcc 1.8e-3 Ry, hcp 2.2e-3 Ry from the wedge). A spinor turned by an
+Hamiltonian at the order of the discretization. Since 21 November 2026 the wedge of scalar orbitals keeps only the
+operations that also map the grid's finite-difference operators onto themselves (`PARSEC_SCALAR_KPOINT_WEDGE=auto`,
+`Grid.kpoints.stencil_preserving_operations`: hcp 8 of 24, the primitive fcc and bcc cells 12 of 48), and every point
+of the mesh is computed at the shortest of its images modulo the reciprocal lattice, a point of the first Brillouin
+zone (`PARSEC_KPOINT_FOLD=shortest`, `Grid.kpoints.shortest_images`). A point of the zone boundary with several
+equally short images (the fcc X, L and W points, the hexagonal M and K points) takes all of them, each with an equal
+share of its weight, in the whole mesh and in the stars of a wedge, which are split into the orbits of exact images
+where its operations do not relate them. Before, the wedge kept every operation that maps the grid onto itself and the
+points were folded into (-1/2, 1/2] along the reciprocal vectors, which leaves some points of an oblique cell outside
+the first zone, where the Bloch operator of these routines (`-nabla^2 - 2ik.grad + k^2` on the periodic factor) gives
+other levels. Now the wedge computes exactly the points of the whole mesh without symmetry on the same grid (the whole
+mesh of shared ties, which does not depend on how a tie is broken), and its time-reversal pairs are exact: on one A100
+per run, fcc Au at 0.3 bohr and order 6 within 2e-11 Ry for the 4x4x4, 6x6x6 and 8x8x8 meshes (14, 34 and 71 points
+against 89, 259 and 597), hcp Au2 4x4x2 and 6x6x4, primitive bcc Au and primitive Si within 1.4e-10 Ry, spin-orbit fcc
+Au within 3.6e-10 Ry, the force along c of hcp Au2 with an atom moved along c within 8e-8 Ry/bohr. The former wedge lay up to
+2.8e-3 Ry from it (fcc Au -4.7e-4, -3.1e-4 and -9.7e-6 Ry for those meshes, hcp Au2 -1.2e-3 and -1.5e-3 Ry, primitive
+bcc Au +2.8e-3 Ry; at order 12 fcc Au 6x6x6 -2.5e-5 Ry, primitive Si -1.8e-7 Ry). The shortest images give the better
+levels (fcc Au 4x4x4 at order 6: band energies relative to Gamma within 9.0e-4 Ry rms of a fine grid against 1.6e-3 Ry
+with the folded points), although the total energy of a coarse grid, which lies below the converged one, comes closer
+to it with the folded points by error cancellation. The forces and a relaxation are averaged over every operation that
+maps the grid and the mesh (`PARSEC_KPOINT_FORCE_GROUP=crystal`), which removes only what the oblique grid breaks and
+keeps the relaxed structure in its group. The cost is the points that the dropped operations no longer fold: 1.3 to 1.8
+times the time of the former wedge on the cells measured, with 1.75 to 2.4 times the k-points; for light species at
+order 12 the gain lies below the SCF criterion. On a lattice of orthogonal vectors nothing changes, bit for bit.
+`PARSEC_SCALAR_KPOINT_WEDGE=grid` and `PARSEC_KPOINT_FOLD=centred` restore the former runs. A spinor turned by an
 operation with its SU(2) matrix has the turned density, and its Kramers partner at `-k` the same density, so
 non-magnetic spin-orbit coupling is reduced as PARSEC 1.5 does, by the operations that also keep the grid's
 finite-difference operators (`Grid.kpoints.stencil_preserving_operations`: all of them on an orthogonal grid, hcp 8 of
 24, the primitive fcc cell 12 of 48; time reversal alone where only the identity is left;
-`PARSEC_SOC_KPOINT_WEDGE=grid` takes those of scalar orbitals). Its wedge gives the energy of time reversal alone on
+`PARSEC_SOC_KPOINT_WEDGE=grid` takes every operation that maps the grid, the former group of scalar orbitals). Its
+wedge gives the energy of time reversal alone on
 the same points within 1e-10 Ry for hcp Au2 (14 points against 20, 21.3 against 30.9 s on one A100 node; the whole
-mesh, 32 points, 46.7 s) and 2e-9 Ry for fcc Au (13 points against 36, 19.9 against 32.5 s), and on a cube that of the
+mesh, 32 points, 46.7 s) and 2e-9 Ry for fcc Au (13 points against 36, 19.9 against 32.5 s), with the shortest points
+also that of the whole mesh of shared ties (fcc Au within 3.6e-10 Ry, 14 against 89 points), and on a cube that of the
 whole mesh (bcc Au2 with an atom moved along (1, 1, 1), 4x4x4: 13 of 64 points, 77.6 -> 22.5 s with forces, the energy
 within 4e-8 Ry and the forces within 6e-6 Ry/bohr of the whole mesh). `Ignore_Symmetry` or
 `Symmetrize_Charge_Density: .false.` reduce by time reversal alone (`k` and `-k` have the same density). A hybrid
@@ -1044,9 +1077,16 @@ degenerate states of that kind; `PARSEC_HYBRID_KPOINT_SECTORS=on` keeps them and
 runs the wedge always, its start too: the symmetric state, also for a metal. The wedge and the images take only the
 operations that map the mesh onto itself, also on the Fortran-derived routines, whose density average keeps the whole
 space group (the exchange of the mesh commutes with those operations alone: the 8-atom cube with a 2x2x1 or 2x2x4 mesh
-keeps 16 of its 48); `PARSEC_HYBRID_KPOINT_WEDGE=off`, forces, moving atoms and a mesh that time reversal does not keep
-(a shift other than 0 or 1/2) keep its time-reversal pairs. Molecular dynamics, `manual` movements and
-moving atoms whose `Move_Flag` an operation does not respect run the full mesh as its pairs `k`, `-k`
+keeps 16 of its 48). The forces and `bfgs`/`simple` relaxations of a hybrid take the same route
+(`PARSEC_HYBRID_KPOINT_FORCE_WEDGE=auto`, since 21 November 2026: the forces of the wedge completed and averaged over
+its group; a relaxation keeps the route its first structure takes; forces equal to 1e-6 Ry/bohr, Si64 2x2x2 forces
+322.1 -> 296.9 s on 4 A100, cubic MgO 47.0 -> 39.6 s); `PARSEC_HYBRID_KPOINT_WEDGE=off`,
+`PARSEC_HYBRID_KPOINT_FORCE_WEDGE=off`, molecular dynamics, `manual` movements and a mesh that time reversal does not
+keep (a shift other than 0 or 1/2) keep its time-reversal pairs. Molecular dynamics, `manual` movements and
+moving atoms whose `Move_Flag` no operation but the identity respects (since 2026-11-21 a relaxation of scalar or
+collinear-spin orbitals, not a hybrid's, whose flags break the group takes the wedge of the operations that map the
+fixed atoms onto fixed atoms and the grid's finite-difference operators onto themselves,
+`PARSEC_MOVE_FLAG_SPACE_GROUP`) run the full mesh as its pairs `k`, `-k`
 (`PARSEC_KPOINT_TIME_REVERSAL`); non-collinear magnetism and spin-polarized spin-orbit coupling keep the full mesh of
 equal weights (time reversal flips their moments, and the group found from the atoms ignores them), as every input
 with `.false.` did before 8 November 2026. Without `Use_Fortran_Routines` a shifted mesh still selects the
@@ -1080,8 +1120,15 @@ and translations of Fortran's `atftmt`; 0.8 s and a few MB for 4,096 atoms, wher
 `_crystal_operations` needs `(N, N)` arrays), once per structure. The fractional translations that `adjust_step`
 meets are snapped to fractions `p/q` (`q <= 48`) within `1e-8` (`Grid.space_group.snapped_translation`): coordinates
 written with ten decimals gave `0.2499999999963` for diamond's quarter, whose steps never settled. The density
-table is built from the integer affine maps of the operations (3 M points and 24 operations: 1.5 s, 0.29 GB of
-int32); `acceleration/SCF/periodic_symmetry.py` applies them on a GPU without the table.
+group keeps the integer affine maps of the operations and, since 2026-11-21, no table of their images on a grid of
+at least 2^17 points averaged on two threads or more (`PARSEC_PERIODIC_IMAGE_ROWS=auto`,
+`Grid.space_group.AffineImageRows`; the int32 table of 3 M points and 24 operations took 0.29 GB, of 10 M points and
+48 operations 1.9 GB): the host average gathers the field at the images through broadcast index vectors, on threads;
+an oblique operation (a row of its matrix reads all three lattice axes, as the mirrors of the primitive fcc cell),
+whose index vector would be an int64 array of every point, keeps its int32 row instead, so a primitive fcc cell
+holds 36 of its 48 rows and no cell more than the table. `acceleration/SCF/periodic_symmetry.py` forms the indices
+of one operation at a time on a GPU; the same sums bit for bit; `on` takes the rows at every size and thread count,
+`off` builds the table as before.
 
 An input that Andrew Grieder's routines do not compute (wires, charged sheets, forces of a slab, unequal k-point
 weights of a slab or with forces, LDA+U, NSCF, other pseudopotential formats or functionals, ...) runs on the Fortran-derived routines by

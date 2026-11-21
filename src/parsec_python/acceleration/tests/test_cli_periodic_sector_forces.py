@@ -179,16 +179,19 @@ class CommandLineRoutingTests(unittest.TestCase):
         )
         # the Fortran-derived routines under PARSEC_FORTRAN_SECTOR_FORCES=off (under auto, the default since
         # 2026-11-19, they keep the sectors: test_fortran_sector_forces), and a relaxation with fixed
-        # atoms on those routines under auto, whose forces are symmetrized with their own group
+        # atoms on those routines under PARSEC_MOVING_SECTORS=off (under auto, the default since 2026-11-21, it keeps
+        # the sectors of the subgroup of the fixed atoms, as manual movements keep theirs: test_moving_sectors);
+        # molecular dynamics with random velocities keeps the full grid under both
         fortran_off = {"PARSEC_FORTRAN_SECTOR_FORCES": "off"}
+        moving_off = {"PARSEC_MOVING_SECTORS": "off"}
         for extra, reason, environment in (
             (DYNAMICS, "molecular dynamics", None),
-            (MANUAL, "manual movements", None),
+            (MANUAL, "manual movements", moving_off),
             fixed,
             ("Use_Fortran_Routines: .true.\n" + FORCES, "Use_Fortran_Routines", fortran_off),
             ("Use_Fortran_Routines: .true.\n" + BFGS, "Use_Fortran_Routines", fortran_off),
             ("Use_Fortran_Routines: .true.\n" + BFGS.replace("Minimization", "Move_Flag: 4\nMinimization"),
-             "Move_Flag fixes atoms of a cell on the Fortran-derived routines", None),
+             "Move_Flag fixes atoms of a cell on the Fortran-derived routines", moving_off),
         ):
             with self.subTest(extra=extra):
                 self.assertEqual(self.route(extra, environment=environment), ("prepared", "off"))
@@ -196,6 +199,9 @@ class CommandLineRoutingTests(unittest.TestCase):
                 self.assertEqual(outcome[:2], ("exit", 2), outcome)
                 self.assertIn("--symmetry on cannot be used with", outcome[2])
                 self.assertIn(reason, outcome[2])
+        for extra in (MANUAL, "Use_Fortran_Routines: .true.\n" + BFGS.replace("Minimization", "Move_Flag: 4\nMinimization")):
+            with self.subTest(extra=extra, switch="PARSEC_MOVING_SECTORS=auto"):
+                self.assertEqual(self.route(extra), ("prepared", "auto"))
 
     def test_fixed_atoms_keep_the_sectors_of_their_subgroup(self) -> None:
         # PARSEC_MOVE_FLAG_SUBGROUP=auto (the default): a relaxation with Move_Flag keeps the sectors, the fixed atoms

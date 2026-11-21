@@ -79,6 +79,8 @@ def symmetry_signature(translation) -> tuple:
     problem = translation.problem
     return (
         _group_key(problem.space_group),
+        _group_key(getattr(problem, "force_space_group", None)),
+        bool(getattr(problem, "kpoint_tie_images", False)),
         bool(problem.scf.symmetrize_density),
         problem.grid,
         None if problem.monkhorst_pack_dimensions is None else tuple(problem.monkhorst_pack_dimensions),
@@ -189,6 +191,8 @@ def restarted_symmetry(translation, name: str):
         kpoints=found.kpoints,
         kpoint_weights=found.kpoint_weights,
         kpoint_time_reversal=found.kpoint_time_reversal,
+        kpoint_tie_images=found.kpoint_tie_images,
+        force_space_group=found.force_space_group,
         hybrid_kpoint_wedge=found.hybrid_kpoint_wedge,
         hybrid_kpoint_wedge_deferred=found.hybrid_kpoint_wedge_deferred,
     )

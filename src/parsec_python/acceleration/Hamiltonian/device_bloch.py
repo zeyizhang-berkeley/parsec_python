@@ -164,6 +164,10 @@ class DeviceBlochOperator:
     # diagonal it adds (c_0 + V + |k|^2), set by a converter with ``fused_stencil``; None: the sparse products.
     stencil = None
     stencil_diagonal = None
+    # A real operator (the Gamma point of a k-point SCF, PARSEC_KPOINT_REAL_GAMMA; ..SCF.kpoint_real): every part is
+    # real (the kinetic term without its gradient, real projectors) and the device solvers work on float64 blocks;
+    # set by DeviceBlochConverter.operator.  A complex block is applied by its real and imaginary parts.
+    real_arithmetic = False
 
     def __init__(
         self,
@@ -280,9 +284,38 @@ class DeviceBlochOperator:
         return xp.ascontiguousarray(matrix @ block.view(xp.float64)).view(xp.complex128)
 
     # ------------------------------------------------------------ the operator
+    def _scalar_real(self, block):
+        """``H_0`` on one ``(n, vectors)`` float64 block (:attr:`real_arithmetic`): the stencil kernel or the real
+        sparse kinetic term, the potential and the real projectors."""
+        xp = self.xp
+        if self.stencil is not None:
+            result = self.stencil.apply(block, self.stencil_diagonal)
+        else:
+            result = xp.ascontiguousarray(self.laplacian @ block)
+            result += self.diagonal[:, None] * block
+        if self.projector_forward is not None:
+            coefficients = self.projector_adjoint @ block
+            coefficients *= self.projector_signs[:, None]
+            result += self.projector_forward @ coefficients
+        return result
+
+    def _complex_by_parts(self, block):
+        """A complex block through the real operator: its real and imaginary parts as one real block."""
+        xp = self.xp
+        count = int(block.shape[1])
+        both = xp.empty((int(block.shape[0]), 2 * count), dtype=xp.float64)
+        both[:, :count] = block.real
+        both[:, count:] = block.imag
+        applied = self._scalar_real(both)
+        return applied[:, :count] + 1j * applied[:, count:]
+
     def _scalar(self, block):
         """``H_k`` on one ``(n, vectors)`` complex block."""
         xp = self.xp
+        if self.real_arithmetic:
+            if block.dtype == xp.float64:
+                return self._scalar_real(block)
+            return self._complex_by_parts(block)
         # the stencils reach rows of the neighbouring ranks when the basis is distributed: start the
         # exchange, apply the stencils to the local rows meanwhile, then add the part on the halo rows
         pending = None if self.halo_begin is None else self.halo_begin(block)
@@ -386,6 +419,16 @@ class DeviceBlochOperator:
         Only where :attr:`fused_recurrence`."""
         xp = self.xp
         nonlocal_part = None
+        if self.real_arithmetic and current.dtype == xp.float64:
+            # the Gamma point in real arithmetic: real projectors, the real kernel of the stencil
+            if self.projector_forward is not None:
+                coefficients = self.projector_adjoint @ current
+                coefficients *= self.projector_signs[:, None]
+                nonlocal_part = xp.ascontiguousarray(self.projector_forward @ coefficients)
+            return self.stencil.apply(
+                current, self.stencil_diagonal, added=nonlocal_part, previous=previous, center=center, scale=scale,
+                before=before, after=after,
+            )
         if self.projector_forward is not None:
             # the complex projectors of a sector take the CSR kernel of .complex_csr_device (``product``)
             adjoint_product = getattr(self.projector_adjoint, "product", None)
@@ -678,6 +721,11 @@ class DeviceBlochConverter:
         # solver keeps them, so that its numbers stay those of before the kernel; the MPI k-point pools set it).
         self.fused_stencil = False
         self._stencils: dict[tuple, Any] = {}
+        # The Gamma point of a k-point SCF in real arithmetic (PARSEC_KPOINT_REAL_GAMMA, ..SCF.kpoint_real): the
+        # solvers of the SCF (the worker threads of one process, the MPI pools) set it; the band paths keep their
+        # complex solves.
+        self.real_gamma = False
+        self._real_static: dict[Any, tuple[Any, Any]] = {}
 
     def eigensolve(self, hamiltonian, number_of_states: int, settings, attempt: int = 0):
         """Lowest ``number_of_states`` pairs of a host Hamiltonian with the device-resident solver.
@@ -689,6 +737,8 @@ class DeviceBlochConverter:
         band paths, where every k-point is a first solve.
         """
         import dataclasses
+
+        from parsec_python.Eigensolvers.eigval import first_solve_converges
 
         from ..Eigensolvers.chebff_spinor import solve_spinor_eigval
 
@@ -707,7 +757,8 @@ class DeviceBlochConverter:
             state=None,
             xp=self.backend.xp,
             sync=self.backend.synchronize,
-            converge_first=settings.initial_method == "chebdav",
+            # Eigensolver: chebdav, and the CHEBFF band k-points under PARSEC_BAND_CONVERGENCE=auto
+            converge_first=first_solve_converges(settings),
         )
         residual = float(np.max(result.residual_norms)) if result.residual_norms is not None else float("nan")
         vectors = np.asarray(self.backend.asnumpy(result.vectors))
@@ -719,6 +770,70 @@ class DeviceBlochConverter:
             entry = (host_object, build())
             self._static[id(host_object)] = entry
         return entry[1]
+
+    def _cached_real(self, host_object, build):
+        """:meth:`_cached` for the real copies of complex host matrices (the real Gamma point), kept apart."""
+        entry = self._real_static.get(id(host_object))
+        if entry is None or entry[0] is not host_object:
+            entry = (host_object, build())
+            self._real_static[id(host_object)] = entry
+        return entry[1]
+
+    def _host_is_real(self, matrix) -> bool:
+        """Whether a host matrix has no imaginary part (checked once per matrix)."""
+        if not sp.issparse(matrix) and not isinstance(matrix, np.ndarray):
+            return False
+        data = matrix.data if sp.issparse(matrix) else matrix
+        if not np.iscomplexobj(data):
+            return True
+        import weakref
+
+        # by a weak reference: the projectors of the structures of a relaxation or dynamics run are not kept alive
+        found = self._real_static.get(("real", id(matrix)))
+        if found is None or found[0]() is not matrix:
+            stale = [
+                key for key, entry in self._real_static.items()
+                if isinstance(key, tuple) and key[0] == "real" and entry[0]() is None
+            ]
+            for key in stale:
+                del self._real_static[key]
+            found = (weakref.ref(matrix), bool(np.all(np.asarray(data).imag == 0.0)))
+            self._real_static[("real", id(matrix))] = found
+        return found[1]
+
+    def _takes_real(self, host_scalar, spinor: bool, stencil) -> bool:
+        """Whether the operator of ``host_scalar`` is real and goes to the solvers as such (:attr:`real_gamma`,
+        ``PARSEC_KPOINT_REAL_GAMMA``, :mod:`..SCF.kpoint_real`): a scalar Hamiltonian at ``k = 0`` exactly, or one in
+        the psi gauge of a time-reversal invariant point (``psi_gauge``, ``PARSEC_KPOINT_TRIM_REAL``), on a whole grid
+        or a sector (not the row-distributed solver), without a meta-GGA's orbital term, whose kinetic term (the
+        stencil kernel, the Bloch, psi-gauge or sector matrix, or the Laplacian without gradient term) and projectors
+        are real."""
+        if spinor or self._operator_extras():
+            return False
+        from ..SCF.kpoint_real import is_gamma
+
+        # the psi gauge of a time-reversal invariant point (..SCF.kpoint_real.PsiGauge, PARSEC_KPOINT_TRIM_REAL): made
+        # only where its real solve is wanted
+        psi = bool(getattr(host_scalar, "psi_gauge", False))
+        if not psi and (not self.real_gamma or not is_gamma(getattr(host_scalar, "k_point", None))):
+            return False
+        if _host_kinetic_term(host_scalar) is not None:
+            return False
+        if stencil is not None:
+            if not bool(getattr(stencil, "real_capable", False)):
+                return False
+        else:
+            bloch = getattr(host_scalar, "bloch_laplacian", None)
+            if bloch is not None:
+                if getattr(bloch, "sector_stencil", False) or not self._host_is_real(bloch):
+                    return False
+            elif getattr(host_scalar, "_k_gradient", None) is not None:
+                return False
+        nonlocal_operator = getattr(host_scalar, "nonlocal_operator", None)
+        projectors = getattr(nonlocal_operator, "projectors", None)
+        if projectors is not None and projectors.shape[1] and not self._host_is_real(projectors):
+            return False
+        return True
 
     def _cached_k_gradient(self, hamiltonian, build):
         """The device ``k.grad`` of a Bloch Hamiltonian, cached by its gradient operators and its k-point.
@@ -753,11 +868,12 @@ class DeviceBlochConverter:
         """The entries (last axis) of a per-grid-point host array this device holds."""
         return np.asarray(host_array)
 
-    def _derivative_parts(self, hamiltonian):
+    def _derivative_parts(self, hamiltonian, real: bool = False):
         """Device ``(laplacian, k_gradient)``: the stencil matrices, ``k_gradient`` None without Bloch term.
 
         A Hamiltonian with ``bloch_laplacian`` (``PARSEC_KPOINT_KINETIC=bloch``) gives that complex matrix and no
-        ``k_gradient``; the row-distributed converter does not take it.
+        ``k_gradient``; the row-distributed converter does not take it.  ``real``: the operator is real
+        (:meth:`_takes_real`), and a ``bloch_laplacian`` without imaginary part goes to the device as a real matrix.
         """
         backend = self.backend
         bloch = getattr(hamiltonian, "bloch_laplacian", None)
@@ -767,6 +883,8 @@ class DeviceBlochConverter:
                     "PARSEC_KPOINT_KINETIC=bloch is not implemented for the row-distributed MPI k-point solver "
                     "(the forces of a k-point run); PARSEC_KPOINT_KINETIC=gradient takes it"
                 )
+            if real:
+                return self._cached_real(bloch, lambda: backend.matrix(bloch, dtype=np.float64)), None
             if self._complex_csr(hamiltonian):
                 from .complex_csr_device import DeviceComplexCSR
 
@@ -849,6 +967,13 @@ class DeviceBlochConverter:
         k_point = tuple(
             float(value) for value in np.asarray(getattr(hamiltonian, "k_point", np.zeros(3)), dtype=float).reshape(3)
         )
+        if bloch is not None and getattr(hamiltonian, "psi_gauge", False):
+            # the psi gauge of a time-reversal invariant point: the twisted real stencil (BlochStencil.from_psi)
+            found = by_k.get(("psi", k_point))
+            if found is None or found[0] is not bloch:
+                found = (bloch, BlochStencil.from_psi(self.backend.cp, stencils, bloch))
+                by_k[("psi", k_point)] = found
+            return found[1]
         if bloch is not None:
             # the phase-weighted stencil of the Bloch Laplacian, read off its row 0 (BlochStencil.from_bloch)
             found = by_k.get(("bloch", k_point))
@@ -876,9 +1001,9 @@ class DeviceBlochConverter:
             return self._cached(table, lambda: DeviceSectorStencil(self.backend.cp, table))
         return self._cached(table, lambda: HostSectorStencil(table))
 
-    def _scalar_parts(self, hamiltonian, *, derivatives: bool = True):
+    def _scalar_parts(self, hamiltonian, *, derivatives: bool = True, real: bool = False):
         backend = self.backend
-        laplacian, k_gradient = self._derivative_parts(hamiltonian) if derivatives else (None, None)
+        laplacian, k_gradient = self._derivative_parts(hamiltonian, real) if derivatives else (None, None)
         # an isolated Hamiltonian keeps its potential as ``effective_potential``
         host_diagonal = getattr(hamiltonian, "_diagonal", None)
         if host_diagonal is None:
@@ -985,7 +1110,7 @@ class DeviceBlochConverter:
             pass
         return device, factor
 
-    def operator(self, hamiltonian) -> DeviceBlochOperator:
+    def operator(self, hamiltonian, *, real: bool | None = None) -> DeviceBlochOperator:
         """Device operator for a host ``KPointKohnShamHamiltonian`` or spinor one.
 
         A k-point spinor Hamiltonian carries its scalar part as ``scalar_hamiltonian``; the spinor
@@ -993,12 +1118,14 @@ class DeviceBlochConverter:
         A scalar Hamiltonian with LDA+U (``BlochHubbardHamiltonian``: ``base`` and ``hubbard``) is
         the operator of its base with the term; one with the exchange of a hybrid functional
         (``KPointExchangeHamiltonian``: ``base`` and ``exchange``) the operator of its base with
-        ``-a_x xi xi^H``.
+        ``-a_x xi xi^H``.  The Gamma point of a k-point SCF is a real operator
+        (:attr:`DeviceBlochOperator.real_arithmetic`) where :attr:`real_gamma` asks for it and
+        :meth:`_takes_real` finds every part real (``real=False``: complex in any case).
         """
         exchange = getattr(hamiltonian, "exchange", None)
         base = getattr(hamiltonian, "base", None)
         if exchange is not None and base is not None:
-            operator = self.operator(base)
+            operator = self.operator(base, real=False)
             if operator.spinor:
                 raise NotImplementedError("the exact exchange of a spinor Hamiltonian is not implemented")
             if operator.row_bounds is not None:
@@ -1010,7 +1137,7 @@ class DeviceBlochConverter:
             return operator
         term = getattr(hamiltonian, "hubbard", None)
         if term is not None and base is not None:
-            operator = self.operator(base)
+            operator = self.operator(base, real=False)
             if operator.spinor:
                 raise NotImplementedError("LDA+U of a spinor Hamiltonian is not implemented")
             operator.hubbard = self._hubbard_parts(term)
@@ -1026,11 +1153,12 @@ class DeviceBlochConverter:
             stencil = self._sector_stencil(table)
         else:
             stencil = None if spinor else self._bloch_stencil(host_scalar)
+        real = (real is None or bool(real)) and self._takes_real(host_scalar, spinor, stencil)
         if stencil is not None:
             # the kernel replaces the stencil matrices: they are not uploaded
             parts = self._scalar_parts(host_scalar, derivatives=False)
         else:
-            parts = self._scalar_parts(host_scalar)
+            parts = self._scalar_parts(host_scalar, real=real)
         laplacian, k_gradient, diagonal, forward, adjoint, signs, projector_real = parts
         global_size = int(host_scalar.negative_laplacian.shape[0])
         soc, delta, field = None, None, None
@@ -1060,6 +1188,10 @@ class DeviceBlochConverter:
         if stencil is not None:
             operator.stencil = stencil
             operator.stencil_diagonal = stencil.diagonal(diagonal)
+        if real:
+            if forward is not None and not projector_real:
+                raise RuntimeError("the projectors of a real Gamma-point operator are complex")
+            operator.real_arithmetic = True
         term = _host_kinetic_term(host_scalar)
         if term is not None:
             if spinor or operator.row_bounds is not None:

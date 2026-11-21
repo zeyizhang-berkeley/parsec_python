@@ -34,7 +34,8 @@ block of :mod:`.exchange_device` on ``S`` instead of the grid, ``1/|T|`` of its 
 (each pair of two occupied states once, the empty states against the occupied ones) form the class densities of up to
 ``densities_per_solve`` pairs at a time with one CUDA kernel, straight into the twisted complex boxes, transform them,
 multiply them by the kernel of their class, transform them back, and accumulate ``W`` on ``S`` with a second kernel
-that untwists the potentials.  ``W`` is then folded into every sector from one point of each orbit, as the parity
+that untwists the potentials (one thread per coset row and column of ``W`` where a pair has at most two classes,
+``PARSEC_CUPY_EXCHANGE_COLUMN_UPDATE``, else one per coset row: the same bits).  ``W`` is then folded into every sector from one point of each orbit, as the parity
 classes of a cluster's sectors are.  Every pair density costs ``N/|T|`` points instead of ``N``: for a diamond
 supercell of even repeats (``|T| = 8``) the transforms are eight times smaller.  The energies are those of the pooled
 full-grid block (``off``) to round-off.
@@ -368,6 +369,13 @@ class TranslationContext:
     def pair_classes(self, first: dict, second: dict) -> tuple[int, ...]:
         return self.classes({a: first[a] * second[a] for a in self.group.operations})
 
+    def updates_by_columns(self) -> bool:
+        """Whether the builds update ``W`` by coset row and column (``PARSEC_CUPY_EXCHANGE_COLUMN_UPDATE=auto`` and a
+        pair density of at most :data:`COLUMN_UPDATE_CLASSES` classes, the cosets of ``T``): the same bits as by
+        rows."""
+
+        return exchange_column_update_setting() == "auto" and self.cosets <= COLUMN_UPDATE_CLASSES
+
     def tables(self, cp, classes: tuple[int, ...], inverse_volume: float):
         """Device ``chi_t(h_c)/(m h^3)`` (the class densities), ``chi_t(h_c)`` (``W``) and the twists of ``classes``."""
 
@@ -394,6 +402,7 @@ class TranslationContext:
         inverse_volume = 1.0 / float(orbitals.volume_element)
         pending: list = []
         step = int(self.densities_per_solve)
+        by_columns = self.updates_by_columns()
 
         def settle() -> None:
             for begin, finish in pending:
@@ -432,9 +441,10 @@ class TranslationContext:
                     orbitals.characters[blocks[first_index].sector], orbitals.characters[second_block.sector]
                 )
                 density_table, table, twists = self.tables(cp, classes, inverse_volume)
-                left, right, update = (
-                    cp.asarray(values) for values in _tile_pairs(tile.kind, first.shape[1], second.shape[1])
-                )
+                pairs = _tile_pairs(tile.kind, first.shape[1], second.shape[1])
+                left, right, update = (cp.asarray(values) for values in pairs)
+                shape = (tile.kind, int(first.shape[1]), int(second.shape[1]))
+                aliased = second_acc is None or second_acc is first_acc
                 for begin in range(0, int(left.size), step):
                     i, j, u = left[begin : begin + step], right[begin : begin + step], update[begin : begin + step]
                     boxes = translation_densities(cp, self, first, second, i, j, density_table, twists)
@@ -443,9 +453,16 @@ class TranslationContext:
                     solvers.solve_translation_classes(cp, boxes, classes, self.layout)
                     finish.record()
                     pending.append((start, finish))
+                    events = (
+                        _device_events(
+                            cp, shape, pairs, begin, min(begin + step, int(left.size)), int(first.shape[1]), aliased
+                        )
+                        if by_columns
+                        else None
+                    )
                     translation_update(
                         cp, self, boxes, twists, table, first, second, i, j, first_weights, second_weights, u,
-                        first_acc, second_acc,
+                        first_acc, second_acc, events=events,
                     )
                     del boxes
                 settle()
@@ -597,6 +614,81 @@ extern "C" __global__ void translation_pair_update(
     }
     if (current >= 0) first_acc[p + current * ld] -= sum;
 }
+
+// The update above with one thread per coset row and column of W (PARSEC_CUPY_EXCHANGE_COLUMN_UPDATE=auto): column
+// `column` (of first_acc, or of second_acc from `split` on where `aliased` is 0) takes the events of the pairs that
+// write it, events[offsets[column] .. offsets[column + 1]) in the order of the pairs, with the operations of the
+// kernel above in the same order: role bit 1, the pair (i = column, j) whose sum of a run of consecutive pairs of
+// the same i is subtracted where the run ends; bit 2, the pair (i, j = column) subtracted at once.  The same values
+// in the same order: the same bits.  blockIdx.x is the column, so the blocks that run together hold every column of
+// the same rows (their potentials and orbitals shared in the caches).
+extern "C" __global__ void translation_pair_update_columns(
+    const complex<double>* __restrict__ boxes,   // classes x halves x n_r
+    const complex<double>* __restrict__ twist,   // classes x n_r
+    const double* __restrict__ table,            // chi_t(h_c), classes x m
+    const double* first, const double* second,
+    const long long* __restrict__ left, const long long* __restrict__ right,
+    const double* __restrict__ first_weights, const double* __restrict__ second_weights,
+    const int* __restrict__ offsets, const int* __restrict__ events, const signed char* __restrict__ roles,
+    double* first_acc, double* second_acc,
+    const long long n_r, const int cosets, const int classes, const int halves, const int split, const int aliased)
+{
+    const int column = blockIdx.x;
+    const int begin = offsets[column];
+    const int end = offsets[column + 1];
+    if (begin == end) return;
+    const long long ld = (long long)cosets * n_r;
+    double* target = (aliased || column < split) ? first_acc + (long long)column * ld
+                                                 : second_acc + (long long)(column - split) * ld;
+    for (long long p = (long long)blockIdx.y * blockDim.x + threadIdx.x; p < ld;
+         p += (long long)gridDim.y * blockDim.x) {
+        const int c = (int)(p / n_r);
+        const long long r = p - (long long)c * n_r;
+        double coefficient[8];
+        complex<double> untwist[8];
+        complex<double> potential[8];
+        for (int t = 0; t < classes; ++t) {
+            coefficient[t] = table[t * cosets + c];
+            untwist[t] = conj(twist[(long long)t * n_r + r]);
+        }
+        double value = target[p];
+        double sum = 0.0;
+        int running = 0;
+        int last = -2;
+        int loaded = -1;
+        for (int e = begin; e < end; ++e) {
+            const int k = events[e];
+            const int role = roles[e];
+            if (running && !((role & 1) && k == last + 1)) {
+                value -= sum;
+                running = 0;
+            }
+            if ((k >> 1) != loaded) {
+                loaded = k >> 1;
+                for (int t = 0; t < classes; ++t) {
+                    potential[t] = boxes[((long long)t * halves + loaded) * n_r + r] * untwist[t];
+                }
+            }
+            double v = 0.0;
+            for (int t = 0; t < classes; ++t) v += coefficient[t] * ((k & 1) ? potential[t].imag() : potential[t].real());
+            if (role & 1) {
+                if (!running) {
+                    sum = 0.0;
+                    running = 1;
+                }
+                const long long j = right[k];
+                sum += second_weights[j] * second[p + j * ld] * v;
+                last = k;
+            }
+            if (role & 2) {
+                const long long i = left[k];
+                value -= first_weights[i] * first[p + i * ld] * v;
+            }
+        }
+        if (running) value -= sum;
+        target[p] = value;
+    }
+}
 """
 _KERNELS: dict[int, Any] = {}
 _KERNELS_LOCK = Lock()
@@ -615,8 +707,93 @@ def _kernels(cp):
             found = (
                 module.get_function("translation_pair_densities"),
                 module.get_function("translation_pair_update"),
+                module.get_function("translation_pair_update_columns"),
             )
             _KERNELS[device] = found
+    return found
+
+
+COLUMN_UPDATE_SETTING = "PARSEC_CUPY_EXCHANGE_COLUMN_UPDATE"
+#: The update by columns is taken where the pair densities have at most this many classes (the cosets of ``T``):
+#: it reads the class potentials of a pair twice (for ``W_i`` and for ``W_j``), which four classes make slower than
+#: the update by rows (a body-centred cube, measured on A100), while one or two classes gain from the threads.
+COLUMN_UPDATE_CLASSES = 2
+
+
+def exchange_column_update_setting() -> str:
+    """``PARSEC_CUPY_EXCHANGE_COLUMN_UPDATE``: ``auto`` (default, since 2026-11-21) or ``off``.
+
+    ``auto``: the update of ``W`` from the class potentials of a batch of pairs (:func:`translation_update`) runs one
+    thread per coset row and column of ``W`` (``translation_pair_update_columns``), each column taking the pairs that
+    write it in the order of the pairs, so the sums are those of ``off`` to the last bit, where a pair density has
+    at most :data:`COLUMN_UPDATE_CLASSES` classes (one for a supercell of even repeats, two for the face-centring
+    translations of a cube; a body-centred cell, four, keeps the update by rows).  ``off``: one thread per coset
+    row, which runs every pair of the batch, as before (a few hundred blocks for the coset form of a 512-atom
+    diamond cell: about a third of the GPU time of a build).  A wrong value is refused when the device exchange is
+    set up (:func:`parsec_python.acceleration.SCF.hybrid.device_exchange_for`).
+    """
+
+    value = os.environ.get(COLUMN_UPDATE_SETTING, "auto").strip().lower() or "auto"
+    if value not in {"auto", "off"}:
+        raise ValueError(f"{COLUMN_UPDATE_SETTING} must be auto or off, not {value!r}")
+    return value
+
+
+def column_events(left, right, update, first_columns: int, *, aliased: bool):
+    """The events of :func:`translation_update` by column of ``W`` (``translation_pair_update_columns``).
+
+    ``(offsets, events, roles)``: column ``c`` (of the first accumulator; with ``aliased`` false the columns from
+    ``first_columns`` on are those of the second) takes the pairs ``events[offsets[c]:offsets[c + 1]]`` in their
+    order, with ``roles`` bit 1 where it is the ``W_i`` of the pair (``left``) and bit 2 where it is the ``W_j`` the
+    pair updates (``right`` where ``update``).  A pair whose ``i`` and ``j`` are the same column of one accumulator
+    is one event with both bits (the kernel runs bit 1 first, as the update by rows does).
+    """
+
+    left = np.asarray(left, dtype=np.int64)
+    right = np.asarray(right, dtype=np.int64)
+    count = int(left.size)
+    pairs = np.arange(count, dtype=np.int64)
+    updated = np.flatnonzero(np.asarray(update) != 0)
+    shift = 0 if aliased else int(first_columns)
+    column = np.concatenate([left, right[updated] + shift])
+    pair = np.concatenate([pairs, updated])
+    role = np.concatenate([np.ones(count, dtype=np.int8), np.full(updated.size, 2, dtype=np.int8)])
+    order = np.lexsort((role, pair, column))
+    column, pair, role = column[order], pair[order], role[order]
+    if column.size > 1:
+        same = np.flatnonzero((column[1:] == column[:-1]) & (pair[1:] == pair[:-1]))
+        if same.size:
+            role[same] |= role[same + 1]
+            keep = np.ones(column.size, dtype=bool)
+            keep[same + 1] = False
+            column, pair, role = column[keep], pair[keep], role[keep]
+    columns = int(first_columns)
+    if column.size:
+        columns = max(columns, int(column[-1]) + 1)
+    offsets = np.searchsorted(column, np.arange(columns + 1, dtype=np.int64)).astype(np.int32)
+    return offsets, pair.astype(np.int32), role
+
+
+_EVENTS: dict = {}
+_EVENTS_LOCK = Lock()
+#: Event tables kept on the devices at most (a few kB each: the batches of the tile shapes of a run).
+_EVENTS_LIMIT = 1024
+
+
+def _device_events(cp, key, pairs, begin: int, finish: int, first_columns: int, aliased: bool):
+    """:func:`column_events` of the pairs ``[begin, finish)`` of a tile on the current device, cached by ``key``."""
+
+    key = (int(cp.cuda.Device().id),) + tuple(key) + (int(begin), int(finish), bool(aliased))
+    with _EVENTS_LOCK:
+        found = _EVENTS.get(key)
+    if found is None:
+        left, right, update = (values[begin:finish] for values in pairs)
+        offsets, events, roles = column_events(left, right, update, first_columns, aliased=aliased)
+        found = (cp.asarray(offsets), cp.asarray(events), cp.asarray(roles), int(offsets.size) - 1)
+        with _EVENTS_LOCK:
+            if len(_EVENTS) >= _EVENTS_LIMIT:
+                _EVENTS.clear()
+            _EVENTS[key] = found
     return found
 
 
@@ -651,16 +828,38 @@ def translation_densities(cp, context: TranslationContext, first, second, left, 
 
 
 def translation_update(cp, context: TranslationContext, boxes, twists, table, first, second, left, right,
-                       first_weights, second_weights, second_update, first_acc, second_acc) -> None:
+                       first_weights, second_weights, second_update, first_acc, second_acc, *, events=None) -> None:
     """``W_i -= sum_j f_j q_j v_ij`` and, where ``second_update``, ``W_j -= f_i q_i v_ij`` in coset form, from the
-    class potentials of :meth:`DevicePeriodicPairSolvers.solve_translation_classes` (twisted, two pairs a row)."""
+    class potentials of :meth:`DevicePeriodicPairSolvers.solve_translation_classes` (twisted, two pairs a row).
 
-    kernel = _kernels(cp)[1]
+    ``events``: the device tables of :func:`column_events` for these pairs (``offsets, events, roles, columns``;
+    ``aliased`` where ``second_acc`` is ``None`` or ``first_acc``), which run the update by row and column of ``W``
+    (``PARSEC_CUPY_EXCHANGE_COLUMN_UPDATE=auto``, the same bits); ``None``: by row, as before."""
+
     rows = context.coset_rows
     for array in (first, second, first_acc) + (() if second_acc is None else (second_acc,)):
         if not array.flags.f_contiguous or int(array.shape[0]) != rows:
             raise ValueError("the update of W needs F-contiguous coset blocks")
     classes = int(boxes.shape[0])
+    if events is not None:
+        offsets, pairs, roles, columns = events
+        aliased = second_acc is None or second_acc is first_acc
+        split = int(first_acc.shape[1])
+        if columns <= 0:
+            return
+        blocks = min((rows + _THREADS - 1) // _THREADS, 65535)
+        _kernels(cp)[2](
+            (int(columns), int(blocks)),
+            (_THREADS,),
+            (
+                boxes, twists, table, first, second, left, right, first_weights, second_weights, offsets, pairs, roles,
+                first_acc, first_acc if second_acc is None else second_acc,
+                np.int64(context.layout.size), np.int32(context.cosets), np.int32(classes),
+                np.int32(int(boxes.shape[1])), np.int32(split), np.int32(1 if aliased else 0),
+            ),
+        )
+        return
+    kernel = _kernels(cp)[1]
     kernel(
         ((rows + _THREADS - 1) // _THREADS,),
         (_THREADS,),
@@ -938,11 +1137,14 @@ def reference_class_potentials(densities, layout: TranslationLayout, group: Pari
 
 
 __all__ = [
+    "COLUMN_UPDATE_SETTING",
     "SETTING",
     "TranslationChannel",
     "TranslationContext",
     "TranslationLayout",
     "apply_translation_exchange",
+    "column_events",
+    "exchange_column_update_setting",
     "exchange_translation_setting",
     "reference_class_potentials",
     "translation_context",

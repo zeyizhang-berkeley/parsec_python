@@ -482,7 +482,9 @@ def _resolve_symmetry_mode(
     cross term (``lzsz``/``lsxy``) mixes spin channels and breaks that
     assumption, and the spinor loop keeps its Hartree/XC/mixing on the whole
     grid.  Its own reduction is the double-group sectors of the spinor loop
-    (``PARSEC_SOC_SECTORS=kramers`` or ``on``, ``soc_sectors``,
+    (``PARSEC_SOC_SECTORS=kramers`` or ``on``, and ``auto``, the default, from
+    the floor of :func:`.SCF.soc_sectors.resolve_soc_sectors` on and at every
+    size under ``--symmetry on``; ``soc_sectors``,
     :mod:`.SCF.soc_sectors`), which the caller enables unless the run uses no
     symmetry (``--symmetry off``, or ``Ignore_Symmetry`` without a mode on the
     command line, :func:`_soc_symmetry_choice`).  "auto"/unset keeps whatever the
@@ -544,12 +546,26 @@ def _soc_orbital_symmetry(system, soc_sectors: str, symmetry_on: bool):
     """
 
     info = system.backend_info
-    if soc_sectors == "off":
-        text = "full grid (self-consistent spin-orbit coupling: PARSEC_SOC_SECTORS=off)"
+    route, floor = soc_sectors, ""
+    if soc_sectors == "auto":
+        # PARSEC_SOC_SECTORS=auto (the default): the Kramers sector from the floor of the whole-grid spinor basis on,
+        # at every size under --symmetry on
+        from .SCF.soc_sectors import resolve_soc_sectors
+
+        route, floor = resolve_soc_sectors(soc_sectors, system, forced=symmetry_on)
+    if route == "off":
+        text = (
+            "full grid (self-consistent spin-orbit coupling: PARSEC_SOC_SECTORS=off)"
+            if not floor
+            else "full grid (self-consistent spin-orbit coupling: PARSEC_SOC_SECTORS=auto, the whole-grid spinor "
+            "basis below the floor of the sectors)"
+        )
     else:
         from .SCF.soc_sectors import soc_orbital_symmetry
 
-        text, reason = soc_orbital_symmetry(system.grid, system.atoms, soc_sectors)
+        text, reason = soc_orbital_symmetry(system.grid, system.atoms, route)
+        if soc_sectors == "auto":
+            text = text.replace(f"PARSEC_SOC_SECTORS={route}", "PARSEC_SOC_SECTORS=auto")
         if reason and symmetry_on:
             raise ValueError(
                 f"symmetry='on' requested, but the spin-orbit sectors of PARSEC_SOC_SECTORS={soc_sectors} "
@@ -1222,8 +1238,20 @@ def periodic_sector_bands_setting() -> str:
     return value
 
 
-def periodic_sector_forces_refusal(translation, *, supercell: bool = False) -> str | None:
+def periodic_sector_forces_refusal(
+    translation, *, supercell: bool = False, moving_sectors: bool = False, fortran_fixed_atoms: bool = False
+) -> str | None:
     """Why the forces or the moved atoms of a periodic cell keep the full grid, or ``None`` where sectors take them.
+
+    ``moving_sectors``: the caller runs the molecular dynamics or manual movements of the cell in the sectors of the
+    group its structures keep, checked at every structure (``PARSEC_MOVING_SECTORS=auto``,
+    :mod:`.SCF.moving_sectors`, the command line): they are not refused for what they are.  ``fortran_fixed_atoms``
+    (the command line under ``PARSEC_MOVING_SECTORS=auto`` where the basis of the cell reaches the floor of the
+    sectors, in one process: :func:`.SCF.moving_sectors.fortran_fixed_atoms_lifted`): a relaxation with atoms fixed
+    by ``Move_Flag`` on the Fortran-derived routines keeps the sectors of the subgroup that maps the fixed atoms onto
+    fixed atoms, as on the default routines (under ``auto`` where they have 4 operations or more,
+    :func:`.SCF.moving_sectors.fortran_fixed_minimum_order`); its ionic loop averages the forces and moved positions
+    over the operations of the group of those routines and of the sectors that respect the flags.
 
     The sectors of the point group of a bulk cell at the Gamma point (``PARSEC_PERIODIC_SYMMETRY``, the driver's
     route) give the forces of the density the SCF used once their nonlocal term and the total are averaged over the
@@ -1256,12 +1284,16 @@ def periodic_sector_forces_refusal(translation, *, supercell: bool = False) -> s
         return "not a periodic cell"
     if periodic_sector_forces_setting() == "off":
         return f"{_PERIODIC_SECTOR_FORCES_SWITCH}=off"
-    if getattr(translation, "molecular_dynamics", None) is not None:
+    if getattr(translation, "molecular_dynamics", None) is not None and not moving_sectors:
         return "molecular dynamics uses no symmetry"
     relaxation = getattr(translation, "relaxation", None)
-    if relaxation is not None and relaxation.method not in ("bfgs", "simple"):
+    if relaxation is not None and relaxation.method not in ("bfgs", "simple") and not moving_sectors:
         return "manual movements use no symmetry"
-    if relaxation is None and not getattr(translation, "compute_forces", False):
+    if (
+        relaxation is None
+        and not getattr(translation, "compute_forces", False)
+        and getattr(translation, "molecular_dynamics", None) is None
+    ):
         return "no forces are computed"
     if (
         getattr(getattr(translation, "routines", None), "fortran", False)
@@ -1272,19 +1304,30 @@ def periodic_sector_forces_refusal(translation, *, supercell: bool = False) -> s
             "the forces of the Fortran-derived routines (Use_Fortran_Routines) read the full grid "
             "(PARSEC_FORTRAN_SECTOR_FORCES=off)"
         )
+    from .SCF.gamma_features import LDAU_FORCES_SWITCH, ldau_sector_forces_setting
+
+    # (read in every forces run of a cell, so that a value it does not know is refused)
+    ldau_forces = ldau_sector_forces_setting()
     if (
         getattr(getattr(translation, "routines", None), "fortran", False)
         or getattr(problem.grid, "fortran_routines", False)
     ) and (
         getattr(getattr(problem, "scf", None), "van_der_waals", False)
-        or any(getattr(item, "has_hubbard", False) for item in getattr(problem, "pseudopotentials", {}).values())
+        or (
+            any(getattr(item, "has_hubbard", False) for item in getattr(problem, "pseudopotentials", {}).values())
+            and ldau_forces == "off"
+        )
     ):
         # TS and LDA+U take the Gamma sectors for their SCF (PARSEC_GAMMA_TS_SECTORS,
         # PARSEC_GAMMA_LDAU_SECTORS, validated for single points); their forces on the Fortran-derived routines (every
         # TS input) keep the full grid, as before PARSEC_FORTRAN_SECTOR_FORCES, whose sector forces were validated
-        # without these corrections.
+        # without these corrections.  LDA+U keeps the sectors under PARSEC_LDAU_SECTOR_FORCES=auto (its term of
+        # every atom from the sector bases, Hamiltonian/hubbard_device.DeviceHubbard.forces).
         return (
             "the forces of the TS correction or of LDA+U on the Fortran-derived routines read the full grid (their "
+            f"sector forces are not validated; LDA+U: {LDAU_FORCES_SWITCH}={ldau_forces})"
+            if not getattr(getattr(problem, "scf", None), "van_der_waals", False)
+            else "the forces of the TS correction or of LDA+U on the Fortran-derived routines read the full grid (their "
             "sector forces are not validated)"
         )
     movable = getattr(translation, "movable", None)
@@ -1306,13 +1349,17 @@ def periodic_sector_forces_refusal(translation, *, supercell: bool = False) -> s
                 "Move_Flag fixes atoms of a spin-polarized cell (the subgroup sectors of "
                 f"{MOVE_FLAG_SUBGROUP_SWITCH} are not validated for two channels: both on the full grid)"
             )
-        if relaxation is not None and (
+        if relaxation is not None and not fortran_fixed_atoms and (
             getattr(getattr(translation, "routines", None), "fortran", False)
             or getattr(problem.grid, "fortran_routines", False)
         ):
-            # The subgroup sectors of Move_Flag are validated on the default routines; the forces of
-            # the Fortran-derived routines in sectors (PARSEC_FORTRAN_SECTOR_FORCES) are averaged over their own group,
-            # which ignores Move_Flag as PARSEC 1.5 does, so a relaxation with fixed atoms keeps their full grid.
+            # The forces of the Fortran-derived routines in sectors (PARSEC_FORTRAN_SECTOR_FORCES) are averaged over the
+            # group of their own operations (which ignore Move_Flag, as PARSEC 1.5 does) and of the sectors; the ionic
+            # loop keeps the operations of that group that respect the flags.  Under PARSEC_MOVING_SECTORS=auto the
+            # command line takes such a relaxation of a cell above the floor of the sectors in the sectors of the
+            # subgroup of the fixed atoms, where they have 4 operations or more (fortran_fixed_atoms, and the
+            # minimum_sector_order of the preparation); otherwise, with MPI and in the MPI runner, it keeps their full
+            # grid, as before.
             return (
                 "Move_Flag fixes atoms of a cell on the Fortran-derived routines (Use_Fortran_Routines), whose forces "
                 f"are symmetrized with their own group (the subgroup sectors of {MOVE_FLAG_SUBGROUP_SWITCH} are "
@@ -1407,6 +1454,29 @@ def _fortran_sector_forces_line(system) -> str | None:
         " Forces of the Fortran-derived routines in the sectors: their own terms, the total and the moved positions "
         f"averaged over {len(combined)} operations (the group of their {len(routine)} and of the {len(sectors)} of "
         "the sectors; PARSEC_FORTRAN_SECTOR_FORCES=auto)"
+    )
+
+
+def _hybrid_full_grid_forces_line(system) -> str | None:
+    """The parsec.out line of a Gamma-point hybrid on the full grid below the floor of its sectors whose forces and
+    moved positions are averaged over the operations of the cell, or ``None`` for every other run.
+
+    ``PARSEC_GAMMA_HYBRID_SECTOR_FORCES=auto`` on the default routines (the detail of
+    :func:`.SCF.gamma_hybrid_route.full_grid_forces_averaged`): the operations the Fortran-derived routines take on the
+    full grid (:func:`parsec_python.Forces.periodic.periodic_force_operations`), those of them that respect the
+    movable flags in a relaxation (the ionic loop keeps them).
+    """
+
+    from parsec_python.Forces.periodic import periodic_force_operations
+
+    from .SCF.gamma_hybrid_route import full_grid_forces_averaged
+
+    if not full_grid_forces_averaged(system):
+        return None
+    operations = periodic_force_operations(system, None)
+    return (
+        " Forces of the periodic hybrid on the full grid (below the floor of its sectors): the total and the moved "
+        f"positions averaged over the {len(operations)} operations of the cell (PARSEC_GAMMA_HYBRID_SECTOR_FORCES=auto)"
     )
 
 
@@ -2025,6 +2095,70 @@ def _run(
         kept_reasons = ()
     if kept_reasons:
         restart_notes = [*restart_notes, kept_group_note(kept_reasons)]
+    # PARSEC_MOVING_SECTORS=auto: molecular dynamics and manual movements in the sectors of the group their
+    # structures keep, checked at every structure (SCF/moving_sectors.py); read in every run so that a value it does
+    # not know is refused.
+    from .SCF.moving_sectors import (
+        fortran_fixed_atoms_lifted,
+        fortran_fixed_minimum_order,
+        moving_sectors_setting,
+        plan_moving_sectors,
+    )
+
+    moving_plan, moving_reason = None, None
+    try:
+        moving_wanted = moving_sectors_setting() != "off"
+        from parsec_python.Relaxation.run import manual_structures
+
+        from .Parallel import mpi as _moving_mpi
+
+        moving_mpi = _moving_mpi.requested() or bool(getattr(arguments, "mpi", False))
+        # a relaxation of a cell on the Fortran-derived routines with atoms fixed by Move_Flag: in the sectors of the
+        # subgroup of the fixed atoms where its basis reaches the floor of the sectors (on: whatever the size)
+        lift_fortran_fixed_atoms = translation.problem.periodic_cell is not None and fortran_fixed_atoms_lifted(
+            translation, mpi_requested=moving_mpi, symmetry_argument=arguments.symmetry
+        )
+        # (and under auto in sectors of 4 operations or more: fewer keep the full grid of those routines)
+        fortran_minimum_order = fortran_fixed_minimum_order(
+            translation, lifted=lift_fortran_fixed_atoms, symmetry_argument=arguments.symmetry
+        )
+        manual_list = None
+        if (
+            moving_wanted
+            and translation.relaxation is not None
+            and translation.relaxation.method == "manual"
+        ):
+            try:
+                manual_list = manual_structures(translation, translation.source.parent)
+            except (OSError, ValueError):
+                # (reported where the movements read manual.dat, as before: the plan takes no structure)
+                manual_list = None
+        moving_plan, moving_reason = plan_moving_sectors(
+            translation,
+            dynamics_restart=dynamics_restart,
+            manual=manual_list,
+            mpi_requested=moving_mpi,
+            symmetry_argument=arguments.symmetry,
+        )
+        if (
+            moving_plan is not None
+            and translation.relaxation is not None
+            and translation.relaxation.max_movements > 0
+            and manual_list is None
+        ):
+            # manual.dat could not be read: the full grid, which reports the error where it reads the file
+            moving_plan, moving_reason = None, "manual.dat could not be read: the full grid"
+        if moving_plan is not None and not moving_plan.periodic and (
+            solver_symmetry_mode != "off" or accelerated_self_consistent_soc
+        ):
+            moving_plan, moving_reason = None, None
+    except ValueError as error:
+        print(f"Input error: {error}", file=sys.stderr)
+        return 2
+    if moving_plan is not None and not moving_plan.periodic:
+        # a cluster: the sectors of the group the plan keeps (with the pseudo-atoms of the state or of the
+        # structures of manual.dat, at the preparation below)
+        solver_symmetry_mode = "auto"
     # PARSEC_PERIODIC_SECTOR_FORCES, PARSEC_PERIODIC_SECTOR_BANDS and
     # PARSEC_FORTRAN_SECTOR_FORCES, read in every run so that a value they do
     # not know is refused.
@@ -2041,6 +2175,18 @@ def _run(
         from .SCF.band_sectors import band_kpoint_sectors_setting
 
         band_kpoint_sectors_setting()
+        # and PARSEC_GAMMA_HYBRID_SECTOR_FORCES (a small Gamma hybrid with forces averages them on the full grid, or
+        # takes the sectors: driver._gamma_hybrid_full_grid_forces, driver._gamma_hybrid_in_sectors)
+        from .SCF.gamma_hybrid_route import gamma_hybrid_sector_forces_setting
+
+        gamma_hybrid_sector_forces_setting()
+        if translation.problem.scf.spin_polarized:
+            # PARSEC_SPIN_START: the start of the spin loops of the reference solver (a spin cell on its k-point loop)
+            from parsec_python.SCF.spin_polarized import spin_start_setting
+            from parsec_python.cli import spin_ionic_kpoint_setting
+
+            spin_start_setting()
+            spin_ionic_kpoint_setting()
     except ValueError as error:
         print(f"Input error: {error}", file=sys.stderr)
         return 2
@@ -2073,10 +2219,21 @@ def _run(
             or translation.compute_forces
         )
         sector_forces_refusal = (
-            periodic_sector_forces_refusal(translation, supercell=_found_supercell is not None)
+            periodic_sector_forces_refusal(
+                translation,
+                supercell=_found_supercell is not None,
+                # PARSEC_MOVING_SECTORS=auto: molecular dynamics and manual movements of a cell whose structures
+                # are checked against the group of its sectors (SCF/moving_sectors.py), and relaxations with atoms
+                # fixed by Move_Flag on the Fortran-derived routines in the sectors of their subgroup
+                moving_sectors=moving_plan is not None,
+                fortran_fixed_atoms=lift_fortran_fixed_atoms,
+            )
             if moving_or_forces
             else None
         )
+        if sector_forces_refusal is not None:
+            # (what keeps the full grid keeps it for the moving runs of PARSEC_MOVING_SECTORS too)
+            moving_plan = None
         periodic_sector_forces = moving_or_forces and sector_forces_refusal is None
         periodic_full_grid = None if periodic_sector_forces else (
             "a relaxation or molecular dynamics"
@@ -2143,6 +2300,13 @@ def _run(
             solver_symmetry_mode = "auto"
             restart_notes = [*restart_notes, ts_note]
 
+    if moving_plan is not None:
+        if not moving_plan.periodic:
+            # (the NOTE of a cell names the group of its sectors: written after the preparation, by check_start)
+            restart_notes = [*restart_notes, moving_plan.note()]
+        if moving_plan.fixed is not None:
+            # the atoms Move_Flag fixes in molecular dynamics, a species of their own for the detection
+            fixed_atoms = moving_plan.fixed
     # A spin cell whose forces or moves the accelerated driver solves on the full grid (molecular dynamics, manual
     # movements, Move_Flag, Ignore_Symmetry): where both channels would not fit one device, one sector of the identity
     # whose basis the GPUs of the process share (PARSEC_SPIN_FALLBACK_SHARED; the routing kept the k-point driver for
@@ -2188,11 +2352,19 @@ def _run(
         )
         print(f"Hartree backend: {selection.hartree_backend}")
         print(
-            f"Symmetry: mode={solver_symmetry_mode if kept_reasons else symmetry_mode}; exact detection is deferred "
+            f"Symmetry: mode={solver_symmetry_mode if kept_reasons or moving_plan is not None else symmetry_mode}; "
+            "exact detection is deferred "
             "until grid construction"
         )
         if kept_reasons:
             print(kept_group_note(kept_reasons))
+        if moving_plan is not None:
+            print(moving_plan.note())
+        elif moving_reason is not None:
+            print(
+                f"Molecular dynamics or manual movements (PARSEC_MOVING_SECTORS={moving_sectors_setting()}): "
+                f"{moving_reason}"
+            )
         for reason in selection.fallback_reasons:
             print(f"BACKEND FALLBACK: {reason}")
         print("Dry run successful; no grid or SCF calculation was started.")
@@ -2266,7 +2438,8 @@ def _run(
     files = output_files_for(translation, input_directory)
     if _found_supercell is not None and _trim_route.cell_files:
         # PARSEC_KPOINT_SUPERCELL=auto: parsec.dat of the cell of the input, as the k-points write it (the
-        # potential and density of the first cell, the levels dealt to the k-points of the mesh, no orbitals),
+        # potential and density of the first cell, the k-points of the k-point route with the levels of each by their
+        # Bloch phases, PARSEC_KPOINT_SUPERCELL_LEVELS; no orbitals),
         # which Restart_Run and nscf_kpoints of that input read on either route
         files.parsec_dat_view = _cell_parsec_dat_view(_mesh_problem, _found_supercell[1])
     taken = {*protected_paths, log_path}
@@ -2355,9 +2528,50 @@ def _run(
                 **({"spin_identity_sector": True} if spin_identity_sector else {}),
                 symmetry_fixed_atoms=fixed_atoms,
                 # forces and moves averaged over the group of the sectors: a small cell keeps its sectors
-                # (PARSEC_PERIODIC_SECTOR_FLOOR applies to the SCF alone)
-                sector_forces=periodic_sector_forces,
+                # (PARSEC_PERIODIC_SECTOR_FLOOR applies to the SCF alone, and to the molecular dynamics and manual
+                # movements of PARSEC_MOVING_SECTORS=auto, whose structures the full grid needs not average; on keeps
+                # their sectors below it)
+                sector_forces=periodic_sector_forces and (moving_plan is None or moving_sectors_setting() == "on"),
+                # PARSEC_MOVING_SECTORS=auto: the pseudo-atoms of the state of the integrator or of the structures
+                # of manual.dat, where they keep less than the atoms of a cluster, and the operations a cell's sectors
+                # need at least
+                **({"symmetry_constraints": moving_plan.constraints} if moving_plan is not None else {}),
+                **(
+                    {"minimum_sector_order": moving_plan.minimum_order}
+                    if moving_plan is not None and moving_plan.minimum_order > 1
+                    else {"minimum_sector_order": fortran_minimum_order}
+                    if moving_plan is None and fortran_minimum_order > 1 and periodic_sector_forces
+                    else {}
+                ),
             )
+            moving_tracker = None
+            if moving_plan is not None:
+                from .SCF.moving_sectors import MovingSectors
+
+                def _prepare_moved(problem, *, symmetry, constraints, fixed):
+                    return prepare_single_point(
+                        problem,
+                        backend=arguments.backend,
+                        symmetry=symmetry,
+                        symmetry_cache_directory=symmetry_cache_directory,
+                        symmetry_fixed_atoms=fixed,
+                        sector_forces=False,
+                        symmetry_constraints=constraints,
+                    )
+
+                moving_tracker = MovingSectors(
+                    moving_plan,
+                    translation.problem,
+                    prepare=_prepare_moved,
+                    write=log.write,
+                    time_step=(
+                        None
+                        if translation.molecular_dynamics is None
+                        else translation.molecular_dynamics.time_step
+                    ),
+                )
+                # the state of a restart and the structures of manual.dat against the group the driver found
+                moving_tracker.check_start(system)
             if _context is None or _context.is_root:
                 # What of a cluster with a point group runs on the full grid for want of the native extension
                 # (also a NOTE line of parsec.out).
@@ -2415,6 +2629,13 @@ def _run(
                     log.write(line)
                 line = _fortran_sector_forces_line(system)
                 if line is not None:
+                    log.write(line)
+                # A Gamma hybrid below the floor of its sectors on the full grid of the default routines
+                # (PARSEC_GAMMA_HYBRID_SECTOR_FORCES=auto): its forces and moved positions averaged over the
+                # operations of the cell, as the Fortran-derived routines average theirs there.
+                line = _hybrid_full_grid_forces_line(system)
+                if line is not None:
+                    symmetrize_forces = True
                     log.write(line)
             # FDET (PARSEC 1.5): the frozen field and the tip sphere.
             from parsec_python.Output.correction_output import embedding_setup_lines
@@ -2518,6 +2739,8 @@ def _run(
                     # --symmetry off, and Ignore_Symmetry without a mode on the command line, keep the whole grid
                     # with PARSEC_SOC_SECTORS too
                     symmetry=soc_symmetry,
+                    # --symmetry on: PARSEC_SOC_SECTORS=auto takes the sector at every size
+                    forced=arguments.symmetry == "on",
                 )
                 scf_completed = time.perf_counter()
                 reporter.reference.finish_self_consistent_soc(
@@ -2619,10 +2842,14 @@ def _run(
                 )
                 scf_completed = time.perf_counter()
             elif translation.relaxation is not None:
+                relaxation_backend = ionic_backend_of(translation.potential_extrapolation)
+                if moving_tracker is not None:
+                    # PARSEC_MOVING_SECTORS=auto: every structure of manual.dat checked against the group
+                    relaxation_backend = moving_tracker.wrap(relaxation_backend)
                 outcome = run_recorded_relaxation(
                     translation,
                     system,
-                    ionic_backend_of(translation.potential_extrapolation),
+                    relaxation_backend,
                     reporter,
                     log.write,
                     directory=input_directory,
@@ -2635,14 +2862,19 @@ def _run(
                     materialize_wavefunctions(outcome.system, result)
                 scf_completed = time.perf_counter()
             elif translation.molecular_dynamics is not None:
+                dynamics_backend = ionic_backend_of(translation.potential_extrapolation)
+                if moving_tracker is not None:
+                    # PARSEC_MOVING_SECTORS=auto: every step checked against the group, the state kept on it
+                    dynamics_backend = moving_tracker.wrap(dynamics_backend)
                 dynamics = run_recorded_molecular_dynamics(
                     translation,
                     system,
-                    ionic_backend_of(translation.potential_extrapolation),
+                    dynamics_backend,
                     reporter,
                     log.write,
                     directory=input_directory,
                     restart=dynamics_restart,
+                    **({} if moving_tracker is None else {"after_step": moving_tracker.after_step}),
                 )
                 result, forces = dynamics.result, dynamics.forces
                 if wavefunctions_wanted:
@@ -2715,7 +2947,8 @@ def _run(
                 saved = save_result_archive(
                     archive_path,
                     # PARSEC_KPOINT_SUPERCELL=auto: the archive of the cell of the input (its atoms, grid, fields
-                    # and energies, the levels dealt to the k-points), which --bands-from of that input reads
+                    # and energies, the levels of the k-points by their Bloch phases), which --bands-from of that
+                    # input reads
                     _cell_result_view(result, _mesh_problem, _found_supercell[1])
                     if _found_supercell is not None and _trim_route.cell_files
                     else result,

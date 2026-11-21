@@ -301,6 +301,283 @@ def fold_to_centered_zone(fractions) -> np.ndarray:
     return values - np.ceil(values - 0.5)
 
 
+#: Two representatives of a k-point modulo the reciprocal lattice are equally short where their squared lengths
+#: differ by less than this times the largest ``|b_i|^2`` (:func:`fold_to_shortest`).
+SHORTEST_FOLD_TOLERANCE = 1.0e-10
+
+
+def fold_to_shortest(fractions, reciprocal, *, tolerance: float = SHORTEST_FOLD_TOLERANCE) -> np.ndarray:
+    """Reciprocal-lattice coordinates moved to their shortest representatives modulo the reciprocal lattice.
+
+    ``fractions`` are rows ``f`` (or one row) of ``k = f B``, ``reciprocal`` the rows ``b_i`` of ``B``.  Each point is
+    first folded into ``(-1/2, 1/2]`` (:func:`fold_to_centered_zone`) and then moved by the reciprocal vector ``G``
+    that makes ``|k - G|`` smallest, the point of the first Brillouin zone (the Wigner-Seitz cell of the reciprocal
+    lattice).  The folded point is kept where it is as short as the shortest within ``tolerance`` (relative to the
+    largest ``|b_i|^2``), so on a lattice of orthogonal vectors, where every folded point is a shortest one, nothing
+    changes bit for bit; among other equally short points the first of the candidates in the order of
+    ``(|n|_1, n)`` is taken.  ``|k - G| <= |k|`` bounds every component of ``G = n B``:
+    ``|f_i - n_i| <= |k| |a_i| / 2 pi``, so the candidates are searched exhaustively on any cell.
+
+    Why: the finite-difference Bloch operator of the u gauge, ``-nabla^2 - 2i k.grad + k^2`` on the periodic factor
+    ``u_k``, is not invariant under ``k -> k + G`` (its error grows with the plane waves of ``u_k``, whose leading one
+    is ``e^{-iG.r}`` where ``k`` is moved by ``G`` out of the first zone).  On a lattice of orthogonal vectors the
+    folded points are already the shortest; on an oblique one (hexagonal, the primitive fcc and bcc cells) a point
+    with components ``1/2`` and ``1/4``, for instance, can lie outside the first zone.
+    """
+
+    values = fold_to_centered_zone(fractions)
+    single = values.ndim == 1
+    values = np.atleast_2d(values)
+    if values.shape[0] == 0:
+        return values
+    basis = np.asarray(reciprocal, dtype=np.float64).reshape(3, 3)
+    metric = basis @ basis.T
+    scale = float(np.max(np.diag(metric)))
+
+    def squared(points):
+        return np.einsum("...i,ij,...j->...", points, metric, points)
+
+    lengths = squared(values)
+    radius = math.sqrt(max(float(np.max(lengths)), 0.0))
+    # |a_i| / 2 pi: the columns of B^-1
+    directions = np.linalg.norm(np.linalg.inv(basis), axis=0)
+    reach = [int(math.floor(0.5 + radius * float(value) + 1.0e-9)) for value in directions]
+    import itertools
+
+    candidates = [
+        n
+        for n in itertools.product(*(range(-r, r + 1) for r in reach))
+        if any(n)
+    ]
+    candidates.sort(key=lambda n: (sum(abs(v) for v in n), n))
+    best = lengths.copy()
+    moves = np.zeros_like(values)
+    for n in candidates:
+        shift = np.asarray(n, dtype=np.float64)
+        trial = squared(values - shift[None, :])
+        better = trial < best - tolerance * scale
+        if np.any(better):
+            best = np.where(better, trial, best)
+            moves[better] = shift
+    moved = np.any(moves != 0.0, axis=1)
+    result = values.copy()
+    result[moved] = values[moved] - moves[moved]
+    return result[0] if single else result
+
+
+def oblique_reciprocal_lattice(reciprocal, *, tolerance: float = 1.0e-12) -> bool:
+    """Whether the reciprocal vectors (rows of ``reciprocal``) are not mutually orthogonal (relative to the largest
+    ``|b_i|^2``): a hexagonal, monoclinic or triclinic cell, the primitive fcc and bcc cells.  On a lattice of
+    orthogonal vectors every point folded into ``(-1/2, 1/2]`` is a shortest one (:func:`fold_to_shortest`)."""
+
+    basis = np.asarray(reciprocal, dtype=np.float64).reshape(3, 3)
+    metric = basis @ basis.T
+    scale = float(np.max(np.abs(np.diag(metric))))
+    return bool(np.max(np.abs(metric - np.diag(np.diag(metric)))) > tolerance * scale)
+
+
+def shortest_images(fractions, reciprocal, *, tolerance: float = SHORTEST_FOLD_TOLERANCE) -> list[np.ndarray]:
+    """Every shortest representative of each point modulo the reciprocal lattice, the ties on the zone boundary
+    included.
+
+    ``fractions`` are rows ``f`` of ``k = f B`` (``reciprocal``: the rows ``b_i`` of ``B``).  Entry ``i`` of the list
+    is an ``(m, 3)`` array of the points ``f_i - n`` (``f_i`` folded into ``(-1/2, 1/2]`` first) whose squared lengths
+    are within ``tolerance`` (relative to the largest ``|b_i|^2``) of the shortest: one point inside the first
+    Brillouin zone, two or more on its boundary (the faces, edges and corners of the Wigner-Seitz cell, such as the
+    fcc ``X``, ``L`` and ``W`` points or the hexagonal ``M`` and ``K`` points).  The first is that of
+    :func:`fold_to_shortest`, the others follow in the order of its candidates.  The finite-difference Bloch operator
+    is not invariant under ``k -> k + G``, so equally short images have levels that differ at the order of the
+    discretization unless an operation that keeps the grid's finite-difference operators relates them; a mesh point
+    with ``m`` of them is computed as all of them, each with ``1/m`` of its weight (the choice that does not depend on
+    an order of the candidates and that every operation of the lattice maps onto itself).
+
+    On a lattice of mutually orthogonal reciprocal vectors (:func:`oblique_reciprocal_lattice` false) the folded point
+    alone is returned, as :func:`fold_to_shortest` gives it: a component ``1/2`` keeps its tie with ``-1/2`` there
+    (the points of these lattices before 2026-11-21, bit for bit).
+    """
+
+    values = np.atleast_2d(fold_to_centered_zone(fractions))
+    if values.shape[0] == 0:
+        return []
+    basis = np.asarray(reciprocal, dtype=np.float64).reshape(3, 3)
+    if not oblique_reciprocal_lattice(basis):
+        return [row[None, :].copy() for row in values]
+    first = np.atleast_2d(fold_to_shortest(values, basis, tolerance=tolerance))
+    metric = basis @ basis.T
+    scale = float(np.max(np.diag(metric)))
+    lengths = np.einsum("...i,ij,...j->...", values, metric, values)
+    radius = math.sqrt(max(float(np.max(lengths)), 0.0))
+    directions = np.linalg.norm(np.linalg.inv(basis), axis=0)
+    reach = [int(math.floor(0.5 + radius * float(value) + 1.0e-9)) for value in directions]
+    import itertools
+
+    candidates = sorted(
+        itertools.product(*(range(-r, r + 1) for r in reach)), key=lambda n: (sum(abs(v) for v in n), n)
+    )
+    shifts = np.asarray(candidates, dtype=np.float64)
+    # (points, candidates): the squared lengths of f - n
+    moved = values[:, None, :] - shifts[None, :, :]
+    trial = np.einsum("pci,ij,pcj->pc", moved, metric, moved)
+    shortest = trial <= np.min(trial, axis=1, keepdims=True) + tolerance * scale
+    found: list[np.ndarray] = []
+    for index in range(values.shape[0]):
+        chosen = np.rint(values[index] - first[index])
+        rows = [first[index]]
+        for column in np.flatnonzero(shortest[index]):
+            if not np.array_equal(shifts[column], chosen):
+                rows.append(values[index] - shifts[column])
+        found.append(np.asarray(rows, dtype=np.float64))
+    return found
+
+
+def _class_key(fraction) -> tuple[int, int, int]:
+    """A key of the class of a point modulo the reciprocal lattice (reduced coordinates, steps of 1e-9)."""
+
+    scaled = np.rint((np.asarray(fraction, dtype=np.float64) % 1.0) * 1.0e9).astype(np.int64) % 1_000_000_000
+    return tuple(int(value) for value in scaled)
+
+
+def negation_closed_shortest(fractions, reciprocal, *, tolerance: float = SHORTEST_FOLD_TOLERANCE) -> np.ndarray:
+    """One shortest image of each point (:func:`shortest_images`), the set closed under ``k -> -k``.
+
+    The image of :func:`fold_to_shortest`, except at a point of the zone boundary with several shortest images whose
+    class ``-f`` came earlier: it takes the negative of that point's image, which is one of its own.  The
+    time-reversal pairs of the set (:func:`time_reversal_reduced`) are then exact, ``-k`` and not ``-k`` plus a
+    reciprocal vector, which the finite-difference Bloch operator does not keep.  The same points as
+    :func:`fold_to_shortest` wherever no point has two shortest images (on a lattice of orthogonal vectors always).
+    """
+
+    images = shortest_images(fractions, reciprocal, tolerance=tolerance)
+    if not images:
+        return np.zeros((0, 3))
+    chosen = np.asarray([group[0] for group in images], dtype=np.float64)
+    seen: dict = {}
+    for index, group in enumerate(images):
+        if group.shape[0] > 1:
+            partner = seen.get(_class_key(-group[0]))
+            if partner is not None:
+                chosen[index] = -chosen[partner]
+        seen.setdefault(_class_key(group[0]), index)
+    return chosen
+
+
+def tie_shared_points(k_points, weights, lattice_vectors, *, tolerance: float = SHORTEST_FOLD_TOLERANCE):
+    """``(k_points, weights)`` with every point that has several shortest images (:func:`shortest_images`) replaced
+    by all of them, each with an equal share of its weight; the other points keep their bits.
+
+    The whole Monkhorst-Pack mesh of the default routines on an oblique cell
+    (``SinglePointInput.kpoint_tie_images``): its result does not depend on which image a tie would keep, and the set
+    is closed under ``k -> -k`` exactly (the images of ``-f`` are the negatives of those of ``f``), so its
+    time-reversal pairs are exact.
+    """
+
+    k_points = np.atleast_2d(np.asarray(k_points, dtype=np.float64))
+    weights = np.asarray(weights, dtype=np.float64)
+    reciprocal = reciprocal_lattice(lattice_vectors)
+    images = shortest_images(k_points @ np.linalg.inv(reciprocal), reciprocal, tolerance=tolerance)
+    if all(group.shape[0] == 1 for group in images):
+        return k_points.copy(), weights.copy()
+    rows, shares = [], []
+    for point, weight, group in zip(k_points, weights, images):
+        if group.shape[0] == 1:
+            rows.append(point)
+            shares.append(float(weight))
+            continue
+        for image in group:
+            rows.append(image @ reciprocal)
+            shares.append(float(weight) / float(group.shape[0]))
+    return np.asarray(rows, dtype=np.float64), np.asarray(shares, dtype=np.float64)
+
+
+def _exact_image_stars(fractional, counts, ekin, grid_map, dims, shifts, rotations, time_reversal, b_rows):
+    """The stars of a wedge of shortest representatives made of exact images only, or ``None`` where they are.
+
+    ``irrbz`` counts a mesh point to a star where it is an image of the representative modulo the reciprocal lattice.
+    Every shortest image (:func:`shortest_images`) of every member is then ``+-G f_rep`` exactly for an operation
+    ``G``, except on the zone boundary, where a member may have several shortest images that the group does not
+    relate: those are other k-points of the finite-difference Hamiltonian.  Returns ``None`` where every image is
+    exact (the wedge is kept as it is, bit for bit); otherwise ``(fractional, counts, kinetic_energies, grid_map)``
+    of the orbits of the images under the group (and time reversal), each image with ``1/m`` of its mesh point: the
+    first orbit of each star keeps its representative and ``E_kin``, the others follow it, with ``E_kin = |B f|^2``;
+    ``counts`` are the shares (floats) and ``grid_map`` gives each mesh point the orbit of its first image.
+    """
+
+    n1, n2, n3 = dims
+    full = np.asarray(
+        [
+            [
+                (float(ii) + shifts[0]) / float(n1),
+                (float(jj) + shifts[1]) / float(n2),
+                (float(ll) + shifts[2]) / float(n3),
+            ]
+            for ii in range(n1)
+            for jj in range(n2)
+            for ll in range(n3)
+        ],
+        dtype=np.float64,
+    )
+    basis = np.asarray(b_rows, dtype=np.float64)
+    images = shortest_images(full, basis)
+    stars = np.asarray(grid_map, dtype=np.int64).reshape(-1)
+    matrices = np.asarray(rotations, dtype=np.float64).reshape(-1, 3, 3)
+    signs = (1.0, -1.0) if time_reversal else (1.0,)
+
+    def orbit(point):
+        turned = np.einsum("rij,j->ri", matrices, np.asarray(point, dtype=np.float64))
+        return np.concatenate([sign * turned for sign in signs])
+
+    tolerance = 1.0e-8
+    orbits = [orbit(point) for point in np.asarray(fractional, dtype=np.float64)]
+    exact = all(
+        float(np.min(np.max(np.abs(orbits[stars[index]] - image[None, :]), axis=1))) <= tolerance
+        for index, group in enumerate(images)
+        for image in group
+    )
+    if exact:
+        return None
+    members: dict[int, list[int]] = {}
+    for index, star in enumerate(stars):
+        members.setdefault(int(star), []).append(index)
+    new_fractional, new_counts, new_ekin = [], [], []
+    new_map = np.zeros(stars.shape[0], dtype=np.int64)
+    for star in range(len(fractional)):
+        items = [
+            (index, number, image, 1.0 / float(images[index].shape[0]))
+            for index in members.get(star, [])
+            for number, image in enumerate(images[index])
+        ]
+        taken = [False] * len(items)
+        for first, (index, number, image, share) in enumerate(items):
+            if taken[first]:
+                continue
+            label = len(new_fractional)
+            representative = np.asarray(fractional[star], dtype=np.float64) if first == 0 else image
+            images_of = orbits[star] if first == 0 else orbit(image)
+            total = 0.0
+            for other in range(first, len(items)):
+                if taken[other]:
+                    continue
+                candidate = items[other][2]
+                if float(np.min(np.max(np.abs(images_of - candidate[None, :]), axis=1))) <= tolerance:
+                    taken[other] = True
+                    total += items[other][3]
+                    if items[other][1] == 0:
+                        new_map[items[other][0]] = label
+            new_fractional.append(representative)
+            new_counts.append(total)
+            if first == 0:
+                new_ekin.append(float(ekin[star]))
+            else:
+                cartesian = representative @ basis
+                new_ekin.append(float(cartesian @ cartesian))
+    return (
+        np.asarray(new_fractional, dtype=np.float64),
+        np.asarray(new_counts, dtype=np.float64),
+        np.asarray(new_ekin, dtype=np.float64),
+        new_map.reshape(dims),
+    )
+
+
 def _times(matrix, vector) -> list[float]:
     """``matvec3('N', matrix, vector)`` from ``+0.0``, in Fortran's order."""
 
@@ -417,6 +694,8 @@ def irreducible_monkhorst_pack(
     *,
     time_reversal: bool = True,
     fold: bool = True,
+    shortest: bool = False,
+    ties: bool = False,
 ) -> MonkhorstPackSampling:
     """Translation of ``irrbz.f90`` (lines 12-213): the IBZ of a shifted MP grid.
 
@@ -437,7 +716,20 @@ def irreducible_monkhorst_pack(
     run without symmetry differs from the symmetric one through the
     finite-difference Bloch operator (Si8, MP 2x2x2 shifted, h 0.64: 15 mRy).
     The counts, weights, ``grid_map`` and ``E_kin`` do not depend on it;
-    ``fold=False`` gives PARSEC 1.5's set.  ``E_kin``
+    ``fold=False`` gives PARSEC 1.5's set.  ``shortest`` (with ``fold``; the
+    default routines under ``PARSEC_KPOINT_FOLD=shortest``,
+    ``SinglePointInput.kpoint_shortest_representatives``) moves each folded
+    representative on to its shortest image modulo the reciprocal lattice
+    (:func:`fold_to_shortest`), which differs from the folded one on an
+    oblique cell only.  ``ties`` (with ``shortest``; the default routines'
+    wedges of scalar, collinear-spin and spin-orbit orbitals) splits a star
+    whose members' shortest images (:func:`shortest_images`, all of them on
+    the zone boundary, each with an equal share of its point) are not all
+    exact images ``+-G f`` of its representative into the orbits of those
+    images (:func:`_exact_image_stars`): the wedge then gives the whole mesh
+    of shared ties (:func:`tie_shared_points`) to round-off; ``counts`` are
+    floats there and ``grid_map`` gives a mesh point the orbit of its first
+    image.  A wedge whose stars are exact is kept bit for bit.  ``E_kin``
     of a new representative is ``|B (k' - anint(k'))|^2`` with ``k'`` the
     point rotated by the *last* operation, as the Fortran computes it.
 
@@ -523,11 +815,23 @@ def irreducible_monkhorst_pack(
             "counted (PARSEC error 241)"
         )
     fractional = np.array(kibz, dtype=np.float64)
-    if fold:
+    count_values = np.asarray(counts, dtype=np.int64)
+    if fold and shortest:
+        # the shortest image of each representative (the Wigner-Seitz cell; the folded point where it is one)
+        fractional = fold_to_shortest(fractional, np.asarray(b_rows, dtype=np.float64))
+        if ties and oblique_reciprocal_lattice(np.asarray(b_rows, dtype=np.float64)):
+            # the stars of exact images (the ties on the zone boundary shared among their images)
+            split = _exact_image_stars(
+                fractional, counts, ekin, grid_map, dims, shifts, rotations, time_reversal, b_rows
+            )
+            if split is not None:
+                fractional, count_values, split_ekin, grid_map = split
+                ekin = list(split_ekin)
+    elif fold:
         # the representatives themselves (the search above compares them modulo G, as irrbz does)
         fractional = fold_to_centered_zone(fractional)
     k_points = np.array([_times(bvec, [float(v) for v in point]) for point in fractional], dtype=np.float64)
-    weights = np.array([float(count) / float(total) for count in counts], dtype=np.float64)
+    weights = np.array([float(count) / float(total) for count in count_values], dtype=np.float64)
     norm = 0.0
     for value in weights:
         norm = norm + float(value)
@@ -538,7 +842,7 @@ def irreducible_monkhorst_pack(
         fractional=fractional,
         k_points=k_points,
         weights=weights,
-        counts=np.asarray(counts, dtype=np.int64),
+        counts=count_values,
         kinetic_energies=np.asarray(ekin, dtype=np.float64),
         grid_map=grid_map,
         time_reversal=bool(time_reversal),
@@ -739,7 +1043,15 @@ def kpoint_sampling_details(problem) -> MonkhorstPackSampling | None:
     ``problem.hybrid_kpoint_wedge`` (``PARSEC_HYBRID_KPOINT_WEDGE``) the
     operations of the space group that map the mesh onto itself
     (:func:`hybrid_wedge_group`): the exchange then reaches the other points
-    of the mesh through the images of the wedge.
+    of the mesh through the images of the wedge.  The representatives are
+    folded into ``(-1/2, 1/2]``, or moved on to their shortest images
+    (:func:`fold_to_shortest`) where
+    ``problem.kpoint_shortest_representatives`` (the default routines under
+    ``PARSEC_KPOINT_FOLD=shortest``); with ``problem.kpoint_tie_images``
+    (not for a hybrid, whose exchange reaches the mesh through the stars of
+    its wedge, nor for the DOS tetrahedra and Output_GW) a star whose members'
+    shortest images are not all exact images of its representative is split
+    into their orbits (``ties`` of :func:`irreducible_monkhorst_pack`).
     """
 
     shift = getattr(problem, "monkhorst_pack_shift", None)
@@ -764,11 +1076,15 @@ def kpoint_sampling_details(problem) -> MonkhorstPackSampling | None:
         tuple(float(value) for value in shift),
         rotations,
         not problem.scf.noncollinear,
+        bool(getattr(problem, "kpoint_shortest_representatives", False)),
+        bool(getattr(problem, "kpoint_tie_images", False)) and not _hybrid(problem),
     )
 
 
 @lru_cache(maxsize=8)
-def _cached_irreducible_monkhorst_pack(lattice, dimensions, shift, rotations, time_reversal):
+def _cached_irreducible_monkhorst_pack(
+    lattice, dimensions, shift, rotations, time_reversal, shortest=False, ties=False
+):
     """One computation per input for the CLI, the report and ``qpoints.dat``.
 
     Callers must not modify the arrays of the returned (shared) object.
@@ -780,6 +1096,8 @@ def _cached_irreducible_monkhorst_pack(lattice, dimensions, shift, rotations, ti
         shift,
         None if rotations is None else np.asarray(rotations, dtype=np.int64),
         time_reversal=time_reversal,
+        shortest=bool(shortest),
+        ties=bool(ties),
     )
     for array in (
         sampling.fractional,
@@ -825,7 +1143,8 @@ def hybrid_kpoint_wedge_setting() -> str:
     * ``on``: the wedge always, its semilocal start too: the symmetric state, also for a metal.
     * ``off``: the time-reversal pairs of the mesh, as before.
 
-    Forces, moving atoms and spinors keep the pairs either way.  Any other value is refused (``grid``, the operations
+    Forces and moving atoms take the same route unless ``PARSEC_HYBRID_KPOINT_FORCE_WEDGE=off``
+    (:func:`hybrid_kpoint_force_wedge_setting`); spinors keep the pairs either way.  Any other value is refused (``grid``, the operations
     of scalar orbitals on any grid of 2026-11-19, among them those that turn an oblique grid's stencil, is gone)."""
 
     import os
@@ -834,6 +1153,37 @@ def hybrid_kpoint_wedge_setting() -> str:
     value = value or HYBRID_KPOINT_WEDGE_DEFAULT
     if value not in ("auto", "on", "off"):
         raise ValueError(f"{HYBRID_KPOINT_WEDGE_ENV} must be auto, on or off, got {value!r}")
+    return value
+
+
+HYBRID_KPOINT_FORCE_WEDGE_ENV = "PARSEC_HYBRID_KPOINT_FORCE_WEDGE"
+
+
+def hybrid_kpoint_force_wedge_setting() -> str:
+    """``PARSEC_HYBRID_KPOINT_FORCE_WEDGE`` (``auto``, ``off``): the forces and the relaxation of a hybrid on the
+    irreducible wedge of its Monkhorst-Pack mesh.
+
+    * ``auto`` (default, since 2026-11-21): the single-point forces and the ``bfgs``/``simple`` relaxations of a bulk
+      hybrid take the wedge that :func:`hybrid_kpoint_wedge_setting` gives a single point (``auto``: after a semilocal
+      start of the first structure without partly filled states, which the later structures of a relaxation keep, so
+      a metal keeps the pairs; ``on``: the whole run on it), under the operations of the space group that map the
+      grid, its finite-difference operators and the mesh onto themselves and keep the movable atoms apart from the
+      fixed ones; the nonlocal forces of the wedge are completed over the group and the forces averaged over it
+      (``symm_forces.f90``), so the structure keeps the group, as for semilocal k-point forces.  On the default
+      routines ``PARSEC_KPOINT_FORCE_WEDGE=off`` (:func:`kpoint_force_wedge_setting`) turns this off too; the
+      Fortran-derived routines do not read that switch (they reduce the mesh of every k-point force, as PARSEC 1.5
+      does), so there ``off`` of this switch is the one that keeps a hybrid's forces on the pairs.  Molecular
+      dynamics and ``manual`` movements keep the pairs (PARSEC uses no symmetry for them).
+    * ``off``: forces, moving atoms and relaxations of a hybrid keep the time-reversal pairs of the whole mesh, as
+      before, bit for bit.
+
+    Any other value is refused."""
+
+    import os
+
+    value = os.environ.get(HYBRID_KPOINT_FORCE_WEDGE_ENV, "auto").strip().lower() or "auto"
+    if value not in ("auto", "off"):
+        raise ValueError(f"{HYBRID_KPOINT_FORCE_WEDGE_ENV} must be auto or off, got {value!r}")
     return value
 
 
@@ -970,8 +1320,8 @@ def unshifted_mesh_setting() -> str:
     Fortran-derived routines that is ``irrbz``'s wedge (the space group, and time reversal unless non-collinear).  On
     the default routines a single point, forces or a relaxation of scalar orbitals and of non-magnetic spin-orbit
     coupling (``PARSEC_SOC_KPOINT_WEDGE``) take the irreducible wedge of the operations that map the grid and the mesh
-    onto themselves (for spin-orbit coupling those that also keep the grid's finite-difference operators,
-    :func:`stencil_preserving_operations`), with time reversal, the density symmetrized (``Symmetrize_Charge_Density``
+    onto themselves and keep the grid's finite-difference operators (:func:`stencil_preserving_operations`;
+    ``PARSEC_SCALAR_KPOINT_WEDGE``), with time reversal, the density symmetrized (``Symmetrize_Charge_Density``
     true by default);
     a hybrid functional takes the time-reversal pairs of the mesh (its exchange sums over the whole mesh), molecular
     dynamics and manual movements the whole mesh as its time-reversal pairs, and non-collinear magnetism and
@@ -1006,6 +1356,30 @@ def kpoint_force_wedge_setting() -> str:
     return value
 
 
+MOVE_FLAG_SPACE_GROUP_ENV = "PARSEC_MOVE_FLAG_SPACE_GROUP"
+
+
+def move_flag_space_group_setting() -> str:
+    """``PARSEC_MOVE_FLAG_SPACE_GROUP``: ``auto`` (default, since 2026-11-21) or ``off``.
+
+    A relaxation by an optimizer (``bfgs``, ``simple``) of a bulk cell whose ``Move_Flag`` fixes atoms that an
+    operation of the space group the problem carries (the irreducible wedge of a Monkhorst-Pack mesh, the density
+    average of ``Symmetrize_Charge_Density``, a weighted ``Kpoint_List``) exchanges with movable ones leaves that group
+    after its first move, but not the subgroup of the operations that map the fixed atoms onto fixed atoms
+    (:func:`parsec_python.Grid.space_group.flag_preserving_subgroup`).  ``auto`` (with
+    ``PARSEC_MOVE_FLAG_SUBGROUP=auto``) carries that subgroup: the mesh is reduced by it and time reversal, the density
+    averaged over it, the nonlocal forces of the wedge completed and the forces averaged over it, on both routine
+    sets.  ``off`` keeps the routes of before: the whole mesh as its time-reversal pairs on the default routines, a
+    refusal by name on the Fortran-derived ones (and their Gamma-point density average over the whole group)."""
+
+    import os
+
+    value = os.environ.get(MOVE_FLAG_SPACE_GROUP_ENV, "auto").strip().lower() or "auto"
+    if value not in ("auto", "off"):
+        raise ValueError(f"{MOVE_FLAG_SPACE_GROUP_ENV} must be auto or off, got {value!r}")
+    return value
+
+
 SOC_KPOINT_WEDGE_ENV = "PARSEC_SOC_KPOINT_WEDGE"
 
 
@@ -1022,8 +1396,9 @@ def soc_kpoint_wedge_setting() -> str:
     ``PARSEC_KPOINT_FORCE_WEDGE`` lets scalar orbitals take it, and the time-reversal pairs of the whole mesh
     (``PARSEC_KPOINT_TIME_REVERSAL``) where they keep the whole mesh.  On an orthogonal grid that is every operation
     that maps the grid and the mesh onto themselves; on an oblique one (fcc, hcp) a subgroup.  ``grid``: the
-    operations that map the grid and the mesh onto themselves, the group of scalar orbitals (fewer points on an
-    oblique grid, at a discretization error: fcc Au 1.2e-4 Ry, hcp Au 7.7e-3 Ry at 0.3 bohr).  ``off`` keeps the
+    operations that map the grid and the mesh onto themselves, the group scalar orbitals took before 2026-11-21 and
+    take under ``PARSEC_SCALAR_KPOINT_WEDGE=grid`` (fewer points on an oblique grid, at a discretization error: fcc
+    Au 1.2e-4 Ry, hcp Au 7.7e-3 Ry at 0.3 bohr).  ``off`` keeps the
     whole mesh of equal weights, as before, bit for bit.  Non-collinear magnetism and collinear spin with spin-orbit
     coupling keep the whole mesh under every value (the moments are not part of the group found from the atoms, and
     time reversal flips them)."""
@@ -1036,12 +1411,114 @@ def soc_kpoint_wedge_setting() -> str:
     return value
 
 
-def time_reversal_reduced(k_points, weights, lattice_vectors) -> tuple[np.ndarray, np.ndarray]:
-    """The representatives of a uniform mesh of equal weights under time reversal (``k ~ -k``).
+SCALAR_KPOINT_WEDGE_ENV = "PARSEC_SCALAR_KPOINT_WEDGE"
+#: The value of PARSEC_SCALAR_KPOINT_WEDGE without the variable.
+SCALAR_KPOINT_WEDGE_DEFAULT = "auto"
 
-    The first point of each pair is kept with twice the weight; a point with
+
+def scalar_kpoint_wedge_setting() -> str:
+    """``PARSEC_SCALAR_KPOINT_WEDGE``: the operations of the irreducible wedge of a Monkhorst-Pack mesh of scalar (and
+    collinear-spin) orbitals of a bulk cell on the default routines (a single point, forces and a relaxation;
+    :func:`parsec_python.Input.parsec_input._default_routines_wedge`).
+
+    * ``auto`` (default, since 2026-11-21): those of the crystal that map the grid, the mesh and the grid's
+      finite-difference operators onto themselves (:func:`stencil_preserving_operations`), with time reversal, the
+      density averaged over them, as non-magnetic spin-orbit coupling takes them (``PARSEC_SOC_KPOINT_WEDGE=auto``);
+      the forces over the larger group of :func:`kpoint_force_group_setting`.  With ``PARSEC_KPOINT_FOLD=shortest``
+      the wedge then computes exactly the points of the whole mesh without symmetry on the same grid, its ties on the
+      zone boundary shared (:func:`tie_shared_points`; A100: within 1.4e-10 Ry for fcc Au, hcp Au2, primitive bcc Au
+      and primitive Si).  On an orthogonal grid that is every operation that maps the grid and the mesh onto
+      themselves, bit for bit as ``grid``; on an oblique one (hexagonal, the primitive fcc and bcc cells) a subgroup
+      (hcp 8 of 24, primitive fcc 12 of 48), so more k-points (1.75 to 2.4 times on the meshes measured, 1.3 to 1.8
+      times the time).
+    * ``grid``: every operation that maps the grid and the mesh onto themselves, as before: also the three- and
+      six-fold axes of an oblique grid, which turn a grid axis onto another direction and change the
+      finite-difference operators at the order of the discretization (A100, against the whole mesh of shared ties,
+      0.3 bohr and order 6: hcp Au2 4x4x2 -1.2e-3 Ry, fcc Au 4x4x4, 6x6x6 and 8x8x8 -4.7e-4, -3.1e-4 and -9.7e-6 Ry,
+      primitive bcc Au 6x6x6 +2.8e-3 Ry; order 12: hcp Au2 -7.2e-5 Ry, fcc Au 6x6x6 -2.5e-5 Ry).
+
+    Any other value is refused before the SCF."""
+
+    import os
+
+    value = os.environ.get(SCALAR_KPOINT_WEDGE_ENV, SCALAR_KPOINT_WEDGE_DEFAULT).strip().lower()
+    value = value or SCALAR_KPOINT_WEDGE_DEFAULT
+    if value not in ("auto", "grid"):
+        raise ValueError(f"{SCALAR_KPOINT_WEDGE_ENV} must be auto or grid, got {value!r}")
+    return value
+
+
+KPOINT_FOLD_ENV = "PARSEC_KPOINT_FOLD"
+#: The value of PARSEC_KPOINT_FOLD without the variable.
+KPOINT_FOLD_DEFAULT = "shortest"
+
+
+def kpoint_fold_setting() -> str:
+    """``PARSEC_KPOINT_FOLD``: the representatives of the k-points of a Monkhorst-Pack mesh on the default routines
+    (a bulk cell, and a slab of ``Use_Fortran_Routines: .false.``).
+
+    * ``shortest`` (default, since 2026-11-21): every point of the explicit list of the whole mesh (the mesh of
+      forces and moving atoms without a wedge, of molecular dynamics, of a hybrid, of magnetic spinors, run whole or
+      as its time-reversal pairs) and every representative of an irreducible wedge is the shortest of its images
+      modulo the reciprocal lattice (:func:`fold_to_shortest`, the first Brillouin zone).  A point of the zone
+      boundary with several shortest images runs as all of them with equal shares of its weight
+      (``SinglePointInput.kpoint_tie_images``: :func:`tie_shared_points` in the whole mesh, the stars of a wedge split
+      into orbits of exact images), except for a hybrid, which keeps one of them per point, the set closed under
+      ``k -> -k`` (:func:`negation_closed_shortest`); the time-reversal pairs are then exact.  On a lattice of
+      orthogonal vectors that is the point folded into ``(-1/2, 1/2]``, bit for bit as ``centred``.
+    * ``centred``: every point folded into ``(-1/2, 1/2]`` along the reciprocal lattice vectors
+      (:func:`fold_to_centered_zone`), as before; on an oblique cell some of them lie outside the first zone.
+
+    The finite-difference Bloch operator of the u gauge is not invariant under ``k -> k + G``, so the choice changes
+    the energy of an oblique cell at the order of the discretization.  The Fortran-derived routines keep the folded
+    points under both values (PARSEC 1.5's ``irrbz`` keeps them in ``[0, 1)``).  Any other value is refused before the
+    SCF."""
+
+    import os
+
+    value = os.environ.get(KPOINT_FOLD_ENV, KPOINT_FOLD_DEFAULT).strip().lower() or KPOINT_FOLD_DEFAULT
+    if value not in ("shortest", "centred"):
+        raise ValueError(f"{KPOINT_FOLD_ENV} must be shortest or centred, got {value!r}")
+    return value
+
+
+KPOINT_FORCE_GROUP_ENV = "PARSEC_KPOINT_FORCE_GROUP"
+#: The value of PARSEC_KPOINT_FORCE_GROUP without the variable.
+KPOINT_FORCE_GROUP_DEFAULT = "crystal"
+
+
+def kpoint_force_group_setting() -> str:
+    """``PARSEC_KPOINT_FORCE_GROUP``: the operations the forces and the moved positions of a wedge of the default
+    routines are averaged over where the wedge keeps only those that keep the grid's finite-difference operators
+    (``PARSEC_SCALAR_KPOINT_WEDGE=auto`` or ``PARSEC_SOC_KPOINT_WEDGE=auto`` on an oblique grid).
+
+    * ``crystal`` (default, since 2026-11-21): every operation of the space group that maps the grid and the mesh onto
+      themselves (``SinglePointInput.force_space_group``), the group of the forces before 2026-11-21, while the k-point
+      sum stays that of the wedge.  The forces of the converged grid have that symmetry; the average is the orthogonal
+      projection onto it, so it removes only the part the oblique grid breaks (an hcp atom on the three-fold axis
+      keeps zero in-plane forces) and keeps a relaxed structure in the group.
+    * ``wedge``: the operations of the wedge alone (the forces of the same points without symmetry on that grid).
+
+    Any other value is refused before the SCF."""
+
+    import os
+
+    value = os.environ.get(KPOINT_FORCE_GROUP_ENV, KPOINT_FORCE_GROUP_DEFAULT).strip().lower()
+    value = value or KPOINT_FORCE_GROUP_DEFAULT
+    if value not in ("crystal", "wedge"):
+        raise ValueError(f"{KPOINT_FORCE_GROUP_ENV} must be crystal or wedge, got {value!r}")
+    return value
+
+
+def time_reversal_reduced(k_points, weights, lattice_vectors) -> tuple[np.ndarray, np.ndarray]:
+    """The representatives of a uniform mesh under time reversal (``k ~ -k``).
+
+    The first point of each pair is kept with the weights of both; a point with
     ``-k = k`` modulo the reciprocal lattice of ``lattice_vectors`` keeps its
-    own.  The order of the first members is kept.
+    own.  The order of the first members is kept.  The partner is ``-k``
+    itself where the set holds it, else ``-k`` plus a reciprocal vector (the
+    only partner of a set with one point per class, as before 2026-11-21; a
+    whole mesh of shared ties, :func:`tie_shared_points`, holds both).
     """
 
     k_points = np.atleast_2d(np.asarray(k_points, dtype=float))
@@ -1057,8 +1534,10 @@ def time_reversal_reduced(k_points, weights, lattice_vectors) -> tuple[np.ndarra
         total = fractions + fractions[index]
         partners = np.flatnonzero(np.all(np.abs(total - np.round(total)) < 1.0e-8, axis=1) & ~taken)
         if partners.size:
-            taken[partners[0]] = True
-            weight += float(weights[partners[0]])
+            exact = partners[np.all(np.abs(total[partners]) < 1.0e-8, axis=1)]
+            partner = int(exact[0]) if exact.size else int(partners[0])
+            taken[partner] = True
+            weight += float(weights[partner])
         kept.append(index)
         kept_weights.append(weight)
     return k_points[kept].copy(), np.asarray(kept_weights, dtype=float)
@@ -1082,6 +1561,14 @@ def kpoint_sampling(problem) -> tuple[np.ndarray, np.ndarray] | None:
     if getattr(problem, "kpoints", None) is not None:
         k_points = np.asarray(problem.kpoints, dtype=float)
         weights = np.asarray(problem.kpoint_weights, dtype=float)
+        if getattr(problem, "kpoint_tie_images", False):
+            # the whole mesh of the default routines on an oblique cell: every shortest image of a point on the zone
+            # boundary with its share of the weight (exact time-reversal pairs)
+            lattice = problem.periodic_cell.lattice_vectors
+            k_points, weights = tie_shared_points(k_points, weights, lattice)
+            if getattr(problem, "kpoint_time_reversal", False):
+                return time_reversal_reduced(k_points, weights, lattice)
+            return k_points, weights
         if (_hybrid(problem) or getattr(problem, "kpoint_time_reversal", False)) and np.allclose(
             weights, weights[0], rtol=1.0e-12, atol=0.0
         ):
@@ -1104,10 +1591,20 @@ def kpoint_sampling(problem) -> tuple[np.ndarray, np.ndarray] | None:
 __all__ = [
     "IBZ_TOLERANCE",
     "KPOINT_UNITS",
+    "MOVE_FLAG_SPACE_GROUP_ENV",
     "MonkhorstPackSampling",
     "explicit_kpoints",
     "band_path_kpoints",
     "fold_to_centered_zone",
+    "hybrid_kpoint_force_wedge_setting",
+    "fold_to_shortest",
+    "negation_closed_shortest",
+    "oblique_reciprocal_lattice",
+    "shortest_images",
+    "tie_shared_points",
+    "kpoint_fold_setting",
+    "kpoint_force_group_setting",
+    "scalar_kpoint_wedge_setting",
     "hybrid_kpoint_wedge_setting",
     "DeferredHybridWedge",
     "HYBRID_WEDGE_FRACTIONAL_TOLERANCE",
@@ -1122,6 +1619,7 @@ __all__ = [
     "kpoint_sampling_details",
     "kpoint_time_reversal_setting",
     "mesh_preserving_operations",
+    "move_flag_space_group_setting",
     "monkhorst_pack_grid",
     "partly_filled_states",
     "read_kpoint_file",

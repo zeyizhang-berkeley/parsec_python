@@ -862,7 +862,50 @@ def ion_ion_energy(
 
 PROJECTOR_CENTER_ROUND_OFF = 1.0e-6
 """Bohr: a projector's grid point closer than this (and than the first radial knot) to its atom is the center,
-the clamp of the nonlocal forces (``Forces.periodic.ROUND_OFF_DISTANCE``)."""
+the clamp of the nonlocal forces (``Forces.periodic.ROUND_OFF_DISTANCE``), under ``PARSEC_PROJECTOR_CENTER=off``."""
+
+#: The switch of the centre radius of the projector harmonics and of their gradients (:func:`projector_center_setting`).
+PROJECTOR_CENTER_ENV = "PARSEC_PROJECTOR_CENTER"
+
+
+def projector_center_setting() -> str:
+    """``PARSEC_PROJECTOR_CENTER``: the radius below which the harmonics of a projector divide by a fixed radius.
+
+    ``auto`` (default since 2026-11-21): the first radial sample ``rs(2)``, the rule of ``nonloc.F90`` (``rnorm =
+    max(|d|, rrmin)`` in ``ylm_real``, ``ylm_cplx`` and the radial interpolation, for the projector values and their
+    gradients alike).  Inside the first sample a channel ``l`` is then ``w(rs(2)) Y_l(d/rs(2))``, which goes to its
+    zero limit like ``|d|^l`` (``w ~ r^l`` near the atom), and its gradient is ``w(rs(2))/rs(2)``, the slope of a p
+    projector.  ``off``: ``min(rs(2), 1e-6 bohr)`` (:data:`PROJECTOR_CENTER_ROUND_OFF`), as before: between 1e-6
+    bohr and the first sample the harmonics took the true direction, so the projector had the full ``w(rs(2))`` in
+    the direction of the atom and its gradient grew as ``w(rs(2))/|d|`` up to ``w(rs(2))/1e-6``; an atom within
+    round-off of a grid point got a nonlocal force of 0.1 Ry/bohr (carbon POTRE table, first sample 1.3e-5 bohr) to
+    0.75 Ry/bohr (carbon FHI table, 1.04e-3 bohr) from that one point.  The projectors that used the true direction
+    at every distance (the double grid, the spin-orbit projectors) take ``rs(2)`` under ``auto`` too.
+    """
+
+    import os
+
+    value = os.environ.get(PROJECTOR_CENTER_ENV, "auto").strip().lower() or "auto"
+    if value not in ("auto", "off"):
+        raise ValueError(f"{PROJECTOR_CENTER_ENV} must be auto or off, not {value!r}")
+    return value
+
+
+def projector_center_radius(potential, setting: str | None = None, *, off_radius: float | None = None) -> float:
+    """The centre radius of the projector harmonics of ``potential`` under ``setting`` (read when ``None``).
+
+    ``auto``: the first radial sample.  ``off``: ``off_radius`` when given (the builders that used the true
+    direction pass 0), else ``min(first sample, PROJECTOR_CENTER_ROUND_OFF)``.
+    """
+
+    first = float(potential.radii[0])
+    if setting is None:
+        setting = projector_center_setting()
+    if setting == "auto":
+        return first
+    if off_radius is not None:
+        return float(off_radius)
+    return min(first, PROJECTOR_CENTER_ROUND_OFF)
 
 
 def real_spherical_harmonics(
@@ -886,12 +929,14 @@ def real_spherical_harmonics(
 
     ``center_radius`` (bohr, default 0): the cosines are ``x/max(r, c)``, so a
     point within ``c`` of the center goes continuously to that limit.  The
-    projectors pass the radius their radial table is clamped to, as the forces
-    do (:data:`parsec_python.Forces.periodic.ROUND_OFF_DISTANCE`): a grid point
-    on an atom up to round-off (``1e-16`` to ``1e-12`` bohr) otherwise takes the
-    random direction of its round-off, which breaks the symmetry of the
-    operator (diamond with atoms on the points of its grid: ``2e-4`` of
-    ``V_NL`` under a two-fold axis).
+    projectors pass :func:`projector_center_radius`: the first radial sample,
+    the radius their radial table is clamped to (``nonloc.F90``, the default
+    since 2026-11-21), or under ``PARSEC_PROJECTOR_CENTER=off``
+    ``min(rs(2), 1e-6 bohr)`` (:data:`parsec_python.Forces.periodic.ROUND_OFF_DISTANCE`):
+    a grid point on an atom up to round-off (``1e-16`` to ``1e-12`` bohr)
+    otherwise takes the random direction of its round-off, which breaks the
+    symmetry of the operator (diamond with atoms on the points of its grid:
+    ``2e-4`` of ``V_NL`` under a two-fold axis).
 
     Columns span the complete channel.  Orthogonal rotations, permutations,
     or sign changes within that channel leave
@@ -1276,6 +1321,8 @@ def build_nonlocal_projectors(
     )
     # one radial table (and spline) per species and channel, shared by its atoms and their images
     channels: dict[tuple[str, int], tuple[np.ndarray, float, ParsecRadialSpline | None]] = {}
+    # the centre radius of the harmonics (PARSEC_PROJECTOR_CENTER), read once
+    center_setting = projector_center_setting()
 
     for atom_index, atom in enumerate(atoms):
         potential = potentials[atom.symbol]
@@ -1358,8 +1405,8 @@ def build_nonlocal_projectors(
             for support_rows, relative_support, radius_support, phase in images:
                 if radial_spline is not None:
                     # ``nonloc.F90`` clamps the radial interpolation coordinate
-                    # to the first positive POTRE radius.  Angular harmonics
-                    # still use the actual atom-image-grid displacement below.
+                    # to the first positive POTRE radius (and, under
+                    # PARSEC_PROJECTOR_CENTER=auto, the harmonics below too).
                     interpolation_radius = np.maximum(
                         radius_support, potential.radii[0]
                     )
@@ -1375,12 +1422,14 @@ def build_nonlocal_projectors(
 
                 # The same normalized radial function is paired with every one
                 # of the 2*l+1 real harmonics in this angular-momentum channel.
-                # A grid point on the atom up to round-off takes the center's
-                # zero-limit direction (the radial value is clamped there too).
+                # A grid point within the centre radius of the atom divides by
+                # that radius (projector_center_setting: the first radial sample,
+                # nonloc.F90's rnorm, or under off min(rs(2), 1e-6 bohr)), so it
+                # goes continuously to the zero-limit direction of the centre.
                 harmonics = real_spherical_harmonics(
                     angular_momentum,
                     relative_support,
-                    center_radius=min(float(potential.radii[0]), PROJECTOR_CENTER_ROUND_OFF),
+                    center_radius=projector_center_radius(potential, center_setting),
                 )
                 for harmonic_index, target_column in enumerate(channel_columns):
                     projector = phase * (sqrt_dv * radial * harmonics[:, harmonic_index])

@@ -20,7 +20,9 @@ ignored, which PARSEC_MPI_RESTART_RUN=off keeps).
 A bulk periodic cell at the Gamma point (orthorhombic, a native LDA or GGA,
 unpolarized or collinear spin) runs in the sectors of its group (about the
 origin of the cell, about a symmetric site off it, with the half-cell
-translations; both spin channels in its abelian sectors), or, unpolarized, as
+translations; both spin channels in its sectors, since 2026-11-21 the weighted
+ones of a non-abelian point group as main.py takes them, PARSEC_ORBITAL_GROUP_MPI),
+or, unpolarized, as
 one sector of the identity, whose orbitals several ranks per node share, one
 GPU each (scripts/run_multi_gpu_scf.sh --rank-per-gpu), or one rank per node
 over all the GPUs of each with Eigensolver: chebff (PARSEC_MPI_NESTED_SHARING,
@@ -33,7 +35,8 @@ the full group of the sectors on the root, every rank moving the projectors of
 its sectors; its molecular dynamics, manual movements and relaxations with fixed
 atoms on one sector of the identity, which one rank, the ranks of
 --rank-per-gpu or (nested sharing) one rank per node share, as all its forces and moves under
-PARSEC_PERIODIC_SECTOR_FORCES=off (the rule of main.py). The other periodic
+PARSEC_PERIODIC_SECTOR_FORCES=off (the rule of main.py); those of a spin-polarized cell or cluster on that
+sector with both channels (since 2026-11-21, _spin_moves_without_group). The other periodic
 calculations are refused by name (_refuse_unsupported_periodic).
 """
 from __future__ import annotations
@@ -312,6 +315,35 @@ def _placement_line(context):
     return f"Sector placement ({record['rule']}): " + '; '.join(parts)
 
 
+def _rank_devices_text(context):
+    """The GPUs of every sector of this rank (``device_groups`` of a configured context), grouped."""
+    by_group = {}
+    for sector, devices in sorted(getattr(context, 'device_groups', {}).items()):
+        by_group.setdefault(tuple(devices), []).append(int(sector))
+    return '; '.join(f"sectors {' '.join(map(str, sectors))} on GPU{'s' if len(group) > 1 else ''} "
+                     f"{','.join(map(str, group))}" for group, sectors in by_group.items())
+
+
+def _rank_pool_lines(comm, context):
+    """The lines of parsec.out that name the device-pool decision of every rank, gathered on the root.
+
+    Collective on ``comm`` where the ranks judge the pool floor (:attr:`MPISectorContext.pool_floor`, the same on
+    every rank: ``experimental/mpi_scf.runner_pool_floor_applies``): each rank whose GPUs took a decision
+    (``pool_note``) gives the devices of its sectors (:func:`_rank_devices_text`) and the reason, one line
+    ``Sector devices of rank r: ...`` per such rank (since 2026-11-21; before, only the root's).  The root gets the
+    list (empty where no rank decided), the other ranks ``None``; ``None`` everywhere without the floor (no
+    collective then).
+    """
+    if context is None or not getattr(context, 'pool_floor', False):
+        return None
+    note = getattr(context, 'pool_note', None)
+    records = comm.gather(None if note is None else (_rank_devices_text(context), note), root=0)
+    if records is None:
+        return None
+    return [f'Sector devices of rank {rank}: {record[0]}; {record[1]}'
+            for rank, record in enumerate(records) if record is not None]
+
+
 def _shared_first_solve_note(context, method):
     """The NOTE of a run whose ranks share sectors but whose first solve does not divide their bases, or ``None``.
 
@@ -344,8 +376,8 @@ def _nested_attachment(comm, context, solver):
     Collective on ``comm``: called by every rank after the preparation where the configured sectors are shared
     by ranks of several GPUs each (``PARSEC_MPI_NESTED_SHARING``; :attr:`MPISectorContext.shared` and
     :attr:`~MPISectorContext.nested_sharing` are the same on every rank).  Each rank's sector eigensolver records
-    the nested groups it attached (``nested_representations``; the ranks of a group agree on them,
-    :func:`Eigensolvers.mpi_nested_basis.nested_filter_agreement`).  Returns the sorted sectors of all ranks,
+    the nested groups it attached (``nested_representations``; every rank of a group attaches it, whatever
+    stencil its operator holds, ``filter_graph.device_filter``).  Returns the sorted sectors of all ranks,
     ``None`` where nothing is shared this way (no collective then).
     """
     if context is None or not getattr(context, 'shared', False) or not getattr(context, 'nested_sharing', False):
@@ -906,7 +938,10 @@ def _refuse_unsupported_periodic(translation, *, supercell: bool = False) -> Non
     refused (driver.spin_cell_group_refusal: before the preparation where
     no group is looked for, after the detection otherwise); its forces and
     relaxations by an optimizer run in those sectors too where they keep
-    them, refused on several ranks otherwise (PARSEC_SPIN_SECTOR_FORCES,
+    them, and its molecular dynamics, manual movements and relaxations with
+    fixed atoms as one sector of the identity of both channels that the ranks
+    share (since 2026-11-21, :func:`_spin_moves_without_group`), refused on
+    several ranks otherwise (PARSEC_SPIN_SECTOR_FORCES,
     :func:`_refuse_spin_ionic_steps`). The forces
     of an unpolarized cell and its relaxations (bfgs, simple) with every atom
     movable run here on the default
@@ -1303,6 +1338,48 @@ def _nested_groups_note(context, solver):
             '(518.6 s, 74.9 GiB: their exchanges between nodes go through one network interface per rank).')
 
 
+def _spin_moves_without_group(translation, *, supercell: bool = False) -> bool:
+    """Whether the forces or moves of a spin-polarized run are solved as one sector of the identity of both channels.
+
+    Under ``PARSEC_SPIN_SECTOR_FORCES=auto`` (since 2026-11-21 in this runner): the forces, relaxations and molecular
+    dynamics that use no point group, solved in the full grid of both channels as one sector of the identity whose
+    basis the ranks share (``prepare_single_point`` with ``spin_identity_sector``, the layout of the shared spin
+    fallback, ``PARSEC_SPIN_FALLBACK_SHARED``), where main.py solves them on the full grid of the accelerated
+    driver: for a cluster, molecular dynamics, manual movements, ``Move_Flag`` against its group and
+    ``Ignore_Symmetry`` (:func:`parsec_python.Relaxation.run.symmetry_decision`; ``--symmetry off`` too, which
+    :func:`execute` reads); for a cell, molecular dynamics, manual movements and ``Move_Flag`` fixing atoms
+    (``SCF/gamma_spin._full_grid_moves``) and the forces and relaxations that its rule keeps in sectors but a run
+    takes without symmetry (``Ignore_Symmetry``, ``--symmetry off``), on the default routines, not under
+    ``PARSEC_PERIODIC_SECTOR_FORCES=off`` and never for the supercell of a k-point mesh (``supercell``): the rule of
+    ``SCF/gamma_spin.gamma_spin_on_sector_route``, whose other cases keep the k-point driver in main.py and are
+    refused here.  A hybrid functional and a meta-GGA keep one device per basis in that layout (``driver``'s
+    ``SpinFallbackPlan.shareable``) and stay refused.  The input alone decides, alike on every rank; whether the run is
+    prepared without a group is decided once the symmetry is (:func:`execute`).  ``False`` for a single point and
+    under ``off``.
+    """
+    problem = translation.problem
+    if not (getattr(problem.scf, 'spin_polarized', False)
+            and (getattr(translation, 'compute_forces', False) or getattr(translation, 'relaxation', None) is not None
+                 or getattr(translation, 'molecular_dynamics', None) is not None)):
+        return False
+    if getattr(problem.scf, 'is_hybrid', False) or getattr(problem.scf, 'is_meta_gga', False):
+        return False
+    from parsec_python.acceleration.SCF.gamma_spin import _full_grid_moves, spin_sector_forces_setting
+
+    if spin_sector_forces_setting() == 'off':
+        return False
+    if getattr(problem, 'periodic_cell', None) is None:
+        return True
+    if supercell or (getattr(getattr(translation, 'routines', None), 'fortran', False)
+                     or getattr(problem.grid, 'fortran_routines', False)):
+        return False
+    from parsec_python.acceleration.cli import periodic_sector_forces_setting
+
+    if periodic_sector_forces_setting() == 'off':
+        return False
+    return _full_grid_moves(translation) or _periodic_sector_forces_refusal(translation, supercell=supercell) is None
+
+
 def _refuse_spin_ionic_steps(translation, size: int, *, supercell: bool = False) -> None:
     """Refuse the forces, relaxations and molecular dynamics of a spin-polarized calculation that several ranks
     cannot run.
@@ -1312,9 +1389,12 @@ def _refuse_spin_ionic_steps(translation, size: int, *, supercell: bool = False)
     nonlocal force terms of both channels summed over the ranks (the ``spin_forces`` command): the single-point forces
     and the relaxations by an optimizer of a run that keeps its sectors run here, a cluster whose structure keeps its
     point group (``symmetry_decision``: no ``Ignore_Symmetry``, manual movements or ``Move_Flag`` against the group)
-    and a cell whose forces keep the sectors of its point group (:func:`_periodic_sector_forces_refusal`).  Molecular
-    dynamics and the moving runs that take no sectors are refused here, as is every one under ``off`` (the rule of
-    before): the two channels of a spin-polarized run are not shared as one sector of the identity.
+    and a cell whose forces keep the sectors of its point group (:func:`_periodic_sector_forces_refusal`).  Since
+    2026-11-21 molecular dynamics and the moving runs that take no sectors run as one sector of the identity of both
+    channels whose basis the ranks share (:func:`_spin_moves_without_group`); refused here are those that main.py
+    keeps on the k-point driver (a cell on the Fortran-derived routines, under ``PARSEC_PERIODIC_SECTOR_FORCES=off``,
+    the supercell of a mesh, and what that rule takes from the sectors otherwise), and every one under ``off`` (the
+    rule of before).
     """
     if not (translation.problem.scf.spin_polarized and int(size) > 1
             and (getattr(translation, 'compute_forces', False) or getattr(translation, 'relaxation', None) is not None
@@ -1339,6 +1419,9 @@ def _refuse_spin_ionic_steps(translation, size: int, *, supercell: bool = False)
 
         keeps, note = symmetry_decision(translation)
         reason = None if keeps else (note or 'Ignore_Symmetry or manual movements: the run uses no point group')
+    if reason is not None and _spin_moves_without_group(translation, supercell=supercell):
+        # (one sector of the identity of both channels, shared by the ranks)
+        return
     if reason is not None:
         raise ValueError(f'{_periodic_run_name(translation)} of a spin-polarized calculation on several ranks run in '
                          f'the symmetry sectors of both channels, which this one does not keep ({reason}): run it '
@@ -1465,6 +1548,11 @@ def execute(args, cp, comm, MPI, initialization_seconds, initial_affinity=None):
     from parsec_python.acceleration.experimental.mpi_scf import nested_sharing_setting
 
     nested_sharing_setting()
+    # PARSEC_CUPY_SECTOR_POOL_MIN_BYTES (Eigensolvers/symmetry.process_pool_min_bytes): the floor of the device pool of
+    # the GPUs of a rank (MPISectorContext.pool_floor), read here so that a value it does not know is refused first.
+    from parsec_python.acceleration.Eigensolvers.symmetry import process_pool_min_bytes
+
+    process_pool_min_bytes()
     _refuse_unsupported_periodic(translation, supercell=_found_supercell is not None)
     if getattr(translation, 'polarizability_field', None) is not None:
         # Refused rather than ignored: the seven field loops run in one process (main.py).
@@ -1568,7 +1656,19 @@ def execute(args, cp, comm, MPI, initialization_seconds, initial_affinity=None):
     # Forces are symmetrized where the calculation itself uses the group; those of a cell are decided once it is
     # prepared (_periodic_force_symmetry).
     symmetrize_forces = keeps_group and symmetry != 'off'
-    if periodic and translation.problem.scf.spin_polarized and not args.serial_control:
+    # Spin-polarized forces or moves without a point group (molecular dynamics, manual movements, Move_Flag against the
+    # group, Ignore_Symmetry, --symmetry off): both channels as one sector of the identity whose basis the ranks share
+    # (prepare_single_point's spin_identity_sector, the layout of the shared spin fallback), where main.py takes the
+    # full grid; under PARSEC_SPIN_SECTOR_FORCES=off refused on several ranks and by the driver, as before 2026-11-21.
+    spin_identity = bool(not args.serial_control and symmetry == 'off'
+                         and _spin_moves_without_group(translation, supercell=_found_supercell is not None))
+    if spin_identity:
+        restart_notes = [*restart_notes, (
+            f'NOTE: {_periodic_run_name(translation)} of this spin-polarized run uses no point group: both channels '
+            'are solved as one sector of the identity whose basis '
+            + ('the MPI ranks share' if size > 1 else 'the GPUs of the rank share')
+            + ' (PARSEC_SPIN_SECTOR_FORCES=auto; main.py solves them on the full grid)')]
+    if periodic and translation.problem.scf.spin_polarized and not args.serial_control and not spin_identity:
         # Both channels of a spin cell take the abelian sectors of its group on the ranks, never the shared sector of
         # the identity: a cell that is prepared without a detection has none. Refused here, before any preparation;
         # the driver refuses a cell whose detection finds none right after it (spin_cell_group_refusal).
@@ -1660,6 +1760,14 @@ def execute(args, cp, comm, MPI, initialization_seconds, initial_affinity=None):
         # experimental/mpi_scf.sector_rank_plan); after another one every rank holds the whole bases of its group.
         context.divided_bases = str(getattr(getattr(translation.problem, 'eigensolver', None), 'method',
                                             '')).strip().lower() == 'chebff'
+        # Where the start vectors are drawn on the GPU or the distributed filter runs (PARSEC_CUPY_DEVICE_RANDOM=1,
+        # PARSEC_CUPY_DISTRIBUTED_FILTER=1: the launch settings) the GPUs of a rank take the device pool for its
+        # sectors only where the mean sector gives each at least PARSEC_CUPY_SECTOR_POOL_MIN_BYTES of basis, the rule
+        # of one process (main.py); 0 restores the memory rule alone, as before 2026-11-21, which the code defaults
+        # of both switches keep (experimental/mpi_scf.runner_pool_floor_applies, _pool_floor_groups).
+        from parsec_python.acceleration.experimental.mpi_scf import runner_pool_floor_applies
+
+        context.pool_floor = runner_pool_floor_applies()
     if context is not None and comm.size > 1:
         # An error of some ranks inside a step of a shared basis leaves the others in a collective that no
         # command of the context reaches: report it here and end the job (mpi_shared_basis.set_failure_handler).
@@ -1746,6 +1854,8 @@ def execute(args, cp, comm, MPI, initialization_seconds, initial_affinity=None):
         options = {} if context is None else {'mpi_context': context}
         if sector_forces:
             options['sector_forces'] = True
+        if spin_identity:
+            options['spin_identity_sector'] = True
         cp, system, device_records, sampler, cuda_contexts = _prepare_on_devices(
             cp, args.devices,
             lambda: prepare_single_point(translation.problem, backend=args.backend, symmetry=symmetry,
@@ -1766,6 +1876,8 @@ def execute(args, cp, comm, MPI, initialization_seconds, initial_affinity=None):
             raise RuntimeError('MPI full SCF requires the configured symmetry-sector eigensolver')
         # The groups that the ranks attached over all their GPUs (every rank, where sectors are shared that way).
         nested_attachment = _nested_attachment(comm, context, solver)
+        # The device-pool decisions of the GPUs of every rank (every rank, where the floor is judged).
+        pool_lines = _rank_pool_lines(comm, context)
         if rank == 0:
             # Ranks that share sectors after a CHEBDAV first solve each hold the whole basis: say so.
             shared_note = _shared_first_solve_note(
@@ -1775,6 +1887,9 @@ def execute(args, cp, comm, MPI, initialization_seconds, initial_affinity=None):
             placement_line = _placement_line(context)
             if placement_line is not None:
                 log.write(placement_line)
+            for pool_line in pool_lines or ():
+                # The device pool decisions of the GPUs of the ranks (PARSEC_CUPY_SECTOR_POOL_MIN_BYTES).
+                log.write(pool_line)
             nested_line = _nested_sharing_line(context, len(args.devices), nested_attachment)
             if nested_line is not None:
                 log.write(nested_line)

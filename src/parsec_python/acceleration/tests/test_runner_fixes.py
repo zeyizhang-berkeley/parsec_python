@@ -284,6 +284,10 @@ class SpinCellRefusalTests(unittest.TestCase):
         self.assertIn("PARSEC_PERIODIC_SYMMETRY=off", text)
         self.assertIn("main.py", text)
         self.assertNotIn("PARSEC_CUPY_SINGLE_SECTOR", text)
+        # Since 2026-11-21 the forces and moves of such a cell run on the ranks as one sector of the identity.
+        self.assertIn("--symmetry off", text)
+        self.assertIn("PARSEC_CUPY_DISTRIBUTED_FILTER=0", text)
+        self.assertNotIn("takes no spin channels", text)
 
 
 class LocalForceSwitchTests(unittest.TestCase):

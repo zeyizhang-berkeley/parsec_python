@@ -155,7 +155,7 @@ PP-PBE(B3LYP). The complete tables are `RESULTS.md` in each folder.
 | Table S1, shifts of the other 50 molecules, PBE / refined | | mean absolute difference 0.007 / 0.010, largest 0.029 / 0.037 |
 | Table 3, error against experiment, PBE (B, C, N, O, all) | 0.23, 0.20, 0.15, 0.11, 0.16 | 0.228, 0.205, 0.151, 0.108, 0.167 |
 | Table 3, the same, refined | 0.11, 0.18, 0.14, 0.12, 0.14 | 0.109, 0.175, 0.142, 0.115, 0.138 |
-| Table S2, N shifts with 0 to 5 times the exact exchange | 0.15, 0.14, 0.16, 0.21, 0.26, 0.31 | 0.155, 0.142, 0.164, 0.208, 0.252, 0.302 |
+| Table S2, N shifts with 0 to 5 times the exact exchange | 0.15, 0.14, 0.16, 0.21, 0.26, 0.31 | 0.155, 0.142, 0.164, 0.208, 0.252, 0.301 |
 
 - The absolute values of Table S1 use atomic energies of spin-polarized atoms.
   The constant per element that this takes off a binding energy follows from
@@ -254,6 +254,14 @@ side on one node), with the same totals:
 | 2022, atoms of Table 1 | 16 | 0.06 GPU hours | 14 s | 10 s (N ion) | 22 s (B atom, polarized) |
 | 2022, protonated water | 40 | 14.1 GPU hours | 871 s | 59 s (H3O+(H2O)1) | 3426 s (H3O+(H2O)20) |
 | 2024, 21 molecules | 60 | 1.7 GPU hours | 83 s | 28 s (H2S) | 464 s (P(CF3)3) |
+
+The totals of the 37 molecular inputs that have run in symmetry sectors since
+21 November 2026 (`PARSEC_MOVING_SECTORS`: 28 of the 2022 set, 9 of the 2024
+set) are of those sector runs, while the times in this table and in
+`reference_energies.csv` stay those of the full-grid job. The totals moved by
+at most 6.4e-5 Ry, nine printed values by 0.001 eV. At an SCF criterion of
+2e-7 Ry the two routes agree within 1.3e-7 Ry on the four initial states
+checked, and the sector totals lie closer to those converged values.
 
 | run | grid points | occupied / computed states | SCF steps | SCF [s] | pair solves | refinement [s] | whole run [s] | host memory [GiB] |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|

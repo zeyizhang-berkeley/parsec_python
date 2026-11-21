@@ -41,6 +41,20 @@ so in ``parsec.out`` (a :class:`parsec_python.models.SpinSectorFallbackRecord` o
 The route constrains the state to the magnetic group, as the sectors constrain it to their point group: a lower
 state that breaks the flip (a ferrimagnetic one, or one that the up and down channels reach on different paths
 from noise) is not found, while a full-grid run from the same flip-symmetric start reaches it only through noise.
+From a flip-symmetric start two solved channels keep the levels of each other up to that noise; it can grow into a
+moment where a level of the up channel and its image in the down channel are partly filled (Fermi-Dirac
+occupations: the symmetric ensemble of a partly filled pair, which unequal fillings lower).  So the spin loop
+(:func:`parsec_python.SCF.spin_polarized.run_spin_scf`) leaves the route where its up channel ends with a fractional
+occupation (``min(f, 1 - f)`` from ``SCF.spin_polarized.SPIN_FLIP_OCCUPATION_TOLERANCE`` = 0.05, as test 3 of
+:mod:`.spin_sectors` keeps the sectors), and where a test of the spin sectors fails in a flip loop (equal levels of
+the two channels are those of the operation there, not those two solved channels hold: test 1 then sees a partly
+filled multiplet of the start Hamiltonian that ``off`` does not see).  It says so in ``parsec.out``, solves both
+channels for the rest of the run (later loops, ionic steps, the systems that the spin guard prepares again), and
+solves the loop again from its start in the sectors it started in: the route of ``off``.
+Not detected, and the reason the route is not the default: a flip loop that settles with integer occupations in
+another minimum than two solved channels reach (A100, PBE, 80 K, against ``off``: Ni2 at 4.06 bohr from
+``+0.6 / -0.6``, -138.78451344 against -138.84084192 Ry, 0.77 eV higher, no note; Fe2, Co2, Cr2, Cr4 and MnO
+agree with ``off``), and a closed shell that a rotation across its gap would lower, as in the sectors.
 A same-label start (one ``Initial_Spin_Polarization`` per species) has no flip operation; a state that breaks the
 point group of such atoms fires test 2 of :mod:`.spin_sectors` as before.  Units Ry, bohr.
 """
@@ -94,14 +108,20 @@ def _field_values(values) -> np.ndarray:
     return np.asarray(values, dtype=np.float64)
 
 
+#: The value where none is named: ``off`` (a flip loop can settle in another state than two solved channels with
+#: integer occupations, Ni2 0.77 eV higher, which no test of the loop sees; see the module).
+DEFAULT = "off"
+
+
 def spin_flip_setting() -> str:
-    """``PARSEC_SPIN_FLIP_SYMMETRY``: ``off`` (the default) or ``auto``.
+    """``PARSEC_SPIN_FLIP_SYMMETRY``: ``off`` (the default) or ``auto`` (on request).
 
     ``auto`` solves only the up channel of a collinear spin-polarized run whose labels and start have a spin-flip
-    operation (see the module) and takes the down channel from it; ``off`` solves both channels, as before.
+    operation (see the module) and takes the down channel from it, leaving the route where the up channel ends with a
+    fractional occupation or a test of the spin sectors fails in a flip loop; ``off`` solves both channels.
     """
 
-    value = os.environ.get(_SWITCH, "off").strip().lower() or "off"
+    value = os.environ.get(_SWITCH, DEFAULT).strip().lower() or DEFAULT
     if value in {"0", "false", "no"}:
         value = "off"
     if value in {"1", "true", "yes", "on"}:

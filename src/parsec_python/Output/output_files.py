@@ -374,7 +374,8 @@ class RunOutputFiles:
         )
         path = write_parsec_dat(self.parsec_dat_path, data)
         if report:
-            for note in notes:
+            # (a view's own notes first: the levels of a k-point mesh solved as its supercell)
+            for note in (*getattr(result, "parsec_dat_notes", ()), *notes):
                 self.write(f" NOTE: {note}")
             saved = sum(int(block.state_numbers.size) for spin in data.wavefunctions for block in spin)
             self.write(

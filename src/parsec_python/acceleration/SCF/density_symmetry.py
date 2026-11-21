@@ -196,18 +196,22 @@ def build_wedge_density_symmetry(group: GridPointGroup, reduction) -> WedgeDensi
 
 
 def _periodic_wedge_density_symmetry(group, reduction) -> WedgeDensitySymmetry:
-    """:func:`build_wedge_density_symmetry` of the space group of a periodic cell."""
+    """:func:`build_wedge_density_symmetry` of the space group of a periodic cell.
 
-    images = np.asarray(group.images)
-    if images.shape[1] != int(reduction.full_size):
+    The rows of the group are read at the points that they are needed at (``group.image_rows``: the representatives
+    of the orbits, the sample of the check), from the table or from the affine maps of a group that holds none
+    (``PARSEC_PERIODIC_IMAGE_ROWS``), the same integers."""
+
+    operations, points = group.images.shape
+    if points != int(reduction.full_size):
         raise ValueError("the space group and the symmetry sectors use different grids")
     full_to_wedge = np.asarray(reduction.full_to_wedge)
     representatives = np.asarray(reduction.representative_rows)
     index_type = np.int32 if reduction.wedge_size < 2**31 else np.int64
-    orbit_images = np.empty((images.shape[0], representatives.size), dtype=index_type)
-    for index, rows in enumerate(images):
-        orbit_images[index] = full_to_wedge[rows[representatives]]
-    if images.shape[0] > 1:
+    orbit_images = np.empty((operations, representatives.size), dtype=index_type)
+    for index in range(operations):
+        orbit_images[index] = full_to_wedge[group.image_rows(index, representatives)]
+    if operations > 1:
         # The average at a row must be the average at the representative of its orbit: a field of random orbit
         # values, at the rows of a fixed sample (operations of the sectors that do not map the group onto itself
         # make most rows differ).
@@ -220,9 +224,9 @@ def _periodic_wedge_density_symmetry(group, reduction) -> WedgeDensitySymmetry:
             int(reduction.full_size), size=min(_PERIODIC_CHECK_ROWS, int(reduction.full_size)), replace=False
         )
         at_rows = np.zeros(rows.size)
-        for operation in images:
-            at_rows += values[full_to_wedge[operation[rows]]]
-        if np.max(np.abs(at_rows - at_representatives[full_to_wedge[rows]]), initial=0.0) > 1.0e-9 * images.shape[0]:
+        for operation in range(operations):
+            at_rows += values[full_to_wedge[group.image_rows(operation, rows)]]
+        if np.max(np.abs(at_rows - at_representatives[full_to_wedge[rows]]), initial=0.0) > 1.0e-9 * operations:
             raise ValueError(
                 "Symmetrize_Charge_Density: the operations of the symmetry sectors do not map the space group of "
                 "the cell (its operations that map the grid onto itself) onto itself, so its average would not be "

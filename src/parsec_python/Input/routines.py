@@ -21,7 +21,8 @@ The input parameter ``Use_Fortran_Routines`` chooses:
 
 An input that Andrew Grieder's routines do not compute (a keyword or a value they do not read, a geometry they
 refuse) runs on the Fortran-derived routines by itself, and the reason is printed with a warning.  A keyword that
-both sets read the same way (the shared eigensolvers and SCF loops, :data:`NEUTRAL_KEYS`) chooses nothing, and so
+both sets read the same way (the shared eigensolvers and SCF loops, :data:`NEUTRAL_KEYS`; the symmetry keywords of the
+accelerated sectors, :data:`SYMMETRY_KEYWORDS`, ``PARSEC_SYMMETRY_KEYWORD_ROUTINES``) chooses nothing, and so
 does a label written at a value that has no effect (:data:`NO_EFFECT`: label -> the predicate and its reason, such as
 ``Add_Point_Charges: .false.`` or ``Mixing_Restart_Factor 0.3``, the lines PARSEC 1.5's bak_complete_parsec.in writes).
 :func:`decide_routines` makes the choice once per run, from the input's keywords; the parser adds the reasons it
@@ -331,6 +332,35 @@ SMALL15_SHARED_KEYS = frozenset(
 
 #: Blocks that choose nothing for the same reason: the lateral points of an FDET AFM scan (``FDET_BLOCKS``).
 NEUTRAL_BLOCK_KEYS = frozenset({"afm_scan_lateral_points"})
+
+#: The symmetry keywords of this port that act on the symmetry sectors of the accelerated driver alone, read the same
+#: way under both sets of routines: ``Spin_Symmetry_Sectors`` (both spin channels in the sectors or on the full grid,
+#: ``SCFSettings.spin_symmetry_sectors``).  PARSEC 1.5 has one symmetry keyword, ``Ignore_Symmetry``
+#: (usrinputfile.F90 l.378: the group reduced to the identity, the grid shift set to zero), and both sets read it
+#: (:data:`DEFAULT_GLOBAL_KEYS`); a keyword of the sectors has no counterpart there and must not change the grid or the
+#: local potential of a run.  Under ``PARSEC_SYMMETRY_KEYWORD_ROUTINES=neutral`` (the default since 2026-11-21) they
+#: choose nothing, as :data:`NEUTRAL_KEYS`; ``fortran`` restores the former choice, in which a written
+#: ``Spin_Symmetry_Sectors`` (any value) moved a periodic input to the Fortran-derived routines like a label of neither
+#: set: their local potential follows the species' ``Cubic_Spline`` (the linear interpolation of the table without it,
+#: Andrew Grieder's routines take the cubic spline), which moved the energy of ``Spin_Symmetry_Sectors: off`` away from
+#: that of the sectors and of ``--symmetry off`` (6.1e-4 Ry for a Cr2 pair in a 14.4 bohr cube, 2.3e-2 Ry for MnO in
+#: 64 atoms, at 0.3 bohr).
+SYMMETRY_KEYWORDS = frozenset({"spin_symmetry_sectors"})
+SYMMETRY_KEYWORD_ROUTINES_ENV = "PARSEC_SYMMETRY_KEYWORD_ROUTINES"
+
+
+def symmetry_keyword_routines_setting() -> str:
+    """``PARSEC_SYMMETRY_KEYWORD_ROUTINES``: ``neutral`` (the default) or ``fortran`` (:data:`SYMMETRY_KEYWORDS`).
+
+    The parser reads it for every input, so that a wrong value stops before the SCF.
+    """
+
+    import os
+
+    value = os.environ.get(SYMMETRY_KEYWORD_ROUTINES_ENV, "neutral").strip().lower() or "neutral"
+    if value not in ("neutral", "fortran"):
+        raise ValueError(f"{SYMMETRY_KEYWORD_ROUTINES_ENV} must be neutral or fortran, got {value!r}")
+    return value
 
 
 @dataclass(frozen=True)
@@ -863,11 +893,13 @@ def decide_routines(
     if requested is True:
         return RoutineChoice(fortran=True, requested=True)
     start = RoutineChoice(requested=requested)
+    # the symmetry keywords of the sectors choose nothing (PARSEC_SYMMETRY_KEYWORD_ROUTINES=neutral)
+    symmetry_keys = SYMMETRY_KEYWORDS if symmetry_keyword_routines_setting() == "neutral" else frozenset()
     unknown = sorted(
         key
         for key in scalar
         if key != KEYWORD
-        and key not in DEFAULT_SPECIES_KEYS | DEFAULT_GLOBAL_KEYS | NEUTRAL_KEYS | SMALL15_SHARED_KEYS
+        and key not in DEFAULT_SPECIES_KEYS | DEFAULT_GLOBAL_KEYS | NEUTRAL_KEYS | SMALL15_SHARED_KEYS | symmetry_keys
         # a label written at a value that has no effect chooses nothing (NO_EFFECT)
         and not has_no_effect(key, scalar, blocks)
         # nor one the default routines read for this input (DEFAULT_CONDITIONAL_KEYS)
@@ -909,6 +941,9 @@ __all__ = [
     "NoEffect",
     "has_no_effect",
     "RoutineChoice",
+    "SYMMETRY_KEYWORDS",
+    "SYMMETRY_KEYWORD_ROUTINES_ENV",
     "UseFortranRoutines",
     "decide_routines",
+    "symmetry_keyword_routines_setting",
 ]

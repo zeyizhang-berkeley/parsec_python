@@ -396,6 +396,12 @@ def channel_orbitals(
                 "the symmetry orbitals of this iteration were released before the exchange "
                 "operator read them"
             )
+        if any(item is not None for item in (getattr(wavefunctions, "sector_expansions", None) or ())):
+            raise NotImplementedError(
+                "the exchange operator of a hybrid functional reads the sector orbitals on the rows of their sectors; units of irreducible "
+                "representations on partner rows (PARSEC_ORBITAL_IRREP_ROWS=partner) are not supported with it "
+                "(PARSEC_ORBITAL_IRREP_ROWS=sector)"
+            )
         sectors = []
         for representation, vectors in enumerate(wavefunctions.sector_vectors):
             selected = np.flatnonzero(wavefunctions.representations == representation)

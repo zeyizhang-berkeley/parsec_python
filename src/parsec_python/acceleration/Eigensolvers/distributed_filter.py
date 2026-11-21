@@ -21,9 +21,9 @@ import os
 import numpy as np
 import scipy.sparse as sp
 from ..backends.cupy import require_cupy, CuPyHamiltonian
-from ..backends.cupy_stencil_major import StencilMajorHostMetadata
+from ..backends.cupy_stencil_major import CuPyStencilMajorFiniteDifference, StencilMajorHostMetadata
 from ..backends.implicit_stencil import PackedTileHostMetadata
-from .filter_graph import BlockFilterGraphs
+from .filter_graph import BlockFilterGraphs, device_filter, operator_filter
 from .chebyshev import FilterBlock
 
 _POOLS={}
@@ -81,13 +81,39 @@ def replica_stencil(operator):
     return StencilMajorHostMetadata(operator.shape,*arrays),0
 
 
+def replica_csr(operator):
+    """The host CSR of the finite-difference operator of ``operator`` where it holds no stencil-major layout.
+
+    ``(matrix, compact)``: the CSR-order compact stencil (``PARSEC_CUPY_STENCIL_MAJOR=0``, or a failed
+    stencil-major build) gives its rows, columns and exact palette values (``compact`` true); without one, the
+    generic CSR of the operator (``compact`` false).  A replica built from it with the same choice has the same
+    layout, entries and summation order as the owner.  ``None`` for a stencil-major owner (:func:`replica_stencil`).
+    """
+    cp,_=require_cupy()
+    stencil=operator.compact_finite_difference
+    if isinstance(stencil,CuPyStencilMajorFiniteDifference):
+        return None
+    with cp.cuda.Device(int(operator.effective_potential.device.id)):
+        if stencil is not None:
+            values=cp.asnumpy(stencil.coefficient_palette)[cp.asnumpy(stencil.coefficient_codes)]
+            matrix=sp.csr_matrix((values,cp.asnumpy(stencil.indices),cp.asnumpy(stencil.indptr)),shape=stencil.shape)
+            return matrix,True
+        if operator.negative_laplacian is None:
+            raise RuntimeError('the sector operator has no finite-difference storage to replicate')
+        return operator.negative_laplacian.get(),False
+
+
 class DistributedFilter:
     def __init__(self,operator,devices):
         cp,_=require_cupy()
         self.owner=int(operator.effective_potential.device.id)
         self.owner_ref=ref(operator);self.devices=devices;self.replicas={};self.streams={};self.graphs={}
         started=perf_counter()
-        metadata,tile=replica_stencil(operator)
+        # A stencil-major owner hands its layout to the replicas; one without it (PARSEC_CUPY_STENCIL_MAJOR=0, or a
+        # failed build) its CSR, from which every replica builds the owner's kernel (replica_csr). Each device then
+        # filters with graphs where they can record it, and without them otherwise (filter_graph.device_filter).
+        csr=replica_csr(operator)
+        metadata,tile=replica_stencil(operator) if csr is None else (None,0)
         with cp.cuda.Device(self.owner):
             offsets,columns,values=operator.projector_csr_data
             projectors=sp.csr_matrix((cp.asnumpy(values),cp.asnumpy(columns),cp.asnumpy(offsets)),
@@ -101,11 +127,15 @@ class DistributedFilter:
         for device in devices:
             with cp.cuda.Device(device):
                 self.streams[device]=cp.cuda.Stream(non_blocking=True)
-                if device!=self.owner:
+                if device!=self.owner and csr is None:
                     self.replicas[device]=CuPyHamiltonian(None,np.zeros(operator.shape[0]),(projectors,signs),
                         retain_generic_laplacian=False,finite_difference_metadata=metadata,implicit_tile=tile,
                         projection_block_columns=block_columns)
-                self.graphs[device]=BlockFilterGraphs(operator if device==self.owner else self.replicas[device])
+                elif device!=self.owner:
+                    self.replicas[device]=CuPyHamiltonian(csr[0],np.zeros(operator.shape[0]),(projectors,signs),
+                        retain_generic_laplacian=False,prefer_stencil_major=False,use_compact_finite_difference=csr[1],
+                        projection_block_columns=block_columns)
+                self.graphs[device]=device_filter(operator if device==self.owner else self.replicas[device])
         # Wall time of the downloads from the owner and of the replicas, for reports.
         self.replica_seconds=perf_counter()-started
 
@@ -122,7 +152,7 @@ class DistributedFilter:
             with cp.cuda.Device(device):
                 if device!=self.owner:
                     self.replicas[device].replace_projectors((projectors,signs))
-                self.graphs[device]=BlockFilterGraphs(operator if device==self.owner else self.replicas[device])
+                self.graphs[device]=device_filter(operator if device==self.owner else self.replicas[device])
 
     def apply(self,matrix,blocks,lower,upper,reset,out=None):
         cp,_=require_cupy();operator=self.owner_ref()
@@ -211,10 +241,7 @@ def distributed_filter(operator,matrix,blocks,lower,upper,reset,out=None):
     if int(operator.effective_potential.device.id) not in devices:
         raise ValueError('distributed filter device group must include its owner')
     if len(devices)==1:
-        graph=getattr(operator,'_filter_graph_workspace',None)
-        if graph is None:
-            graph=BlockFilterGraphs(operator);operator._filter_graph_workspace=graph
-        return graph.apply(matrix,blocks,lower,upper,lower,reset,out=out)
+        return operator_filter(operator).apply(matrix,blocks,lower,upper,lower,reset,out=out)
     worker=getattr(operator,'_distributed_filter',None)
     if worker is None:
         worker=DistributedFilter(operator,devices);operator._distributed_filter=worker

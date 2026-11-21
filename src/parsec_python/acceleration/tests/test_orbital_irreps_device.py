@@ -267,7 +267,8 @@ class UnitSCFTests(unittest.TestCase):
             with self.subTest(mode=mode):
                 calls, patches = _filter_calls()
                 with patches[0], patches[1]:
-                    units = _run(self.ge5, {"PARSEC_ORBITAL_IRREPS": mode})
+                    # the rows of the sectors of H (the units on partner rows project nothing: their own tests)
+                    units = _run(self.ge5, {"PARSEC_ORBITAL_IRREPS": mode, "PARSEC_ORBITAL_IRREP_ROWS": "sector"})
                 decomposition = units[2].decomposition
                 self.assertEqual(sorted(int(w) for w in decomposition.sector_weights), [1, 1, 2, 3, 3])
                 self.assertEqual(len(decomposition.projected_sectors), 3)
@@ -285,7 +286,7 @@ class UnitSCFTests(unittest.TestCase):
         # stopped this run before; they are projected back.
         from parsec_python.acceleration.Eigensolvers.irrep_projection import UNIT_BASIS_TOLERANCE
 
-        once = {"PARSEC_ORBITAL_IRREPS": "once"}
+        once = {"PARSEC_ORBITAL_IRREPS": "once", "PARSEC_ORBITAL_IRREP_ROWS": "sector"}
         with tempfile.TemporaryDirectory() as directory:
             settings = dict(radius=9.5, states=24, spacing=0.7, first_filter_cycles=4)
             problem = _ge5(Path(directory), first_filter_degree=90, **settings)

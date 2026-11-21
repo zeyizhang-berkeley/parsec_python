@@ -90,6 +90,8 @@ class MPIKPointSolver:
         backend = self.backend
         backend.use()
         eigenvalues = []
+        from parsec_python.Eigensolvers.eigval import first_solve_converges
+
         for task in range(self.job.n_tasks):
             start = time.perf_counter()
             hamiltonian = self.job.make_hamiltonian(task, potentials)
@@ -110,7 +112,7 @@ class MPIKPointSolver:
                 state=state,
                 xp=backend.xp,
                 sync=backend.synchronize,
-                converge_first=settings.initial_method == "chebdav",
+                converge_first=first_solve_converges(settings),
             )
             self._tick("solve", start)
             for name, value in result.stats.items():

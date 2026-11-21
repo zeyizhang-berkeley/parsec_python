@@ -376,14 +376,22 @@ class HybridWedgeTests(unittest.TestCase):
         notes = [note for note in found["off"].warnings if note.startswith("Monkhorst_Pack_Grid without")]
         self.assertTrue(notes and "time reversal only" in notes[0], notes)
         self.assertIn("PARSEC_HYBRID_KPOINT_WEDGE=off keeps the time-reversal pairs", notes[0])
-        # forces keep the pairs of the mesh (they are not completed over the wedge's group), and the note says so
+        # forces under PARSEC_HYBRID_KPOINT_FORCE_WEDGE=off keep the pairs of the mesh, and the note says so; under
+        # auto (the default) they take the route of the single point (tests/unit/test_hybrid_force_wedge.py)
         for wedge in ("on", "auto"):
-            directory, forces = _silicon_mesh("pbe0", wedge, {"Skip_force": ".false."})
+            with mock.patch.dict(os.environ, {"PARSEC_HYBRID_KPOINT_FORCE_WEDGE": "off"}):
+                directory, forces = _silicon_mesh("pbe0", wedge, {"Skip_force": ".false."})
             self.addCleanup(shutil.rmtree, directory, True)
             self.assertFalse(forces.problem.hybrid_kpoint_wedge)
             self.assertIsNone(forces.problem.hybrid_kpoint_wedge_deferred)
             self.assertEqual(len(kpoint_sampling(forces.problem)[0]), 8)
             self.assertEqual(self.mesh_note(forces).count("forces and moving atoms keep the time-reversal pairs"), 1)
+            with mock.patch.dict(os.environ, {"PARSEC_HYBRID_KPOINT_FORCE_WEDGE": "auto"}):
+                directory, forces = _silicon_mesh("pbe0", wedge, {"Skip_force": ".false."})
+            self.addCleanup(shutil.rmtree, directory, True)
+            self.assertEqual(forces.problem.hybrid_kpoint_wedge, wedge == "on")
+            self.assertEqual(forces.problem.hybrid_kpoint_wedge_deferred is not None, wedge == "auto")
+            self.assertEqual(len(kpoint_sampling(forces.problem)[0]), 4 if wedge == "on" else 8)
         # no symmetry: the pairs, for that reason
         directory, alone = _silicon_mesh("pbe0", "auto", added=("Ignore_Symmetry: .true.",))
         self.addCleanup(shutil.rmtree, directory, True)

@@ -79,7 +79,7 @@ Numerical modules do not print or open files: everything is returned.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import os
 from time import perf_counter
 from typing import Sequence
@@ -426,6 +426,13 @@ class MeshStars:
     another point of the mesh (``partners``), then the images by the operations.  ``gathers[operation]`` are the
     rows ``P_g u = u[gathers[operation]]``; ``point_counts[rep]`` the points of the mesh the representative stands
     for (its weight times ``mesh_size``).
+
+    ``mirrors[(t, i)] = j``: the image source ``i = (r, g, c, k')`` and the target ``t`` have the mirror source
+    ``j = (t, g^-1, c, k'')`` of the target ``r``, a source of the list (``PARSEC_HYBRID_IMAGE_PAIRS``).  The pair
+    of the target ``(t, n)`` with ``(i, m)`` and the pair of ``(r, m)`` with ``(j, n)`` have the densities
+    ``rho`` and ``P_(g^-1) conj(rho)`` (``P_(g^-1) rho`` where ``c`` conjugates), at ``q`` and ``-R^-1 q``
+    (``R^-1 q``): where the pair potentials keep the operation (:func:`image_pair_relation_holds`), the second
+    potential is ``P_(g^-1) conj(w)`` (``P_(g^-1) w``) and one transform serves both.  ``mirrors[(r, j)] = i``.
     """
 
     mesh_size: int
@@ -433,6 +440,7 @@ class MeshStars:
     gathers: dict
     point_counts: np.ndarray
     partners: np.ndarray
+    mirrors: dict = field(default_factory=dict)
 
     def rotated(self, block, operation: int, conjugate: bool):
         """The source columns of ``block`` (rows of the grid, an ``xp`` array) under ``operation``, conjugated."""
@@ -532,7 +540,106 @@ def mesh_stars(k_points, weights, counts, shift, reciprocal, symmetry, *, usable
         [any(source[0] == rep and source[1] < 0 and source[2] for source in sources) for rep in range(k_points.shape[0])],
         dtype=bool,
     )
-    return MeshStars(size, sources, gathers, point_counts.astype(np.int64), partners)
+    # the inverse of each operation of the images among them (the same rotation inverted, the inverse permutation of
+    # the grid points: (P_b P_a u) = u), then the mirror of every (target, image source) whose (target, a^-1, conj)
+    # is a source of the list (its label is then +-R_a^-1 k_t, as the mirror's pair needs)
+    rotation_of = {index: rotation for index, rotation in operations}
+    inverse: dict[int, int] = {}
+    for a in sorted(used):
+        for b in sorted(used):
+            if np.allclose(rotation_of[b] @ rotation_of[a], np.eye(3), rtol=0.0, atol=1.0e-9) and np.array_equal(
+                gathers[b], np.asarray(images[a], dtype=np.int64)
+            ):
+                inverse[a] = b
+                break
+    position = {(item[0], item[1], item[2]): index for index, item in enumerate(sources) if item[1] >= 0}
+    mirrors: dict = {}
+    for index, (rep, operation, conjugate, _label) in enumerate(sources):
+        if operation < 0 or operation not in inverse:
+            continue
+        for target in range(k_points.shape[0]):
+            found = position.get((target, inverse[operation], conjugate))
+            if found is not None:
+                mirrors[(target, index)] = found
+    return MeshStars(size, sources, gathers, point_counts.astype(np.int64), partners, mirrors)
+
+
+#: ``PARSEC_HYBRID_IMAGE_PAIRS``: ``on`` (default, since 2026-11-21) solves a pair of an image source of a wedge and
+#: its mirror pair (:class:`MeshStars`) by one transform where the pair potentials keep the operation; ``off`` solves
+#: both, as before, bit for bit.
+IMAGE_PAIRS_ENV = "PARSEC_HYBRID_IMAGE_PAIRS"
+
+
+def image_pairs_setting() -> bool:
+    """Whether the mirror pairs of the image sources of a wedge are solved once (``PARSEC_HYBRID_IMAGE_PAIRS``).
+
+    ``on`` (default): the pair ``(t, n | i, m)`` of an image source ``i`` (``P_g u_r``) and the pair
+    ``(r, m | j, n)`` of its mirror source ``j`` (``P_(g^-1) u_t``, :attr:`MeshStars.mirrors`) come from one
+    transform (the second potential is the first turned by ``g^-1`` and conjugated), where a test of the pair
+    potentials shows that they keep the operation to round-off (:func:`image_pair_relation_holds`); the energies are
+    those of ``off`` to round-off.  Only pairs of two occupied states have mirrors (the target of the mirror is the
+    source column).  ``off``: every pair of an image source is solved, as before."""
+
+    value = os.environ.get(IMAGE_PAIRS_ENV, "on").strip().lower() or "on"
+    if value not in ("on", "off"):
+        raise ValueError(f"{IMAGE_PAIRS_ENV} must be on or off, got {value!r}")
+    return value == "on"
+
+
+def _wave_vector_key(q) -> tuple:
+    """A cache key of a wave vector (Cartesian bohr^-1), far below any mesh spacing."""
+
+    return tuple(np.round(np.asarray(q, dtype=np.float64).reshape(3) / K_TOLERANCE).astype(np.int64).tolist())
+
+
+def _relation_cache(potentials) -> dict:
+    """The tested relations of the mirror pairs of ``potentials`` (kept with them for the run: the kernel is fixed)."""
+
+    found = getattr(potentials, "_image_pair_relations", None)
+    if found is None:
+        found = {}
+        try:
+            potentials._image_pair_relations = found
+        except AttributeError:  # a stand-in without attributes of its own tests again at every application
+            pass
+    return found
+
+
+#: The largest relative deviation of the test of :func:`image_pair_relation_holds` that counts as round-off.
+IMAGE_PAIR_RELATION_TOLERANCE = 1.0e-10
+#: The seed of its test density (every process and device draws the same one).
+IMAGE_PAIR_RELATION_SEED = 20261121
+
+
+def image_pair_test_density(size: int) -> np.ndarray:
+    """The complex test density of :func:`image_pair_relation_holds` (``size`` grid points, a fixed seed)."""
+
+    generator = np.random.default_rng(IMAGE_PAIR_RELATION_SEED)
+    return generator.standard_normal(int(size)) + 1j * generator.standard_normal(int(size))
+
+
+def image_pair_relation_holds(solve, density, q_first, q_mirror, gather, conjugate: bool, xp=np) -> bool:
+    """Whether ``solve(P conj(rho), q_mirror) = P conj(solve(rho, q_first))`` (``conjugate``: without the two
+    conjugations) holds to round-off for the test density ``density`` (a grid vector, :func:`image_pair_test_density`),
+    ``P v = v[gather]`` (the operation ``g^-1`` of a mirror source, :attr:`MeshStars.mirrors`).
+
+    ``solve(rows, q)`` returns the potentials of ``(points, 1)`` densities (the pair solver of the run, on ``xp``).  The
+    relation holds where ``K(q_mirror + G)`` is ``K(q_first + G')`` at the turned frequencies, which an isotropic kernel
+    with symmetric Nyquist planes gives for operations that permute and flip the axes of the FFT box; a random density
+    tests every frequency at once."""
+
+    rho = xp.asarray(density).reshape(-1, 1)
+    first = solve(rho.copy(), q_first)
+    if conjugate:
+        turned = xp.ascontiguousarray(rho[gather])
+        expected = first[gather]
+    else:
+        turned = xp.ascontiguousarray(xp.conj(rho)[gather])
+        expected = xp.conj(first)[gather]
+    direct = solve(turned, q_mirror)
+    scale = float(xp.max(xp.abs(direct)))
+    deviation = float(xp.max(xp.abs(direct - expected)))
+    return bool(scale > 0.0 and deviation <= IMAGE_PAIR_RELATION_TOLERANCE * scale)
 
 
 @dataclass(frozen=True)
@@ -682,6 +789,7 @@ def apply_bloch_exchange(
     batch_size: int = DEFAULT_BATCH_SIZE,
     occupation_threshold: float = OCCUPATION_THRESHOLD,
     pair_symmetry: bool = True,
+    image_pairs: bool | None = None,
 ) -> BlochExchangeApplication:
     """``W_t = V_x U_t`` for every k-point ``t`` of ``orbital_set`` (see the module).
 
@@ -699,7 +807,11 @@ def apply_bloch_exchange(
     Nyquist planes of the kernel averaged).  With the source ``(r, m)`` at
     ``-k_r`` (``conj(u)``) and the source ``(t, n)`` at ``-k_t`` the density
     ``u_rm u_tn`` and ``q = k_t + k_r`` are the same: the potential is ``w``.
-    ``False`` solves every pair (the reference of the check).
+    ``False`` solves every pair (the reference of the check).  ``image_pairs``
+    (``None``: :func:`image_pairs_setting`) extends this to the image sources
+    of a wedge whose mirror source is in the list (:attr:`MeshStars.mirrors`):
+    the mirror pair gets ``P_(g^-1)`` of the term the identity's partner would
+    get, where :func:`image_pair_relation_holds`.
     """
 
     started = perf_counter()
@@ -734,9 +846,17 @@ def apply_bloch_exchange(
     # with conj(u); on a wedge (orbital_set.stars) also the images of the representatives under the operations of
     # the grid (their rows permuted, conjugated where the sign is negative).
     sources = []
-    for r, operation, conjugate, k_source in orbital_set.mesh_sources():
+    for source_index, (r, operation, conjugate, k_source) in enumerate(orbital_set.mesh_sources()):
         if occupied_columns[r]:
-            sources.append((r, -1 if conjugate else 1, int(operation), np.asarray(k_source, dtype=np.float64)))
+            sources.append((r, -1 if conjugate else 1, int(operation), np.asarray(k_source, dtype=np.float64), source_index))
+    listed = orbital_set.mesh_sources()
+    # the mirrors of the image sources (MeshStars.mirrors) whose pair potentials keep the operation
+    if image_pairs is None:
+        image_pairs = image_pairs_setting()
+    mirrors = (
+        dict(orbital_set.stars.mirrors) if (pair_symmetry and image_pairs and orbital_set.stars is not None) else {}
+    )
+    relations = _relation_cache(potentials)
     covered: set = set()
     pair_solves = 0
     poisson_seconds = 0.0
@@ -747,7 +867,7 @@ def apply_bloch_exchange(
             continue
         block = orbital_set.orbitals[t]
         k_point = np.asarray(orbital_set.k_points[t], dtype=np.float64)
-        for r, sign, operation, k_source in sources:
+        for r, sign, operation, k_source, source_index in sources:
             columns_r = list(occupied_columns[r])
             source_block = orbital_set.orbitals[r][:, columns_r]
             if orbital_set.stars is not None:
@@ -756,6 +876,19 @@ def apply_bloch_exchange(
                 source_block = np.conj(source_block)
             source_occupations = orbital_set.occupations[r][columns_r]
             q = k_point - k_source
+            # the mirror source of an image source (its pairs' partners turned by its operation), or None
+            mirror_source = mirrors.get((t, source_index)) if operation >= 0 else None
+            if mirror_source is not None:
+                _rep, mirror_operation, _conjugate, mirror_label = listed[mirror_source]
+                gather = orbital_set.stars.gathers[int(mirror_operation)]
+                q_mirror = np.asarray(orbital_set.k_points[r], dtype=np.float64) - np.asarray(mirror_label)
+                key = (_wave_vector_key(q), _wave_vector_key(q_mirror), int(mirror_operation), sign < 0)
+                if key not in relations:
+                    relations[key] = image_pair_relation_holds(
+                        potentials.solve, image_pair_test_density(box.size), q, q_mirror, gather, sign < 0
+                    )
+                if not relations[key]:
+                    mirror_source = None
             # (target column n, source position j, mirrored pair or None)
             pairs = []
             for n in targets:
@@ -773,6 +906,14 @@ def apply_bloch_exchange(
                     ):
                         mirror = (r, m, t, sign, -1, n)
                         covered.add(mirror)
+                    elif (
+                        mirror_source is not None
+                        and n in occupied_sets[t]
+                        and m in target_sets[r]
+                        and not (r == t and m == n and mirror_source == source_index)
+                    ):
+                        mirror = (r, m, t, sign, int(listed[mirror_source][1]), n)
+                        covered.add(mirror)
                     pairs.append((n, j, mirror))
             for begin in range(0, len(pairs), batch_size):
                 batch = pairs[begin : begin + batch_size]
@@ -789,12 +930,15 @@ def apply_bloch_exchange(
                     results[t][:, n] += contributions[:, index]
                     if mirror is None:
                         continue
-                    # W_r[:, m] -= (1/N) f_tn s_tn w', s_tn = u_tn (w' = conj(w)) or conj(u_tn) (w' = w)
+                    # W_r[:, m] -= (1/N) f_tn s_tn w', s_tn = u_tn (w' = conj(w)) or conj(u_tn) (w' = w); the mirror
+                    # of an image source turns the term by the operation of its mirror source (P_(g^-1))
                     m = mirror[1]
                     if sign > 0:
                         term = block[:, n] * np.conj(solved[:, index])
                     else:
                         term = np.conj(block[:, n]) * solved[:, index]
+                    if mirror[4] >= 0:
+                        term = term[orbital_set.stars.gathers[mirror[4]]]
                     results[r][:, m] -= (scale * orbital_set.occupations[t][n]) * term
                 pair_solves += len(batch)
     applied = results
@@ -904,6 +1048,7 @@ __all__ = [
     "BlochOrbitalSet",
     "DEFAULT_BATCH_SIZE",
     "GridBox",
+    "IMAGE_PAIRS_ENV",
     "MeshStars",
     "PeriodicPairPoisson",
     "PeriodicPairPotentials",
@@ -912,6 +1057,9 @@ __all__ = [
     "bloch_orbital_set",
     "compress_bloch_exchange",
     "fft_workers",
+    "image_pair_relation_holds",
+    "image_pair_test_density",
+    "image_pairs_setting",
     "kernel_coefficients",
     "mesh_stars",
     "periodic_exchange_kernel",

@@ -938,6 +938,12 @@ class DeviceMetaGGA:
             term = self.terms.get(representation)
             if term is None:
                 raise RuntimeError(f"sector {representation} has no meta-GGA term on this process")
+            if any(item is not None for item in (getattr(wavefunctions, "sector_expansions", None) or ())):
+                raise NotImplementedError(
+                    "the meta-GGA kinetic density reads the sector orbitals on the rows of their sectors; units of irreducible "
+                    "representations on partner rows (PARSEC_ORBITAL_IRREP_ROWS=partner) are not supported with it "
+                    "(PARSEC_ORBITAL_IRREP_ROWS=sector)"
+                )
             weights = occupations[output_columns]
             with cp.cuda.Device(term.device_id):
                 if wavefunctions.sector_vectors is not None:

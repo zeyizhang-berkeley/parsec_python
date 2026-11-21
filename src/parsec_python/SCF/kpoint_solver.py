@@ -303,10 +303,57 @@ def parallel_backend_uses_device() -> bool:
 
 
 def make_kpoint_solver(job: KPointJob, *, problem_size: int | None = None, **options):
-    """The installed parallel solver for ``job``, else the serial one."""
+    """The installed parallel solver for ``job``, else the serial one.
+
+    A solver that names the cell group of its k-point sectors (``kpoint_symmetry_detection``, the accelerated
+    solvers) has that line written at once where a run prints them (:func:`start_kpoint_setup_notes`)."""
     if _parallel_solver is None:
         return SerialKPointSolver(job)
-    return _parallel_solver(job, problem_size=problem_size, **options)
+    solver = _parallel_solver(job, problem_size=problem_size, **options)
+    _announce_setup(solver)
+    return solver
+
+
+_SETUP_NOTES: list = []
+"""``[write, written texts]`` of the runs that print the notes of their k-point solvers as they are made, innermost
+last (:func:`start_kpoint_setup_notes`)."""
+
+
+def start_kpoint_setup_notes(write: Callable[[str], None]) -> object:
+    """From now on, until :func:`stop_kpoint_setup_notes` with the returned token: every k-point solver made by
+    :func:`make_kpoint_solver` that names its symmetry detection writes the line ``kpoint_symmetry_detection = ...``
+    through ``write`` (``parsec.out`` and the standard output of the command line) when it is made, before its first
+    solve, as the ``symmetry_detection`` line of a Gamma run is written at the set-up; each text once per run (the
+    loops of a relaxation or of a Fock loop on the same structure make the same line again).  The final K-point solver
+    detail block repeats it."""
+
+    token = [write, set()]
+    _SETUP_NOTES.append(token)
+    return token
+
+
+def stop_kpoint_setup_notes(token: object) -> None:
+    """End what :func:`start_kpoint_setup_notes` started (a token no longer active is ignored)."""
+
+    for index in range(len(_SETUP_NOTES) - 1, -1, -1):
+        if _SETUP_NOTES[index] is token:
+            del _SETUP_NOTES[index]
+            return
+
+
+def _announce_setup(solver) -> None:
+    """Write the ``kpoint_symmetry_detection`` line of ``solver`` where a run prints them (:data:`_SETUP_NOTES`)."""
+
+    if not _SETUP_NOTES:
+        return
+    text = getattr(solver, "kpoint_symmetry_detection", None)
+    if not isinstance(text, str) or not text:
+        return
+    write, written = _SETUP_NOTES[-1]
+    if text in written:
+        return
+    written.add(text)
+    write(f" kpoint_symmetry_detection = {text}")
 
 
 def map_tasks(
@@ -343,5 +390,7 @@ __all__ = [
     "residual_max",
     "set_parallel_backend",
     "split_pooled",
+    "start_kpoint_setup_notes",
+    "stop_kpoint_setup_notes",
     "whole_orbitals",
 ]

@@ -138,6 +138,51 @@ class EigvalSettings:
 
 
 @dataclass(frozen=True)
+class ConvergedFirstSolveSettings(EigvalSettings):
+    """:class:`EigvalSettings` whose CHEBFF first solve is a converged one (the band and ``nscf`` k-points under
+    ``PARSEC_BAND_CONVERGENCE=auto``, :mod:`parsec_python.SCF.bands`).
+
+    After the ``chebff.filter_cycles`` cycles (``Bands_FF_MaxIter``) the cycles go on until the residuals
+    ``||H x - e x||`` of the requested pairs are within ``chebdav.convergence_tolerance`` times their largest
+    ``|e|`` (CHEBDAV's relative test, which the device-resident first solve of ``Eigensolver: chebdav`` applies
+    the same way) or :func:`first_solve_extra_cycles` more cycles were made.  A k-point whose pairs pass the
+    test after ``filter_cycles`` cycles keeps the levels of before, bit for bit.  A distinct type, so that the
+    settings of an SCF (and their text) are those of before.
+    """
+
+    converge_first_solve: bool = True
+
+
+def first_solve_converges(settings) -> bool:
+    """Whether the first solve of ``settings`` converges its pairs: ``Eigensolver: chebdav``, or CHEBFF with
+    :class:`ConvergedFirstSolveSettings`."""
+
+    return getattr(settings, "initial_method", None) == "chebdav" or bool(
+        getattr(settings, "converge_first_solve", False)
+    )
+
+
+#: ``PARSEC_KPOINT_EXTRA_CYCLES``: the most CHEBFF cycles a converged first solve adds (default 24).
+EXTRA_CYCLES_SWITCH = "PARSEC_KPOINT_EXTRA_CYCLES"
+DEFAULT_EXTRA_CYCLES = 24
+
+
+def first_solve_extra_cycles() -> int:
+    """The most CHEBFF cycles a converged first solve adds (``PARSEC_KPOINT_EXTRA_CYCLES``, default 24); a value
+    that is not a non-negative integer is an error (the input reader checks it before the band and ``nscf``
+    k-points, :func:`parsec_python.SCF.bands.validate_band_settings`)."""
+
+    import os
+
+    value = os.environ.get(EXTRA_CYCLES_SWITCH, "").strip()
+    if not value:
+        return DEFAULT_EXTRA_CYCLES
+    if not value.isdigit():
+        raise ValueError(f"{EXTRA_CYCLES_SWITCH} must be a non-negative integer (CHEBFF cycles), not {value!r}")
+    return int(value)
+
+
+@dataclass(frozen=True)
 class EigvalState:
     """Persistent buffered Ritz subspace carried between SCF iterations.
 
@@ -360,6 +405,17 @@ def solve_eigval(
         # First nonlinear iteration, or an explicit allocation restart.  The
         # selected first solver is never replaced by the other one.
         if settings.initial_method == "chebff":
+            converge = {}
+            if first_solve_converges(settings) and settings.chebff.residual_tolerance is None:
+                # ConvergedFirstSolveSettings (the band k-points): more cycles to CHEBDAV's relative test
+                relative = float(settings.chebdav.convergence_tolerance)
+
+                def converged(values, norms):
+                    values = np.asarray(values, dtype=float)[:requested_states]
+                    scale = max(float(np.max(np.abs(values))), 1.0e-8)
+                    return bool(np.max(np.asarray(norms, dtype=float)[:requested_states]) <= relative * scale)
+
+                converge = {"converged": converged, "extra_cycles": first_solve_extra_cycles()}
             first = run_chebff(
                 operator,
                 working_states,
@@ -371,6 +427,7 @@ def solve_eigval(
                     if settings.chebff.residual_tolerance is None
                     else {"residual_states": requested_states}
                 ),
+                **converge,
             )
             first_residuals = None
             chebff_result: ChebFFResult | None = first

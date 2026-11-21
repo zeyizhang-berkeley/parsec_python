@@ -196,8 +196,10 @@ def batched_nonlocal_projectors(
     lowest = np.array([values.min() for values in axes])
     highest = np.array([values.max() for values in axes])
     sqrt_dv = np.sqrt(grid.volume_element)
+    # the centre radius of the harmonics, the reference's rule (PARSEC_PROJECTOR_CENTER)
+    centre_setting = _ionic.projector_center_setting()
     centre_radius = {
-        symbol: min(float(entry[0].radii[0]), _ionic.PROJECTOR_CENTER_ROUND_OFF) for symbol, entry in species.items()
+        symbol: _ionic.projector_center_radius(entry[0], centre_setting) for symbol, entry in species.items()
     }
     positions = np.array([np.asarray(atom.position, dtype=np.float64) for atom in atoms]).reshape(-1, 3)
     symbols = [atom.symbol for atom in atoms]

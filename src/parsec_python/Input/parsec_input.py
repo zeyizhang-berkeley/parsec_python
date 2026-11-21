@@ -47,11 +47,17 @@ from ..Grid.cell import primitive_lattice, replicate_positions, supercell_lattic
 from ..Grid.pbc import fortran_grid_shift
 from ..Grid.kpoints import (
     explicit_kpoints,
+    hybrid_kpoint_force_wedge_setting,
     hybrid_kpoint_wedge_setting,
+    kpoint_fold_setting,
+    kpoint_force_group_setting,
     kpoint_force_wedge_setting,
     mesh_keeps_time_reversal,
+    move_flag_space_group_setting,
     kpoint_time_reversal_setting,
+    oblique_reciprocal_lattice,
     read_kpoint_file,
+    scalar_kpoint_wedge_setting,
     soc_kpoint_wedge_setting,
 )
 from ..Grid.pbc import periodic_grid_shift, uses_general_periodic_grid
@@ -488,13 +494,26 @@ def _unshifted_hybrid_pairs_note(reason: str) -> str:
 _HYBRID_PAIRS_OFF = "PARSEC_HYBRID_KPOINT_WEDGE=off keeps the time-reversal pairs of a hybrid's mesh"
 _HYBRID_PAIRS_LOW_DIMENSION = "a wire or slab keeps the time-reversal pairs of a hybrid's mesh"
 _HYBRID_PAIRS_MOVING = (
-    "forces and moving atoms keep the time-reversal pairs of a hybrid's mesh (PARSEC_HYBRID_KPOINT_WEDGE reduces the "
-    "mesh of a single point)"
+    "forces and moving atoms keep the time-reversal pairs of a hybrid's mesh here (molecular dynamics, manual "
+    "movements, Create_DOS or Output_GW, PARSEC_KPOINT_FORCE_WEDGE=off or PARSEC_HYBRID_KPOINT_FORCE_WEDGE=off)"
+)
+# (the Fortran-derived routines reduce the mesh of every k-point force without PARSEC_KPOINT_FORCE_WEDGE, which only
+# the default routines read: there PARSEC_HYBRID_KPOINT_FORCE_WEDGE=off alone keeps a hybrid's forces on the pairs)
+_HYBRID_PAIRS_MOVING_FORTRAN = (
+    "forces and moving atoms keep the time-reversal pairs of a hybrid's mesh here (molecular dynamics, manual "
+    "movements, Create_DOS or Output_GW, or PARSEC_HYBRID_KPOINT_FORCE_WEDGE=off)"
 )
 _HYBRID_PAIRS_SPINORS = "spinor orbitals keep the time-reversal pairs of a hybrid's mesh"
 _HYBRID_PAIRS_NO_GROUP = (
     "no operation of the space group other than the identity maps the grid, its finite-difference operators and this "
     "mesh onto themselves, or the symmetry is off (Ignore_Symmetry, Symmetrize_Charge_Density: .false.)"
+)
+# (forces or moving atoms whose wedge PARSEC_HYBRID_KPOINT_FORCE_WEDGE=auto allows, but no group was found for: the
+# group of the forces must also keep the movable atoms apart from the fixed ones)
+_HYBRID_PAIRS_NO_FORCE_GROUP = (
+    "no operation of the space group other than the identity maps the grid, its finite-difference operators and this "
+    "mesh onto themselves and keeps the fixed atoms (Move_Flag) apart from the movable ones, or the symmetry is off "
+    "(Ignore_Symmetry, Symmetrize_Charge_Density: .false.)"
 )
 _UNSHIFTED_HYBRID_WEDGE_NOTE = (
     _UNSHIFTED_MESH_PREFIX
@@ -2845,6 +2864,8 @@ def _parse_parsec_input(
     # ionic loops of spinor orbitals; every other input (a cluster) runs the same
     # code under both and keeps the default without a note.
     choice_matters = _routines_choice_matters(scalar, one, optional_bool)
+    # PARSEC_SYMMETRY_KEYWORD_ROUTINES: read for every input, so that a wrong value stops here
+    _routines_module.symmetry_keyword_routines_setting()
     if routines is None:
         # Use_Fortran_Routines: .true., .false. or not given (None: the default of each feature)
         requested = optional_bool(_routines_module.KEYWORD) if _routines_module.KEYWORD in scalar else None
@@ -3085,6 +3106,10 @@ def _parse_parsec_input(
     # The Monkhorst_Pack_Grid and Monkhorst_Pack_Shift of a bulk cell on the default routines (a mesh of more than
     # one point), whose wedge _default_routines_wedge may take instead of the full list.
     default_routines_mesh: tuple | None = None
+    # the explicit list is the whole Monkhorst-Pack mesh of the default routines in shortest images (PARSEC_KPOINT_FOLD)
+    default_mesh_list = False
+    # (its points on the zone boundary with several shortest images (an oblique cell), all its points)
+    tied_mesh_points = (0, 0)
     kpoint_notes: list[str] = []
     # where the note of a Monkhorst_Pack_Grid without Monkhorst_Pack_Shift sits in kpoint_notes (None: no such mesh)
     unshifted_note_slot: int | None = None
@@ -3350,11 +3375,28 @@ def _parse_parsec_input(
                     ]
                     mesh = np.meshgrid(*axes, indexing="ij")
                     # Folded into (-1/2, 1/2] (Grid.kpoints.fold_to_centered_zone, PARSEC 1.5's intent; the Bloch
-                    # operator of the finite-difference grid is not invariant under k -> k + G).
-                    from ..Grid.kpoints import fold_to_centered_zone
+                    # operator of the finite-difference grid is not invariant under k -> k + G), and moved on to the
+                    # shortest image of each point (the first Brillouin zone, Grid.kpoints.fold_to_shortest) under
+                    # PARSEC_KPOINT_FOLD=shortest (the default since 2026-11-21; the same points on a lattice of
+                    # orthogonal vectors, others on an oblique one).  A point of the zone boundary with several
+                    # shortest images takes the negative of the image of its class -f where that came earlier
+                    # (Grid.kpoints.negation_closed_shortest: exact time-reversal pairs); outside a hybrid the run
+                    # takes every image with a share of its weight (SinglePointInput.kpoint_tie_images, below).
+                    from ..Grid.kpoints import fold_to_centered_zone, negation_closed_shortest
 
-                    fractions = fold_to_centered_zone(np.column_stack([m.reshape(-1) for m in mesh]))
                     reciprocal = 2.0 * np.pi * np.linalg.inv(periodic_cell.lattice_vectors).T
+                    unfolded = np.column_stack([m.reshape(-1) for m in mesh])
+                    if kpoint_fold_setting() == "shortest":
+                        from ..Grid.kpoints import shortest_images
+
+                        fractions = negation_closed_shortest(unfolded, reciprocal)
+                        default_mesh_list = True
+                        tied_mesh_points = (
+                            sum(group.shape[0] > 1 for group in shortest_images(fractions, reciprocal)),
+                            len(fractions),
+                        )
+                    else:
+                        fractions = fold_to_centered_zone(unfolded)
                     explicit_kpoint_array = fractions @ reciprocal
                     explicit_kpoint_weights = np.full(len(fractions), 1.0 / len(fractions))
                     if periodicity == 3 and len(fractions) > 1:
@@ -4497,6 +4539,14 @@ def _parse_parsec_input(
             "restart file; it needs Restart_Run (PARSEC's first diagonalization "
             "fails without one)"
         )
+    if fix_number_eigenvalues:
+        # PARSEC_FIXED_STATES_BUFFER (models.fixed_states_buffer_setting): an unknown value stops here, before the SCF
+        from ..models import fixed_states_buffer_setting
+
+        try:
+            fixed_states_buffer_setting()
+        except ValueError as error:
+            raise ParsecInputError(str(error)) from error
     communication = [
         label
         for key, label in (
@@ -5029,13 +5079,23 @@ def _parse_parsec_input(
         )
     symmetrize_density = optional_bool("symmetrize_charge_density")
     space_group = None
+    # the group the forces and moved positions of a stencil-exact wedge are averaged over (PARSEC_KPOINT_FORCE_GROUP)
+    force_space_group = None
     kpoint_time_reversal = False
-    # PARSEC_SOC_KPOINT_WEDGE: read for every input, so that a wrong value stops here
+    # PARSEC_SOC_KPOINT_WEDGE, PARSEC_SCALAR_KPOINT_WEDGE and PARSEC_KPOINT_FOLD: read for every input, so that a wrong
+    # value stops here
     soc_wedge_setting = soc_kpoint_wedge_setting()
+    scalar_wedge_setting = scalar_kpoint_wedge_setting()
+    shortest_kpoints = kpoint_fold_setting() == "shortest"
+    force_group_setting = kpoint_force_group_setting()
+    # PARSEC_MOVE_FLAG_SPACE_GROUP: read for every input, so that a wrong value stops here
+    move_flag_space_group_setting()
     # the irreducible wedge of a hybrid's mesh (PARSEC_HYBRID_KPOINT_WEDGE; SinglePointInput.hybrid_kpoint_wedge)
     hybrid_kpoint_wedge = False
     # the wedge an auto hybrid takes after an insulating semilocal start (SinglePointInput.hybrid_kpoint_wedge_deferred)
     hybrid_kpoint_wedge_deferred = None
+    # the forces and relaxations of a hybrid on that wedge (PARSEC_HYBRID_KPOINT_FORCE_WEDGE=auto)
+    hybrid_force_wedge = False
     if wire_or_slab:
         # The space group of a wire or slab (and what it decides) is found
         # below, once bandstruc and nscf_kpoints are read.
@@ -5069,9 +5129,17 @@ def _parse_parsec_input(
         )
         # the orbitals whose mesh these routines do not reduce
         unreduced_orbitals = spinor_orbitals and not soc_wedge
-        # their wedge keeps the operations that keep the grid's finite-difference operators (PARSEC_SOC_KPOINT_WEDGE)
-        stencil_exact = soc_wedge and soc_wedge_setting == "auto"
+        # their wedge keeps the operations that keep the grid's finite-difference operators (PARSEC_SOC_KPOINT_WEDGE;
+        # scalar and collinear-spin orbitals under PARSEC_SCALAR_KPOINT_WEDGE=auto, since 2026-11-21: on an oblique
+        # grid the others change the discrete Hamiltonian, hcp Au2 1.2e-3 Ry from the whole mesh at 0.3 bohr, order 6)
+        stencil_exact = (soc_wedge and soc_wedge_setting == "auto") or (
+            not spinor_orbitals and scalar_wedge_setting == "auto"
+        )
+        # the value that keeps every operation that maps the grid and the mesh, for the notes
+        stencil_switch = "PARSEC_SOC_KPOINT_WEDGE=grid" if spinor_orbitals else "PARSEC_SCALAR_KPOINT_WEDGE=grid"
         moving_wedge = None
+        # the group of the forces of the whole mesh where no operation keeps the finite-difference operators
+        moving_force_group: list = []
         if (
             periodicity == 3
             and default_routines_mesh is not None
@@ -5091,6 +5159,11 @@ def _parse_parsec_input(
                 symmetrize_density=symmetrize_density,
                 symmetrize_given="symmetrize_charge_density" in scalar,
                 stencil_exact=stencil_exact,
+                stencil_switch=stencil_switch,
+                force_group=force_group_setting,
+                whole_mesh_group=moving_force_group,
+                # (the subgroup of Move_Flag is validated for scalar orbitals; spinors keep the route of before)
+                flag_subgroup=not spinor_orbitals,
             )
         # A hybrid single point (PARSEC_HYBRID_KPOINT_WEDGE): the wedge of the stencil-exact operations of the grid
         # and the mesh with the density averaged over them, where there are any; the exchange reaches the rest of the
@@ -5099,27 +5172,61 @@ def _parse_parsec_input(
         # average) with the wedge kept aside, which the Fock loop takes after a semilocal start without partly filled
         # states (BlochExchange.after_start).
         hybrid_wedge = None
+        # the forces and relaxations of a hybrid on its wedge (PARSEC_HYBRID_KPOINT_FORCE_WEDGE=auto): bfgs, simple and
+        # the forces of a single point, the group keeping movable and fixed atoms apart, the forces completed and
+        # averaged over it as for scalar orbitals (PARSEC_KPOINT_FORCE_WEDGE)
+        hybrid_force_wedge = bool(
+            scf.is_hybrid
+            and (atoms_move or single_point_forces)
+            and hybrid_kpoint_force_wedge_setting() == "auto"
+            and not (molecular_dynamics.enabled or minimization == "manual")
+            and not (optional_bool("create_dos") or optional_bool("output_gw"))
+            and kpoint_force_wedge_setting() == "auto"
+        )
         if (
             scf.is_hybrid
             and periodicity == 3
             and default_routines_mesh is not None
-            and not (atoms_move or single_point_forces or spinor_orbitals)
+            and not spinor_orbitals
+            and (hybrid_force_wedge or not (atoms_move or single_point_forces))
             and hybrid_kpoint_wedge_setting() in ("auto", "on")
             and mesh_keeps_time_reversal(default_routines_mesh[1])
         ):
             wedge_notes: list[str] = []
-            found = _default_routines_wedge(
-                symmetry_atoms,
-                periodic_cell,
-                grid,
-                default_routines_mesh,
-                ignore_symmetry=ignore_symmetry,
-                symmetrize_density=symmetrize_density,
-                symmetrize_given="symmetrize_charge_density" in scalar,
-                warnings=wedge_notes,
-                stencil_exact=True,
-                stencil_switch=None,
-            )
+            if hybrid_force_wedge:
+                moved = _default_routines_force_wedge(
+                    symmetry_atoms,
+                    periodic_cell,
+                    grid,
+                    default_routines_mesh,
+                    movable=movable if minimization in {"bfgs", "simple"} else None,
+                    ignore_symmetry=ignore_symmetry,
+                    symmetrize_density=symmetrize_density,
+                    symmetrize_given="symmetrize_charge_density" in scalar,
+                    stencil_exact=True,
+                    stencil_switch=None,
+                    # (the average over the wedge's own group, as the hybrid force wedge was built: below)
+                    force_group="wedge",
+                    # a Move_Flag that breaks the group keeps the time-reversal pairs of a hybrid
+                    # (PARSEC_MOVE_FLAG_SPACE_GROUP covers scalar and collinear-spin orbitals: the subgroup's density
+                    # average held O2 PBE0 in a symmetric state 8.5e-3 Ry above the unaveraged one)
+                    flag_subgroup=False,
+                )
+                found = (False, None) if moved is None else (moved[0], moved[1])
+                wedge_notes = [] if moved is None else list(moved[2])
+            else:
+                found = _default_routines_wedge(
+                    symmetry_atoms,
+                    periodic_cell,
+                    grid,
+                    default_routines_mesh,
+                    ignore_symmetry=ignore_symmetry,
+                    symmetrize_density=symmetrize_density,
+                    symmetrize_given="symmetrize_charge_density" in scalar,
+                    warnings=wedge_notes,
+                    stencil_exact=True,
+                    stencil_switch=None,
+                )
             from ..Grid.kpoints import DeferredHybridWedge, hybrid_wedge_operations
 
             if (
@@ -5130,6 +5237,12 @@ def _parse_parsec_input(
                 if hybrid_kpoint_wedge_setting() == "on":
                     hybrid_wedge = (found, wedge_notes)
                     hybrid_kpoint_wedge = True
+                    if hybrid_force_wedge:
+                        # the wedge of the forces (completed and averaged over its group, Forces.total); a hybrid's
+                        # forces keep the average over the wedge's own group (no force_space_group: the crystal group
+                        # of PARSEC_KPOINT_FORCE_GROUP covers scalar and collinear-spin orbitals only, whose meshes
+                        # take every shortest image; a hybrid keeps one image per class)
+                        moving_wedge = (found[0], found[1], wedge_notes, None)
                 else:
                     hybrid_kpoint_wedge_deferred = DeferredHybridWedge(
                         group=found[1],
@@ -5194,7 +5307,7 @@ def _parse_parsec_input(
             )
         if default_routines_mesh is not None and not keeps_full_mesh:
             if moving_wedge is not None:
-                symmetrize_density, space_group, wedge_warnings = moving_wedge
+                symmetrize_density, space_group, wedge_warnings, force_space_group = moving_wedge
                 warnings.extend(wedge_warnings)
             elif hybrid_wedge is not None:
                 (symmetrize_density, space_group), wedge_notes = hybrid_wedge
@@ -5210,6 +5323,7 @@ def _parse_parsec_input(
                     symmetrize_given="symmetrize_charge_density" in scalar,
                     warnings=warnings,
                     stencil_exact=stencil_exact,
+                    stencil_switch=stencil_switch,
                 )
             monkhorst_pack_dimensions, monkhorst_pack_shift = default_routines_mesh
             explicit_kpoint_array = None
@@ -5245,6 +5359,11 @@ def _parse_parsec_input(
             # weight (the DOS tetrahedra and Output_GW keep the whole mesh).  Non-magnetic spin-orbit coupling
             # (PARSEC_SOC_KPOINT_WEDGE) too: the Kramers partner of a spinor at -k has the same density and forces.
             kpoint_time_reversal = True
+        if moving_wedge is None and moving_force_group and explicit_kpoint_array is not None:
+            # the whole mesh of a structure whose operations all change the finite-difference operators of the
+            # oblique grid: its forces averaged over them (PARSEC_KPOINT_FORCE_GROUP)
+            force_space_group, force_note = moving_force_group[0]
+            warnings.append(force_note)
     elif is_periodic:
         weighted_kpoints = bool(
             explicit_kpoint_weights is not None
@@ -5256,6 +5375,21 @@ def _parse_parsec_input(
         def bulk_symmetry(shift, notes: list[str]):
             """_periodic_symmetry with the k-point shift ``shift``, and the movements its wedge cannot follow."""
 
+            search_info = _bulk_symmetry_search_info(
+                periodic_cell,
+                ignore_symmetry=ignore_symmetry,
+                kpoints=monkhorst_pack_dimensions is not None or explicit_kpoint_array is not None,
+                spinors=bool(
+                    noncollinear
+                    or self_consistent_spin_orbit
+                    or any(specification.spin_orbit for specification in specifications.values())
+                ),
+                bands=bool(blocks.get("bandstruc")),
+                nscf="nscf_kpoints" in blocks,
+                molecular_dynamics=molecular_dynamics.enabled,
+                manual_movement=minimization == "manual",
+                requested_shift=requested_grid_shift,
+            )
             symmetrized, group, symmetric_grid = _periodic_symmetry(
                 symmetry_atoms,
                 periodic_cell,
@@ -5268,22 +5402,79 @@ def _parse_parsec_input(
                 noncollinear=noncollinear,
                 warnings=notes,
                 forces_of_weighted_kpoints=forces_requested and weighted_kpoints,
-                search_info=_bulk_symmetry_search_info(
-                    periodic_cell,
-                    ignore_symmetry=ignore_symmetry,
-                    kpoints=monkhorst_pack_dimensions is not None or explicit_kpoint_array is not None,
-                    spinors=bool(
-                        noncollinear
-                        or self_consistent_spin_orbit
-                        or any(specification.spin_orbit for specification in specifications.values())
-                    ),
-                    bands=bool(blocks.get("bandstruc")),
-                    nscf="nscf_kpoints" in blocks,
-                    molecular_dynamics=molecular_dynamics.enabled,
-                    manual_movement=minimization == "manual",
-                    requested_shift=requested_grid_shift,
-                ),
+                search_info=search_info,
             )
+            spinor_orbitals = bool(
+                noncollinear
+                or self_consistent_spin_orbit
+                or any(specification.spin_orbit for specification in specifications.values())
+            )
+            flagged_relaxation = bool(
+                forces_requested
+                and minimization in {"bfgs", "simple"}
+                and not (molecular_dynamics.enabled or weighted_kpoints)
+                and group is not None
+                and _move_flag_subgroup_active()
+            )
+            subgroup_note = None
+            if flagged_relaxation and not spinor_orbitals and not (scf.is_hybrid and shift is not None):
+                # A relaxation whose Move_Flag breaks the group keeps the subgroup of its flags
+                # (PARSEC_MOVE_FLAG_SPACE_GROUP=auto, since 2026-11-21): the wedge of a Monkhorst_Pack_Shift mesh, the
+                # density average and the forces take it.  The grid keeps the translations of the whole group
+                # (adjust_step above), as PARSEC 1.5 chooses it; a group whose translations it does not take keeps
+                # the route of before.  A weighted Kpoint_List is a wedge of the input's group, which no subgroup
+                # completes: it is refused below, as before.  Spinor orbitals (spin-orbit coupling, non-collinear
+                # magnetism) keep the refusal of before: their subgroup is not validated.  So does a hybrid on a
+                # Monkhorst_Pack_Shift mesh: its mesh stays the time-reversal pairs (no fewer points), and the density
+                # average holds a state symmetric where exact exchange breaks it (O2 PBE0 with one atom fixed, the
+                # second structure: 8.5e-3 Ry above the state of the whole mesh without the average).
+                group, subgroup_note = _move_flag_space_group(
+                    group,
+                    symmetry_atoms,
+                    periodic_cell.lattice_vectors,
+                    movable,
+                    lambda labelled: _fortran_flag_group(
+                        labelled, periodic_cell, symmetric_grid, search_info=search_info
+                    ),
+                    what=(
+                        "the k-point mesh is reduced (with time reversal) by, and the density averaged over,"
+                        if shift is not None
+                        else "the density is averaged over"
+                    ),
+                )
+                if subgroup_note is not None:
+                    notes.append(subgroup_note)
+            if (
+                flagged_relaxation
+                and subgroup_note is None
+                and shift is None
+                and symmetrized
+                and group is not None
+                and group.order > 1
+                and movable is not None
+                and len(movable) == len(symmetry_atoms)
+            ):
+                from ..Grid.space_group import respects_flags
+
+                if respects_flags(group, periodic_cell.lattice_vectors, symmetry_atoms, movable) is not True:
+                    # Symmetrize_Charge_Density of a relaxation without a reduced k-point set (the Gamma point, an
+                    # equally weighted Kpoint_List) whose flags break the group, where no subgroup is kept (spinor
+                    # orbitals, or a subgroup whose translations the grid does not take): the moved structures leave
+                    # the group, so the density is not averaged (before 2026-11-21 it was averaged over the group of
+                    # the first structure; PARSEC_MOVE_FLAG_SPACE_GROUP=off keeps that)
+                    notes.append(
+                        f"Move_Flag fixes atoms that operations of the space group ({group.order} operations) "
+                        "exchange with movable ones, and no subgroup that keeps them is used here ("
+                        + (
+                            "spin-orbit coupling or non-collinear magnetism"
+                            if spinor_orbitals
+                            else "its operations do not map the grid onto itself"
+                        )
+                        + "): the relaxation leaves the group after its first move, so Symmetrize_Charge_Density "
+                        "averages nothing (PARSEC_MOVE_FLAG_SPACE_GROUP=off: the density averaged over the whole "
+                        "group, as before)"
+                    )
+                    symmetrized, group = False, None
             if forces_requested:
                 _check_reduced_kpoint_movements(
                     symmetry_atoms,
@@ -5316,12 +5507,22 @@ def _parse_parsec_input(
                 "symmetrized"
             )
         warnings.extend(bulk_notes)
+        # the forces and relaxations of a hybrid on its wedge (PARSEC_HYBRID_KPOINT_FORCE_WEDGE=auto): bfgs, simple and
+        # the forces of a single point; the nonlocal forces of the wedge are completed over the space group and the
+        # forces averaged over it, as every k-point force of these routines (Forces.periodic, symm_forces.f90)
+        hybrid_force_wedge = bool(
+            scf.is_hybrid
+            and forces_requested
+            and hybrid_kpoint_force_wedge_setting() == "auto"
+            and not (molecular_dynamics.enabled or minimization == "manual")
+            and not (optional_bool("create_dos") or optional_bool("output_gw"))
+        )
         if (
             scf.is_hybrid
             and periodicity == 3
             and monkhorst_pack_shift is not None
             and monkhorst_pack_dimensions is not None
-            and not forces_requested
+            and (hybrid_force_wedge or not forces_requested)
             and symmetrize_density
             and space_group is not None
             and not (
@@ -5410,17 +5611,29 @@ def _parse_parsec_input(
             mesh_note = _unshifted_hybrid_pairs_note(_HYBRID_PAIRS_OFF)
         elif wire_or_slab:
             mesh_note = _unshifted_hybrid_pairs_note(_HYBRID_PAIRS_LOW_DIMENSION)
-        elif atoms_move or single_point_forces:
-            mesh_note = _unshifted_hybrid_pairs_note(_HYBRID_PAIRS_MOVING)
+        elif (atoms_move or single_point_forces) and not hybrid_force_wedge:
+            mesh_note = _unshifted_hybrid_pairs_note(
+                _HYBRID_PAIRS_MOVING_FORTRAN if routines.fortran else _HYBRID_PAIRS_MOVING
+            )
         elif (
             noncollinear
             or self_consistent_spin_orbit
             or any(specification.spin_orbit for specification in specifications.values())
         ):
             mesh_note = _unshifted_hybrid_pairs_note(_HYBRID_PAIRS_SPINORS)
+        elif hybrid_force_wedge:
+            # forces whose wedge was allowed and not found: the group of the forces keeps the fixed atoms apart too
+            mesh_note = _unshifted_hybrid_pairs_note(_HYBRID_PAIRS_NO_FORCE_GROUP)
         else:
             mesh_note = _unshifted_hybrid_pairs_note(_HYBRID_PAIRS_NO_GROUP)
         warnings[:] = [mesh_note if note == _UNSHIFTED_HYBRID_PAIRS_NOTE else note for note in warnings]
+    if hybrid_force_wedge and (hybrid_kpoint_wedge or hybrid_kpoint_wedge_deferred is not None):
+        warnings.append(
+            "Forces of the hybrid: on the irreducible wedge of the mesh where its Fock loop runs there (the nonlocal "
+            "forces of the wedge's k-points completed over its group and the forces averaged over it, which keeps a "
+            "relaxed structure in the group; a relaxation keeps the route its first structure takes); "
+            "PARSEC_HYBRID_KPOINT_FORCE_WEDGE=off keeps the time-reversal pairs"
+        )
     if symmetrize_density and not wire_or_slab:
         scf = replace(scf, symmetrize_density=True)
     # PARSEC always evaluates the forces.  Here a single point evaluates
@@ -5563,6 +5776,14 @@ def _parse_parsec_input(
     if band_blocks:
         if not is_periodic:
             raise ParsecInputError("bandstruc applies only to periodic systems")
+        # PARSEC_BAND_CONVERGENCE and PARSEC_KPOINT_EXTRA_CYCLES (SCF/bands.validate_band_settings): an unknown
+        # value stops here, before the SCF
+        from ..SCF.bands import validate_band_settings
+
+        try:
+            validate_band_settings()
+        except ValueError as error:
+            raise ParsecInputError(str(error)) from error
         if len(band_blocks) != 1:
             raise ParsecInputError("provide a single bandstruc block")
         segments = []
@@ -5779,6 +6000,15 @@ def _parse_parsec_input(
     if post_processing.monkhorst_pack_shift is not None:
         # the restarted SCF of Create_DOS runs with the shift of the DOS (implied where no block gives it)
         implied_zero_shift = post_processing.implied_monkhorst_pack_shift
+    if post_processing.nscf is not None:
+        # PARSEC_BAND_CONVERGENCE and PARSEC_KPOINT_EXTRA_CYCLES also set the first solve of the nscf k-points:
+        # checked before the run
+        from ..SCF.bands import validate_band_settings
+
+        try:
+            validate_band_settings()
+        except ValueError as error:
+            raise ParsecInputError(str(error)) from error
     if post_processing.nscf is not None and eigensolver.fixed_state_count:
         # calc_nscf.F90:146-147 sets the number of eigenpairs of the NSCF
         # solve itself (nn = nstate): Fix_Number_Eigenvalues changes nothing.
@@ -5904,6 +6134,7 @@ def _parse_parsec_input(
                 nscf=post_processing.nscf is not None,
                 no_symmetry=bool(molecular_dynamics.enabled or polarizability or minimization == "manual"),
                 warnings=[],
+                charged_sheets=charged_sheets,
                 slab_mesh=_slab_mesh_request(
                     periodicity=periodicity,
                     monkhorst_pack_dimensions=monkhorst_pack_dimensions,
@@ -5972,6 +6203,7 @@ def _parse_parsec_input(
                 molecular_dynamics.enabled or polarizability or minimization == "manual"
             ),
             warnings=warnings,
+            charged_sheets=charged_sheets,
             slab_mesh=_slab_mesh_request(
                 periodicity=periodicity,
                 monkhorst_pack_dimensions=monkhorst_pack_dimensions,
@@ -6314,6 +6546,31 @@ def _parse_parsec_input(
                 full_mesh_reason=full_mesh_reason,
             )
 
+    # the mesh of these routines on an oblique cell outside a hybrid (whose exchange needs one point per class) and the
+    # DOS tetrahedra and Output_GW (one per mesh point, and BerkeleyGW's unfolding of the wedge): every shortest image
+    # of a point on the zone boundary with a share of its weight, in the whole mesh (Grid.kpoints.tie_shared_points)
+    # and in the stars of a wedge (Grid.kpoints.irreducible_monkhorst_pack)
+    tie_images = bool(
+        default_mesh_list
+        and not scf.is_hybrid
+        and not (optional_bool("create_dos") or optional_bool("output_gw"))
+        and oblique_reciprocal_lattice(2.0 * np.pi * np.linalg.inv(periodic_cell.lattice_vectors).T)
+    )
+    if tie_images and tied_mesh_points[0]:
+        warnings.append(
+            f"Monkhorst_Pack_Grid: {tied_mesh_points[0]} of the {tied_mesh_points[1]} points of the mesh lie on the "
+            "boundary of the first Brillouin zone with several equally short images, which the finite-difference "
+            "Bloch operator does not treat alike; each runs as all of them with an equal share of its weight (the "
+            "stars of a wedge split into the orbits of exact images; PARSEC_KPOINT_FOLD=centred keeps one folded "
+            "point each)"
+        )
+
+    if scf.spin_polarized and not ignore_symmetry and not wire_or_slab:
+        # labels of one species that hide operations of the atoms from the symmetry sectors (a parsec.out note)
+        label_note = _identical_label_note(atoms, specifications, periodic_cell)
+        if label_note is not None:
+            warnings.append(label_note)
+
     problem = SinglePointInput(
         atoms=atoms,
         pseudopotentials=specifications,
@@ -6337,6 +6594,15 @@ def _parse_parsec_input(
         **({"kpoint_time_reversal": True} if kpoint_time_reversal else {}),
         **({"hybrid_kpoint_wedge": True} if hybrid_kpoint_wedge else {}),
         **({"hybrid_kpoint_wedge_deferred": hybrid_kpoint_wedge_deferred} if hybrid_kpoint_wedge_deferred else {}),
+        # the representatives of a wedge of the default routines: the shortest images (PARSEC_KPOINT_FOLD)
+        **(
+            {"kpoint_shortest_representatives": True}
+            if is_periodic and not routines.fortran and shortest_kpoints
+            else {}
+        ),
+        # every shortest image of a point on the zone boundary (tie_images, above)
+        **({"kpoint_tie_images": True} if tie_images else {}),
+        **({"force_space_group": force_space_group} if force_space_group is not None else {}),
     )
     output_all_states = optional_bool("output_all_states")
     output_level = _integer(one("output_level", "1"), label="Output_Level")
@@ -6409,6 +6675,61 @@ def _parse_parsec_input(
             ),
         )
     return translation
+
+
+def _identical_label_note(atoms, specifications, periodic_cell) -> str | None:
+    """A note where two ``Atom_Type`` labels are one species and the labels hide operations of the atoms.
+
+    Labels whose pseudopotential files hold the same bytes and whose other settings (``Initial_Spin_Polarization``,
+    ``Local_Component``, LDA+U, ...) agree are the same Hamiltonian; the symmetry of the labeled atoms, which PARSEC
+    1.5 and the symmetry sectors of a spin-polarized run use, then leaves out the operations that exchange them.
+    A state that breaks those operations is not seen by the guard of the sectors, and the sectors and the full grid
+    can end in different SCF solutions: the non-magnetic Cr2 pair of two such labels in a 14.4 bohr cube (PBE)
+    ended at -37.4886 Ry in the sectors (C4v of the labeled atoms, the mirror between them broken) and at
+    -37.4402 Ry on the full grid, which keeps the mirror-symmetric start (A100, 2026-11-21).  ``None`` where no two
+    labels are one species or the labels hide no operation; a cluster takes the cubic operations about the origin,
+    a bulk cell the space group.
+    """
+
+    from dataclasses import replace as _replace
+
+    classes: dict = {}
+    for label in dict.fromkeys(atom.symbol for atom in atoms):
+        specification = specifications[label]
+        try:
+            content = Path(specification.path).read_bytes()
+        except (OSError, TypeError):
+            return None
+        key = (content, repr(_replace(specification, path="", atomic_radius=0.0)))
+        classes.setdefault(key, []).append(label)
+    shared = [labels for labels in classes.values() if len(labels) > 1]
+    if not shared:
+        return None
+    first = {label: labels[0] for labels in shared for label in labels}
+    joined = [_replace(atom, symbol=first.get(atom.symbol, atom.symbol)) for atom in atoms]
+    try:
+        if periodic_cell is None:
+            from ..Forces.symmetry import atom_symmetry_operations
+
+            labeled, merged = len(atom_symmetry_operations(atoms)), len(atom_symmetry_operations(joined))
+        else:
+            from ..Grid.space_group import find_space_group
+
+            lattice = periodic_cell.lattice_vectors
+            labeled = len(find_space_group(lattice, atoms).rotations)
+            merged = len(find_space_group(lattice, joined).rotations)
+    except ValueError:
+        return None
+    if merged <= labeled:
+        return None
+    names = "; ".join(", ".join(labels) for labels in shared)
+    return (
+        f"the Atom_Type labels {names} are one species (the same pseudopotential file and settings): the labeled "
+        f"atoms keep {labeled} of the {merged} symmetry operations of the atoms, and the symmetry sectors of the "
+        "spin-polarized run hold those alone; a state that breaks the others can differ from the run without "
+        "symmetry (Spin_Symmetry_Sectors: off or --symmetry off), as two SCF solutions of a non-magnetic Cr2 pair "
+        "in a cube do (48 mRy). One label for those atoms keeps all of them."
+    )
 
 
 class StructureCountMismatch(ParsecInputError):
@@ -6730,6 +7051,7 @@ def _default_routines_wedge(
     warnings: list[str],
     stencil_exact: bool = False,
     stencil_switch: str | None = "PARSEC_SOC_KPOINT_WEDGE=grid",
+    mesh_group: list | None = None,
 ):
     """The symmetry of a ``Monkhorst_Pack_Shift`` mesh of a bulk cell on the default routines.
 
@@ -6752,14 +7074,16 @@ def _default_routines_wedge(
     ``Ignore_Symmetry`` or ``Symmetrize_Charge_Density: .false.``: time reversal alone (``k`` and ``-k`` have the
     same density, which needs no average).
 
-    ``stencil_exact`` (non-magnetic spin-orbit coupling, ``PARSEC_SOC_KPOINT_WEDGE=auto``) keeps only the operations
+    ``stencil_exact`` (non-magnetic spin-orbit coupling, ``PARSEC_SOC_KPOINT_WEDGE=auto``; scalar and collinear-spin
+    orbitals under ``PARSEC_SCALAR_KPOINT_WEDGE=auto``, since 2026-11-21) keeps only the operations
     that also map the grid's finite-difference operators onto themselves
     (:func:`parsec_python.Grid.kpoints.stencil_preserving_operations`): on an oblique grid the others change the
     discrete Hamiltonian at the order of the discretization, and their wedge is not the energy of the same points
-    without the group (scalar orbitals keep them, as before).  A hybrid single point takes them too
+    without the group (``PARSEC_SCALAR_KPOINT_WEDGE=grid`` keeps them, as before).  A hybrid single point takes them too
     (``PARSEC_HYBRID_KPOINT_WEDGE`` on and auto, since 2026-11-20, on any grid:
     :func:`parsec_python.Grid.kpoints.hybrid_wedge_operations`); ``stencil_switch`` names the value that keeps every
-    operation in the notes (``None``: none does).
+    operation in the notes (``None``: none does).  ``mesh_group`` (a list) receives the operations that map the grid
+    and the mesh onto themselves, before ``stencil_exact`` keeps its subgroup (nothing where no group is formed).
     """
 
     from ..Grid.kpoints import mesh_preserving_operations, stencil_preserving_operations
@@ -6781,6 +7105,8 @@ def _default_routines_wedge(
     except ValueError as error:
         raise ParsecInputError(f"symmetry operations: {error}") from error
     on_mesh = mesh_preserving_operations(on_grid, *mesh)
+    if mesh_group is not None:
+        mesh_group.append(on_mesh)
     group = stencil_preserving_operations(on_mesh, lattice_vectors, counts) if stencil_exact else on_mesh
     stencil_note = (
         "do not map the finite-difference operators of the oblique grid onto themselves (they turn a grid axis onto "
@@ -6826,22 +7152,43 @@ def _default_routines_force_wedge(
     symmetrize_density: bool,
     symmetrize_given: bool,
     stencil_exact: bool = False,
+    stencil_switch: str | None = "PARSEC_SOC_KPOINT_WEDGE=grid",
+    force_group: str = "crystal",
+    whole_mesh_group: list | None = None,
+    flag_subgroup: bool = True,
 ):
     """The wedge of :func:`_default_routines_wedge` for forces or a relaxation, or ``None`` for the whole mesh.
 
-    Returns ``(symmetrize_density, space_group, warnings)``.  The forces of the wedge are completed over its group and
-    averaged over it (:func:`parsec_python.Forces.total.compute_periodic_forces`, as ``symm_forces.f90``), which keeps
+    Returns ``(symmetrize_density, space_group, warnings, force_space_group)``.  ``force_space_group`` is ``None``
+    except where ``stencil_exact`` kept fewer operations than map the grid and the mesh onto themselves and
+    ``force_group`` is ``crystal`` (``PARSEC_KPOINT_FORCE_GROUP``, the default): then those operations, over which the
+    forces and the moved positions are averaged (:func:`parsec_python.Forces.periodic.periodic_force_operations`)
+    while the k-point sum stays that of the wedge; in the converged limit the forces have that symmetry, and the
+    average is an orthogonal projection onto it, which removes only the part the finite-difference operators of the
+    oblique grid break (the in-plane forces of an atom on the hcp three-fold axis) and keeps a relaxed structure in
+    the group.  It is dropped where one of its operations exchanges fixed and movable atoms.  Where ``stencil_exact``
+    leaves no operation but the identity, the whole mesh runs and ``whole_mesh_group`` (a list) receives ``(group,
+    note)`` of those operations instead, for the same average.  The forces of the wedge
+    are completed over its group and averaged over it (:func:`parsec_python.Forces.total.compute_periodic_forces`, as
+    ``symm_forces.f90``), which keeps
     a relaxed structure in the group while every movable atom is mapped onto a movable one: ``movable`` (the flags of a
     relaxation, ``None`` for the forces of a single point) is checked against the atom images of every operation.
     ``None`` where no operation but the identity remains (``Ignore_Symmetry``, ``Symmetrize_Charge_Density:
     .false.``, a structure without symmetry, spin-orbit coupling whose operations all change the finite-difference
-    operators, ``stencil_exact``) or where an operation exchanges fixed and movable atoms: the caller then keeps the
-    whole mesh, run as its time-reversal pairs.
+    operators, ``stencil_exact``) or where an operation exchanges fixed and movable atoms and no operation but the
+    identity maps the fixed atoms onto fixed atoms: the caller then keeps the whole mesh, run as its time-reversal
+    pairs.  Where some do, the wedge is that of their subgroup (``PARSEC_MOVE_FLAG_SPACE_GROUP=auto``, since
+    2026-11-21, :func:`_move_flag_space_group`; ``off`` keeps the whole mesh for such flags, as before, and so does
+    ``flag_subgroup=False``, spinor orbitals, for which the subgroup is not validated), of the operations that also
+    keep the grid's finite-difference operators whatever the orbitals (``stencil_exact``): these inputs ran the whole
+    mesh before, which the subgroup's wedge then gives to SCF precision on oblique grids too (hcp Au2: 14 of 32
+    points).
     """
 
     from ..Grid.space_group import space_group_atom_images
 
     found: list[str] = []
+    whole: list = []
     symmetrize, group = _default_routines_wedge(
         atoms,
         periodic_cell,
@@ -6852,18 +7199,96 @@ def _default_routines_force_wedge(
         symmetrize_given=symmetrize_given,
         warnings=found,
         stencil_exact=stencil_exact,
+        stencil_switch=stencil_switch,
+        mesh_group=whole,
     )
-    if group is None or group.order <= 1:
-        return None
-    if movable is not None and len(movable) == len(atoms):
+
+    def keeps_movable(candidate) -> bool | None:
+        # True where every operation maps movable atoms onto movable ones, False where one exchanges fixed and
+        # movable atoms (the subgroup of Move_Flag below), None where the atom images cannot be formed
+        if movable is None or len(movable) != len(atoms):
+            return True
         mask = np.asarray(movable, dtype=bool)
         try:
-            images = space_group_atom_images(group, periodic_cell.lattice_vectors, atoms)
+            images = space_group_atom_images(candidate, periodic_cell.lattice_vectors, atoms)
         except ValueError:
             return None
-        if any(not np.array_equal(mask[row], mask) for row in images):
+        return all(np.array_equal(mask[row], mask) for row in images)
+
+    if group is None or group.order <= 1:
+        if (
+            whole_mesh_group is not None
+            and stencil_exact
+            and force_group == "crystal"
+            and whole
+            and whole[0].order > 1
+            and keeps_movable(whole[0])
+        ):
+            # every operation changes the finite-difference operators: the whole mesh, its forces averaged over them
+            whole_mesh_group.append(
+                (
+                    whole[0],
+                    f"Forces: averaged over the {whole[0].order} operations of the space group that map the grid and "
+                    "the k-point mesh onto themselves, which the k-point sum of the whole mesh does not use (none "
+                    "but the identity keeps the grid's finite-difference operators); the moved positions keep them "
+                    "(PARSEC_KPOINT_FORCE_GROUP=wedge does not average)",
+                )
+            )
+        return None
+    keeps = keeps_movable(group)
+    if keeps is None:
+        return None
+    if not keeps:
+        if not (flag_subgroup and _move_flag_subgroup_active()):
             return None
-    return symmetrize, group, found
+
+        def search(labelled):
+            # the wedge of these routines for the atoms with the fixed ones as a species of their own: the
+            # operations that map the grid, the mesh and the finite-difference operators onto themselves and the
+            # fixed atoms onto fixed atoms.  The stencil condition holds for scalar orbitals too: these inputs
+            # ran the whole mesh before, and on an oblique grid the operations that turn the stencil change the
+            # energy at the order of the discretization (hcp Au2 at 0.3 bohr: 7.7e-3 Ry); orthogonal grids
+            # keep every operation.
+            return _default_routines_wedge(
+                labelled,
+                periodic_cell,
+                grid,
+                mesh,
+                ignore_symmetry=ignore_symmetry,
+                symmetrize_density=symmetrize_density,
+                symmetrize_given=symmetrize_given,
+                warnings=[],
+                stencil_exact=True,
+                stencil_switch=None,
+            )[1]
+
+        kept, note = _move_flag_space_group(
+            group,
+            atoms,
+            periodic_cell.lattice_vectors,
+            movable,
+            search,
+            what=(
+                "the Monkhorst_Pack_Shift mesh is reduced to the irreducible wedge (with time reversal) of, and "
+                "the density averaged over,"
+            ),
+        )
+        if note is None or kept is None or kept.order <= 1:
+            return None
+        # the forces of the subgroup's wedge are averaged over the subgroup itself (no force_space_group): the
+        # crystal group of PARSEC_KPOINT_FORCE_GROUP exchanges fixed and movable atoms here, and the subgroup's
+        # wedge was validated against the whole mesh with its own average
+        return True, kept, [note], None
+    averaged = None
+    if force_group == "crystal" and whole and whole[0].order > group.order and keeps_movable(whole[0]):
+        averaged = whole[0]
+        found.append(
+            f"Forces: averaged over the {averaged.order} operations of the space group that map the grid and the "
+            f"k-point mesh onto themselves (the k-point sum takes the {group.order} of its wedge, which also keep the "
+            "grid's finite-difference operators); the moved positions keep them (PARSEC_KPOINT_FORCE_GROUP=wedge "
+            "averages over those of the wedge)"
+        )
+    return symmetrize, group, found, averaged
 
 
 def _default_routines_list_symmetry(
@@ -6973,6 +7398,7 @@ def _wire_slab_symmetry(
     no_symmetry: bool,
     warnings: list[str],
     slab_mesh: dict | None = None,
+    charged_sheets=(),
 ):
     """The space group of a wire or slab and what it decides.
 
@@ -6990,7 +7416,11 @@ def _wire_slab_symmetry(
     (:func:`parsec_python.Grid.space_group.find_wire_slab_space_group`); the
     operations that do not map the confined grid onto itself are dropped (a
     Fortran defect: with ``bandstruc`` a slab's symmetrization averages
-    over points that are not images of each other).  The group is always
+    over points that are not images of each other), and so are those that do
+    not map the ``charged_sheets`` of a slab onto sheets of the same charge
+    (:func:`parsec_python.Grid.space_group.sheet_preserving_operations`; PARSEC
+    searches from the atoms alone, so ``z -> -z`` symmetrized an asymmetric
+    capacitor and erased its dipole, since 2026-11-21).  The group is always
     kept in the problem (its block is printed, the forces are averaged over
     it); the fractional translations along the periodic directions make
     ``adjust_step`` commensurate, ``Monkhorst_Pack_Shift`` reduces the
@@ -7029,6 +7459,21 @@ def _wire_slab_symmetry(
                 "periodic one) and do not map the wire or slab grid onto itself "
                 "(PARSEC applies them anyway)"
             )
+        if periodicity == 2 and charged_sheets:
+            from ..Grid.space_group import confined_symmetry_lattice, sheet_preserving_operations
+
+            group, sheet_dropped = sheet_preserving_operations(
+                group,
+                charged_sheets,
+                confined_symmetry_lattice(periodic_cell.lattice_vectors, periodicity, grid.confinement_radius),
+            )
+            if sheet_dropped:
+                warnings.append(
+                    f"{sheet_dropped} symmetry operation(s) of PARSEC's search are not used: "
+                    "they do not map the charged sheets (add_charged_sheets) onto sheets of the same "
+                    "charge, whose potential then breaks them (PARSEC searches from the atoms alone "
+                    "and applies them anyway)"
+                )
         translations = group.commensurate_translations(periodicity)
         if any(translations):
             grid = replace(
@@ -7244,6 +7689,99 @@ def _slab_mesh_space_group(atoms, periodic_cell: PeriodicCell, grid: PeriodicGri
         + "; PARSEC 1.5 searches no symmetry for a slab (PARSEC_SLAB_MESH_SYMMETRY=off: time reversal alone)"
     )
     return group
+
+
+def _move_flag_subgroup_active() -> bool:
+    """Whether a relaxation whose ``Move_Flag`` breaks the space group of a cell keeps the subgroup of its flags.
+
+    ``PARSEC_MOVE_FLAG_SPACE_GROUP=auto`` and ``PARSEC_MOVE_FLAG_SUBGROUP=auto`` (both the defaults); either at
+    ``off`` keeps the routes of before (:func:`parsec_python.Grid.kpoints.move_flag_space_group_setting`).
+    """
+
+    from ..Grid.kpoints import move_flag_space_group_setting
+    from ..Relaxation.run import move_flag_subgroup_setting
+
+    # (both read, so that a value either does not know is refused)
+    space_group = move_flag_space_group_setting()
+    subgroup = move_flag_subgroup_setting()
+    return space_group == "auto" and subgroup == "auto"
+
+
+def _move_flag_space_group(group, atoms, lattice_vectors, movable, search, *, what: str):
+    """``(group, note)``: the group a relaxation keeps where its ``Move_Flag`` breaks the space group ``group``.
+
+    A relaxation by an optimizer keeps the operations that map the fixed atoms onto fixed atoms: its forces and
+    moved positions averaged over them keep every structure in that subgroup, so the k-point wedge, the density
+    average and the completion of the forces of the wedge take it (``PARSEC_MOVE_FLAG_SPACE_GROUP=auto``,
+    :func:`_move_flag_subgroup_active`).  ``search`` finds it from the atoms with the fixed ones as a species of their
+    own (:func:`parsec_python.Grid.space_group.atoms_with_fixed_species`; the search of the routines, so that its
+    operations meet the same conditions as those of ``group``), or returns ``None``: one translation per rotation
+    that keeps the fixed atoms, which the operations of ``group`` need not have (a supercell's translations of the
+    smaller cell).  Returns ``group`` and ``None`` where every operation of ``group`` respects the flags, where there
+    is no group, or where none is found (the caller keeps the route of before); the group found may be the identity
+    alone (the caller decides what that runs).  ``what`` names the use in the note.
+    """
+
+    from ..Grid.kpoints import MOVE_FLAG_SPACE_GROUP_ENV
+    from ..Grid.space_group import atoms_with_fixed_species, respects_flags
+
+    if group is None or group.order <= 1 or movable is None or all(bool(flag) for flag in movable):
+        return group, None
+    if respects_flags(group, lattice_vectors, atoms, movable) is not False:
+        return group, None
+    kept = search(atoms_with_fixed_species(atoms, movable))
+    if kept is None or respects_flags(kept, lattice_vectors, atoms, movable) is not True:
+        return group, None
+    note = (
+        f"Move_Flag fixes atoms that operations of the space group ({group.order} operations) exchange with movable "
+        f"ones: {what} "
+        + (
+            f"the {kept.order} operations that map the fixed atoms onto fixed atoms"
+            if kept.order > 1
+            else "the identity alone (no other operation maps the fixed atoms onto fixed atoms)"
+        )
+        + f", which the relaxation keeps ({MOVE_FLAG_SPACE_GROUP_ENV}=auto; off: the routes of before)"
+    )
+    return kept, note
+
+
+def _fortran_flag_group(labelled, periodic_cell: PeriodicCell, grid, *, search_info: int):
+    """The space group of ``labelled`` (the fixed atoms a species of their own) for the Fortran-derived routines.
+
+    ``symmetries.f90``'s search (:func:`parsec_python.Grid.space_group.find_space_group`), with ``symchk`` where the
+    search of the run checks its group (``search_info`` 0, :func:`_periodic_symmetry`).  ``None`` where that check
+    fails or where a translation of the group found does not map ``grid`` (the grid of the input's group, whose
+    translations ``adjust_step`` took) onto itself.  Of the operations found, those that map the finite-difference
+    operators of that grid onto themselves (:func:`parsec_python.Grid.kpoints.stencil_preserving_operations` with the
+    stencil of :func:`parsec_python.Grid.kpoints.grid_stencil_lines`, as a hybrid's wedge takes them): on Fortran's
+    general grid of an oblique cell the others change the discrete Hamiltonian at the order of the discretization,
+    and these relaxations, which the routines refused before, are to give the energies of the whole mesh (on an
+    orthorhombic grid every operation is kept).
+    """
+
+    from ..Grid.kpoints import grid_stencil_lines, stencil_preserving_operations
+    from ..Grid.pbc import fortran_grid_counts
+    from ..Grid.space_group import find_space_group, grid_commensurability_problem
+    from ..Grid.symmetry_analysis import symmetry_check
+
+    try:
+        found = find_space_group(periodic_cell.lattice_vectors, labelled)
+    except ValueError:
+        return None
+    if search_info == 0 and symmetry_check(found).error:
+        return None
+    if found.order > 1:
+        try:
+            counts = [int(value) for value in fortran_grid_counts(periodic_cell, grid)[0]]
+            stencil_counts, lines = grid_stencil_lines(periodic_cell, grid)
+        except ValueError:
+            return None
+        if grid_commensurability_problem(found, counts, grid.shift) is not None:
+            return None
+        found = stencil_preserving_operations(
+            found, np.asarray(periodic_cell.lattice_vectors, dtype=np.float64), stencil_counts, lines=lines
+        )
+    return found
 
 
 def _check_reduced_kpoint_movements(
@@ -8927,6 +9465,44 @@ def _periodic_potential_conventions(
     return grid, scf
 
 
+def _mesh_reduction_text(problem) -> str:
+    """How the summary's ``K-points`` line says Fortran's grid of ``problem`` (``monkhorst_pack_shift``) is reduced.
+
+    A semilocal run: by its space group (``problem.space_group``) and time reversal unless non-collinear (``irrbz``).
+    A hybrid functional (its exchange sums over the whole mesh): by time reversal alone, which the density average of
+    the Fortran-derived routines does not change (``problem.space_group`` is that average's group there); its wedge
+    under ``PARSEC_HYBRID_KPOINT_WEDGE`` (:func:`parsec_python.Grid.kpoints.hybrid_wedge_group`: the operations that
+    keep the mesh and the grid's finite-difference operators), or that wedge for the Fock loop of an insulating start
+    (``auto``, ``hybrid_kpoint_wedge_deferred``)."""
+
+    if not getattr(problem.scf, "is_hybrid", False):
+        return "reduced to the irreducible wedge by " + (
+            "the identity"
+            if problem.space_group is None or problem.space_group.order == 1
+            else f"{problem.space_group.order} space-group operations"
+        ) + (" without time reversal" if problem.scf.noncollinear else " and time reversal")
+    if problem.scf.noncollinear:
+        return "the whole mesh: a hybrid functional's exchange sums over it, and no time reversal"
+    if getattr(problem, "hybrid_kpoint_wedge", False):
+        from ..Grid.kpoints import hybrid_wedge_group
+
+        group = hybrid_wedge_group(problem)
+        order = 1 if group is None else int(group.order)
+        return (
+            f"reduced to the irreducible wedge by time reversal and the {order} space-group operations that keep the "
+            "mesh and the grid's finite-difference operators; the hybrid's exchange reaches the rest of the mesh "
+            "through the images of the wedge"
+        )
+    deferred = getattr(problem, "hybrid_kpoint_wedge_deferred", None)
+    if deferred is not None:
+        return (
+            "reduced by time reversal alone for the semilocal start of the hybrid; the Fock loop takes the "
+            f"irreducible wedge of time reversal and {int(deferred.group.order)} space-group operations if that "
+            "start fills every state to 0 or 1 (PARSEC_HYBRID_KPOINT_WEDGE=auto)"
+        )
+    return "reduced by time reversal alone: a hybrid functional's exchange sums over the whole mesh"
+
+
 def summarize_translation(translation: ParsecInputTranslation) -> str:
     """Return a concise, deterministic input summary for CLI/log output."""
     problem = translation.problem
@@ -9137,13 +9713,7 @@ def summarize_translation(translation: ParsecInputTranslation) -> str:
                 + "x".join(str(value) for value in problem.monkhorst_pack_dimensions)
                 + ", shift "
                 + " ".join(f"{value:g}" for value in problem.monkhorst_pack_shift)
-                + " (PARSEC's grid, reduced to the irreducible wedge by "
-                + (
-                    "the identity"
-                    if problem.space_group is None or problem.space_group.order == 1
-                    else f"{problem.space_group.order} space-group operations"
-                )
-                + (" without time reversal)" if problem.scf.noncollinear else " and time reversal)"),
+                + f" (PARSEC's grid, {_mesh_reduction_text(problem)})",
             )
         ),
         # The whole mesh of forces and moving atoms run as its pairs k, -k (kpoint_time_reversal).

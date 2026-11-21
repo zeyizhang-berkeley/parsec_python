@@ -62,10 +62,14 @@ def main(argv=None) -> int:
         density = np.random.default_rng(1).random(grid.size)
         host, _ = symmetrize_density(density, symmetry, grid.volume_element)
         averaged = time.perf_counter()
+        held = (
+            "held" if symmetry.holds_table
+            else f"not held, PARSEC_PERIODIC_IMAGE_ROWS; {symmetry.held_bytes / 1e9:.3f} GB of rows and vectors kept"
+        )
         print(
             f"n={n}: {len(atoms)} atoms, {grid.size} points; space group {crystal.order} in {searched - start:.2f} s, "
             f"grid group {group.order} in {grouped - searched:.2f} s, table {tabled - grouped:.2f} s "
-            f"({symmetry.images.nbytes / 1e9:.2f} GB), host average {averaged - tabled:.3f} s",
+            f"({symmetry.table_bytes / 1e9:.2f} GB, {held}), host average {averaged - tabled:.3f} s",
             flush=True,
         )
         if cupy is None:

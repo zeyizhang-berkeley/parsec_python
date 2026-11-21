@@ -61,9 +61,10 @@ class HostEigensolversOnDeviceWorkersTests(unittest.TestCase):
         original = DeviceBlochConverter.operator
         uploads = []
 
-        def counted(converter, hamiltonian):
+        def counted(converter, hamiltonian, **keywords):
+            # the host route asks for the complex operator (real=False, PARSEC_KPOINT_REAL_GAMMA)
             uploads.append(1)
-            return original(converter, hamiltonian)
+            return original(converter, hamiltonian, **keywords)
 
         with mock.patch.dict(os.environ, _DEVICE), mock.patch(
             "parsec_python.acceleration.SCF.kpoint_parallel.solve_spinor_eigval",

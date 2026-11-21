@@ -97,6 +97,20 @@ def generalized_ritz_requested(row_count: int, column_count: int) -> bool:
     return work >= threshold
 
 
+def ritz_route_rows(operator: Any, rows: int) -> int:
+    """The rows by which :func:`generalized_ritz_requested` chooses the Ritz route of ``operator``'s basis.
+
+    ``rows`` itself, but for a unit of irreducible representations on partner rows
+    (``PARSEC_ORBITAL_IRREP_ROWS=partner``): its operator names the rows of the sector of ``H`` it was cut from
+    (``ritz_route_rows``), whose route it keeps.  The work threshold of the route was measured on sectors; on the
+    halved rows of a 1728-atom diamond cube the QR route took the units twice the time of the generalized step
+    per call (0.23 against 0.12 s on A100).
+    """
+
+    route = getattr(operator, "ritz_route_rows", None)
+    return int(rows) if route is None else int(route)
+
+
 def _generalized_condition_limit() -> float:
     raw = os.environ.get(
         "PARSEC_CUPY_GENERALIZED_RITZ_CONDITION_MAX", "1.0e8"
@@ -1811,6 +1825,7 @@ __all__ = [
     "generalized_rayleigh_ritz",
     "generalized_ritz_requested",
     "gram_multiple",
+    "ritz_route_rows",
     "one_array_buffer_limit",
     "rayleigh_ritz",
     "solve_whitened_ritz",

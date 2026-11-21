@@ -14,7 +14,11 @@ The terms are added to the total in the order of the operations, as the host doe
 for bit; the sums of the report (largest change, charges) are reduced on the backend and may differ from the
 host's in their last bits (they are printed only).
 
-The host average at 3 M points costs ~1.5 s per call on a laptop (24 gathers); on an A100 it is milliseconds.
+Since 2026-11-21 the host holds no such table either on a grid of at least 2^17 points averaged on two threads or
+more (``PARSEC_PERIODIC_IMAGE_ROWS=auto``, :class:`parsec_python.Grid.space_group.AffineImageRows`): it gathers the
+field at the images by broadcast index vectors, by slabs on threads, and keeps the int32 row of an oblique operation
+only (a row of its matrix that reads all three axes; the CPU of an A100 node, 48 operations: 2.1 M points 0.68 s with
+the table, 0.064 s without; 16.8 M points 4.47 and 1.31 s).  On an A100 it is milliseconds.
 """
 
 from __future__ import annotations
@@ -35,7 +39,9 @@ class PeriodicDensitySymmetrizer:
         self.xp = xp
         self.order = int(group.order)
         self.reduced_order = int(group.reduced_order)
-        self.size = int(np.asarray(group.images).shape[1])
+        # (the shape of the table, which a group of affine maps need not hold: Grid.space_group.AffineImageRows)
+        shape = getattr(group.images, "shape", None)
+        self.size = int((np.shape(group.images) if shape is None else shape)[1])
         maps = getattr(group, "affine_maps", None)
         counts = getattr(group, "counts", None)
         if maps is not None and counts is not None:

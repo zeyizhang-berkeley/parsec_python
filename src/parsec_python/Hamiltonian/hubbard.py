@@ -264,28 +264,61 @@ def hubbard_symmetry_lattice(system) -> np.ndarray:
     return lattice
 
 
+#: Relative and absolute widening of the radius of the tree query of :func:`hubbard_support`: the query of the
+#: points within the radius of an image along every axis then holds every point of the exact box test.
+_SUPPORT_QUERY_WIDENING = (1.0e-9, 1.0e-12)
+
+
+def support_tree(coordinates: np.ndarray):
+    """A k-d tree of the grid points ``coordinates`` for :func:`hubbard_support` (``scipy.spatial.cKDTree``)."""
+
+    from scipy.spatial import cKDTree
+
+    return cKDTree(np.asarray(coordinates, dtype=np.float64))
+
+
 def hubbard_support(
     coordinates: np.ndarray,
     position: np.ndarray,
     radius: float,
     translations: np.ndarray,
+    *,
+    tree=None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Grid rows and displacements ``r_i + L - R_a`` of every support entry.
 
     One entry per pair of a grid point and a translation ``L`` with
     ``|r_i + L - R_a| <= radius``; a point reached by two images gives two
-    entries, which add up in the projector.
+    entries, which add up in the projector.  ``tree`` (:func:`support_tree`
+    of the same ``coordinates``) narrows the tests of each image to the points
+    the tree finds within a slightly wider radius along every axis, in place of
+    every grid point: the box and sphere tests then run on those rows alone,
+    with the same arithmetic, so the entries, their order and their values are
+    the same bit for bit (the tests of every point took 35 s for the 256 atoms
+    of an fcc Ag cell on a 64^3 grid).
     """
 
     rows: list[np.ndarray] = []
     relative: list[np.ndarray] = []
     position = np.asarray(position, dtype=np.float64)
+    widened = float(radius) * (1.0 + _SUPPORT_QUERY_WIDENING[0]) + _SUPPORT_QUERY_WIDENING[1]
     for translation in translations:
-        shifted = coordinates + (translation - position)
-        # A cheap box test first, the exact sphere after it.
-        box = np.all(np.abs(shifted) <= radius, axis=1)
-        candidates = np.flatnonzero(box)
-        displacement = shifted[candidates]
+        offset = translation - position
+        if tree is None:
+            shifted = coordinates + offset
+            # A cheap box test first, the exact sphere after it.
+            box = np.all(np.abs(shifted) <= radius, axis=1)
+            candidates = np.flatnonzero(box)
+            displacement = shifted[candidates]
+        else:
+            # coordinates - (position - translation) = coordinates + offset in floating point
+            near = np.sort(
+                np.asarray(tree.query_ball_point(-offset, widened, p=np.inf), dtype=np.int64)
+            )
+            shifted = coordinates[near] + offset
+            box = np.all(np.abs(shifted) <= radius, axis=1)
+            candidates = near[box]
+            displacement = shifted[box]
         # rr_tmp = sqrt(x*x+y*y+z*z) <= rc(ity) of upot.F90.
         distance = np.sqrt(
             displacement[:, 0] * displacement[:, 0]
@@ -451,6 +484,7 @@ def build_hubbard_projectors(
     sqrt_volume = np.sqrt(grid.volume_element)
     coordinates = np.asarray(grid.coordinates, dtype=np.float64)
     order = int(getattr(getattr(grid, "settings", None), "double_grid_order", 1) or 1)
+    tree = support_tree(coordinates) if order == 1 else None
     if k_point is not None:
         if lattice_vectors is None:
             raise ValueError("k_point requires lattice_vectors")
@@ -469,7 +503,7 @@ def build_hubbard_projectors(
             block_values = sqrt_volume * block_values
         else:
             entry_rows, relative = hubbard_support(
-                coordinates, atom.position, radii[atom.symbol], translations
+                coordinates, atom.position, radii[atom.symbol], translations, tree=tree
             )
             distance = np.linalg.norm(relative, axis=1)
             radial, _ = interpolate_hubbard_radial(potential, distance)
@@ -841,6 +875,7 @@ __all__ = [
     "hubbard_operator",
     "hubbard_replica_lattice",
     "hubbard_support",
+    "support_tree",
     "hubbard_symmetry_lattice",
     "hubbard_terms",
     "hubbard_terms_from_orbitals",

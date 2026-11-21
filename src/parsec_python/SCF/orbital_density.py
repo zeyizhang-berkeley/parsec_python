@@ -23,6 +23,10 @@ def weighted_square_sum(vectors, occupations, xp=np, chunk: int = COLUMN_CHUNK):
         if not np.any(occupations[c0:c1]):
             continue
         block = vectors[:, c0:c1]
+        if np.dtype(block.dtype).kind != "c":
+            # real orbitals (the Gamma point of a k-point SCF in real arithmetic)
+            total += (block * block) @ xp.asarray(occupations[c0:c1])
+            continue
         total += (block.real * block.real + block.imag * block.imag) @ xp.asarray(occupations[c0:c1])
     return total
 

@@ -163,10 +163,40 @@ class FixNumberEigenvaluesTests(unittest.TestCase):
         self.assertTrue(translation.fix_number_eigenvalues)
         self.assertTrue(eigensolver.fixed_state_count)
         self.assertEqual(eigensolver.subspace_buffer, 6)
-        self.assertEqual(eigensolver.working_buffer, 0)
+        from unittest import mock
+
+        from parsec_python.Input.parsec_input import ParsecInputError
+        from parsec_python.models import (
+            FIXED_STATES_BUFFER_SWITCH,
+            fixed_states_keep_parsec_counts,
+            fixed_states_note,
+            fixed_states_sector_buffer,
+        )
+
+        # PARSEC's nn = nec on every route (no buffer) under both values; PARSEC_FIXED_STATES_BUFFER=auto (the
+        # default) gives the symmetry sectors of the accelerated driver the buffer and their own counts back
+        for value in ("auto", "off"):
+            with mock.patch.dict(os.environ, {FIXED_STATES_BUFFER_SWITCH: value}):
+                self.assertEqual(eigensolver.working_buffer, 0)
+                self.assertEqual(fixed_states_keep_parsec_counts(eigensolver), value == "off")
+                self.assertEqual(fixed_states_sector_buffer(eigensolver), 6 if value == "auto" else 0)
+                self.assertEqual(fixed_states_note(eigensolver) is not None, value == "auto")
+                self.assertFalse(fixed_states_keep_parsec_counts(EigensolverSettings()))
+                self.assertEqual(fixed_states_sector_buffer(EigensolverSettings()), 0)
+                self.assertIsNone(fixed_states_note(EigensolverSettings()))
+                exact = EigensolverSettings(fixed_state_count=True, exact_state_count=True)
+                self.assertEqual(fixed_states_sector_buffer(exact), 0)
+        with mock.patch.dict(os.environ, {FIXED_STATES_BUFFER_SWITCH: ""}):
+            self.assertIn("PARSEC error 404", fixed_states_note(eigensolver))
+        with mock.patch.dict(os.environ, {FIXED_STATES_BUFFER_SWITCH: "sometimes"}):
+            with self.assertRaisesRegex(ParsecInputError, FIXED_STATES_BUFFER_SWITCH):
+                _parse(H2, extra="Restart_Run: .true.\nFix_Number_Eigenvalues: .true.")
+            # without the keyword the switch is not read
+            _parse(H2, extra="Restart_Run: .true.")
         self.assertIn("fixed_state_count=True", repr(eigensolver))
         self.assertNotIn("fixed_state_count", repr(EigensolverSettings()))
         self.assertEqual(EigensolverSettings().working_buffer, 6)
+        self.assertEqual(EigensolverSettings(exact_state_count=True).working_buffer, 0)
 
     def test_nscf_keeps_its_own_count(self) -> None:
         translation = _parse(

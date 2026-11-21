@@ -239,7 +239,68 @@ class ComponentDerivativeTests(unittest.TestCase):
 
     def test_an_atom_within_round_off_of_a_grid_point(self) -> None:
         # Found when both sets of routines were compared: the 1/|d| of a round-off distance made |grad beta| 1.8e6 (Si64, 82 Ry/bohr).
-        # Below min(first radial knot, ROUND_OFF_DISTANCE) the distance is clamped: continuous, bounded.
+        # Below min(first radial knot, ROUND_OFF_DISTANCE) the distance is clamped: continuous, bounded.  The rule
+        # of PARSEC_PROJECTOR_CENTER=off (the default before 2026-11-21).
+        import os
+        from unittest import mock
+
+        with mock.patch.dict(os.environ, {"PARSEC_PROJECTOR_CENTER": "off"}):
+            self._round_off_rule_off()
+
+    def test_an_atom_within_the_first_knot_of_a_grid_point(self) -> None:
+        # PARSEC_PROJECTOR_CENTER=auto (default since 2026-11-21): nonloc.F90's rnorm = max(|d|, rs(2)), also on the
+        # atom itself; the gradient of a round-off distance and of an atom on the point is that of the clamp.
+        import os
+        from unittest import mock
+
+        cube = PeriodicCell(lattice_vectors=5.6 * np.eye(3))
+        grid = build_periodic_grid(cube, PeriodicGridSettings(fortran_routines=True, spacing=0.7, expansion_order=4))
+        node = grid.coordinates[int(np.argmin(np.linalg.norm(grid.coordinates - 2.8, axis=1)))]
+        first_knot = self.si_potentials["Si"].radii[0]
+
+        def gradients(offset):
+            with mock.patch.dict(os.environ, {"PARSEC_PROJECTOR_CENTER": "auto"}):
+                return build_periodic_projector_gradients(
+                    grid, [Atom("Si", node + offset)], self.si_potentials, self.si, cube.lattice_vectors
+                )
+
+        def largest(result):
+            return max(abs(component).max() for component in result.components)
+
+        exact = gradients(np.zeros(3))
+        bound = largest(gradients(np.array([0.0, first_knot, 0.0])))
+        for name, offset in (
+            ("round-off", np.array([1.8e-15, 0.0, -1.8e-15])),
+            ("round-off, one axis", np.array([0.0, 3.6e-15, 0.0])),
+            ("half the knot", np.array([0.0, 0.5 * first_knot, 0.0])),
+        ):
+            with self.subTest(case=name):
+                result = gradients(offset)
+                self.assertLess(largest(result), 1.001 * bound)
+                if "round-off" in name:
+                    for a, b in zip(result.components, exact.components):
+                        self.assertLess(abs(a - b).max(), 1.0e-9 * bound)
+        # an atom exactly on the grid point: the slope w(rs(2))/rs(2) of its p projector at that point (Fortran's
+        # ylm_real with rr = 0), not zero
+        centre = int(np.argmin(np.linalg.norm(grid.coordinates - node, axis=1)))
+        self.assertGreater(abs(exact.components[0][centre]).max(), 0.0)
+        # just below and just above the knot: the derivative of the projectors themselves (the projector of a flat
+        # table has a kink at the knot: w(rs(2)) |d|/rs(2) inside, w(|d|) outside, so the gradient steps there)
+        def projectors(offset):
+            with mock.patch.dict(os.environ, {"PARSEC_PROJECTOR_CENTER": "auto"}):
+                return build_nonlocal_projectors(
+                    grid, [Atom("Si", node + offset)], self.si_potentials, self.si, cube.lattice_vectors
+                ).projectors.toarray()
+
+        step = 1.0e-4 * first_knot
+        for fraction in (0.999, 1.001):
+            offset = np.array([0.0, fraction * first_knot, 0.0])
+            derivative = (projectors(offset - [0.0, step, 0.0]) - projectors(offset + [0.0, step, 0.0])) / (2.0 * step)
+            with self.subTest(knot_fraction=fraction):
+                gradient = gradients(offset).components[1].toarray()
+                self.assertLess(abs(gradient - derivative).max(), 1.0e-6 * bound)
+
+    def _round_off_rule_off(self) -> None:
         from parsec_python.Forces.periodic import ROUND_OFF_DISTANCE
 
         cube = PeriodicCell(lattice_vectors=5.6 * np.eye(3))

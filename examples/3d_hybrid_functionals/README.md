@@ -39,7 +39,7 @@ python src\parsec_python\main.py examples\3d_hybrid_functionals\Si_k222\pbe0\par
 ```
 
 `parsec.out` is written beside the input; compare it with `parsec_python.out`. Every input of this example, one after
-another on one node (about 1 h 24 min of program time on one A100, 38 min of it the two O2 hybrids), and the tables:
+another on one node (about 1 h 20 min of program time on one A100, 40 min of it the two O2 hybrids), and the tables:
 
 ```powershell
 python examples\3d_hybrid_functionals\run_examples.py            # or: run_examples.py Si_k222 hBN_k661/pbe0
@@ -223,14 +223,14 @@ too), with no skip where the gradient vanishes.
 
 | functional | this code | QE | difference | hybrid - PBE: difference |
 |---|---|---|---|---|
-| pbe | -0.018062 | -0.01806913 | +7.1e-06 |  |
-| pbe0 | -0.018976 | -0.01898746 | +1.1e-05 | +4.3e-06 |
-| hse06 | -0.018884 | -0.01889558 | +1.2e-05 | +4.4e-06 |
+| pbe | -0.018049 | -0.01806913 | +2.0e-05 |  |
+| pbe0 | -0.018962 | -0.01898746 | +2.5e-05 | +5.3e-06 |
+| hse06 | -0.018870 | -0.01889558 | +2.6e-05 | +5.4e-06 |
 
 Atom 2 of `Si_disp_k222` (moved by +0.05 bohr along x), forces after the net force is set to zero, as QE's; this
-code prints them to 1e-6 Ry/bohr. The PBE forces of the two codes differ by 7e-6 Ry/bohr (grid against cutoff), the hybrid forces by 1.1e-5 and 1.2e-5 Ry/bohr; the change of the force from PBE to the hybrid agrees with QE's to 4.3e-6 (PBE0) and 4.4e-6 Ry/bohr (HSE06). The exchange operator of norm-conserving pseudopotentials adds no
-explicit force term (Hellmann-Feynman forces of the hybrid orbitals and density); finite differences of the PBE0
-energy of this cell give the analytic force to 1.3e-6 Ry/bohr (PBE 2.6e-6).
+code prints them to 1e-6 Ry/bohr. The PBE forces of the two codes differ by 2.0e-5 Ry/bohr (grid against cutoff), the hybrid forces by 2.5e-5 and 2.6e-5 Ry/bohr; the change of the force from PBE to the hybrid agrees with QE's to 5.3e-6 (PBE0) and 5.4e-6 Ry/bohr (HSE06). The exchange operator of norm-conserving pseudopotentials adds no
+explicit force term (Hellmann-Feynman forces of the hybrid orbitals and density); central differences of the PBE0
+energy of this cell (both atoms, step 1e-4 bohr, SCF 1e-10 Ry) give the analytic force after the net force is removed to 5e-8 Ry/bohr (PBE 4e-10).
 
 ## Error budget
 
@@ -250,43 +250,41 @@ energy of this cell give the analytic force to 1.3e-6 Ry/bohr (PBE 2.6e-6).
 
 | input | GPUs | program (s) | SCF (s) | exchange (s) | solver (s) | pair solves | outer | peak GiB |
 |---|---|---|---|---|---|---|---|---|
-| Si_k222/pbe | 1 | 8.1 | 4.8 |  |  |  |  | 0.7 |
-| Si_k222/pbe0 | 1 | 11.7 | 10.1 | 0.52 | 0.17 | 6736 | 4 | 1.8 |
-| Si_k222/hse06 | 1 | 13.4 | 11.0 | 0.54 | 0.16 | 6736 | 4 | 1.8 |
-| Si_k222/hse06_default | 1 | 12.2 | 10.2 | 0.49 | 0.13 | 6736 | 4 | 1.8 |
-| Si_k222/hf | 1 | 14.0 | 11.9 | 0.65 | 0.18 | 11920 | 7 | 1.9 |
-| Si_k222/b3lyp | 1 | 12.7 | 10.7 | 0.49 | 0.15 | 8288 | 5 | 1.8 |
-| Si_k444/pbe | 1 | 33.6 | 30.7 |  |  |  |  | 1.6 |
-| Si_k444/pbe0 | 1 | 51.5 | 49.1 | 5.33 | 2.58 | 306432 | 5 | 2.8 |
-| Si_k444/hse06 | 1 | 46.9 | 44.9 | 4.34 | 2.12 | 249216 | 4 | 2.8 |
-| Si_k444/hse06_default | 1 | 46.3 | 44.3 | 4.76 | 2.22 | 249216 | 4 | 2.8 |
-| Si_k444/hf | 1 | 62.3 | 60.4 | 8.44 | 4.10 | 498432 | 8 | 3.0 |
-| Si_disp_k222/pbe | 1 | 5.9 | 4.9 |  |  |  |  | 0.7 |
-| Si_disp_k222/pbe0 | 1 | 11.3 | 10.3 | 0.45 | 0.15 | 6736 | 4 | 1.8 |
-| Si_disp_k222/hse06 | 1 | 11.6 | 10.6 | 0.46 | 0.16 | 6736 | 4 | 1.8 |
-| C_k333/pbe | 1 | 19.3 | 17.4 |  |  |  |  | 1.3 |
-| C_k333/pbe0 | 1 | 20.7 | 18.7 | 1.18 | 0.46 | 40102 | 4 | 2.2 |
-| C_k333/hse06 | 1 | 20.2 | 17.6 | 0.98 | 0.36 | 30872 | 3 | 2.2 |
-| MgO_k333/pbe | 1 | 41.8 | 39.2 |  |  |  |  | 1.9 |
-| MgO_k333/pbe0 | 1 | 37.9 | 35.4 | 1.08 | 0.50 | 40102 | 4 | 2.9 |
-| MgO_k333/hse06 | 1 | 35.1 | 32.6 | 0.92 | 0.39 | 30872 | 3 | 2.9 |
-| hBN_k661/pbe | 1 | 245.6 | 190.8 |  |  |  |  | 4.5 |
-| hBN_k661/pbe0 | 1 | 446.2 | 389.6 | 12.69 | 10.30 | 95664 | 5 | 7.2 |
-| hBN_k661/hse06 | 1 | 423.2 | 363.2 | 10.84 | 8.86 | 77800 | 4 | 7.2 |
-| hBN_k661/pbe0_periodic | 1 | 431.6 | 374.9 | 7.75 | 5.65 | 95664 | 5 | 6.8 |
-| hBN_k661/hse06_periodic | 1 | 415.9 | 358.8 | 6.64 | 4.86 | 77800 | 4 | 6.8 |
-| O2_box/pbe | 1 | 78.1 | 73.5 |  |  |  |  | 1.9 |
-| O2_box/pbe0 | 1 | 1123.0 | 1120.0 | 7.61 | 1.83 | 548 | 5 | 0.7 |
-| O2_box/hse06 | 1 | 1150.6 | 1146.0 | 6.30 | 1.53 | 447 | 4 | 0.7 |
-| Si64_gamma/pbe | 1 | 4.9 | 2.3 |  |  |  |  | 0.5 |
-| Si64_gamma/pbe0 | 1 | 22.0 | 20.1 | 1.23 | 0.34 | 67008 | 6 | 1.2 |
-| Si64_k222/pbe | 4 | 25.5 | 23.6 |  |  |  |  | 0.8 |
-| Si64_k222/pbe0 | 4 | 164.2 | 162.5 | 46.93 | 33.98 | 3442688 | 6 | 14.5 |
+| Si_k222/pbe | 1 | 4.9 | 4.3 |  |  |  |  | 0.7 |
+| Si_k222/pbe0 | 1 | 11.3 | 10.4 | 0.28 | 0.09 | 6736 | 4 | 1.8 |
+| Si_k222/hse06 | 1 | 11.5 | 10.8 | 0.38 | 0.09 | 6736 | 4 | 1.8 |
+| Si_k222/hse06_default | 1 | 10.6 | 10.0 | 0.26 | 0.08 | 6736 | 4 | 1.8 |
+| Si_k222/hf | 1 | 13.0 | 12.3 | 0.48 | 0.14 | 11920 | 7 | 1.9 |
+| Si_k222/b3lyp | 1 | 11.3 | 10.7 | 0.32 | 0.11 | 8288 | 5 | 1.8 |
+| Si_k444/pbe | 1 | 31.8 | 31.0 |  |  |  |  | 1.6 |
+| Si_k444/pbe0 | 1 | 51.9 | 51.1 | 5.43 | 2.68 | 306432 | 5 | 2.8 |
+| Si_k444/hse06 | 1 | 47.4 | 46.7 | 4.50 | 2.21 | 249216 | 4 | 2.8 |
+| Si_k444/hse06_default | 1 | 47.6 | 46.8 | 4.58 | 2.25 | 249216 | 4 | 2.8 |
+| Si_k444/hf | 1 | 65.7 | 64.8 | 9.14 | 4.37 | 498432 | 8 | 3.0 |
+| Si_disp_k222/pbe | 1 | 6.0 | 5.0 |  |  |  |  | 0.7 |
+| Si_disp_k222/pbe0 | 1 | 10.8 | 9.9 | 0.26 | 0.09 | 6736 | 4 | 1.8 |
+| Si_disp_k222/hse06 | 1 | 12.1 | 11.2 | 0.41 | 0.22 | 6736 | 4 | 1.8 |
+| C_k333/pbe | 1 | 17.8 | 17.1 |  |  |  |  | 1.3 |
+| C_k333/pbe0 | 1 | 20.7 | 19.9 | 1.00 | 0.44 | 40102 | 4 | 2.2 |
+| C_k333/hse06 | 1 | 17.3 | 16.6 | 0.76 | 0.32 | 30872 | 3 | 2.2 |
+| MgO_k333/pbe | 1 | 40.2 | 38.9 |  |  |  |  | 1.9 |
+| MgO_k333/pbe0 | 1 | 36.9 | 35.5 | 0.97 | 0.46 | 40102 | 4 | 2.9 |
+| MgO_k333/hse06 | 1 | 33.5 | 32.1 | 0.75 | 0.35 | 30872 | 3 | 2.9 |
+| hBN_k661/pbe | 1 | 227.3 | 173.6 |  |  |  |  | 4.5 |
+| hBN_k661/pbe0 | 1 | 375.9 | 325.9 | 11.81 | 10.14 | 95664 | 5 | 7.2 |
+| hBN_k661/hse06 | 1 | 350.6 | 296.9 | 9.61 | 8.25 | 77800 | 4 | 7.2 |
+| hBN_k661/pbe0_periodic | 1 | 371.3 | 319.4 | 6.88 | 5.35 | 95664 | 5 | 6.8 |
+| hBN_k661/hse06_periodic | 1 | 349.9 | 296.4 | 5.61 | 4.34 | 77800 | 4 | 6.8 |
+| O2_box/pbe | 1 | 19.7 | 19.0 |  |  |  |  | 2.1 |
+| O2_box/pbe0 | 1 | 1183.2 | 1182.4 | 7.80 | 1.88 | 548 | 5 | 0.5 |
+| O2_box/hse06 | 1 | 1193.7 | 1192.7 | 6.14 | 1.48 | 447 | 4 | 0.5 |
+| Si64_gamma/pbe | 1 | 4.1 | 2.3 |  |  |  |  | 0.5 |
+| Si64_gamma/pbe0 | 1 | 22.4 | 20.6 | 1.25 | 0.34 | 67008 | 6 | 1.2 |
+| Si64_k222/pbe | 4 | 23.1 | 21.4 |  |  |  |  | 0.8 |
+| Si64_k222/pbe0 | 4 | 149.9 | 148.2 | 41.75 | 29.00 | 2918400 | 6 | 14.9 |
 
 Program wall time of `main.py` (first runs of each input, with the GPU kernels of the code compiled on the node by
-earlier runs, on an A100 node that other jobs shared: indicative; the h-BN
-rows are those of the earlier runs, whose slab inputs this code's defaults for bulk cells leave unchanged, and the
-rows of `Si64_gamma` and `Si64_k222` those of 20 November 2026), the
+earlier runs, on an A100 node that other jobs shared: indicative; the logs of 21 November 2026), the
 seconds of its SCF (PBE start and Fock loop), of the exchange builds (pair solves on the GPU and ACE; in the cuFFT
 solver alone), the pair solves, the outer iterations and the peak device memory (`acceleration/benchmarks/
-periodic_hybrid_run.py`). The exchange builds take 3 % (h-BN, MgO) to 11 % (Si 4x4x4) of the SCF, and 6 % and 29 % for Si64 at the Gamma point and on the 2x2x2 mesh; the rest is mostly the eigensolver of the k-points. The two O2 hybrids run the Fock loop on the host (the third route above): 1,120 to 1,150 s, against 78 s for the PBE input of the same cell on the GPU. Si64: at the Gamma point (68^3 points, 128 occupied states, 67,008 pair solves) PBE0 takes 22 s on one GPU in the 32 real sectors of the abelian group of the cell with the half-cell translations (a hybrid keeps no weighted sectors; SCF 20.1 s, 1.2 s of it in the exchange, and 1.2 GiB, against 34.6 s and 8.2 GiB on the full grid with `PARSEC_GAMMA_HYBRID_SECTORS=off` on the same node, the same energy to the printed digits), and PBE 4.9 s in the 10 weighted sectors of a subgroup of 32 of the 192 operations of the cell (README of the accelerated driver, "Translations by half the cell"), against 8.0 s and 4.1 GiB on the full grid (`PARSEC_PERIODIC_SYMMETRY=off`, the route of the log of 8 November 2026: 8.6 s, 4.3 GiB) on the same node, with the same energy to 1e-8 Ry (the 15.0 s of the log of 19 November 2026 included the compilation of the CUDA kernels of the sectors). On the 2x2x2 mesh (64^3 points) PBE0 runs its PBE start on all 8 points of PARSEC 1.5's Gamma-centred mesh, each its own time-reversal partner, and, the start being an insulator, its Fock loop on the wedge of 4 points (`PARSEC_HYBRID_KPOINT_WEDGE`; since 19 November 2026 the last inner loop keeps the sectors, `PARSEC_KPOINT_SECTOR_LEVELS`): 3.4 million pair solves, 164 s on four GPUs, 47 s of it in the exchange, 14.5 GiB per GPU (the log of 19 November 2026 solved all 8 points throughout: 4.8 million pair solves, 375 s, 76 s in the exchange, 25.7 GiB; the same total energy to the printed digits); PBE solves its irreducible wedge of 4 points (Gamma, X, M and R, the density symmetrized), each split into the sectors of its little group (64 tasks), in 26 s. With the former mesh of this input (`PARSEC_MP_UNSHIFTED_MESH=port`, points at +-1/4) the code of 8 November 2026 took 168 s for PBE0 (4 time-reversal pairs, 2.4 million pair solves) and 129 s for PBE (all 8 points, without sectors). The same `Grid_Spacing` gives 68 points per side on the Gamma-point route and 64 on the k-point route.
+periodic_hybrid_run.py`). The exchange builds take 3 % (h-BN, MgO) to 11 % (Si 4x4x4) of the SCF, and 6 % and 28 % for Si64 at the Gamma point and on the 2x2x2 mesh; the rest is mostly the eigensolver of the k-points. The two O2 hybrids run the Fock loop on the host (the third route above): 1,180 to 1,190 s, against 20 s for the PBE input of the same cell on the GPU. Si64: at the Gamma point (68^3 points, 128 occupied states, 67,008 pair solves) PBE0 takes 22.4 s on one GPU in the 32 real sectors of the abelian group of the cell with the half-cell translations (a hybrid keeps no weighted sectors; SCF 20.6 s, 1.25 s of it in the exchange, and 1.2 GiB; in the runs of 20 November 2026 SCF 20.1 s against 34.6 s and 8.2 GiB on the full grid with `PARSEC_GAMMA_HYBRID_SECTORS=off` on the same node, the same energy to the printed digits), and PBE 4.1 s in the 10 weighted sectors of a subgroup of 32 of the 192 operations of the cell (README of the accelerated driver, "Translations by half the cell"; in the runs of 20 November 2026 4.9 s against 8.0 s and 4.1 GiB on the full grid (`PARSEC_PERIODIC_SYMMETRY=off`, the route of the log of 8 November 2026: 8.6 s, 4.3 GiB) on the same node, with the same energy to 1e-8 Ry (the 15.0 s of the log of 19 November 2026 included the compilation of the CUDA kernels of the sectors)). On the 2x2x2 mesh (64^3 points) PBE0 runs its PBE start on all 8 points of PARSEC 1.5's Gamma-centred mesh, each its own time-reversal partner, and, the start being an insulator, its Fock loop on the wedge of 4 points (`PARSEC_HYBRID_KPOINT_WEDGE`; since 19 November 2026 the last inner loop keeps the sectors, `PARSEC_KPOINT_SECTOR_LEVELS`): 2.9 million pair solves, 150 s on four GPUs, 42 s of it in the exchange, 14.9 GiB per GPU (the log of 19 November 2026 solved all 8 points throughout: 4.8 million pair solves, 375 s, 76 s in the exchange, 25.7 GiB; the same total energy to the printed digits); PBE solves its irreducible wedge of 4 points (Gamma, X, M and R, the density symmetrized), each split into the sectors of its little group (64 tasks), in 23 s. With the former mesh of this input (`PARSEC_MP_UNSHIFTED_MESH=port`, points at +-1/4) the code of 8 November 2026 took 168 s for PBE0 (4 time-reversal pairs, 2.4 million pair solves) and 129 s for PBE (all 8 points, without sectors). The same `Grid_Spacing` gives 68 points per side on the Gamma-point route and 64 on the k-point route.

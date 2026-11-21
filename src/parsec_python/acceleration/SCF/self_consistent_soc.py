@@ -100,6 +100,7 @@ def run_self_consistent_soc(
     backend=None,
     note: Callable[[str], None] | None = None,
     symmetry: bool = True,
+    forced: bool = False,
 ) -> SelfConsistentSOCResult:
     """Run self-consistent SOC with the device spinor Hamiltonian and eigensolver.
 
@@ -110,13 +111,26 @@ def run_self_consistent_soc(
     ``PARSEC_SOC_SECTORS=kramers`` solves the ``+i`` sector of a two-fold
     operation of the double group, one state of every Kramers pair, and ``on``
     splits it by inversion parity where the cluster has a centre of inversion
-    (:mod:`.soc_sectors`); ``note`` receives a line that says which route the
-    run takes and why.  ``symmetry=False`` (``Ignore_Symmetry``, ``--symmetry
-    off``) keeps the whole grid whatever the switch.
+    (:mod:`.soc_sectors`); ``auto`` (the default since 2026-11-21) is
+    ``kramers`` where the whole-grid spinor basis reaches the floor of
+    :func:`.soc_sectors.resolve_soc_sectors`, or where ``--symmetry on`` asks
+    for a reduction (``forced``), and the whole grid below it.  ``note``
+    receives a line that says which route the run takes and why.
+    ``symmetry=False`` (``Ignore_Symmetry``, ``--symmetry off``) keeps the
+    whole grid whatever the switch.
     """
-    from .soc_sectors import soc_sectors_setting
+    from .soc_sectors import SWITCH, resolve_soc_sectors, soc_sectors_setting
 
     sectors = soc_sectors_setting()
+    requested = sectors
+    if sectors == "auto":
+        if not symmetry:
+            # (as the former default off: no note for an input without symmetry)
+            sectors = "off"
+        else:
+            sectors, reason = resolve_soc_sectors(sectors, system, forced=forced)
+            if reason and note is not None:
+                note(f"NOTE: {SWITCH}=auto: {reason}; the spinors stay on the whole grid")
     if backend is None:
         if system.backend_info.selected != "cupy":
             raise ValueError(
@@ -137,7 +151,10 @@ def run_self_consistent_soc(
                 "--symmetry off); the spinors stay on the whole grid"
             )
     elif sectors != "off":
-        route = _sector_route(system, soc_projectors, backend, note, parity=sectors == "on")
+        route = _sector_route(
+            system, soc_projectors, backend, note, parity=sectors == "on",
+            label="auto" if requested == "auto" else None,
+        )
         if route is not None:
             result = run_reference_self_consistent_soc(
                 system,
@@ -178,7 +195,7 @@ def run_self_consistent_soc(
     )
 
 
-def _sector_route(system, soc_projectors, backend, note, *, parity: bool):
+def _sector_route(system, soc_projectors, backend, note, *, parity: bool, label: str | None = None):
     """The hooks of the double-group sectors (:class:`.soc_sectors.SectorRoute`), split by inversion parity with
     ``parity``, or ``None`` (the whole grid) for a cluster without a two-fold rotation or mirror; ``note`` hears
     which."""
@@ -186,7 +203,7 @@ def _sector_route(system, soc_projectors, backend, note, *, parity: bool):
 
     from .soc_sectors import SWITCH, SectorRoute, detect_sector_plan
 
-    setting = "on" if parity else "kramers"
+    setting = label or ("on" if parity else "kramers")
     start = time.perf_counter()
     plan, reason = detect_sector_plan(system.grid, system.atoms, parity=parity)
     seconds = time.perf_counter() - start

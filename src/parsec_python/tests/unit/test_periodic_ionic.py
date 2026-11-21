@@ -497,8 +497,14 @@ class ForceWedgeTests(unittest.TestCase):
             off = self._parse(extra, setting="off").problem
             self.assertTrue(off.kpoint_time_reversal)
             self.assertEqual(len(kpoint_sampling(off)[0]), 5)
-        # the mirror z -> -z exchanges the atoms, the second of which Move_Flag 1 fixes: the pairs of the whole mesh
+        # the mirror z -> -z exchanges the atoms, the second of which Move_Flag 1 fixes: the wedge of the 8 operations
+        # of C4v that keep it (PARSEC_MOVE_FLAG_SPACE_GROUP=auto), the pairs of the whole mesh under off
         fixed = self._parse("Minimization: bfgs\n", flag="Move_Flag: 1").problem
+        self.assertFalse(fixed.kpoint_time_reversal)
+        self.assertEqual(fixed.space_group.order, 8)
+        self.assertEqual(len(kpoint_sampling(fixed)[0]), 3)
+        with mock.patch.dict(os.environ, {"PARSEC_MOVE_FLAG_SPACE_GROUP": "off"}):
+            fixed = self._parse("Minimization: bfgs\n", flag="Move_Flag: 1").problem
         self.assertTrue(fixed.kpoint_time_reversal)
         self.assertIsNone(fixed.space_group)
         dynamics = self._parse(

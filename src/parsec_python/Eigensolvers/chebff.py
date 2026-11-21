@@ -27,7 +27,7 @@ reached it.  ``ChebFFSettings.residual_tolerance`` selects that mode
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable
 
 import numpy as np
 
@@ -304,6 +304,8 @@ def run_chebff(
     *,
     settings: ChebFFSettings = ChebFFSettings(),
     residual_states: int | None = None,
+    converged: Callable[[np.ndarray, np.ndarray], bool] | None = None,
+    extra_cycles: int = 0,
 ) -> ChebFFResult:
     """Build PARSEC's initial approximate eigensubspace.
 
@@ -320,6 +322,13 @@ def run_chebff(
         With ``settings.residual_tolerance``: how many leading states the
         residual test covers (the requested ``States_Num``, PARSEC 1.5's
         whole working space; ``None`` tests every working state).
+    converged, extra_cycles
+        A converged first solve (the band k-points,
+        :class:`parsec_python.Eigensolvers.eigval.ConvergedFirstSolveSettings`):
+        after ``settings.filter_cycles`` cycles, ``converged(eigenvalues,
+        residual_norms)`` of the Rayleigh--Ritz pairs of the working space is
+        asked after every cycle, and up to ``extra_cycles`` more cycles run
+        until it is true.  ``None`` (the default): the fixed cycles of before.
 
     Notes
     -----
@@ -381,8 +390,9 @@ def run_chebff(
     lower_bound = _initial_filter_lower_bound(smallest_ritz, upper_bound)
     eigenvalues = np.empty(wanted_states, dtype=float)
     cycle_records: list[ChebFFCycle] = []
+    total_cycles = settings.filter_cycles + (max(0, int(extra_cycles)) if converged is not None else 0)
 
-    for cycle_number in range(1, settings.filter_cycles + 1):
+    for cycle_number in range(1, total_cycles + 1):
         lower_in = lower_bound
         upper_in = upper_bound
         # Stage 3a: amplify states below lower_bound while damping the
@@ -455,6 +465,9 @@ def run_chebff(
                 raise ChebFFResidualError(
                     maximum_residual, settings.residual_tolerance, cycle_number
                 )
+        if converged is not None and cycle_number >= settings.filter_cycles:
+            if converged(eigenvalues, np.asarray(ritz.residual_norms, dtype=float)):
+                break
 
     state = ChebFFState(
         operator_dimension=dimension,

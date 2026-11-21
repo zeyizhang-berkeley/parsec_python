@@ -46,7 +46,7 @@ _SOC_ANGULAR_MOMENTA: tuple[int, ...] = (1, 2)
 
 
 def complex_spherical_harmonics(
-    angular_momentum: int, relative_coordinates: np.ndarray
+    angular_momentum: int, relative_coordinates: np.ndarray, *, center_radius: float = 0.0
 ) -> np.ndarray:
     """Complex spherical harmonics ``Y_l^ml``, ``ml=-l..l`` (Condon-Shortley).
 
@@ -54,7 +54,8 @@ def complex_spherical_harmonics(
     ``do ml=-lj,lj`` loop.  Supports ``l=1`` and ``l=2``, PARSEC's spin-orbit
     angular momenta.  Direction cosines are computed the same way as
     :func:`~parsec_python.V_ion.ionic_potential.real_spherical_harmonics`
-    (zero at the exact atomic center).
+    (zero at the exact atomic center; ``center_radius`` divides by
+    ``max(r, center_radius)``, the rule of the scalar projectors).
     """
     xyz = np.asarray(relative_coordinates, dtype=float)
     if xyz.ndim != 2 or xyz.shape[1] != 3:
@@ -62,7 +63,7 @@ def complex_spherical_harmonics(
     radius = np.linalg.norm(xyz, axis=1)
     unit = np.zeros_like(xyz)
     nonzero = radius > 0
-    unit[nonzero] = xyz[nonzero] / radius[nonzero, None]
+    unit[nonzero] = xyz[nonzero] / np.maximum(radius[nonzero], float(center_radius))[:, None]
     x, y, z = unit.T
 
     if angular_momentum == 1:
@@ -154,6 +155,10 @@ def build_spin_orbit_projectors(
         return _double_grid_spin_orbit_projectors(
             grid, atoms, potentials, specifications, lattice_vectors, k_point, order
         )
+    from ..V_ion.ionic_potential import projector_center_radius, projector_center_setting
+
+    # the centre radius of the harmonics: rs(2) under PARSEC_PROJECTOR_CENTER=auto (nonloc.F90's ylm_cplx), else 0
+    center_setting = projector_center_setting()
     sqrt_dv = np.sqrt(grid.volume_element)
     result: list[AtomSpinOrbitProjectors] = []
     for atom_index, atom in enumerate(atoms):
@@ -231,7 +236,9 @@ def build_spin_orbit_projectors(
                     right=0.0,
                 )
                 harmonics = complex_spherical_harmonics(
-                    angular_momentum, relative_support
+                    angular_momentum,
+                    relative_support,
+                    center_radius=projector_center_radius(potential, center_setting, off_radius=0.0),
                 )
                 local_rows = np.searchsorted(support_rows_union, support_rows)
                 phase_column = phase if np.isscalar(phase) else phase[:, None]
@@ -267,7 +274,10 @@ def _double_grid_spin_orbit_projectors(
     """
 
     from ..V_ion.double_grid import double_grid_support
+    from ..V_ion.ionic_potential import projector_center_radius, projector_center_setting
 
+    # the centre radius of the harmonics: rs(2) under PARSEC_PROJECTOR_CENTER=auto (nonloc.F90's ylm_cplx), else 0
+    center_setting = projector_center_setting()
     sqrt_dv = np.sqrt(grid.volume_element)
     spacing = float(grid.spacing)
     result: list[AtomSpinOrbitProjectors] = []
@@ -328,7 +338,9 @@ def _double_grid_spin_orbit_projectors(
                     radius, potential.radii, radial_so, left=radial_so[0], right=0.0
                 )
                 harmonics = complex_spherical_harmonics(
-                    angular_momentum, support.relative.reshape(-1, 3)
+                    angular_momentum,
+                    support.relative.reshape(-1, 3),
+                    center_radius=projector_center_radius(potential, center_setting, off_radius=0.0),
                 ).reshape(points, fine, width)
                 summed_ion = np.einsum(
                     "pf,pfm->pm",

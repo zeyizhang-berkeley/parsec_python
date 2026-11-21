@@ -78,6 +78,7 @@ from ..Eigensolvers.chebff_columns import (
 from ..Eigensolvers.chebff_spinor import _filter_columns
 from ..Eigensolvers.mpi_shared_basis import exchange_bytes
 from ..Parallel import mpi
+from .kpoint_real import matched_state, psi_gauge_for
 
 POOLS_ENV = "PARSEC_KPOINT_POOLS"
 ASSIGN_ENV = "PARSEC_KPOINT_POOL_ASSIGN"
@@ -579,6 +580,7 @@ class MPIPoolKPointSolver:
         backend: str | None = None,
         context=None,
         pools: int | None = None,
+        real_gamma: bool | None = None,
         **_ignored,
     ) -> None:
         from ..Hamiltonian.device_bloch import DeviceBlochConverter, NumpyArrayBackend
@@ -604,6 +606,18 @@ class MPIPoolKPointSolver:
             self.converter = plan.converter(context.local_rank)
             # the local term in one kernel where the grid is an orthorhombic periodic one (.bloch_stencil)
             self.converter.fused_stencil = True
+            # the Gamma point in real arithmetic (PARSEC_KPOINT_REAL_GAMMA): given by a solver of sectors (decided on
+            # the k-points it splits), else decided on this job (.kpoint_real.real_gamma_applies; the same on every
+            # rank: the job and the environment)
+            from .kpoint_real import real_gamma_applies
+
+            self.converter.real_gamma = (
+                real_gamma_applies(job, self.problem_size) if real_gamma is None else bool(real_gamma)
+            )
+        # the psi gauge of the time-reversal invariant points in the Bloch form (PARSEC_KPOINT_TRIM_REAL,
+        # .kpoint_real.PsiGauge), by task: only on the GPU (the CPU ranks keep the route of before)
+        self.gauges: dict[int, Any] = {}
+        self._psi = plan is not None
         self.backend = self.converter.backend
         self.xp = self.backend.xp
         self.n_workers = context.size
@@ -741,17 +755,27 @@ class MPIPoolKPointSolver:
             kept = getattr(self, "_kept", None)
             if kept is not None and kept not in wanted and kept in self.states:
                 self._spill(kept, self.states[kept])  # host storage keeps one subspace on the device: the next
+        from parsec_python.Eigensolvers.eigval import first_solve_converges
+
         for task in order:
             requested = task_states(self.job, task)
             start = time.perf_counter()
             hamiltonian = self.job.make_hamiltonian(task, potentials)
             self._tick("hamiltonian", start)  # the Bloch projectors of a k-point on first use
             start = time.perf_counter()
+            gauge = psi_gauge_for(self.job, task, hamiltonian, self.gauges) if self._psi else None
+            if gauge is not None:
+                hamiltonian = gauge.hamiltonian(hamiltonian)
             operator = self.converter.operator(hamiltonian)
             self._tick("upload", start)
             if not self.static_bytes:
                 self.static_bytes = _static_device_bytes(operator)
             state = self.states.pop(task, None)
+            # a real subspace into a complex solve (the exchange loop of a hybrid after its real semilocal start at
+            # Gamma), or a complex one dropped before a real solve (.kpoint_real)
+            state = matched_state(
+                state, bool(getattr(operator, "real_arithmetic", False)), None if gauge is None else "psi"
+            )
             self._release_cached()
             self._resident(state)
             state = self._carried(state, requested, settings, operator)
@@ -764,13 +788,14 @@ class MPIPoolKPointSolver:
                 state=state,
                 xp=self.xp,
                 sync=backend.synchronize,
-                converge_first=settings.initial_method == "chebdav",
+                converge_first=first_solve_converges(settings),
                 route=self.route,
             )
             del state
             self._tick("solve", start)
             for name, value in result.stats.items():
                 self._stats[name] = self._stats.get(name, 0.0) + value
+            result.state.gauge = None if gauge is None else "psi"
             self.states[task] = result.state
             if self.group.is_root:
                 found[task] = np.asarray(result.eigenvalues, dtype=np.float64)
@@ -1125,12 +1150,12 @@ class MPIPoolKPointSolver:
             for first, local, width in spans:
                 if width <= 0:
                     continue
+                block = vectors[:, local : local + width]
+                gauge = self.gauges.get(task)
+                if gauge is not None:  # the psi gauge: the forces take the u gauge
+                    block = gauge.to_u(block, self.xp)
                 piece = np.asarray(
-                    _host(
-                        self.job.extras(
-                            task, vectors[:, local : local + width], xp=self.xp, columns=np.arange(first, first + width)
-                        )
-                    ),
+                    _host(self.job.extras(task, block, xp=self.xp, columns=np.arange(first, first + width))),
                     dtype=np.float64,
                 )
                 part = piece if part is None else part + piece

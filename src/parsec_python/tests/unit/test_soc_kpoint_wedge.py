@@ -131,7 +131,9 @@ class ParserTests(_Directory):
         for cell, setting, order, wedge, as_scalar in (
             ("cube", "auto", 6, 13, True),
             ("cube", "grid", 6, 13, True),
-            ("fcc", "auto", 12, 13, False),
+            # 13 stars, one of which holds shortest images on the zone boundary that its 12 operations do not relate
+            # (PARSEC_KPOINT_FOLD=shortest splits it, Grid.kpoints.irreducible_monkhorst_pack with ties)
+            ("fcc", "auto", 12, 14, False),
             ("fcc", "grid", 48, 8, True),
             ("hcp", "auto", 8, 14, False),
             ("hcp", "grid", 24, 8, True),
@@ -155,9 +157,22 @@ class ParserTests(_Directory):
                 )
                 np.testing.assert_array_equal(kpoint_sampling(block.problem)[0], k_points)
                 np.testing.assert_array_equal(kpoint_sampling(block.problem)[1], weights)
-                # the scalar orbitals of the same cell keep every operation that maps the grid onto itself
-                scalar = kpoint_sampling(self.parse(_text(cell=cell, extra="", so_psp=".false."), environment).problem)
+                # the scalar orbitals of the same cell under PARSEC_SCALAR_KPOINT_WEDGE=grid keep every operation that
+                # maps the grid onto itself (their group before 2026-11-21)
+                scalar = kpoint_sampling(
+                    self.parse(
+                        _text(cell=cell, extra="", so_psp=".false."),
+                        {**environment, "PARSEC_SCALAR_KPOINT_WEDGE": "grid"},
+                    ).problem
+                )
                 self.assertEqual(len(scalar[0]) == wedge and np.array_equal(scalar[0], k_points), as_scalar)
+                if setting == "auto":
+                    # and by default the operations of the spin-orbit wedge (PARSEC_SCALAR_KPOINT_WEDGE=auto)
+                    default = kpoint_sampling(
+                        self.parse(_text(cell=cell, extra="", so_psp=".false."), environment).problem
+                    )
+                    np.testing.assert_array_equal(default[0], k_points)
+                    np.testing.assert_array_equal(default[1], weights)
                 if not as_scalar:
                     self.assertIn("do not map the finite-difference operators of the oblique grid", " ".join(translation.warnings))
         # the fcc cell keeps all 48 operations on the Fortran-derived routines' grid: 8 points
@@ -202,7 +217,11 @@ class ParserTests(_Directory):
         problem = translation.problem
         self.assertFalse(translation.routines.fortran)
         self.assertIsNone(problem.space_group)
-        self.assertEqual(len(kpoint_sampling(problem)[0]), 36)
+        # the 36 time-reversal pairs of the 4x4x4 mesh, of which the pairs with several shortest images on the zone
+        # boundary run as all of them (PARSEC_KPOINT_FOLD=shortest); 36 under PARSEC_KPOINT_FOLD=centred
+        self.assertEqual(len(kpoint_sampling(problem)[0]), 48)
+        centred = self.parse(_text(cell="c3"), {"PARSEC_KPOINT_FOLD": "centred"}).problem
+        self.assertEqual(len(kpoint_sampling(centred)[0]), 36)
         self.assertIn("reduced by time reversal alone", self.note(translation))
         self.assertIn(
             "the k-point mesh is reduced by time reversal alone: the 2 operations of the space group besides the "

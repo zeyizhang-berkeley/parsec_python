@@ -62,6 +62,9 @@ from ..SCF.pbc import PeriodicPreparedSinglePointSystem
 from ..SCF.spin_polarized import (
     _number_of_states_per_channel,
     _weighted_initial_polarization,
+    initchrg_spin_start,
+    initchrg_start_needed,
+    spin_start_setting,
 )
 from ..Forces.nonlocal_force import bloch_projector_gradients, build_periodic_projector_gradients, nonlocal_forces
 from ..V_ion import build_nonlocal_projectors
@@ -159,6 +162,13 @@ def _run_timings(system, timer: StageTimer, solver, started: float, levels: dict
     if stats is not None:
         for name, value in stats().items():
             detail[name] = float(value)
+    # the cell group of the k-point sectors and its tolerance, or why there are none (the accelerated solvers,
+    # acceleration/SCF/kpoint_parallel.make_solver): parsec.out at every Output_Level, as the symmetry_detection of
+    # the Gamma route
+    notes = {}
+    detection = getattr(solver, "kpoint_symmetry_detection", None)
+    if isinstance(detection, str) and detection:
+        notes["kpoint_symmetry_detection"] = detection
     return RunTimings(
         preparation=system.timings,
         initial_hartree_seconds=seconds.get("initial_hartree", 0.0),
@@ -170,6 +180,7 @@ def _run_timings(system, timer: StageTimer, solver, started: float, levels: dict
         mixing_energy_seconds=seconds.get("mixing_energy", 0.0),
         total_seconds=time.perf_counter() - started,
         detail=detail,
+        notes=notes,
     )
 
 
@@ -1136,11 +1147,17 @@ def _spin_kpoint_loop(
     lattice_vectors = system.input.periodic_cell.lattice_vectors
     started = time.perf_counter()
     timer = StageTimer()
+    # PARSEC_SPIN_START: PARSEC 1.5's start (initchrg.f90), with the Hartree potential of the total starting density
     if initial_spin_densities is not None:
         # A caller's start (the Fock loop of a hybrid: the per-species densities of initchrg.f90 that the
         # Gamma loop of run_spin_scf starts from, SCF.pbc.with_initial_spin_densities).
+        initchrg = spin_start_setting() == "initchrg"
         density_up, density_down = (np.asarray(value, dtype=np.float64) for value in initial_spin_densities)
+    elif initchrg_start_needed(system):
+        initchrg = True
+        density_up, density_down = initchrg_spin_start(system)
     else:
+        initchrg = False
         polarization = _weighted_initial_polarization(system)
         density_up = 0.5 * (1.0 + polarization) * system.initial_density
         density_down = 0.5 * (1.0 - polarization) * system.initial_density
@@ -1155,8 +1172,11 @@ def _spin_kpoint_loop(
         )
     elif initial_potentials is None:
         with timer.stage("initial_hartree"):
+            # initchrg.f90: the channels add up to twice the total starting density (see initial_spin_densities);
+            # the Hartree potential is that of the total (rho(:,1)), as in run_spin_scf
             initial_hartree = system.solve_hartree(
-                density_up + density_down, initial_potential=-ionic_potential
+                np.asarray(system.initial_density, dtype=np.float64) if initchrg else density_up + density_down,
+                initial_potential=-ionic_potential,
             )
         hartree_potential = initial_hartree.potential
         with timer.stage("initial_xc"):

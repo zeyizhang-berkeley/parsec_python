@@ -862,24 +862,6 @@ class NestedShardGroup:
         return self._ritz_outcome(outcomes, layout)
 
 
-def nested_filter_agreement(comm, can_filter: bool) -> tuple[int, ...]:
-    """The ranks of ``comm`` (a sector's group) whose devices cannot filter its operator; empty where all can.
-
-    Whether the other GPUs of a rank can filter its operator (:func:`distributed_state._devices_can_filter`)
-    follows from how the operator was built, which can differ between ranks where one of them took a silent
-    fallback (an allocation or NVRTC failure of the stencil-major or projector kernels).  A rank that attached
-    a nested group while another of its group attached a plain one would wait in collectives the other never
-    enters, so every rank of the group gathers the answers and takes the same step
-    (:class:`CuPySymmetrySCFEigensolver`): the nested group where all can; where one cannot, all of them stop
-    with an error that names it, since the group of one GPU per rank filters with the same kernels
-    (:meth:`mpi_shared_basis.MPIShardGroup.filter`: ``PARSEC_CUPY_STENCIL_MAJOR=0`` stopped Si28H36 there on
-    A100).  Every rank of a group builds the same sectors in the same order, so the collective pairs up.
-    """
-
-    flags = comm.allgather(bool(can_filter)) if int(getattr(comm, "size", 1)) > 1 else [bool(can_filter)]
-    return tuple(rank for rank, flag in enumerate(flags) if not flag)
-
-
 def attach_nested_group(operator, comm, devices, *, ritz_route: str = "rows", round_buffers: dict | None = None,
                         hubs: dict | None = None, transport: str | None = None) -> NestedShardGroup:
     """Give ``operator`` (this rank's operator of the shared sector, on ``devices[0]``) its nested group.
@@ -894,4 +876,4 @@ def attach_nested_group(operator, comm, devices, *, ritz_route: str = "rows", ro
     return group
 
 
-__all__ = ["NestedBasis", "NestedShardGroup", "attach_nested_group", "nested_filter_agreement"]
+__all__ = ["NestedBasis", "NestedShardGroup", "attach_nested_group"]

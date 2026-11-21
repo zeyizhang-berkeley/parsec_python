@@ -15,9 +15,15 @@ before the SCF):
     reduced to every sector with it (``Hamiltonian/hubbard_device.py``); the occupation matrices are summed over
     the sector bases, ``B_G^T c = B^T psi``.  The term commutes with the operations ``r -> R r + t`` of the cell,
     which carry the d projectors of an atom onto those of its image, so the abelian sectors with their
-    translations are exact (the weighted sectors are refused, as on clusters: ``driver._orbital_group_refusal``),
-    and every atom keeps its projectors (no projector orbits with LDA+U).  Unpolarized only: the spin sectors carry
-    no LDA+U (``driver._spin_sector_refusal``), so a spin cell with LDA+U keeps its route.
+    translations are exact, and so are the weighted sectors of a subgroup since 2026-11-21, whose occupation matrices
+    are averaged over the full group (``PARSEC_LDAU_WEIGHTED_SECTORS``, ``hubbard_device.HubbardGroupAverage``;
+    ``off``: the abelian group, ``driver._orbital_group_refusal``).
+    Since 2026-11-21 the sectors carry the KB and LDA+U columns of one atom per orbit and the occupation matrices
+    of the other atoms are those of the representatives turned with the d harmonics of the operations
+    (``PARSEC_LDAU_PROJECTOR_ORBITS=auto``, ``hubbard_device.HubbardOrbits``; ``off``: the columns of every atom, as
+    before).  A spin cell takes the spin sectors under ``PARSEC_LDAU_SPIN_SECTORS=auto``
+    (:func:`ldau_spin_sector_setting`), each channel with its own potential matrices; under ``off`` it keeps its
+    route of before.
 ``PARSEC_GAMMA_META_GGA_SECTORS``
     a meta-GGA (native SCAN or a libxc ``mgga_`` functional, which also needs ``PARSEC_GAMMA_LIBXC_SECTORS``):
     ``tau`` of the sector orbitals and the term ``-div(vtau grad)`` as the derivatives between the sectors
@@ -35,15 +41,16 @@ carries ``Ignore_Symmetry`` (PARSEC error 159), which the command line reads as 
 ``on`` where the sectors of a CuPy run take the cell (:func:`ts_ignore_symmetry_note`).
 
 Values: ``auto`` takes the sectors where the basis of the cell (grid points times states) reaches
-:data:`MINIMUM_ENTRIES` of its switch (2^27 for TS and a meta-GGA, 2^28 for LDA+U and libxc), below which the many
-small abelian sectors with their translations cost more than they save; for TS only an unpolarized cell (a spin
-cell was slower in the spin sectors than on the 1x1x1 k-point driver) and for LDA+U only a process with
-:data:`MINIMUM_DEVICES` CUDA devices (on one GPU the sectors were slower); ``on`` takes them at every size;
-``off`` keeps the full grid of one device, as before.  Defaults (:data:`DEFAULTS`): ``auto`` for a meta-GGA and
-libxc, ``off`` for TS (the reading of its ``Ignore_Symmetry`` departs from PARSEC 1.5, so it is
-opt-in) and for LDA+U (measured faster only on four GPUs).  The energies are those of the full grid to the
-convergence of the SCF (forces of a meta-GGA and of libxc too; the forces of TS and LDA+U inputs, which run on the
-Fortran-derived routines, read the full grid: ``acceleration.cli.periodic_sector_forces_refusal``).  A hybrid with
+:data:`MINIMUM_ENTRIES` of its switch (2^27 for TS and a meta-GGA, 2^28 for libxc, 2^26 for LDA+U since
+2026-11-21), below which the setup of the sectors costs more than they save; for TS only an unpolarized cell (a spin
+cell was slower in the spin sectors than on the 1x1x1 k-point driver); :data:`MINIMUM_DEVICES` (from 2026-11-19 to 21
+four CUDA devices for LDA+U) is empty; ``on`` takes them at every size; ``off`` keeps the full grid of one device, as
+before.  Defaults (:data:`DEFAULTS`): ``auto`` for a meta-GGA, libxc, LDA+U and TS (TS since 2026-11-21: the
+``Ignore_Symmetry`` of a TS input is read as PARSEC 1.5's requirement of the correction, error 159, not as a request
+for the full grid; ``off`` restores the former default).  The energies are those of the full grid to the
+convergence of the SCF (forces of a meta-GGA, of libxc and, under ``PARSEC_LDAU_SECTOR_FORCES=auto``, of LDA+U too;
+the forces of TS inputs, which run on the Fortran-derived routines, read the full grid:
+``acceleration.cli.periodic_sector_forces_refusal``).  A hybrid with
 one of them keeps the refusal (the Fock loop of the sectors, :mod:`.gamma_hybrid_route`, was validated with native
 semilocal parts and no LDA+U), and so do the callers that run several ranks or fold a k-point mesh into a supercell
 (``periodic_sector_refusal(..., features=False)``, the default): the MPI full-SCF runner and the supercell of
@@ -60,12 +67,15 @@ META_GGA_SWITCH = "PARSEC_GAMMA_META_GGA_SECTORS"
 LIBXC_SWITCH = "PARSEC_GAMMA_LIBXC_SECTORS"
 
 #: The default of each switch (since 2026-11-19, validated on A100 against the full grid, see :data:`MINIMUM_ENTRIES`):
-#: ``auto`` for a meta-GGA and libxc.  ``off`` for TS, whose ``auto`` reads the ``Ignore_Symmetry`` of a TS input as
-#: PARSEC's requirement rather than as a request for the full grid (a departure from PARSEC 1.5, hence opt-in),
-#: and for LDA+U, whose sectors were slower on one GPU (:data:`MINIMUM_DEVICES`).
+#: ``auto`` for a meta-GGA and libxc, and since 2026-11-21 for LDA+U (its sectors carry one atom per orbit and take
+#: the weighted sectors of the point group: ``Hamiltonian/hubbard_device.py``; ``off`` from 2026-11-19 to 21, when
+#: every sector carried the columns of every atom and one GPU was slower) and for TS (``off`` before): it reads the
+#: ``Ignore_Symmetry`` that PARSEC 1.5 demands of every TS input (error 159) as that requirement rather than as a
+#: request for the full grid, and takes the sectors of an unpolarized cell from :data:`MINIMUM_ENTRIES` on (the same
+#: energies as the full grid, faster on every cell measured above the floor: README, ``PARSEC_GAMMA_TS_SECTORS``).
 DEFAULTS = {
-    TS_SWITCH: "off",
-    LDAU_SWITCH: "off",
+    TS_SWITCH: "auto",
+    LDAU_SWITCH: "auto",
     META_GGA_SWITCH: "auto",
     LIBXC_SWITCH: "auto",
 }
@@ -81,21 +91,27 @@ DEFAULTS = {
 #: ``on``) LDA+U 41.6 -> 23.5 (67.8 -> 55.2); Si216 84^3 x 502 (3.0e8) libxc PBE 26.1 -> 14.1 (29.1 -> 22.2);
 #: Ag256 64^3 x 1836 (4.8e8) LDA+U 70.3 -> 46.9 (115.6 -> 103.3); Si512 96^3 x 1183 (1.0e9) libxc PBE 96.1 -> 30.6
 #: (99.9 -> 41.2).  ``on`` takes every size.
+#:
+#: LDA+U since 2026-11-21 (one atom per orbit, the weighted sectors of the point group with the face-centring
+#: translations; SCF (total) seconds on one, two and four A100, first runs): fcc Ag32 at 46^3 x 234 (2.3e7) 3.4
+#: (5.8) -> 3.5 (11.6), 4.0 (12.2), 4.3 (13.6), the setup of the sectors 2.4 -> 8.4 s; SrTiO3 40 atoms at 54^3 x 118
+#: (1.9e7) 4.3 (6.7) -> 5.1 (13.3), 5.8 (14.4), 5.9 (15.3); Ag108 48^3 x 778 (8.6e7) 11.6 (14.1) -> 6.3 (9.4),
+#: 5.6 (10.1) on four; SrTiO3 135 atoms 60^3 x 380 (8.2e7) 8.8 (11.6) -> 4.5 (7.0), 5.3 (9.0) on four; SrTiO3 320
+#: atoms 84^3 x 891 (5.3e8) 48.2 (52.3) -> 8.7 (18.1), 9.9 (20.7) on four; Ag256 64^3 x 1836 (4.8e8) 61.9 (65.2)
+#: -> 9.9 (18.5), 11.6 (21.5) on four; the energies to 1e-8 Ry, the occupation matrices within 1.5e-7.
 MINIMUM_ENTRIES = {
     TS_SWITCH: 1 << 27,
-    LDAU_SWITCH: 1 << 28,
+    LDAU_SWITCH: 1 << 26,
     META_GGA_SWITCH: 1 << 27,
     LIBXC_SWITCH: 1 << 28,
 }
 
 #: The fewest CUDA devices of the process (``PARSEC_CUPY_DEVICES``) with which ``auto`` takes a switch into the
-#: sectors.  LDA+U carries the KB and LDA+U columns of every atom into every sector (no projector orbits), which
-#: four devices share and one carries alone: Ag256 fcc 64^3 x 1836 (4.8e8 entries), first runs, total seconds full
-#: grid -> sectors, 115.6 -> 103.3 on four A100 but 114.4 -> 170.9 with one visible A100 (SCF 69.9 -> 115.5); TS and
-#: libxc stayed faster on one A100 (Si216 PBE + TS 33.9 -> 23.8, libxc Si216 84^3 29.0 -> 18.7).
-MINIMUM_DEVICES = {
-    LDAU_SWITCH: 4,
-}
+#: sectors; none since 2026-11-21.  From 2026-11-19 LDA+U needed four: its sectors carried the KB and LDA+U columns of
+#: every atom, Ag256 fcc 64^3 x 1836 (4.8e8 entries) total 115.6 -> 103.3 s on four A100 but 114.4 -> 170.9 s on one.
+#: With one atom per orbit (``PARSEC_LDAU_PROJECTOR_ORBITS``) one GPU is the fastest: 106.5 -> 75.1 s on one, 80.8 on
+#: two, 84.2 on four (the abelian sectors), and the weighted sectors are faster still on every count measured.
+MINIMUM_DEVICES: dict[str, int] = {}
 
 #: The reasons of the refusals, as the route of the sectors gave them before the switches.
 TS_REASON = "the Tkatchenko-Scheffler dispersion correction"
@@ -122,6 +138,58 @@ def gamma_feature_settings() -> dict[str, str]:
     """Every switch of this module, read (and checked) at once."""
 
     return {name: gamma_feature_setting(name) for name in DEFAULTS}
+
+
+#: Whether the forces and relaxations of a Gamma cell with LDA+U whose SCF takes the sectors keep them (``auto``)
+#: or read the full grid (``off``).
+LDAU_FORCES_SWITCH = "PARSEC_LDAU_SECTOR_FORCES"
+LDAU_FORCES_DEFAULT = "auto"
+
+
+def ldau_sector_forces_setting() -> str:
+    """``PARSEC_LDAU_SECTOR_FORCES``: ``auto`` or ``off`` (``0``, ``false``, ``no`` mean ``off``).
+
+    ``auto``: the forces and the ``bfgs``/``simple`` relaxations of a bulk cell at the Gamma point with LDA+U (an
+    input of the Fortran-derived routines) keep the sectors where :func:`parsec_python.acceleration.cli.
+    periodic_sector_forces_refusal` takes the forces of those routines (``PARSEC_FORTRAN_SECTOR_FORCES=auto``): the
+    nonlocal KB term in the sectors of one atom per orbit completed over the group, the LDA+U term of every atom from
+    the sector bases with the gradients of its projectors (``Hamiltonian/hubbard_device.DeviceHubbard.forces``),
+    the total and the moves averaged over the group.  ``off`` keeps the full grid for them, as before.
+    """
+
+    value = os.environ.get(LDAU_FORCES_SWITCH, LDAU_FORCES_DEFAULT).strip().lower() or LDAU_FORCES_DEFAULT
+    if value in {"0", "false", "no"}:
+        value = "off"
+    if value not in ("auto", "off"):
+        raise ValueError(f"{LDAU_FORCES_SWITCH} must be auto or off, not {value!r}")
+    return value
+
+
+#: Whether a spin-polarized LDA+U run takes the spin sectors: ``auto`` a Gamma cell, ``on`` a cluster too, ``off``
+#: neither (the refusal of before).
+LDAU_SPIN_SWITCH = "PARSEC_LDAU_SPIN_SECTORS"
+LDAU_SPIN_DEFAULT = "auto"
+
+
+def ldau_spin_sector_setting() -> str:
+    """``PARSEC_LDAU_SPIN_SECTORS``: ``auto``, ``on`` or ``off`` (``0``, ``false``, ``no`` mean ``off``).
+
+    The two channels of a spin-polarized LDA+U run take the spin sectors, each channel with its own potential
+    matrices written into the shared sector operators before its solve (``Hamiltonian/hubbard_device.py``), with
+    the guard of :mod:`.spin_sectors`: under ``auto`` (the default since 2026-11-21) a bulk cell at the Gamma point
+    where its unpolarized twin takes the sectors (the LDA+U switch :data:`LDAU_SWITCH` of this module, then the
+    spin route of :mod:`.gamma_spin`; before, the 1x1x1 k-point driver of the reference CLI, which did not converge
+    for the antiferromagnetic MnO and NiO cells measured), under ``on`` also a cluster (``Spin_Symmetry_Sectors``,
+    ``driver._spin_sector_refusal``; a cluster keeps the full grid of the driver under ``auto``, which was faster
+    where the guard stopped the sectors).  ``off`` keeps the refusal of before for both.
+    """
+
+    value = os.environ.get(LDAU_SPIN_SWITCH, LDAU_SPIN_DEFAULT).strip().lower() or LDAU_SPIN_DEFAULT
+    if value in {"0", "false", "no"}:
+        value = "off"
+    if value not in ("auto", "on", "off"):
+        raise ValueError(f"{LDAU_SPIN_SWITCH} must be auto, on or off, not {value!r}")
+    return value
 
 
 def _has_hubbard(problem) -> bool:
@@ -217,7 +285,9 @@ def meta_gga_or_libxc_refusal(problem, *, features: bool) -> str | None:
 def correction_refusal(problem, *, features: bool) -> str | None:
     """The refusal of LDA+U or of the TS correction by the route of the Gamma sectors, or ``None``.
 
-    LDA+U also stays refused for a spin-polarized cell (the spin sectors carry no LDA+U) and with a hybrid.  TS of a
+    LDA+U stays refused with a hybrid, and for a spin-polarized cell only under ``PARSEC_LDAU_SPIN_SECTORS=off``:
+    under ``auto`` (the default since 2026-11-21) a spin cell takes the spin sectors where its switch
+    (:data:`LDAU_SWITCH`, from 2^26 grid points x states under ``auto``) takes the unpolarized one.  TS of a
     spin-polarized cell takes the spin sectors only under ``on``: under ``auto`` it keeps the 1x1x1 k-point driver,
     which was faster (Si216 spin PBE + TS, 72^3 x 502, four A100, first runs, in both orders: SCF 27.3 -> 39.8 s and
     27.1 -> 40.2 s, process wall 46.9 -> 50.5 s and 46.1 -> 51.3 s, the same energy).
@@ -227,7 +297,8 @@ def correction_refusal(problem, *, features: bool) -> str | None:
     hybrid = bool(getattr(scf, "is_hybrid", False))
     spin = bool(getattr(scf, "spin_polarized", False))
     if _has_hubbard(problem):
-        found = _refused(problem, LDAU_SWITCH, LDAU_REASON, features=features, refused=hybrid or spin)
+        spin_refused = spin and ldau_spin_sector_setting() == "off"
+        found = _refused(problem, LDAU_SWITCH, LDAU_REASON, features=features, refused=hybrid or spin_refused)
         if found is not None:
             return found
     if getattr(scf, "van_der_waals", False):
@@ -248,8 +319,8 @@ def ts_ignore_symmetry_note(translation, *, backend_is_cupy) -> str | None:
     PARSEC 1.5 refuses the TS correction unless symmetry is switched off (``Ignore_Symmetry: true``, error 159:
     its Hirshfeld sums read a density it would otherwise hold on the irreducible wedge), so every TS input says
     so.  Here the correction reads the density on the full grid of the cell whatever the route of the loop, and the
-    sectors give the energy of the full grid; under ``PARSEC_GAMMA_TS_SECTORS`` ``auto`` or ``on`` (the default is
-    ``off``) the command line therefore reads that keyword of a TS input as PARSEC's requirement, not as a request
+    sectors give the energy of the full grid; under ``PARSEC_GAMMA_TS_SECTORS`` ``auto`` (the default since
+    2026-11-21) or ``on`` the command line therefore reads that keyword of a TS input as PARSEC's requirement, not as a request
     for the full grid, where the route of the sectors takes the cell: the point group of the cell is looked for
     (``PARSEC_PERIODIC_SYMMETRY=auto``), the backend resolves to CuPy (``backend_is_cupy()``) and
     :func:`parsec_python.acceleration.driver.periodic_sector_refusal` takes it in one process (under ``auto`` an
@@ -301,6 +372,10 @@ def taken_features(problem) -> list[str]:
 
 __all__ = [
     "DEFAULTS",
+    "LDAU_FORCES_DEFAULT",
+    "LDAU_FORCES_SWITCH",
+    "LDAU_SPIN_DEFAULT",
+    "LDAU_SPIN_SWITCH",
     "LDAU_SWITCH",
     "LIBXC_SWITCH",
     "META_GGA_SWITCH",
@@ -308,6 +383,8 @@ __all__ = [
     "correction_refusal",
     "gamma_feature_setting",
     "gamma_feature_settings",
+    "ldau_sector_forces_setting",
+    "ldau_spin_sector_setting",
     "meta_gga_or_libxc_refusal",
     "taken_features",
     "ts_ignore_symmetry_note",

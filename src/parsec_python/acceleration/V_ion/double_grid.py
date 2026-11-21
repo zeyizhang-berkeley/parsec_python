@@ -186,8 +186,14 @@ def build_double_grid_projectors(
     an isolated system.  ``order`` defaults to the order of ``grid``.
     """
 
-    from parsec_python.V_ion.ionic_potential import real_spherical_harmonics
+    from parsec_python.V_ion.ionic_potential import (
+        projector_center_radius,
+        projector_center_setting,
+        real_spherical_harmonics,
+    )
 
+    # the reference's centre radius of the harmonics (PARSEC_PROJECTOR_CENTER)
+    center_setting = projector_center_setting()
     order = double_grid_order(grid) if order is None else int(order)
     displacements, fine_weights = double_grid_points(order, float(grid.spacing))
     sqrt_dv = np.sqrt(grid.volume_element)
@@ -213,7 +219,11 @@ def build_double_grid_projectors(
             table, _slopes, sign, spline = tables[(atom.symbol, angular_momentum)]
             width = 2 * angular_momentum + 1
             radial = interpolate_projector(potential, table, flat_radius, spline)
-            harmonics = real_spherical_harmonics(angular_momentum, flat_relative)
+            harmonics = real_spherical_harmonics(
+                angular_momentum,
+                flat_relative,
+                center_radius=projector_center_radius(potential, center_setting, off_radius=0.0),
+            )
             scaled = (sqrt_dv * radial)[:, None] * harmonics
             summed = np.einsum(
                 "pm,pmh->ph", support.weights, scaled.reshape(points, fine, width)

@@ -156,23 +156,23 @@ class SwitchTests(unittest.TestCase):
                         gamma_features.gamma_feature_settings()
 
     def test_floors(self) -> None:
-        # measured on A100 (gamma_features.MINIMUM_ENTRIES): TS and meta-GGAs from 2^27, LDA+U and libxc from 2^28;
-        # LDA+U with four devices (slower on one GPU)
+        # measured on A100 (gamma_features.MINIMUM_ENTRIES): TS and meta-GGAs from 2^27, libxc from 2^28, LDA+U (one
+        # atom per orbit, weighted sectors) from 2^26 since 2026-11-21 on any number of devices
         self.assertEqual(set(gamma_features.MINIMUM_ENTRIES), set(_SWITCHES))
         self.assertEqual(gamma_features.MINIMUM_ENTRIES[gamma_features.TS_SWITCH], 1 << 27)
         self.assertEqual(gamma_features.MINIMUM_ENTRIES[gamma_features.META_GGA_SWITCH], 1 << 27)
-        self.assertEqual(gamma_features.MINIMUM_ENTRIES[gamma_features.LDAU_SWITCH], 1 << 28)
+        self.assertEqual(gamma_features.MINIMUM_ENTRIES[gamma_features.LDAU_SWITCH], 1 << 26)
         self.assertEqual(gamma_features.MINIMUM_ENTRIES[gamma_features.LIBXC_SWITCH], 1 << 28)
-        self.assertEqual(gamma_features.MINIMUM_DEVICES, {gamma_features.LDAU_SWITCH: 4})
+        self.assertEqual(gamma_features.MINIMUM_DEVICES, {})
 
     def test_defaults(self) -> None:
-        # a meta-GGA and libxc auto; TS (its reading of Ignore_Symmetry departs from PARSEC 1.5) and LDA+U (slower on one
-        # GPU) off, which keeps the routes of before
+        # a meta-GGA, libxc, LDA+U and TS auto (since 2026-11-21: LDA+U with one atom per orbit in the weighted
+        # sectors; the Ignore_Symmetry of a TS input read as PARSEC's requirement)
         self.assertEqual(
             gamma_features.DEFAULTS,
             {
-                gamma_features.TS_SWITCH: "off",
-                gamma_features.LDAU_SWITCH: "off",
+                gamma_features.TS_SWITCH: "auto",
+                gamma_features.LDAU_SWITCH: "auto",
                 gamma_features.META_GGA_SWITCH: "auto",
                 gamma_features.LIBXC_SWITCH: "auto",
             },
@@ -238,20 +238,11 @@ class RefusalTests(unittest.TestCase):
                         self.assertIsNone(self.refusal(problem, {**_all("off"), switch: "auto"}, features=True))
                     with mock.patch.dict(gamma_features.MINIMUM_ENTRIES, {switch: entries + 1}):
                         self.assertIsNotNone(self.refusal(problem, {**_all("off"), switch: "auto"}, features=True))
-                # fewer devices: LDA+U alone keeps the full grid under auto (on takes it)
+                # any number of devices (LDA+U needed four from 2026-11-19 to 21)
                 for devices in (0, 1, 3):
                     counted = mock.patch.object(gamma_features, "process_device_count", return_value=devices)
                     with counted, mock.patch.dict(gamma_features.MINIMUM_ENTRIES, {switch: entries}):
-                        found = self.refusal(problem, {**_all("off"), switch: "auto"}, features=True)
-                        if switch == gamma_features.LDAU_SWITCH:
-                            self.assertEqual(
-                                found,
-                                "LDA+U (fewer than 4 CUDA devices in this process under PARSEC_GAMMA_LDAU_SECTORS=auto;"
-                                " on takes it)",
-                            )
-                            self.assertIsNone(self.refusal(problem, {**_all("off"), switch: "on"}, features=True))
-                        else:
-                            self.assertIsNone(found)
+                        self.assertIsNone(self.refusal(problem, {**_all("off"), switch: "auto"}, features=True))
 
     def test_a_libxc_meta_gga_needs_both_switches(self) -> None:
         problem = replace(
@@ -270,7 +261,17 @@ class RefusalTests(unittest.TestCase):
             # the hybrid route of the sectors takes the hybrid, not the TS correction with it
             self.assertIn("Tkatchenko", self.refusal(problem, _all("on"), features=True, hybrid_sectors=True))
         spin_silver = replace(self.silver, scf=replace(self.silver.scf, spin_polarized=True))
-        self.assertEqual(self.refusal(spin_silver, _all("on"), features=True), "LDA+U")
+        # PARSEC_LDAU_SPIN_SECTORS: auto (the default since 2026-11-21) and on let the spin cell take the spin
+        # sectors under the LDA+U switch; off keeps the refusal of before (the 1x1x1 k-point driver)
+        for value in ("auto", "on"):
+            spin = {gamma_features.LDAU_SPIN_SWITCH: value}
+            self.assertIsNone(self.refusal(spin_silver, {**_all("on"), **spin}, features=True))
+            self.assertEqual(self.refusal(spin_silver, {**_all("off"), **spin}, features=True), "LDA+U")
+        with mock.patch.dict(os.environ):
+            os.environ.pop(gamma_features.LDAU_SPIN_SWITCH, None)
+            self.assertIsNone(self.refusal(spin_silver, _all("on"), features=True))
+        off = {gamma_features.LDAU_SPIN_SWITCH: "off"}
+        self.assertEqual(self.refusal(spin_silver, {**_all("on"), **off}, features=True), "LDA+U")
         # the spin cell takes TS, a meta-GGA and libxc under their switches
         oxygen = self.oxygen
         for changed in (
@@ -317,7 +318,8 @@ class RefusalTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {"PARSEC_GAMMA_SPIN_SECTORS": "auto"}):
             for name in _SWITCHES:
                 os.environ.pop(name, None)
-            # the default (TS off)
+            # the default (TS auto since 2026-11-21: a spin cell keeps the 1x1x1 driver)
+            self.assertEqual(gamma_features.gamma_feature_setting(gamma_features.TS_SWITCH), "auto")
             self.assertFalse(gamma_spin_on_sector_route(translation, mpi=False, backend_is_cupy=lambda: True))
 
     def test_the_mpi_runner_keeps_refusing(self) -> None:
@@ -480,13 +482,14 @@ class CommandLineTests(unittest.TestCase):
         self.assertEqual(outcome[:2], ("prepared", "off"))
 
     def test_ignore_symmetry_keeps_its_meaning_where_the_sectors_cannot_take_the_cell(self) -> None:
-        # PARSEC_PERIODIC_SYMMETRY=off, a backend that is not CuPy, the default of the switch (off) even for a cell
-        # above the floor: no NOTE, the full grid, as in PARSEC 1.5
+        # PARSEC_PERIODIC_SYMMETRY=off, a backend that is not CuPy, the switch off (the former default) even for a
+        # cell above the floor: no NOTE, the full grid, as in PARSEC 1.5
         cases = (
             ({gamma_features.TS_SWITCH: "on", "PARSEC_PERIODIC_SYMMETRY": "off"}, True),
             ({gamma_features.TS_SWITCH: "on"}, False),
             ({gamma_features.TS_SWITCH: "auto"}, False),
-            ({}, True),
+            ({}, False),
+            ({gamma_features.TS_SWITCH: "off"}, True),
         )
         for environment, cupy in cases:
             with self.subTest(environment=environment, cupy=cupy), mock.patch.dict(os.environ):
@@ -495,6 +498,21 @@ class CommandLineTests(unittest.TestCase):
                     outcome = self.route(self.silicon(), environment=environment, cupy=cupy)
                 self.assertEqual(outcome[:2], ("prepared", "off"))
                 self.assertNotIn("NOTE: Ignore_Symmetry of this TS input", outcome[2])
+
+    def test_the_default_takes_the_sectors_of_an_unpolarized_cell_above_the_floor(self) -> None:
+        # since 2026-11-21 the default is auto: Ignore_Symmetry of a TS input is PARSEC's requirement, the cell takes
+        # the sectors from the floor on (patched to 1 here), with the NOTE; below it the full grid, as before
+        with mock.patch.dict(os.environ):
+            os.environ.pop(gamma_features.TS_SWITCH, None)
+            with mock.patch.dict(gamma_features.MINIMUM_ENTRIES, {gamma_features.TS_SWITCH: 1}):
+                outcome = self.route(self.silicon())
+            self.assertEqual(outcome[:2], ("prepared", "auto"))
+            self.assertIn("NOTE: Ignore_Symmetry of this TS input", outcome[2])
+            self.assertIn("PARSEC_GAMMA_TS_SECTORS=auto", outcome[2])
+            outcome = self.route(self.silicon())
+            self.assertEqual(outcome[:2], ("prepared", "off"))
+            self.assertNotIn("NOTE: Ignore_Symmetry of this TS input", outcome[2])
+        # (a spin cell keeps the 1x1x1 k-point driver under auto: RefusalTests and the spin route test above)
 
     def test_a_wrong_value_is_refused_before_the_scf(self) -> None:
         # (the driver reads every switch at its preparation; the command line through the TS rule)
@@ -557,15 +575,17 @@ class DeviceTests(unittest.TestCase):
         self.assertRegex(texts["on"], r"orbital_symmetry_representations = [2-9]")
 
     def test_ldau_single_point(self) -> None:
-        # the perfect cell: the commuting involutions with the face-centring translations, whose group knows the
-        # orbits of its atoms; LDA+U keeps the projectors of every atom (driver._without_atom_orbits)
-        texts, _ = self.run_both(write_silver, [gamma_features.LDAU_SWITCH])
+        # the perfect cell: the commuting involutions with the face-centring translations under
+        # PARSEC_LDAU_WEIGHTED_SECTORS=off, whose group knows the orbits of its atoms (one atom per orbit since
+        # 2026-11-21, PARSEC_LDAU_PROJECTOR_ORBITS)
+        with mock.patch.dict(os.environ, {"PARSEC_LDAU_WEIGHTED_SECTORS": "off"}):
+            texts, _ = self.run_both(write_silver, [gamma_features.LDAU_SWITCH])
         self.assertIn("does not take LDA+U", texts["off"])
         self.assertIn("exact commuting group of 32 operations", texts["on"])
         self.assertIn("with PARSEC_GAMMA_LDAU_SECTORS=on", texts["on"])
 
-    def test_ldau_auto_needs_four_devices(self) -> None:
-        from parsec_python.acceleration.backends.cupy import cupy_device_count
+    def test_ldau_auto_takes_one_device(self) -> None:
+        # since 2026-11-21 auto needs no count of devices (four from 2026-11-19 to 21)
         from parsec_python.acceleration.driver import periodic_sector_refusal
 
         folder = Path(tempfile.mkdtemp(prefix="parsec_gamma_features_gpu_"))
@@ -573,18 +593,12 @@ class DeviceTests(unittest.TestCase):
         path = write_silver(folder)
         problem = _translation(path).problem
         floor = mock.patch.dict(gamma_features.MINIMUM_ENTRIES, {gamma_features.LDAU_SWITCH: 1})
-        with floor, mock.patch.dict(os.environ, {gamma_features.LDAU_SWITCH: "auto", "PARSEC_CUPY_DEVICES": "current"}):
-            self.assertEqual(gamma_features.process_device_count(), 1)
-            self.assertIn("fewer than 4 CUDA devices", periodic_sector_refusal(problem, features=True))
-        if cupy_device_count() < 4:
-            self.skipTest("four CUDA devices are needed for the route of auto")
         output = StringIO()
-        with floor, mock.patch.dict(os.environ, {gamma_features.LDAU_SWITCH: "auto"}), redirect_stdout(
-            output
-        ), redirect_stderr(StringIO()), warnings.catch_warnings():
-            os.environ.pop("PARSEC_CUPY_DEVICES", None)
+        with floor, mock.patch.dict(
+            os.environ, {gamma_features.LDAU_SWITCH: "auto", "PARSEC_CUPY_DEVICES": "current"}
+        ), redirect_stdout(output), redirect_stderr(StringIO()), warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            self.assertEqual(gamma_features.process_device_count(), cupy_device_count())
+            self.assertEqual(gamma_features.process_device_count(), 1)
             self.assertIsNone(periodic_sector_refusal(problem, features=True))
             self.assertEqual(cli_module.main([str(path), "--no-archive"]), 0)
         self.assertIn("with PARSEC_GAMMA_LDAU_SECTORS=auto", (folder / "parsec.out").read_text())

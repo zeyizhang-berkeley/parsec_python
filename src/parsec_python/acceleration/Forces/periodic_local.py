@@ -119,16 +119,23 @@ def _auto_off(name: str) -> str:
 def validate_local_force_settings() -> None:
     """Read every switch of the local forces of a cell, so that a value they do not know stops a run before its SCF.
 
-    ``PARSEC_PERIODIC_FORCE_SERIES``, ``PARSEC_PERIODIC_SECTOR_LOCAL_FORCES``, ``PARSEC_PERIODIC_LOCAL_ORBITS`` and
-    ``PARSEC_PERIODIC_LOCAL_BALLS`` are read where the forces are formed, after the whole first SCF; the preparation
-    of a run (``acceleration.driver.prepare_single_point``, the command line and the MPI runner) calls this first
-    (since 2026-11-19).  Nothing else changes: the values are read again where they are used.
+    ``PARSEC_PERIODIC_FORCE_SERIES``, ``PARSEC_PERIODIC_SECTOR_LOCAL_FORCES``, ``PARSEC_PERIODIC_LOCAL_ORBITS``,
+    ``PARSEC_PERIODIC_LOCAL_BALLS`` and ``PARSEC_SPLINE_FORCE_CENTER`` (since 2026-11-21) are read where the forces are
+    formed, after the whole first SCF; the preparation of a run (``acceleration.driver.prepare_single_point``, the
+    command line and the MPI runner) calls this first (since 2026-11-19).  ``PARSEC_PROJECTOR_CENTER`` (2026-11-21) is
+    read where the projectors are built, before the SCF, and here too.  Nothing else changes: the values are read
+    again where they are used.
     """
+
+    from parsec_python.Forces.periodic import spline_force_center_setting
+    from parsec_python.V_ion.ionic_potential import projector_center_setting
 
     periodic_force_series_setting()
     periodic_sector_local_forces_setting()
     periodic_local_orbits_setting()
     periodic_local_balls_setting()
+    spline_force_center_setting()
+    projector_center_setting()
 
 
 def periodic_local_orbits_setting() -> str:

@@ -65,6 +65,23 @@ class SwitchTests(unittest.TestCase):
         for value, expected in (("", "off"), ("OFF", "off"), ("0", "off"), ("auto", "auto"), (" on ", "auto")):
             with mock.patch.dict(os.environ, {"PARSEC_SPIN_FLIP_SYMMETRY": value}):
                 self.assertEqual(spin_flip_setting(), expected)
+        # off by default: a flip loop can settle in another state with integer occupations (Ni2, A100)
+        with mock.patch.dict(os.environ):
+            os.environ.pop("PARSEC_SPIN_FLIP_SYMMETRY", None)
+            self.assertEqual(spin_flip_setting(), "off")
+
+    def test_fractional_occupations_of_the_up_channel(self) -> None:
+        from parsec_python.SCF.spin_polarized import SPIN_FLIP_OCCUPATION_TOLERANCE, _flip_fractional_occupations
+
+        self.assertEqual(SPIN_FLIP_OCCUPATION_TOLERANCE, 0.05)
+        largest, lines = _flip_fractional_occupations([-0.5, -0.2, 0.1], [1.0, 1.0 - 1e-9, 0.0])
+        self.assertLess(largest, SPIN_FLIP_OCCUPATION_TOLERANCE)
+        self.assertEqual(lines, ())
+        largest, lines = _flip_fractional_occupations([-0.5, -0.2, -0.19], [1.0, 0.6, 0.4])
+        self.assertAlmostEqual(largest, 0.4)
+        self.assertEqual(len(lines), 2)
+        self.assertIn("up level 2: -0.200000 Ry, occupation 0.6000", lines[0])
+        self.assertEqual(_flip_fractional_occupations([], []), (0.0, ()))
         with mock.patch.dict(os.environ, {"PARSEC_SPIN_FLIP_SYMMETRY": "always"}), self.assertRaises(ValueError):
             spin_flip_setting()
 
@@ -588,6 +605,204 @@ class ScipyLoopTests(unittest.TestCase):
         moment = flip.spin[0].density - flip.spin[1].density
         self.assertGreater(float(np.sum(np.abs(moment)) * flip.grid.volume_element), 0.5)
         np.testing.assert_allclose(flip_forces, both_forces, atol=1e-6)
+
+
+class ScipyFractionalTests(unittest.TestCase):
+    """A stretched H2 (two labels) at a high Fermi temperature: the up channel of the flip loop ends with fractional
+    occupations, so the loop is not kept and runs again with both channels; the energy of off, the note in
+    parsec.out."""
+
+    def test_a_fractional_up_level_solves_both_channels(self) -> None:
+        from parsec_python.Input import parse_parsec_input
+        from parsec_python.SCF.spin_polarized import SPIN_FLIP_OCCUPATION_TOLERANCE
+        from parsec_python.acceleration import driver
+        from parsec_python.models import SpinSectorFallbackRecord
+
+        directory = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, directory, ignore_errors=True)
+        hot = ("Fermi_Temp: 40000",)
+        path = _write_h2(directory, radius=6.0, spacing=0.55, extra=hot)
+        _, both, _ = _run(path, "off", backend="scipy")
+        records = []
+        with mock.patch.dict(os.environ, {"PARSEC_SPIN_FLIP_SYMMETRY": "auto"}):
+            translation = parse_parsec_input(path)
+            system = driver.prepare_single_point(translation.problem, backend="scipy")
+            self.assertIsNotNone(system.spin_flip)
+            flip = driver.run_scf(system, callback=records.append)
+        notes = [record for record in records if isinstance(record, SpinSectorFallbackRecord)]
+        self.assertEqual(len(notes), 1)
+        self.assertEqual(notes[0].route, "spin_flip")
+        self.assertIn("fractional occupation", notes[0].reason)
+        self.assertGreaterEqual(notes[0].largest_fractional_occupation, SPIN_FLIP_OCCUPATION_TOLERANCE)
+        # the second loop solved both channels: the down channel has a subspace of its own, the energy of off
+        self.assertNotIsInstance(flip.spin[1].eigensolver_state, SpinFlipChannelState)
+        self.assertTrue(both.converged and flip.converged)
+        self.assertAlmostEqual(flip.energies.total, both.energies.total, delta=1e-9)
+        # parsec.out of the command line says so
+        cli_directory = directory / "cli"
+        cli_directory.mkdir()
+        _write_h2(cli_directory, radius=6.0, spacing=0.55, extra=hot)
+        _, text = _cli(cli_directory, "auto")
+        self.assertIn("NOTE: PARSEC_SPIN_FLIP_SYMMETRY: the up channel of the converged loop holds a fractional", text)
+        self.assertIn("this SCF loop solves both spin channels", text)
+        self.assertAlmostEqual(_last_energy(text), both.energies.total, delta=1e-8)
+
+    def test_the_default_solves_both_channels(self) -> None:
+        # off by default: an antiferromagnetic start of two labels has no operation attached and no detail
+        from parsec_python.Input import parse_parsec_input
+        from parsec_python.acceleration import driver
+
+        directory = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, directory, ignore_errors=True)
+        path = _write_h2(directory, radius=5.0, spacing=0.6)
+        with mock.patch.dict(os.environ):
+            os.environ.pop("PARSEC_SPIN_FLIP_SYMMETRY", None)
+            translation = parse_parsec_input(path)
+            system = driver.prepare_single_point(translation.problem, backend="scipy")
+        self.assertIsNone(system.spin_flip)
+        self.assertNotIn("spin_flip_symmetry", dict(system.backend_info.details))
+
+
+class _OtherError(RuntimeError):
+    pass
+
+
+class LeaveRouteTests(unittest.TestCase):
+    """How run_spin_scf leaves the route: a failed test of the spin sectors in a flip loop, the mark of the system
+    for the rest of the run, the warm start of the second loop (the loop itself mocked)."""
+
+    @staticmethod
+    def _abandoned():
+        from parsec_python.acceleration.SCF.spin_sectors import FractionalOccupations, SpinSectorsAbandoned
+
+        report = FractionalOccupations(
+            largest=0.5, tolerance=0.05, lines=("up pi*: 0.5000",), reason="a partly filled multiplet",
+            measure="largest min(f, 1-f)",
+        )
+        return SpinSectorsAbandoned("the start Hamiltonian", report)
+
+    @staticmethod
+    def _system():
+        from types import SimpleNamespace
+
+        from parsec_python.acceleration.models import BackendInfo
+
+        info = BackendInfo(
+            requested="auto", selected="cupy",
+            details=(("spin_flip_symmetry", "auto: the up channel is solved"), ("other", "x")),
+        )
+        return SimpleNamespace(
+            spin_flip=SimpleNamespace(description="inversion"), backend_info=info, backend=SimpleNamespace(info=info)
+        )
+
+    @staticmethod
+    def _loops(first_error, *, take=True):
+        calls = []
+
+        def loop(system, *, flip_taken=None, **keywords):
+            calls.append((flip_taken, keywords))
+            if len(calls) == 1:
+                if take and flip_taken is not None:
+                    flip_taken.append("inversion")
+                raise first_error
+            return "second loop"
+
+        return calls, loop
+
+    def test_a_failed_sector_test_in_a_flip_loop_solves_both_channels_in_the_same_sectors(self) -> None:
+        from parsec_python.SCF import spin_polarized
+        from parsec_python.models import SpinSectorFallbackRecord
+
+        system = self._system()
+        calls, loop = self._loops(self._abandoned())
+        records = []
+        with mock.patch.object(spin_polarized, "_run_spin_loop", loop):
+            self.assertEqual(spin_polarized.run_spin_scf(system, callback=records.append), "second loop")
+        self.assertEqual(len(calls), 2)
+        self.assertIsNone(calls[1][0])
+        (record,) = records
+        self.assertIsInstance(record, SpinSectorFallbackRecord)
+        self.assertEqual(record.route, "spin_flip")
+        self.assertEqual(record.stage, "the start Hamiltonian")
+        self.assertIn("a test of the spin sectors failed in a loop of the route (a partly filled multiplet", record.reason)
+        self.assertEqual(record.largest_fractional_occupation, 0.5)
+        self.assertEqual(record.multiplets, ("up pi*: 0.5000",))
+        # the mark: no operation for the rest of the run, and the detail says so
+        self.assertIn("the start Hamiltonian", getattr(system, spin_polarized.SPIN_FLIP_LEFT))
+        flip, refusal = spin_polarized._spin_flip_of(
+            system, exchange_term=None, meta=None, hubbard_projectors=None, ionic_potential=None
+        )
+        self.assertIsNone(flip)
+        self.assertIsNone(refusal)
+        details = dict(system.backend_info.details)
+        self.assertTrue(details["spin_flip_symmetry"].startswith("auto: both channels solved (the run left the route"))
+        self.assertEqual(details["other"], "x")
+        self.assertIs(system.backend.info, system.backend_info)
+        # parsec.out
+        from parsec_python.Output.parsec_output import spin_sector_fallback_lines
+
+        text = "\n".join(spin_sector_fallback_lines(record))
+        self.assertIn("NOTE: PARSEC_SPIN_FLIP_SYMMETRY: a test of the spin sectors failed", text)
+        self.assertIn("this SCF loop solves both spin channels", text)
+
+    def test_other_errors_and_loops_without_the_flip_are_not_caught(self) -> None:
+        from parsec_python.SCF import spin_polarized
+        from parsec_python.acceleration.SCF.spin_sectors import SpinSectorsAbandoned
+
+        system = self._system()
+        # a loop that solved both channels: the guard of the spin sectors decides, as before
+        calls, loop = self._loops(self._abandoned(), take=False)
+        with mock.patch.object(spin_polarized, "_run_spin_loop", loop), self.assertRaises(SpinSectorsAbandoned):
+            spin_polarized.run_spin_scf(system)
+        self.assertEqual(len(calls), 1)
+        self.assertIsNone(getattr(system, spin_polarized.SPIN_FLIP_LEFT, None))
+        # another error of a flip loop is not a reason to leave the route
+        calls, loop = self._loops(_OtherError("no"))
+        with mock.patch.object(spin_polarized, "_run_spin_loop", loop), self.assertRaises(_OtherError):
+            spin_polarized.run_spin_scf(system)
+        self.assertEqual(len(calls), 1)
+        self.assertIsNone(getattr(system, spin_polarized.SPIN_FLIP_LEFT, None))
+
+    def test_a_fractional_up_channel_marks_the_system_and_drops_the_saved_subspaces(self) -> None:
+        from parsec_python.SCF import SCFWarmStart
+        from parsec_python.SCF import spin_polarized
+
+        system = self._system()
+        calls, loop = self._loops(spin_polarized._SpinFlipFractional(0.37, ("up level 1",)))
+        warm = SCFWarmStart(
+            input_potential=(np.zeros(2), np.zeros(2)), hartree_potential=np.zeros(2),
+            eigensolver_state=("up", "down"), first_iteration_degree=12,
+        )
+        records = []
+        with mock.patch.object(spin_polarized, "_run_spin_loop", loop):
+            spin_polarized.run_spin_scf(system, callback=records.append, warm_start=warm)
+        self.assertIs(calls[0][1]["warm_start"], warm)
+        second = calls[1][1]["warm_start"]
+        self.assertIsNone(second.eigensolver_state)
+        self.assertIsNone(second.first_iteration_degree)
+        self.assertIs(second.input_potential, warm.input_potential)
+        self.assertIn("fractional occupation of the up channel", getattr(system, spin_polarized.SPIN_FLIP_LEFT))
+        self.assertIn("fractional occupation", records[0].reason)
+
+    def test_a_system_prepared_again_keeps_both_channels(self) -> None:
+        # driver._SpinSectorFallback fills the same system object again: the mark stays and corrects the new detail
+        from dataclasses import replace
+
+        from parsec_python.SCF import spin_polarized
+        from parsec_python.acceleration import driver
+
+        system = self._system()
+        driver._keep_spin_flip_left(system)
+        self.assertEqual(dict(system.backend_info.details)["spin_flip_symmetry"], "auto: the up channel is solved")
+        spin_polarized.leave_spin_flip(system, "a reason")
+        fresh = replace(system.backend_info, details=(("spin_flip_symmetry", "auto: the up channel is solved"),))
+        system.backend_info = system.backend.info = fresh
+        driver._keep_spin_flip_left(system)
+        self.assertEqual(
+            dict(system.backend_info.details)["spin_flip_symmetry"],
+            "auto: both channels solved (the run left the route: a reason)",
+        )
+        self.assertIs(system.backend.info, system.backend_info)
 
 
 def _point_charge(position, charge=0.5) -> tuple[str, ...]:

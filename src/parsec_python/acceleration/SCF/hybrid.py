@@ -600,15 +600,16 @@ def device_exchange_for(
         exchange_pool_setting,
     )
 
-    from ..Hamiltonian.exchange_translations import exchange_translation_setting
+    from ..Hamiltonian.exchange_translations import exchange_column_update_setting, exchange_translation_setting
 
     # The switches of the parity classes, of the pooled block of periodic sector orbitals and of their translation
-    # classes (PARSEC_CUPY_EXCHANGE_POOL, PARSEC_CUPY_EXCHANGE_TRANSLATIONS, read by the builds of such orbitals
-    # only) are refused here when wrong.
+    # classes (PARSEC_CUPY_EXCHANGE_POOL, PARSEC_CUPY_EXCHANGE_TRANSLATIONS and the update of their W by column,
+    # PARSEC_CUPY_EXCHANGE_COLUMN_UPDATE, read by the builds of such orbitals only) are refused here when wrong.
     exchange_parity_setting()
     exchange_parity_box_setting()
     exchange_pool_setting()
     exchange_translation_setting()
+    exchange_column_update_setting()
     return DeviceExchange(
         backend=backend,
         sectors=sectors,

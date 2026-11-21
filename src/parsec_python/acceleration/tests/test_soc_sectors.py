@@ -42,7 +42,9 @@ from parsec_python.acceleration.SCF.soc_sectors import (
     SectorRoute,
     SectorSpinors,
     detect_sector_plan,
+    resolve_soc_sectors,
     soc_sectors_setting,
+    whole_grid_spinor_entries,
 )
 
 _EXAMPLE = Path(__file__).resolve().parents[4] / "examples" / "0d_AuH"
@@ -541,9 +543,13 @@ class CommandLineTests(unittest.TestCase):
 
 class SwitchTests(unittest.TestCase):
     def test_values(self) -> None:
-        for value, expected in (("", "off"), ("off", "off"), ("ON", "on"), ("kramers", "kramers")):
+        for value, expected in (("", "auto"), ("auto", "auto"), ("off", "off"), ("ON", "on"), ("kramers", "kramers")):
             with mock.patch.dict(os.environ, {SWITCH: value}):
                 self.assertEqual(soc_sectors_setting(), expected)
+        # the default since 2026-11-21
+        with mock.patch.dict(os.environ):
+            os.environ.pop(SWITCH, None)
+            self.assertEqual(soc_sectors_setting(), "auto")
         with mock.patch.dict(os.environ, {SWITCH: "yes"}):
             with self.assertRaises(ValueError):
                 soc_sectors_setting()
@@ -561,6 +567,75 @@ class SwitchTests(unittest.TestCase):
         self.assertNotIn("soc_sector_setup", result.timings)
         self.assertEqual(len(notes), 1)
         self.assertIn("the spinors stay on the whole grid", notes[0])
+
+    def test_auto_takes_the_kramers_sector_from_the_floor_on(self) -> None:
+        from parsec_python.acceleration.SCF import soc_sectors
+
+        system, _ = _prepared([Atom("Au", [0.0, 0.0, 0.0])], iterations=1)
+        states = 12 + system.input.eigensolver.subspace_buffer
+        self.assertEqual(whole_grid_spinor_entries(system), 2 * system.grid.size * states)
+        self.assertLess(whole_grid_spinor_entries(system), soc_sectors.MINIMUM_ENTRIES)
+        route, reason = resolve_soc_sectors("auto", system)
+        self.assertEqual(route, "off")
+        self.assertIn("below the floor of auto", reason)
+        # --symmetry on asks for a reduction at every size; an explicit value is its own route
+        self.assertEqual(resolve_soc_sectors("auto", system, forced=True), ("kramers", ""))
+        for setting in ("off", "kramers", "on"):
+            self.assertEqual(resolve_soc_sectors(setting, system), (setting, ""))
+        with mock.patch.object(soc_sectors, "MINIMUM_ENTRIES", whole_grid_spinor_entries(system)):
+            self.assertEqual(resolve_soc_sectors("auto", system), ("kramers", ""))
+
+    def test_auto_below_the_floor_is_the_whole_grid(self) -> None:
+        from parsec_python.acceleration.SCF import soc_sectors
+
+        system, projectors = _prepared([Atom("Au", [0.0, 0.0, 0.0])], iterations=3)
+        with mock.patch.dict(os.environ, {SWITCH: "off"}):
+            whole = run_self_consistent_soc(system, projectors, backend=NumpyArrayBackend())
+        notes = []
+        with mock.patch.dict(os.environ, {SWITCH: "auto"}), mock.patch(
+            "parsec_python.acceleration.SCF.self_consistent_soc._sector_route",
+            side_effect=AssertionError("no sectors below the floor"),
+        ):
+            below = run_self_consistent_soc(system, projectors, backend=NumpyArrayBackend(), note=notes.append)
+        self.assertEqual(below.energies.total, whole.energies.total)
+        np.testing.assert_array_equal(below.eigenvalues, whole.eigenvalues)
+        self.assertEqual(len(notes), 1)
+        self.assertIn("PARSEC_SOC_SECTORS=auto", notes[0])
+        self.assertIn("the spinors stay on the whole grid", notes[0])
+        # no symmetry: the whole grid without a note, as the former default
+        notes = []
+        with mock.patch.dict(os.environ, {SWITCH: "auto"}):
+            run_self_consistent_soc(system, projectors, backend=NumpyArrayBackend(), note=notes.append, symmetry=False)
+        self.assertEqual(notes, [])
+        # from the floor on: the Kramers sector, named as the route of auto
+        notes = []
+        with mock.patch.dict(os.environ, {SWITCH: "auto"}), mock.patch.object(soc_sectors, "MINIMUM_ENTRIES", 1):
+            sector = run_self_consistent_soc(system, projectors, backend=NumpyArrayBackend(), note=notes.append)
+        self.assertIn("soc_sector_setup", sector.timings)
+        self.assertEqual(len(notes), 1)
+        self.assertIn("Spin-orbit sectors (PARSEC_SOC_SECTORS=auto)", notes[0])
+        self.assertIn("sector +i of C2z", notes[0])
+
+    def test_backend_record_under_auto(self) -> None:
+        from types import SimpleNamespace
+
+        from parsec_python.acceleration.SCF import soc_sectors
+        from parsec_python.acceleration.cli import _soc_orbital_symmetry
+        from parsec_python.acceleration.models import BackendInfo
+
+        info = BackendInfo(requested="auto", selected="cupy", details=(("orbital_symmetry", "full grid"),))
+        system, _ = _prepared([Atom("Au", [0.0, 0.0, 0.0])], iterations=1)
+        view = SimpleNamespace(backend_info=info, grid=system.grid, atoms=system.atoms, input=system.input,
+                               electron_count=system.electron_count)
+
+        def text(symmetry_on=False):
+            return dict(_soc_orbital_symmetry(view, "auto", symmetry_on).details)["orbital_symmetry"]
+
+        self.assertIn("PARSEC_SOC_SECTORS=auto, the whole-grid spinor basis below the floor", text())
+        self.assertIn("sector +i of C2z", text(symmetry_on=True))
+        self.assertIn("(PARSEC_SOC_SECTORS=auto)", text(symmetry_on=True))
+        with mock.patch.object(soc_sectors, "MINIMUM_ENTRIES", 1):
+            self.assertIn("sector +i of C2z", text())
 
 
 if __name__ == "__main__":

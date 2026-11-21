@@ -429,6 +429,56 @@ def _start_occupations(start) -> list:
     return [np.asarray(start.occupations)]
 
 
+#: The key of the Ritz states of the k-point sectors in a result's ``eigensolver_state``
+#: (``acceleration/SCF/kpoint_sectors.py``, ``SectorKPointSolver.export_states``).
+_SECTOR_STATES_KEY = "kpoint_sectors"
+WEDGE_SECTOR_STATES_ENV = "PARSEC_HYBRID_WEDGE_SECTOR_STATES"
+
+
+def wedge_sector_states_setting() -> str:
+    """``PARSEC_HYBRID_WEDGE_SECTOR_STATES``: where the Fock loop of an insulating start moves to the wedge
+    (``PARSEC_HYBRID_KPOINT_WEDGE=auto``, :meth:`BlochExchange.after_start`), ``auto`` (default) starts the sectors of
+    the wedge's k-points from the Ritz states the start left in the sectors of the same k-points (the wedge's
+    representatives are points of the pairs with their labels, so their sector plans are those of the start), and
+    ``off`` starts them afresh, as before (a first solve from random starts in every sector)."""
+
+    import os
+
+    value = os.environ.get(WEDGE_SECTOR_STATES_ENV, "auto").strip().lower() or "auto"
+    if value not in ("auto", "off"):
+        raise ValueError(f"{WEDGE_SECTOR_STATES_ENV} must be auto or off, got {value!r}")
+    return value
+
+
+def _restricted_sector_states(carried, indices, pair_count: int, channels: int):
+    """The Ritz states of the k-point sectors of a loop on the pairs at the points ``indices`` alone, as the solver of
+    the wedge lays them out: its items are those of the pairs' k-points ``channel * pair_count + indices[j]``,
+    renumbered ``channel * len(indices) + j``, in the order of the pairs' layout (both order their sectors by the
+    same costs, ties by k-point, and ``indices`` grow), each with its number of states.  A layout the wedge's solver
+    does not make is not taken there (``import_states``): its sectors then start afresh."""
+
+    if not isinstance(carried, dict):
+        return None
+    renumbered = {
+        channel * pair_count + int(index): channel * len(indices) + position
+        for channel in range(channels)
+        for position, index in enumerate(indices)
+    }
+    layout, counts, moved = [], [], {}
+    old_states = dict(carried.get("states") or {})
+    for position, (item, count) in enumerate(zip(carried.get("layout", ()), carried.get("counts", ()))):
+        task, sector, rows = (int(value) for value in item)
+        if task not in renumbered:
+            continue
+        if position in old_states:
+            moved[len(layout)] = old_states[position]
+        layout.append((renumbered[task], sector, rows))
+        counts.append(int(count))
+    if not layout:
+        return None
+    return {_SECTOR_STATES_KEY: {"layout": layout, "counts": counts, "states": moved}}
+
+
 def _restricted_start(start, plan: WedgePlan, pair_count: int):
     """The result ``start`` of the loop on the pairs at the points ``plan.indices`` alone (the wedge's
     representatives, with the labels of the pairs): their orbitals, levels, occupations and Ritz states."""
@@ -442,8 +492,11 @@ def _restricted_start(start, plan: WedgePlan, pair_count: int):
         return np.concatenate([parts[index] for index in indices]) if indices else np.zeros(0)
 
     def states(found, channels: int):
-        # the Ritz states by task (channel * n_k + k); those of the k-point sectors (a layout of their own) are left:
-        # the wedge's sectors start afresh
+        # the Ritz states by task (channel * n_k + k); those of the k-point sectors (a layout of their own) move with
+        # their k-points under PARSEC_HYBRID_WEDGE_SECTOR_STATES=auto (_restricted_sector_states), else the wedge's
+        # sectors start afresh
+        if isinstance(found, dict) and _SECTOR_STATES_KEY in found and wedge_sector_states_setting() == "auto":
+            return _restricted_sector_states(found[_SECTOR_STATES_KEY], indices, pair_count, channels)
         if not isinstance(found, dict) or any(not isinstance(key, (int, np.integer)) for key in found):
             return None
         moved = {}
@@ -538,6 +591,9 @@ class BlochExchange:
     takes_hooks = False
     #: The k-point backend of the SCF loops (``make_kpoint_solver``): the host, where the operator is.
     kpoint_backend = "cpu"
+    #: ``(how, pairs, mesh points, operations)`` once ``PARSEC_HYBRID_KPOINT_WEDGE=auto`` moved this Fock loop to the
+    #: wedge (``how``: ``start``, :meth:`after_start`; ``carried``, :meth:`adopt_carried`), for :meth:`after_loop`.
+    _wedge_taken: tuple | None = None
 
     def __init__(self, system, definition, k_points, k_weights, potentials: PeriodicPairPotentials | None = None) -> None:
         self.k_points = np.atleast_2d(np.asarray(k_points, dtype=np.float64))
@@ -662,8 +718,75 @@ class BlochExchange:
             return system, start
         restricted = _restricted_start(start, plan, pairs)
         self._take_wedge(plan)
+        self._wedge_taken = ("start", pairs, mesh_points, int(plan.operations))
         note("wedge", len(plan.k_points), plan.operations)
         return plan.system, restricted
+
+    def adopt_carried(self, system, sets):
+        """The system of a Fock loop started from the orbitals ``sets`` of the structure before a move
+        (:func:`parsec_python.SCF.hybrid.run_hybrid_scf`, no semilocal start): where they are the wedge's (their
+        ``stars``; a relaxation whose first structure took the deferred wedge, ``PARSEC_HYBRID_KPOINT_FORCE_WEDGE=auto``
+        (the default) with ``PARSEC_HYBRID_KPOINT_WEDGE=auto``) and this engine is on the time-reversal pairs, it takes that wedge
+        for this structure too (:func:`hybrid_wedge_plan`) and returns its system (the density averaged over the
+        wedge's group); otherwise ``system`` unchanged."""
+
+        deferred = getattr(system.input, "hybrid_kpoint_wedge_deferred", None)
+        carried = [getattr(orbital_set, "stars", None) for orbital_set in sets]
+        if deferred is None or self.stars is not None or not sets or any(stars is None for stars in carried):
+            return system
+        if tuple(int(value) for value in deferred.dimensions) != tuple(int(value) for value in self.mesh):
+            raise ValueError(
+                f"the pairs make up the {'x'.join(str(n) for n in self.mesh)} mesh, not the wedge's of the structure "
+                "before"
+            )
+        plan = hybrid_wedge_plan(system, deferred, self.k_points, self.box.reciprocal)
+        points = np.atleast_2d(np.asarray(sets[0].k_points, dtype=np.float64))
+        if plan.k_points.shape != points.shape or not np.allclose(plan.k_points, points, rtol=0.0, atol=1.0e-10):
+            raise ValueError("the orbitals of the structure before are on another wedge than this structure's")
+        pairs = int(self.k_points.shape[0])
+        self._take_wedge(plan)
+        self._wedge_taken = (
+            "carried",
+            pairs,
+            int(np.prod([int(value) for value in deferred.dimensions])),
+            int(plan.operations),
+        )
+        return plan.system
+
+    def after_loop(self, system, result, *, callback: Callable | None = None) -> None:
+        """The NOTE of a Fock loop that ``PARSEC_HYBRID_KPOINT_WEDGE=auto`` moved to the wedge (after an insulating
+        semilocal start, :meth:`after_start`, or with the wedge's orbitals of the structure before a move,
+        :meth:`adopt_carried`) and whose last inner loop ``result`` has a partly filled state
+        (:func:`parsec_python.Grid.kpoints.partly_filled_states`): such a structure is a metal held in the symmetric
+        state of the wedge, which ``PARSEC_HYBRID_KPOINT_WEDGE=auto`` keeps on the time-reversal pairs where the
+        semilocal start shows it (a later structure of a relaxation, or a Fock loop that closes the start's gap).
+        ``callback`` receives a
+        :class:`parsec_python.models.HybridMeshRouteRecord` of route ``wedge_partly_filled`` (``reason``: ``start``
+        or ``carried``); the run and its result are not changed.  Nothing for the pairs, ``on`` or an insulator."""
+
+        taken = getattr(self, "_wedge_taken", None)
+        if taken is None or callback is None or result is None:
+            return
+        from ..Grid.kpoints import HYBRID_WEDGE_FRACTIONAL_TOLERANCE, partly_filled_states
+        from ..models import HybridMeshRouteRecord
+
+        count, largest = partly_filled_states(_start_occupations(result))
+        if not count:
+            return
+        how, pairs, mesh_points, operations = taken
+        callback(
+            HybridMeshRouteRecord(
+                route="wedge_partly_filled",
+                points=int(self.k_points.shape[0]),
+                mesh_points=int(mesh_points),
+                pairs_points=int(pairs),
+                operations=int(operations),
+                partly_filled=int(count),
+                largest_fractional_occupation=float(largest),
+                tolerance=float(HYBRID_WEDGE_FRACTIONAL_TOLERANCE),
+                reason=how,
+            )
+        )
 
     def _take_wedge(self, plan: WedgePlan) -> None:
         """Run the Fock loop on the wedge of ``plan`` (its k-points, weights and stars; the kernel is the mesh's)."""
@@ -913,8 +1036,63 @@ def bloch_warm_start(previous_system, previous_result, system, unpolarized=None)
         input_potential=tuple(np.asarray(value, dtype=np.float64) + shift for value in previous_result.next_potentials),
         hartree_potential=np.asarray(previous_result.scf_hartree_potential, dtype=np.float64),
         eigensolver_state=state_for_new_potential(previous_result.eigensolver_state),
-        exchange_orbitals=bloch_orbital_sets_of(previous_result, GridBox(previous_system.grid)),
+        exchange_orbitals=bloch_orbital_sets_of(
+            previous_result, GridBox(previous_system.grid), result_stars(previous_system, previous_result)
+        ),
     )
+
+
+def result_wedge(system, result):
+    """``(system, stars)`` of a hybrid k-point result that ran on the irreducible wedge of its mesh, ``None`` for
+    one on the time-reversal pairs.
+
+    ``system`` is the system the run was given: under ``PARSEC_HYBRID_KPOINT_WEDGE=on`` (``hybrid_kpoint_wedge``)
+    itself with the stars of its wedge (:func:`hybrid_mesh_stars`); under ``auto`` (``hybrid_kpoint_wedge_deferred``)
+    the system of the wedge the Fock loop moved to (:func:`hybrid_wedge_plan`: the density averaged over the wedge's
+    group, which the forces are completed and averaged over, :func:`parsec_python.Forces.compute_periodic_forces`)
+    where the result's k-points are those of the wedge, ``None`` where they are the pairs of the input."""
+
+    k_points = getattr(result, "k_points", None)
+    if k_points is None or getattr(result, "exact_exchange", None) is None:
+        return None
+    problem = system.input
+    k_points = np.atleast_2d(np.asarray(k_points, dtype=np.float64))
+    weights = np.asarray(result.k_weights, dtype=np.float64)
+    box = GridBox(system.grid)
+    if getattr(problem, "hybrid_kpoint_wedge", False):
+        return system, hybrid_mesh_stars(system, k_points, weights, box)
+    deferred = getattr(problem, "hybrid_kpoint_wedge_deferred", None)
+    if deferred is None:
+        return None
+    from ..Grid.kpoints import kpoint_sampling
+
+    pairs = np.atleast_2d(np.asarray(kpoint_sampling(problem)[0], dtype=np.float64))
+    if pairs.shape == k_points.shape and np.allclose(pairs, k_points, rtol=0.0, atol=1.0e-10):
+        return None
+    plan = hybrid_wedge_plan(system, deferred, pairs, box.reciprocal)
+    if (
+        plan.k_points.shape != k_points.shape
+        or not np.allclose(plan.k_points, k_points, rtol=0.0, atol=1.0e-10)
+        or not np.allclose(plan.k_weights, weights, rtol=0.0, atol=1.0e-12)
+    ):
+        raise ValueError("the k-points of the hybrid result are neither the pairs nor the wedge of its input")
+    return plan.system, plan.stars
+
+
+def result_stars(system, result):
+    """The :class:`MeshStars` of a hybrid k-point result on the wedge of its mesh (:func:`result_wedge`), ``None``
+    for one on the time-reversal pairs (the orbital sets of its warm start need them)."""
+
+    found = result_wedge(system, result)
+    return None if found is None else found[1]
+
+
+def hybrid_force_system(system, result):
+    """The system whose group completes and averages the forces of a hybrid k-point result: that of the deferred
+    wedge where the Fock loop moved there (:func:`result_wedge`), else ``system``."""
+
+    found = result_wedge(system, result)
+    return system if found is None else found[0]
 
 
 def bloch_nonlocal_forces(system, result) -> np.ndarray:
@@ -983,13 +1161,18 @@ def _any_size_key() -> str | None:
 
 def _check_kpoint_hybrid_switches() -> None:
     """Read the switches that only the k-point loops of a hybrid read (``PARSEC_KPOINT_SECTOR_LEVELS``,
-    ``PARSEC_KPOINT_SECTOR_GUARD_FOCK``, ``PARSEC_HYBRID_KPOINT_SECTORS``; ``PARSEC_HYBRID_KPOINT_WEDGE``, which the
-    input reader reads for a single point with a Monkhorst-Pack mesh only) before its first loop, so that a bad value
-    is an error before any SCF."""
+    ``PARSEC_KPOINT_SECTOR_GUARD_FOCK``, ``PARSEC_HYBRID_KPOINT_SECTORS``, ``PARSEC_HYBRID_IMAGE_PAIRS``,
+    ``PARSEC_HYBRID_WEDGE_SECTOR_STATES``; ``PARSEC_HYBRID_KPOINT_WEDGE`` and ``PARSEC_HYBRID_KPOINT_FORCE_WEDGE``,
+    which the input reader reads for a bulk cell with a Monkhorst-Pack mesh only) before its first loop, so that a bad
+    value is an error before any SCF."""
 
-    from ..Grid.kpoints import hybrid_kpoint_wedge_setting
+    from ..Grid.kpoints import hybrid_kpoint_force_wedge_setting, hybrid_kpoint_wedge_setting
+    from ..V_xc.bloch_exchange import image_pairs_setting
 
     hybrid_kpoint_wedge_setting()
+    hybrid_kpoint_force_wedge_setting()
+    image_pairs_setting()
+    wedge_sector_states_setting()
     try:
         from ..acceleration.SCF.kpoint_sectors import (
             hybrid_kpoint_sectors_setting,
@@ -1155,9 +1338,13 @@ __all__ = [
     "PeriodicFockOperator",
     "bloch_nonlocal_forces",
     "bloch_orbital_sets_of",
+    "hybrid_force_system",
     "bloch_warm_start",
     "full_mesh_counts",
     "hybrid_mesh_stars",
+    "result_stars",
+    "result_wedge",
+    "wedge_sector_states_setting",
     "uniform_mesh_counts",
     "mesh_counts",
     "periodic_pair_potentials",

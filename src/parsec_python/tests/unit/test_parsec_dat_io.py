@@ -168,6 +168,71 @@ class RecordLayoutTests(unittest.TestCase):
         self.assertEqual(len(back.levels[0]), 2)
         self.assertEqual([block.state_numbers.size for block in back.wavefunctions[0]], [0, 0])
 
+    def test_spin_kpoint_loop_of_one_kpoint_writes_its_kept_orbitals_and_mixed_potentials(self) -> None:
+        # The spin k-point loop with keep_wavefunctions (the ionic loops of a spin cell at the Gamma point,
+        # PARSEC_SPIN_IONIC_KPOINT): its Bloch orbitals of k = 0 and the mixed potentials (vnew) go to parsec.dat.
+        grid = build_periodic_grid(
+            PeriodicCell(np.diag([4.0, 4.0, 4.8])), PeriodicGridSettings(spacing=0.8, expansion_order=4)
+        )
+        rng = np.random.default_rng(5)
+        states = 4
+
+        def orbitals():
+            vectors = rng.normal(size=(grid.size, states)) + 1j * rng.normal(size=(grid.size, states))
+            return np.linalg.qr(vectors)[0]
+
+        class SpinK:
+            eigenvalues_up = np.sort(rng.normal(size=states))
+            eigenvalues_down = np.sort(rng.normal(size=states))
+            occupations_up = np.array([1.0, 1.0, 0.0, 0.0])
+            occupations_down = np.array([1.0, 0.0, 0.0, 0.0])
+            density_up = np.abs(rng.normal(size=grid.size))
+            density_down = np.abs(rng.normal(size=grid.size))
+            scf_potentials = {"potential_up": rng.normal(size=grid.size), "potential_down": rng.normal(size=grid.size)}
+            next_potentials = (rng.normal(size=grid.size), rng.normal(size=grid.size))
+            k_points = np.zeros((1, 3))
+            k_weights = np.ones(1)
+            k_wavefunctions = ((orbitals(),), (orbitals(),))
+
+        result = SpinK()
+        data, notes = dat.parsec_dat_from_result(result, grid, WavefunctionSelection(mode="all"))
+        self.assertEqual(notes, ())
+        with tempfile.TemporaryDirectory() as directory:
+            back = dat.read_parsec_dat(dat.write_parsec_dat(Path(directory) / "parsec.dat", data))
+        self.assertEqual(back.wavefunction_kind, 1)
+        for spin in range(2):
+            np.testing.assert_array_equal(back.potentials[spin], result.next_potentials[spin])
+            np.testing.assert_array_equal(back.wavefunctions[spin][0].state_numbers, [1, 2, 3, 4])
+            np.testing.assert_allclose(back.wavefunctions[spin][0].vectors, result.k_wavefunctions[spin][0])
+        # the default selection: the occupied states of each channel
+        data, _ = dat.parsec_dat_from_result(result, grid, WavefunctionSelection())
+        self.assertEqual([channel[0].state_numbers.size for channel in data.wavefunctions], [2, 1])
+        # without kept orbitals or mixed potentials (a single point of the loop), as before; several k-points keep
+        # no orbitals (one set of columns is written for every k-point)
+        for changes in (
+            {"k_wavefunctions": None, "next_potentials": None},
+            {"k_points": np.zeros((2, 3)), "k_weights": np.full(2, 0.5),
+             "eigenvalues_up": np.tile(SpinK.eigenvalues_up, 2), "eigenvalues_down": np.tile(SpinK.eigenvalues_down, 2),
+             "occupations_up": np.tile(SpinK.occupations_up, 2), "occupations_down": np.tile(SpinK.occupations_down, 2),
+             "k_wavefunctions": ((orbitals(), orbitals()), (orbitals(), orbitals()))},
+            {"k_wavefunctions": ((orbitals()[: grid.size - 1],), (orbitals()[: grid.size - 1],))},
+        ):
+            with self.subTest(changes=sorted(changes)):
+                other = SpinK()
+                for name, value in changes.items():
+                    setattr(other, name, value)
+                data, notes = dat.parsec_dat_from_result(other, grid, WavefunctionSelection(mode="all"))
+                self.assertTrue(any("k-point drivers keep no orbitals" in note for note in notes))
+                self.assertEqual([block.state_numbers.size for channel in data.wavefunctions for block in channel],
+                                 [0] * (2 * len(other.k_points)))
+                expected = (
+                    other.next_potentials
+                    if other.next_potentials is not None
+                    else (other.scf_potentials["potential_up"], other.scf_potentials["potential_down"])
+                )
+                for spin in range(2):
+                    np.testing.assert_array_equal(data.potentials[spin], expected[spin])
+
     def test_long_records_are_split_into_gfortran_subrecords(self) -> None:
         values = np.arange(40, dtype="<f8")
         stream = io.BytesIO()

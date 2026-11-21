@@ -77,21 +77,22 @@ Use a k-mesh (the 2x2x2 and 4x4x4 rows above converge in 17 and 18 iterations), 
 
 ## Costs
 
-`main.py` on one A100 (program wall time, setup included, one process per input; peak device memory of the process):
+`main.py` on one A100 (first run of each input with an empty kernel cache: program wall time, setup included, one
+process per input; peak device memory of the process):
 
 | mesh | irreducible k-points | functional | SCF iterations | wall (s) | peak device memory (GiB) |
 |---|---|---|---|---|---|
-| 2x2x2 | 3 | PBE | 12 | 7.0 | 0.7 |
-| 2x2x2 | 3 | SCAN | 18 | 13.0 | 0.8 |
-| 2x2x2 | 3 | r2SCAN | 15 | 11.5 | 0.8 |
-| 2x2x2 | 3 | TPSS | 18 | 11.5 | 0.8 |
-| 4x4x4 | 8 | PBE | 11 | 9.5 | 0.8 |
-| 4x4x4 | 8 | SCAN | 17 | 20.7 | 1.0 |
-| 4x4x4 | 8 | r2SCAN | 16 | 18.7 | 1.0 |
-| 4x4x4 | 8 | TPSS | 17 | 18.6 | 1.0 |
+| 2x2x2 | 3 | PBE | 12 | 10.5 | 0.7 |
+| 2x2x2 | 3 | SCAN | 18 | 18.9 | 0.8 |
+| 2x2x2 | 3 | r2SCAN | 15 | 17.0 | 0.8 |
+| 2x2x2 | 3 | TPSS | 18 | 17.1 | 0.8 |
+| 4x4x4 | 8 | PBE | 11 | 14.2 | 0.8 |
+| 4x4x4 | 8 | SCAN | 17 | 26.4 | 1.0 |
+| 4x4x4 | 8 | r2SCAN | 16 | 24.7 | 1.0 |
+| 4x4x4 | 8 | TPSS | 17 | 24.7 | 1.0 |
 
 The orbital terms of a meta-GGA (`tau` of the orbitals of every k-point and `-div(vtau grad)` in every Bloch
-Hamiltonian) and the evaluation of libxc on the GPU make a meta-GGA run 1.6 to 2.2 times as long as PBE here.
+Hamiltonian) and the evaluation of libxc on the GPU make a meta-GGA run 1.6 to 1.9 times as long as PBE here.
 
 ## The check script
 

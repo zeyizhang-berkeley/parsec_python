@@ -480,6 +480,7 @@ def load_or_build_reduced_operators(
     kinetic_key_seed: str | None = None,
     decomposition_key_seed: str | None = None,
     representations: tuple[int, ...] | None = None,
+    stencil_only: tuple[int, ...] = (),
 ) -> ReducedOperatorBundle:
     """Load an exact matching static bundle or build it.
 
@@ -502,6 +503,11 @@ def load_or_build_reduced_operators(
 
     The key addresses the disk entry and the resident in-memory bundle.  With
     both caches off it is not computed and is reported as ``None``.
+
+    ``stencil_only`` names sectors of such a partial bundle whose projectors
+    are not reduced (``None`` in their slots): the sector of ``H`` of a
+    totally symmetric unit on partner rows (``PARSEC_ORBITAL_IRREP_ROWS``),
+    assembled for the Poisson stencil alone.  A complete bundle ignores it.
     """
 
     from .axis_reflection import PointGroupReduction
@@ -656,7 +662,16 @@ def load_or_build_reduced_operators(
         signs=np.asarray(nonlocal_operator.signs, dtype=np.float64).copy(),
         labels=tuple(nonlocal_operator.labels),
     )
-    nonlocals = decomposition.reduce_nonlocal_operators(canonical_nonlocal, partial)
+    skipped = set() if partial is None else {int(index) for index in stencil_only}
+    if skipped:
+        projected = tuple(index for index in partial if index not in skipped)
+        nonlocals = (
+            decomposition.reduce_nonlocal_operators(canonical_nonlocal, projected)
+            if projected
+            else (None,) * decomposition.representation_count
+        )
+    else:
+        nonlocals = decomposition.reduce_nonlocal_operators(canonical_nonlocal, partial)
     build_seconds = perf_counter() - build_started
     if partial is not None:
         return ReducedOperatorBundle(
@@ -705,8 +720,38 @@ def load_or_build_reduced_operators(
     return bundle
 
 
+def build_partner_operators(
+    decomposition: ReflectionRepresentationDecomposition,
+    negative_laplacian: object,
+    nonlocal_operator: NonlocalProjectorOperator,
+) -> tuple[StencilMajorHostMetadata, NonlocalProjectorOperator, str]:
+    """The packed stencil and the reduced projectors of the one sector of a unit's partner rows.
+
+    ``decomposition`` is :meth:`.representations.ReflectionRepresentationDecomposition.partner_decomposition` of a
+    unit (``PARSEC_ORBITAL_IRREP_ROWS=partner``): its sector is reduced by the builders of every sector, from the grid
+    where :func:`load_or_build_reduced_operators` takes that route (``direct-native``, ``direct-numpy`` or the
+    wrapped stencil of a periodic box) and from the full-grid matrix otherwise, with the projectors of ``nonlocal_operator``
+    (one atom per orbit of ``H``, ``compress_projectors_for_sectors``: an orbit of ``K`` holds whole orbits of ``H``,
+    so the sector of ``K`` gets the same operator from them).  Nothing is cached.  Returns the stencil, the projectors
+    and the name of the stencil builder.
+    """
+
+    metadata, builder = _direct_sector_stencils(decomposition, negative_laplacian, None)
+    if metadata is None:
+        laplacian = decomposition.reduce_operators(_canonical_kinetic(negative_laplacian))[0]
+        metadata = (build_stencil_major_metadata(laplacian, codes=sector_palette_codes_setting()),)
+        builder = "csr"
+    canonical = NonlocalProjectorOperator(
+        projectors=_canonical_projectors(nonlocal_operator),
+        signs=np.asarray(nonlocal_operator.signs, dtype=np.float64).copy(),
+        labels=tuple(nonlocal_operator.labels),
+    )
+    return metadata[0], decomposition.reduce_nonlocal_operators(canonical)[0], builder
+
+
 __all__ = [
     "ReducedOperatorCacheInfo",
     "ReducedOperatorBundle",
+    "build_partner_operators",
     "load_or_build_reduced_operators",
 ]

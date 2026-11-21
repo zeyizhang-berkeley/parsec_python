@@ -28,12 +28,39 @@ and the plan of the group does (``PARSEC_ORBITAL_GROUP``, ``PARSEC_ORBITAL_GROUP
   ``SCF/spin_sectors.py``) cannot see an operation outside ``H``; the levels can: the guard counts a state of weight
   ``w`` as ``w`` partner levels in distinct sectors (tests 1 and 3), so that a partly filled multiplet held by one
   weighted state is caught as one held by several sectors is.  A run whose guard fires starts again in the abelian
-  sectors (whose own guard may still send it to the full grid).
+  sectors (whose own guard may still send it to the full grid), or goes straight to the full grid where those
+  sectors would stop the same levels (``PARSEC_WEIGHTED_GUARD_SHORTCUT`` below).
 
 ``off`` keeps the abelian group of before for that input, bit for bit.  Every value is read and checked in every
 preparation (:func:`weighted_input_settings`), so that a value the code does not know stops the run before the
 SCF.  :func:`abelian_orbitals` forces the abelian group while a calculation that left the weighted sectors is
 prepared again.
+
+Three switches since 2026-11-21 decide where the weighted sectors of spin and ``occup.in`` serve (also read and
+checked in every preparation):
+
+* ``PARSEC_ORBITAL_GROUP_MPI`` (:func:`mpi_weighted_setting`) -- ``auto``: spin polarization and ``occup.in`` take
+  the weighted sectors on several MPI ranks too (the full-SCF runner), as in one process.  Every rank prepares the
+  same plan; a run that leaves them is prepared again in the abelian sectors on every rank
+  (``MPISectorContext.reprepare``).  ``off``: they keep the abelian group there, as before, with a NOTE.
+* ``PARSEC_WEIGHTED_GUARD_SHORTCUT`` (:func:`guard_shortcut_setting`) -- ``auto``: a spin run of a cluster, or of a
+  cell whose operations take no translation (whose abelian route keeps the group about the origin), whose guard
+  stops the weighted sectors goes straight to the full grid where the sectors of the abelian group would stop the
+  same state (the reported multiplet holds a representation of ``G`` whose partners lie in two or more abelian
+  sectors, ``PointGroupReduction.sector_abelian_split``; ``None`` for a cell with translations, which keeps the way
+  through its abelian sectors).  For a stop at the start Hamiltonian (test 1), which both routes share, the run of
+  the abelian sectors that would follow is the one ``off`` of ``PARSEC_ORBITAL_GROUP_SPIN`` pays before its own full
+  grid, bit for bit; a stop at the end of the SCF (test 3) is predicted from the weighted run's own occupations, and
+  gives the full-grid result, which is the abelian route's wherever that route stops at its end too.  ``off``:
+  always through the abelian sectors, as before.
+* ``PARSEC_ORBITAL_GROUP_SPIN_FLOOR`` (:func:`spin_floor_setting`) -- the smallest basis (grid points times states
+  of a channel) whose spin run takes the weighted sectors; a smaller one keeps the abelian group with a NOTE.
+  ``auto``: :data:`SPIN_FLOOR_ENTRIES`, which is 0: measured on A100 (one node, first runs with empty kernel caches
+  and runs with warm ones) from the N atom (3.7e6 entries), Cr2, O2, V- in diamond 2^3, 3^3 and 4^3, nanodiamonds
+  k02 to k05 and their Si analogues k02 to k04 (up to 2.4e9), the weighted sectors were as fast or faster at every
+  size, at a lower GPU peak, except V- 3^3 with warm caches (SCF 3.8 -> 4.8 s, a cell whose weighted stencils apply
+  2.6 times slower per vector; with empty caches 20.3 -> 9.9 s), so there is no floor; ``off``: no floor either;
+  an integer: that floor.
 """
 
 from __future__ import annotations
@@ -71,6 +98,60 @@ def weighted_input_settings() -> dict[str, str]:
     return {kind: weighted_input_setting(kind) for kind in WEIGHTED_INPUT_SWITCHES}
 
 
+def weighted_route_settings() -> tuple[str, str, int]:
+    """The three switches of the module's end read and checked: ``PARSEC_ORBITAL_GROUP_MPI``,
+    ``PARSEC_WEIGHTED_GUARD_SHORTCUT`` and ``PARSEC_ORBITAL_GROUP_SPIN_FLOOR``."""
+
+    return mpi_weighted_setting(), guard_shortcut_setting(), spin_floor_setting()
+
+
+MPI_SWITCH = "PARSEC_ORBITAL_GROUP_MPI"
+GUARD_SHORTCUT_SWITCH = "PARSEC_WEIGHTED_GUARD_SHORTCUT"
+SPIN_FLOOR_SWITCH = "PARSEC_ORBITAL_GROUP_SPIN_FLOOR"
+#: The floor of ``PARSEC_ORBITAL_GROUP_SPIN_FLOOR=auto``: grid points times states of a channel (see the module: the
+#: measurements found no size below which the abelian sectors are faster, so none).
+SPIN_FLOOR_ENTRIES = 0
+
+
+def _auto_or_off(name: str) -> str:
+    value = os.environ.get(name, "auto").strip().lower() or "auto"
+    if value not in _VALUES:
+        raise ValueError(f"{name} must be auto or off, not {value!r}")
+    return value
+
+
+def mpi_weighted_setting() -> str:
+    """``PARSEC_ORBITAL_GROUP_MPI``: ``auto`` (spin and ``occup.in`` in the weighted sectors on several MPI ranks) or
+    ``off`` (the abelian group there, as before)."""
+
+    return _auto_or_off(MPI_SWITCH)
+
+
+def guard_shortcut_setting() -> str:
+    """``PARSEC_WEIGHTED_GUARD_SHORTCUT``: ``auto`` (a guard stop that the abelian sectors would repeat goes straight to
+    the full grid) or ``off`` (through the abelian sectors, as before)."""
+
+    return _auto_or_off(GUARD_SHORTCUT_SWITCH)
+
+
+def spin_floor_setting() -> int:
+    """``PARSEC_ORBITAL_GROUP_SPIN_FLOOR``: the floor in grid points times states (``auto``: :data:`SPIN_FLOOR_ENTRIES`;
+    ``off``: 0, no floor; an integer >= 0)."""
+
+    raw = os.environ.get(SPIN_FLOOR_SWITCH, "auto").strip().lower() or "auto"
+    if raw == "auto":
+        return int(SPIN_FLOOR_ENTRIES)
+    if raw == "off":
+        return 0
+    try:
+        value = int(raw)
+    except ValueError:
+        value = -1
+    if value < 0:
+        raise ValueError(f"{SPIN_FLOOR_SWITCH} must be auto, off or a number of entries >= 0, not {raw!r}")
+    return value
+
+
 def forced_abelian_reason() -> str | None:
     """Why the preparation under way keeps the abelian group (:func:`abelian_orbitals`), ``None`` otherwise."""
 
@@ -89,9 +170,17 @@ def abelian_orbitals(reason: str):
 
 
 __all__ = [
+    "GUARD_SHORTCUT_SWITCH",
+    "MPI_SWITCH",
+    "SPIN_FLOOR_ENTRIES",
+    "SPIN_FLOOR_SWITCH",
     "WEIGHTED_INPUT_SWITCHES",
     "abelian_orbitals",
     "forced_abelian_reason",
+    "guard_shortcut_setting",
+    "mpi_weighted_setting",
+    "spin_floor_setting",
     "weighted_input_setting",
     "weighted_input_settings",
+    "weighted_route_settings",
 ]

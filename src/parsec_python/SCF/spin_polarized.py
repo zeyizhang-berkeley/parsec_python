@@ -96,6 +96,11 @@ SPIN_NAMES = ("up", "down")
 #: start spectrum that a reduced adapter asks to solve again (test 1 of
 #: acceleration/SCF/spin_sectors.py: the spread bound of its multiplets).
 START_LEVEL_WINDOW = 3.0e-2
+#: ``min(f, 1 - f)`` of a level of the up channel from which the converged loop of ``PARSEC_SPIN_FLIP_SYMMETRY``
+#: is not kept (Fermi-Dirac occupations): the level and its image in the down channel hold the symmetric ensemble of
+#: a partly filled pair, which two solved channels may fill unequally (test 3 of the spin sectors, for the pair of
+#: channels that the operation exchanges; ``acceleration.SCF.spin_sectors.SPIN_SECTOR_OCCUPATION_TOLERANCE``).
+SPIN_FLIP_OCCUPATION_TOLERANCE = 0.05
 
 
 def _spin_occupations(eigenvalues, system, settings, weights=None, partners=None):
@@ -275,7 +280,8 @@ def _spin_flip_of(system, *, exchange_term, meta, hubbard_projectors, ionic_pote
     """
 
     flip = getattr(system, "spin_flip", None)
-    if flip is None:
+    if flip is None or getattr(system, SPIN_FLIP_LEFT, None):
+        # (a system whose run left the route, leave_spin_flip: its note was given then)
         return None, None
     for condition, reason in (
         (exchange_term is not None, "an exchange operator (a hybrid functional)"),
@@ -309,6 +315,76 @@ def _spin_flip_of(system, *, exchange_term, meta, hubbard_projectors, ionic_pote
     return flip, None
 
 
+#: The attribute of a prepared system whose run left ``PARSEC_SPIN_FLIP_SYMMETRY`` (:func:`leave_spin_flip`): why.
+SPIN_FLIP_LEFT = "spin_flip_left"
+
+
+def leave_spin_flip(system, reason: str) -> None:
+    """Solve both channels in every later loop of ``system``: the run left the spin-flip route for ``reason``.
+
+    The mark stays on the system object, through its later structures and the objects that the spin guard of the
+    accelerated driver prepares again in its place (``driver._SpinSectorFallback``, which calls this again to correct
+    the backend detail ``spin_flip_symmetry`` of what it prepared); the detail says so from here on.
+    """
+
+    try:
+        setattr(system, SPIN_FLIP_LEFT, str(reason))
+    except (AttributeError, TypeError):
+        return
+    info = getattr(system, "backend_info", None)
+    details = getattr(info, "details", None)
+    if details is None or not any(item[0] == "spin_flip_symmetry" for item in details):
+        return
+    text = f"auto: both channels solved (the run left the route: {reason})"
+    info = replace(
+        info, details=tuple(("spin_flip_symmetry", text) if item[0] == "spin_flip_symmetry" else item for item in details)
+    )
+    try:
+        system.backend_info = info
+        backend = getattr(system, "backend", None)
+        if backend is not None:
+            backend.info = info
+    except (AttributeError, TypeError):
+        pass
+
+
+def _sector_guard(error) -> bool:
+    """Whether ``error`` is a failed test of the spin sectors of the accelerated driver
+    (``acceleration.SCF.spin_sectors.SpinSectorsAbandoned``)."""
+
+    try:
+        from parsec_python.acceleration.SCF.spin_sectors import SpinSectorsAbandoned
+    except ImportError:
+        return False
+    return isinstance(error, SpinSectorsAbandoned)
+
+
+class _SpinFlipFractional(Exception):
+    """The converged loop of ``PARSEC_SPIN_FLIP_SYMMETRY`` holds a fractional occupation in its up channel
+    (:data:`SPIN_FLIP_OCCUPATION_TOLERANCE`); :func:`run_spin_scf` solves the loop again with both channels."""
+
+    def __init__(self, largest: float, lines: tuple[str, ...]) -> None:
+        super().__init__(f"largest min(f, 1-f) of the up channel {largest:.3e}")
+        self.largest = float(largest)
+        self.lines = tuple(lines)
+
+
+def _flip_fractional_occupations(eigenvalues, occupations) -> tuple[float, tuple[str, ...]]:
+    """The largest ``min(f, 1 - f)`` of the up channel of a flip loop and the levels that reach the tolerance."""
+
+    values = np.asarray(occupations, dtype=np.float64).reshape(-1)
+    if values.size == 0:
+        return 0.0, ()
+    measure = np.minimum(values, 1.0 - values)
+    levels = np.asarray(eigenvalues, dtype=np.float64).reshape(-1)
+    lines = tuple(
+        f"up level {int(index) + 1}: {levels[index]:.6f} Ry, occupation {values[index]:.4f}"
+        for index in np.flatnonzero(measure >= SPIN_FLIP_OCCUPATION_TOLERANCE)[:8]
+        if index < levels.size
+    )
+    return float(np.max(measure)), lines
+
+
 def _spin_flip_record(refusal):
     """The note (:class:`parsec_python.models.SpinSectorFallbackRecord`, ``route`` ``spin_flip``) of a loop that
     solves both channels although the prepared system has a spin-flip operation."""
@@ -322,6 +398,49 @@ def _spin_flip_record(refusal):
         tolerance=float(bound),
         reason=reason,
         measure=measure,
+        route="spin_flip",
+    )
+
+
+def _spin_flip_fractional_record(broken: _SpinFlipFractional):
+    """The note of a flip loop whose up channel ended with a fractional occupation: the loop starts again from its
+    start and solves both channels."""
+
+    from ..models import SpinSectorFallbackRecord
+
+    return SpinSectorFallbackRecord(
+        stage="the end of the SCF loop",
+        largest_fractional_occupation=broken.largest,
+        tolerance=SPIN_FLIP_OCCUPATION_TOLERANCE,
+        multiplets=broken.lines,
+        reason=(
+            "the up channel of the converged loop holds a fractional occupation, a level that the operation shares "
+            "with the down channel and that two solved channels may fill unequally; the loop starts again from its "
+            "start"
+        ),
+        measure="largest min(f, 1-f) of the up channel",
+        route="spin_flip",
+    )
+
+
+def _spin_flip_guard_record(error):
+    """The note of a flip loop in which a test of the spin sectors failed (``error``, a ``SpinSectorsAbandoned``):
+    the loop starts again from its start with both channels, in the sectors it started in."""
+
+    from ..models import SpinSectorFallbackRecord
+
+    report = error.report
+    return SpinSectorFallbackRecord(
+        stage=str(error.stage),
+        largest_fractional_occupation=float(report.largest),
+        tolerance=float(report.tolerance),
+        multiplets=tuple(report.lines),
+        reason=(
+            f"a test of the spin sectors failed in a loop of the route ({report.reason} after {error.stage}); the "
+            "two channels held the same levels by the operation, not as two solved channels hold them, so the loop "
+            "starts again from its start in the same sectors before the guard may leave them"
+        ),
+        measure=str(report.measure),
         route="spin_flip",
     )
 
@@ -367,6 +486,69 @@ def run_spin_scf(
     iteration_state_callback: Callable[[object], None] | None = None,
     exchange_term: object | None = None,
 ) -> SinglePointResult:
+    """Run PARSEC-style potential mixing with two spin channels (:func:`_run_spin_loop`).
+
+    A loop of ``PARSEC_SPIN_FLIP_SYMMETRY`` (the down channel taken as the image of the up channel) is not kept where
+    its up channel ends with a fractional Fermi-Dirac occupation (``min(f, 1 - f)`` from
+    :data:`SPIN_FLIP_OCCUPATION_TOLERANCE`) or where a test of the spin sectors of the accelerated driver fails in it
+    (test 1 of the start Hamiltonian, tests 2 and 3 of the result: they would leave the sectors for a state of the
+    operation that two solved channels need not reach).  A note goes to ``callback``, ``system`` leaves the route for
+    the rest of the run (:func:`leave_spin_flip`), and the loop runs again from its start with both channels, in the
+    sectors the flip loop started in: the loop of ``off``, whose result the guard of the spin sectors then tests as
+    any other.  A warm start (an ionic step) is taken again without its saved subspaces, which the flip loop moved on.
+    """
+
+    keywords = dict(
+        callback=callback,
+        eigenproblem_solver=eigenproblem_solver,
+        orbital_density_builder=orbital_density_builder,
+        mixer_factory=mixer_factory,
+        residual_metrics_evaluator=residual_metrics_evaluator,
+        total_energy_evaluator=total_energy_evaluator,
+        scalar_field_adapter=scalar_field_adapter,
+        warm_start=warm_start,
+        convergence_criterion=convergence_criterion,
+        iteration_state_callback=iteration_state_callback,
+        exchange_term=exchange_term,
+    )
+    record = None
+    taken: list[str] = []
+    try:
+        return _run_spin_loop(system, flip_taken=taken, **keywords)
+    except _SpinFlipFractional as broken:
+        # Only the note leaves this block: the frames of the flip loop, and the orbitals they hold, go with the
+        # exception.
+        record = _spin_flip_fractional_record(broken)
+        why = f"a fractional occupation of the up channel, min(f, 1-f) = {broken.largest:.3e}"
+    except Exception as error:
+        if not taken or not _sector_guard(error):
+            raise
+        record = _spin_flip_guard_record(error)
+        why = f"a test of the spin sectors failed in a flip loop after {error.stage} ({error.report.reason})"
+    leave_spin_flip(system, why)
+    if callback is not None:
+        callback(record)
+    if warm_start is not None:
+        keywords["warm_start"] = replace(warm_start, eigensolver_state=None, first_iteration_degree=None)
+    return _run_spin_loop(system, **keywords)
+
+
+def _run_spin_loop(
+    system: PreparedSinglePointSystem,
+    *,
+    callback: Callable[[SCFIteration], None] | None = None,
+    eigenproblem_solver: Callable[..., object] | None = None,
+    orbital_density_builder: Callable[..., np.ndarray] | None = None,
+    mixer_factory: Callable[..., object] | None = None,
+    residual_metrics_evaluator: Callable[..., object] | None = None,
+    total_energy_evaluator: Callable[..., object] | None = None,
+    scalar_field_adapter: object | None = None,
+    warm_start: SCFWarmStart | None = None,
+    convergence_criterion: float | None = None,
+    iteration_state_callback: Callable[[object], None] | None = None,
+    exchange_term: object | None = None,
+    flip_taken: list | None = None,
+) -> SinglePointResult:
     """Run PARSEC-style potential mixing with two spin channels.
 
     The arguments are those of :func:`parsec_python.SCF.run_scf`, which
@@ -387,6 +569,9 @@ def run_spin_scf(
     them together in its other fields, as
     :class:`parsec_python.models.SinglePointResult` documents; its fields are
     full-grid arrays also where the loop kept them on the orbits.
+
+    ``flip_taken`` (a list, from :func:`run_spin_scf`) receives the description of the spin-flip operation where
+    this loop takes the down channel from the up channel.
     """
 
     reduced_hooks = {
@@ -450,6 +635,7 @@ def run_spin_scf(
     # PARSEC_SPIN_FLIP_SYMMETRY (acceleration/SCF/spin_flip.py): the down
     # channel is the image of the up channel under an operation of the atoms
     # that exchanges the partner labels, and only the up channel is solved.
+    # (none once the run left the route, leave_spin_flip: the second loop of run_spin_scf and every later one)
     flip, flip_refusal = _spin_flip_of(
         system,
         exchange_term=exchange_term,
@@ -538,6 +724,8 @@ def run_spin_scf(
                 flip = None
     if flip_refusal is not None and callback is not None:
         callback(_spin_flip_record(flip_refusal))
+    if flip is not None and flip_taken is not None:
+        flip_taken.append(str(getattr(flip, "description", "")))
 
     # The mixer a warm start carries (the Fock loop's Exx_Mixer_History), else a new one.
     # Mixing_Preconditioner: kerker filters the charge part of the joined
@@ -1111,6 +1299,14 @@ def run_spin_scf(
     # A loop that met its criterion and then ran out of iterations while
     # tightening it (test 2 of a reduced loop) has converged.
     converged = converged or met_criterion
+    if flip is not None and settings.fixed_occupations is None:
+        # PARSEC_SPIN_FLIP_SYMMETRY: a partly filled level of the up channel and its image in the down channel are
+        # the symmetric ensemble of a pair that two solved channels may fill unequally (a moment the operation
+        # forbids): run_spin_scf solves the loop again with both channels.
+        # (per partner: the occupations of the weighted sectors of a subgroup before their weights)
+        largest, lines = _flip_fractional_occupations(eigenvalues[0], occupation_result.occupations[0])
+        if largest >= SPIN_FLIP_OCCUPATION_TOLERANCE:
+            raise _SpinFlipFractional(largest, lines)
     output_potentials = [
         ionic_potential + hartree_potential + xc_potential
         for xc_potential in xc_potentials
@@ -1270,6 +1466,102 @@ def run_spin_scf(
 _PreparedSystem = Union[PreparedSinglePointSystem, PeriodicPreparedSinglePointSystem]
 
 
+SPIN_START_ENV = "PARSEC_SPIN_START"
+
+
+def spin_start_setting() -> str:
+    """``PARSEC_SPIN_START``: the start of the two reference spin loops that began from one polarization fraction.
+
+    Those are the collinear k-point loop (:func:`parsec_python.SCF.kpoints.run_scf_kpoints_spin_polarized`: spin
+    cells with k-points, the 1x1x1 run of a spin cell at the Gamma point on the reference command line, its forces,
+    relaxations and dynamics there), :func:`run_scf_spin_polarized` (a periodic spin single point without a device,
+    an isolated spin run with spin-orbit species) and the two self-consistent spin-orbit loops with collinear spin
+    (:func:`parsec_python.SCF.self_consistent_soc_spin_polarized.run_self_consistent_soc_spin_polarized`, isolated,
+    and :func:`parsec_python.SCF.kpoints_soc.run_self_consistent_soc_kpoints_spin_polarized`, periodic).  Before, they
+    started from ``(1 +/- p)/2`` of the starting density with ``p`` the ionic-charge weighted mean of the species'
+    ``Initial_Spin_Polarization`` (:func:`_weighted_initial_polarization`), which is zero for an antiferromagnetic or
+    broken-symmetry start of two labels with opposite values: such a run started non-magnetic and stayed there (a
+    Cr2 pair in a 14.4 bohr cube ended 0.68 Ry above its antiferromagnetic state, without converging in 300
+    iterations; MnO in 64 atoms 174 Ry off).
+
+    * ``auto`` (the default since 2026-11-21): PARSEC 1.5's start where the species of the atoms start with values of
+      both signs (:func:`opposite_spin_starts`), the former start elsewhere (one value, or values of one sign, whose
+      single fraction keeps the sign of the pattern; bit for bit as before);
+    * ``initchrg``: PARSEC 1.5's start for every input (``initchrg.f90``: ``p_fac = 1 +/- spol`` of each atom's
+      species, the channels scaled by the factor of the total density, so that they add up to twice it;
+      :func:`initchrg_spin_start`), as :func:`run_spin_scf` and the accelerated driver start; with one value it changes
+      only the path (the same energies; one more iteration for V- in diamond, 72 against 33 for the SCAN silicon cell
+      of the meta-GGA tests);
+    * ``weighted``: the former start for every input, bit for bit.
+
+    PARSEC 1.5's start takes the first Hartree potential of the normalized total starting density (``rho(:,1)``); the
+    k-point loop takes that one also for the channel pair a hybrid's Fock loop hands in under ``initchrg`` (their
+    sum, twice the density, before and under ``auto``).  The command lines read the value before every
+    spin-polarized run.
+    """
+
+    import os
+
+    value = os.environ.get(SPIN_START_ENV, "auto").strip().lower() or "auto"
+    if value not in ("auto", "initchrg", "weighted"):
+        raise ValueError(f"{SPIN_START_ENV} must be auto, initchrg or weighted, got {value!r}")
+    return value
+
+
+def initchrg_start_needed(system: _PreparedSystem) -> bool:
+    """Whether the loop starts as ``initchrg.f90`` (:func:`spin_start_setting`): always under ``initchrg``, never
+    under ``weighted``, and under ``auto`` where the species of the atoms start with values of both signs
+    (:func:`opposite_spin_starts`: the one fraction of the former start has a single sign and loses their pattern)."""
+
+    setting = spin_start_setting()
+    if setting != "auto":
+        return setting == "initchrg"
+    return opposite_spin_starts(system)
+
+
+def opposite_spin_starts(system: _PreparedSystem) -> bool:
+    """Whether the species of the atoms start with ``Initial_Spin_Polarization`` values of both signs.
+
+    That is where the former start, one polarization fraction of the whole cell (:func:`_weighted_initial_polarization`),
+    loses the pattern of the input: an antiferromagnetic or broken-symmetry start of two labels (zero there for
+    ``+p`` and ``-p``).  Values of one sign (a species at ``0.3`` beside another at the default ``0.1``, or at ``0``)
+    keep a moment of that sign everywhere in the former start, whose loop finds the magnetic state on its own; PARSEC
+    1.5's doubled first density only lengthens their path there (SCAN silicon with labels at 0.3 and 0.1: 86 against
+    45 iterations, and a locally magnetized state 1.4e-5 Ry from the non-magnetic one; A100, 2026-11-21).
+    """
+
+    specifications = system.input.pseudopotentials
+    values = [float(specifications[atom.symbol].initial_spin_polarization) for atom in system.atoms]
+    return bool(values) and min(values) < 0.0 < max(values)
+
+
+def initchrg_spin_start(system: _PreparedSystem) -> tuple[np.ndarray, np.ndarray]:
+    """The starting densities of the two channels of ``initchrg.f90`` (:func:`spin_start_setting`).
+
+    ``system.initial_spin_densities`` where the preparation built them; ``(1 + p) rho0`` and ``(1 - p) rho0`` where
+    every species starts with the same ``Initial_Spin_Polarization`` ``p`` (``rho0`` the normalized starting density,
+    :func:`parsec_python.SCF.initial_spin_densities` of one species); otherwise the per-species superposition of a
+    periodic cell (:func:`parsec_python.SCF.pbc.periodic_spin_start`, what ``run_spin_scf`` of the cell starts from).
+    """
+
+    given = getattr(system, "initial_spin_densities", None)
+    if given is not None:
+        return tuple(np.asarray(value, dtype=np.float64) for value in given)
+    specifications = system.input.pseudopotentials
+    polarizations = {float(specifications[atom.symbol].initial_spin_polarization) for atom in system.atoms}
+    if len(polarizations) <= 1:
+        value = polarizations.pop() if polarizations else 0.0
+        total = np.asarray(system.initial_density, dtype=np.float64)
+        return (1.0 + value) * total, (1.0 - value) * total
+    if getattr(system.input, "periodic_cell", None) is None:
+        raise ValueError(
+            "the system was not prepared for a spin-polarized calculation: it has no starting spin densities"
+        )
+    from .pbc import periodic_spin_start
+
+    return tuple(np.asarray(value, dtype=np.float64) for value in periodic_spin_start(system))
+
+
 def _weighted_initial_polarization(system: _PreparedSystem) -> float:
     """Ionic-charge-weighted average of each species' ``Initial_Spin_Polarization``.
 
@@ -1282,7 +1574,14 @@ def _weighted_initial_polarization(system: _PreparedSystem) -> float:
     the initial guess only.  It has no effect on the converged
     self-consistent solution beyond which local minimum SCF may find, and
     any nonzero value serves its sole purpose: breaking the up/down symmetry
-    so SCF does not stay trapped at zero moment.
+    so SCF does not stay trapped at zero moment.  It is zero for an
+    antiferromagnetic start of two labels with opposite values, which then
+    starts and stays non-magnetic; the collinear k-point loop
+    (:func:`parsec_python.SCF.kpoints.run_scf_kpoints_spin_polarized`),
+    :func:`run_scf_spin_polarized` and the two spin-orbit loops with collinear
+    spin take the per-species start of ``initchrg.f90`` there instead since
+    2026-11-21 (:func:`spin_start_setting`, :func:`opposite_spin_starts`;
+    ``PARSEC_SPIN_START=weighted`` keeps this one everywhere).
     """
     specifications = system.input.pseudopotentials
     total_charge = 0.0
@@ -1372,12 +1671,18 @@ def run_scf_spin_polarized(
     number_of_states = _number_of_states_per_channel(system)
     ionic_potential = system.ionic_potential
 
-    polarization = _weighted_initial_polarization(system)
-    density_up = 0.5 * (1.0 + polarization) * system.initial_density
-    density_down = 0.5 * (1.0 - polarization) * system.initial_density
+    if initchrg_start_needed(system):
+        # PARSEC 1.5's per-species start (initchrg.f90), the Hartree potential of the total starting density
+        density_up, density_down = initchrg_spin_start(system)
+        hartree_source = np.asarray(system.initial_density, dtype=np.float64)
+    else:
+        polarization = _weighted_initial_polarization(system)
+        density_up = 0.5 * (1.0 + polarization) * system.initial_density
+        density_down = 0.5 * (1.0 - polarization) * system.initial_density
+        hartree_source = density_up + density_down
 
     initial_hartree = system.solve_hartree(
-        density_up + density_down, initial_potential=-ionic_potential
+        hartree_source, initial_potential=-ionic_potential
     )
     hartree_potential = initial_hartree.potential
     xc = system.evaluate_xc_spin_polarized(density_up, density_down)

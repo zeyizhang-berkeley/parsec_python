@@ -14,8 +14,10 @@ the reference Gamma loop.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 import unittest
+from unittest import mock
 
 import numpy as np
 
@@ -331,12 +333,19 @@ class GammaSpinStartTests(unittest.TestCase):
         self.assertGreater(moments[0], 0.3)
         self.assertAlmostEqual(moments[1], moments[0], delta=1e-4)
         self.assertAlmostEqual(bloch.energies.total, real.energies.total, delta=1.0e-6)
-        # Why the Fock loop passes that start: the k-point driver's own start (one polarization fraction of the
-        # whole cell, zero here) has no local moments, and its loop stays in the symmetric state.
+        # The k-point driver's own start: PARSEC 1.5's per-species start since 2026-11-21 (PARSEC_SPIN_START=auto,
+        # the two labels start with opposite values) has the local moments, and its semilocal loop breaks the
+        # symmetry too; the former start (one polarization fraction of the whole cell, zero here,
+        # PARSEC_SPIN_START=weighted), which the Fock loop passed by, has none, and its loop stays in the symmetric state.
         plain = run_scf_kpoints_spin_polarized(
             replace(prepared, initial_spin_densities=None), np.zeros((1, 3)), np.ones(1)
         )
-        self.assertLess(abs(_left_moment(system, plain)), 1e-3)
+        self.assertGreater(abs(_left_moment(system, plain)), 0.3)
+        with mock.patch.dict(os.environ, {"PARSEC_SPIN_START": "weighted"}):
+            former = run_scf_kpoints_spin_polarized(
+                replace(prepared, initial_spin_densities=None), np.zeros((1, 3)), np.ones(1)
+            )
+        self.assertLess(abs(_left_moment(system, former)), 1e-3)
 
 
 @unittest.skipUnless(cupy_available(), "CuPy and a CUDA device are required")

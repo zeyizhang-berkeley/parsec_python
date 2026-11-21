@@ -144,6 +144,48 @@ def _representative_images(
 
 
 @dataclass(frozen=True)
+class PartnerRows:
+    """The partner rows of a unit that is a sector of a larger subgroup ``K`` (``PARSEC_ORBITAL_IRREP_ROWS=partner``).
+
+    ``cosets``: the positions of the right cosets of ``H`` that make ``K``; ``first[k]``: the first row of the unit's
+    sector of ``H`` in partner row ``k`` (ascending); ``row_of_sector[s]``: the partner row of sector row ``s``
+    (``-1`` where the unit is zero there: an orbit of ``K`` that its character does not admit); ``values[s]``: the
+    coefficient ``e_s`` of the isometry ``E`` (``x_sector = E x_partner``: ``x_sector[s] = values[s] *
+    x_partner[row_of_sector[s]]``), ``+-sqrt(|O_s| / |O_K|)``, positive at ``first``.
+    """
+
+    representation: int
+    cosets: tuple[int, ...]
+    first: np.ndarray
+    row_of_sector: np.ndarray
+    values: np.ndarray
+
+    @property
+    def rows(self) -> int:
+        return int(self.first.size)
+
+    def expand(self, vectors: np.ndarray) -> np.ndarray:
+        """``E x``: partner rows (rows x columns, or one vector) to the coefficients of the sector of ``H``."""
+
+        array = np.asarray(vectors, dtype=np.float64)
+        held = self.row_of_sector >= 0
+        out = np.zeros((self.row_of_sector.size,) + array.shape[1:], dtype=np.float64)
+        scale = self.values[held] if array.ndim == 1 else self.values[held][:, None]
+        out[held] = scale * array[self.row_of_sector[held]]
+        return out
+
+    def restrict(self, vectors: np.ndarray) -> np.ndarray:
+        """``E^T y``: coefficients of the sector of ``H`` to partner rows."""
+
+        array = np.asarray(vectors, dtype=np.float64)
+        held = np.flatnonzero(self.row_of_sector >= 0)
+        out = np.zeros((self.rows,) + array.shape[1:], dtype=np.float64)
+        scale = self.values[held] if array.ndim == 1 else self.values[held][:, None]
+        np.add.at(out, self.row_of_sector[held], scale * array[held])
+        return out
+
+
+@dataclass(frozen=True)
 class ReflectionRepresentationDecomposition:
     """Character table, row phases, and stabilizer-filtered sector maps."""
 
@@ -157,6 +199,11 @@ class ReflectionRepresentationDecomposition:
     )
     # The projector tables of the units of irreducible representations (projection_tables), kept likewise.
     _projection_tables: dict[int, tuple] = field(
+        default_factory=dict, init=False, repr=False, compare=False
+    )
+    # The partner rows of the units that are sectors of a larger subgroup (partner_rows, partner_decomposition,
+    # solved_size; PARSEC_ORBITAL_IRREP_ROWS), kept likewise.
+    _partner_cache: dict = field(
         default_factory=dict, init=False, repr=False, compare=False
     )
 
@@ -304,6 +351,311 @@ class ReflectionRepresentationDecomposition:
         indices, scales = tables
         own = np.arange(indices.shape[1], dtype=np.int64)
         return int(round(float(np.sum(np.where(indices == own[None, :], scales, 0.0)))))
+
+    def partner_cosets(self, representation: int) -> tuple[int, ...] | None:
+        """The coset positions of the larger subgroup ``K`` on whose orbits unit ``representation`` is solved.
+
+        ``None`` (the rows of its sector of ``H``) unless ``PARSEC_ORBITAL_IRREP_ROWS=partner`` (read at the first
+        question and kept for the decomposition's life) and the unit is a
+        projected one whose states are a whole one-dimensional sector of a subgroup ``K`` of the full group
+        (:attr:`.axis_reflection.PointGroupReduction.sector_partner_cosets`), and unless this decomposition was told
+        to keep the sector rows (:meth:`keep_sector_rows`).
+        """
+
+        index = int(representation)
+        cosets = getattr(self.reduction, "sector_partner_cosets", None)
+        if cosets is None or not self.sector_projected(index) or cosets[index] is None:
+            return None
+        if self._partner_cache.get("kept") is not None:
+            return None
+        setting = self._partner_cache.get("setting")
+        if setting is None:
+            # read once: every later question of the run gets the answer of its preparation
+            from .axis_reflection import orbital_irrep_rows_setting
+
+            setting = self._partner_cache.setdefault("setting", orbital_irrep_rows_setting())
+        if setting != "partner":
+            return None
+        return tuple(int(c) for c in cosets[index])
+
+    def keep_sector_rows(self, reason: str) -> None:
+        """Solve every unit on the rows of its sector of ``H`` from now on (``reason`` is kept for the record)."""
+
+        if self._partner_cache.get("kept") is None:
+            self._partner_cache["kept"] = str(reason)
+
+    @property
+    def sector_rows_kept(self) -> str | None:
+        """Why :meth:`keep_sector_rows` was called, or ``None``."""
+
+        return self._partner_cache.get("kept")
+
+    @property
+    def partner_units(self) -> tuple[int, ...]:
+        """The units solved on the orbits of a larger subgroup (:meth:`partner_cosets`)."""
+
+        return tuple(index for index in range(self.representation_count) if self.partner_cosets(index) is not None)
+
+    def solved_size(self, representation: int) -> int:
+        """The rows on which sector ``representation`` is solved: those of its sector, or for a unit on partner rows
+        (:meth:`partner_cosets`) the admitted orbits of ``K``.
+
+        For a unit on partner rows this is the trace of its projector, computed from the orbits that a coset of
+        ``K`` maps onto themselves (one row map of their representatives per coset; :meth:`partner_rows` builds the
+        rows themselves and gives the same count), so that every MPI rank counts every unit alike without the
+        tables of the units it does not solve.
+        """
+
+        index = int(representation)
+        if self.partner_cosets(index) is None:
+            return self.sector_size(index)
+        # (zero for a unit whose range is empty on this grid, which irrep_units_refusal refuses)
+        return self.projector_trace(index)
+
+    def projector_trace(self, representation: int) -> int:
+        """The trace of the projector of unit ``representation`` (:meth:`projection_tables`), the dimension of the
+        space it solves; its rows for a sector solved whole.
+
+        Computed from the orbits that a coset with a nonzero coefficient maps onto themselves (one row map of their
+        representatives per coset), without the tables, so that every MPI rank counts every unit alike; it equals
+        :meth:`sector_rank`.  Zero where the unit's representations have no function on this grid (a coarse grid of
+        a large group); an error for a trace that is no integer or negative.
+        """
+
+        index = int(representation)
+        if not self.sector_projected(index):
+            return self.sector_size(index)
+        key = ("size", index)
+        cached = self._partner_cache.get(key)
+        if cached is not None:
+            return int(cached)
+        reduction = self.reduction
+        coefficients = np.asarray(reduction.sector_projections[index], dtype=np.float64)
+        orbits = self.sector_orbit_indices(index)
+        trace = float(coefficients[0]) * float(orbits.size)
+        translations = getattr(reduction, "coset_translations", None)
+        for coset in np.flatnonzero(np.abs(coefficients) > 1.0e-12):
+            coset = int(coset)
+            if coset == 0:
+                continue
+            fixed = np.flatnonzero(np.asarray(reduction.coset_images[coset])[orbits] == orbits)
+            if not fixed.size:
+                continue
+            rows = _grid_row_mapping_operation(
+                reduction.grid, reduction.coset_operations[coset], 1.0e-10,
+                reduction.representative_rows[orbits[fixed]],
+                translation=None if translations is None else translations[coset],
+            )
+            if rows is None:
+                raise RuntimeError("a coset representative of the full group no longer maps the grid")
+            trace += float(coefficients[coset]) * float(np.sum(self.phases[index, rows].astype(np.float64)))
+        size = int(round(trace))
+        if abs(trace - size) > 1.0e-6 or size < 0:
+            raise RuntimeError(f"the projector of unit {index} has no integer trace ({trace!r})")
+        self._partner_cache[key] = size
+        return size
+
+    @property
+    def empty_units(self) -> tuple[int, ...]:
+        """The units whose projector has an empty range on this grid (:meth:`projector_trace` zero)."""
+
+        return tuple(index for index in self.projected_sectors if self.projector_trace(index) == 0)
+
+    @property
+    def solved_sizes(self) -> tuple[int, ...]:
+        """:meth:`solved_size` of every sector."""
+
+        return tuple(self.solved_size(index) for index in range(self.representation_count))
+
+    def partner_rows(self, representation: int) -> "PartnerRows | None":
+        """The partner rows of unit ``representation`` (:meth:`partner_cosets`), or ``None``.
+
+        The projector ``P`` of such a unit is ``E E^T``, ``E`` the isometry from the functions of the sector ``mu`` of
+        ``K`` to the coefficients of the sector of ``H``: an orbit of ``K`` is the union of the orbits of ``H`` that
+        its cosets carry onto each other, and the normalized function of ``mu`` on it has the coefficient ``e_s =
+        +-sqrt(|O_s| / |O_K|)`` on each of them (zero on an orbit of ``K`` whose stabilizer ``mu`` does not admit).
+        ``E`` is read off ``P`` itself (:meth:`projection_tables`): the blocks of ``P`` on the orbits of ``K`` are
+        ``e e^T``, of rank one, which is checked entry by entry, with ``e`` positive at the first row of each.
+        """
+
+        index = int(representation)
+        cosets = self.partner_cosets(index)
+        if cosets is None:
+            return None
+        key = ("rows", index)
+        cached = self._partner_cache.get(key)
+        if cached is not None:
+            return cached
+        from scipy.sparse.csgraph import connected_components
+
+        indices, scales = self.projection_tables(index)
+        size = int(indices.shape[1])
+        own = np.broadcast_to(np.arange(size, dtype=np.int64)[None, :], indices.shape).reshape(-1)
+        matrix = sp.coo_matrix(
+            (np.asarray(scales, dtype=np.float64).reshape(-1), (own, np.asarray(indices).reshape(-1))),
+            shape=(size, size),
+        ).tocsr()
+        matrix.sum_duplicates()
+        largest = float(np.max(np.abs(matrix.data), initial=0.0))
+        matrix.data[np.abs(matrix.data) <= 1.0e-12 * max(largest, 1.0)] = 0.0
+        matrix.eliminate_zeros()
+        count, labels = connected_components(matrix, directed=True, connection="weak")
+        labels = np.asarray(labels, dtype=np.int64)
+        first = np.full(count, size, dtype=np.int64)
+        np.minimum.at(first, labels, np.arange(size, dtype=np.int64))
+        diagonal = matrix.diagonal()
+        pivot = diagonal[first]
+        admitted = pivot > 1.0e-12
+        coo = matrix.tocoo()
+        values = np.zeros(size, dtype=np.float64)
+        at_first = coo.col == first[labels[coo.row]]
+        values[coo.row[at_first]] = coo.data[at_first] / np.sqrt(pivot[labels[coo.row[at_first]]])
+        widths = np.bincount(labels, minlength=count)
+        entries = np.bincount(coo.row, minlength=size)
+        held = admitted[labels]
+        if (
+            np.any(held & (values == 0.0))
+            or np.any(~held & (entries > 0))
+            or np.any(held & (entries != widths[labels]))
+            or np.max(np.abs(coo.data - values[coo.row] * values[coo.col]), initial=0.0) > 1.0e-11
+            or np.any(values[first[admitted]] <= 0.0)
+        ):
+            raise RuntimeError(
+                f"the projector of unit {index} is not that of a sector of a larger subgroup "
+                "(PARSEC_ORBITAL_IRREP_ROWS=sector solves it on the rows of its sector)"
+            )
+        number = np.full(count, -1, dtype=np.int64)
+        kept = np.flatnonzero(admitted)
+        kept = kept[np.argsort(first[kept], kind="stable")]
+        number[kept] = np.arange(kept.size, dtype=np.int64)
+        rows = PartnerRows(
+            representation=index,
+            cosets=cosets,
+            first=np.ascontiguousarray(first[kept]),
+            row_of_sector=np.ascontiguousarray(number[labels]),
+            values=np.ascontiguousarray(values),
+        )
+        if rows.rows != self.solved_size(index):
+            raise RuntimeError(
+                f"unit {index} has {rows.rows} partner rows, its projector a trace of {self.solved_size(index)}"
+            )
+        for array in (rows.first, rows.row_of_sector, rows.values):
+            array.setflags(write=False)
+        self._partner_cache[key] = rows
+        return rows
+
+    def partner_decomposition(self, representation: int) -> "ReflectionRepresentationDecomposition | None":
+        """The one sector of ``K`` on which unit ``representation`` is solved, as a decomposition of its own.
+
+        Its reduction is the orbit map of ``K`` (:class:`.axis_reflection.AxisReflectionReduction`: the union of
+        the orbits of ``H`` that the cosets of ``K`` carry onto each other, its smallest row the representative,
+        the orbits in ascending order of it), and its one sector the partner rows (:meth:`partner_rows`, in their
+        order), with the phase of every grid row that of the sector of ``H`` times the sign of ``e`` on its orbit
+        of ``H``.  The sector stencil, the projectors and their gradients of the unit are reduced with it as those
+        of any sector (``Symmetry/operator_cache.build_partner_operators``); its expansion of a vector is that of
+        the sector of ``H`` of ``E x`` (checked by the tests).  Grid-sized arrays: built for the units a process
+        solves only.
+        """
+
+        index = int(representation)
+        rows = self.partner_rows(index)
+        if rows is None:
+            return None
+        key = ("decomposition", index)
+        cached = self._partner_cache.get(key)
+        if cached is not None:
+            return cached
+        from scipy.sparse.csgraph import connected_components
+
+        from .axis_reflection import AxisReflectionReduction
+
+        reduction = self.reduction
+        wedge = int(reduction.wedge_size)
+        images = np.asarray(reduction.coset_images, dtype=np.int64)[list(rows.cosets)]
+        sources = np.repeat(np.arange(wedge, dtype=np.int64)[None, :], images.shape[0], axis=0).reshape(-1)
+        graph = sp.coo_matrix(
+            (np.ones(sources.size, dtype=np.int8), (sources, images.reshape(-1))), shape=(wedge, wedge)
+        ).tocsr()
+        count, labels = connected_components(graph, directed=True, connection="weak")
+        labels = np.asarray(labels, dtype=np.int64)
+        smallest = np.full(count, wedge, dtype=np.int64)
+        np.minimum.at(smallest, labels, np.arange(wedge, dtype=np.int64))
+        order = np.argsort(smallest, kind="stable")
+        number = np.empty(count, dtype=np.int64)
+        number[order] = np.arange(count, dtype=np.int64)
+        orbit_class = number[labels]
+        multiplicities = np.bincount(
+            orbit_class, weights=np.asarray(reduction.multiplicities, dtype=np.float64), minlength=count
+        )
+        multiplicities = np.rint(multiplicities).astype(np.int64)
+        representative_rows = np.asarray(reduction.representative_rows, dtype=np.int64)[smallest[order]]
+        orbits = self.sector_orbit_indices(index)
+        held = rows.row_of_sector >= 0
+        orbit_to_sector = np.full(count, -1, dtype=np.int64)
+        orbit_to_sector[orbit_class[orbits[rows.first]]] = np.arange(rows.rows, dtype=np.int64)
+        # Every orbit of H of an admitted orbit of K is a row of the unit's sector, with that partner row.
+        members = np.bincount(orbit_class, minlength=count)
+        if (
+            not np.array_equal(orbit_to_sector[orbit_class[orbits[held]]], rows.row_of_sector[held])
+            or not np.array_equal(
+                np.bincount(rows.row_of_sector[held], minlength=rows.rows), members[orbit_class[orbits[rows.first]]]
+            )
+        ):
+            raise RuntimeError(f"the partner rows of unit {index} are not the orbits of its subgroup")
+        expected = np.sqrt(
+            np.asarray(reduction.multiplicities, dtype=np.float64)[orbits[held]]
+            / multiplicities[orbit_class[orbits[held]]]
+        )
+        if np.max(np.abs(np.abs(rows.values[held]) - expected), initial=0.0) > 1.0e-12:
+            raise RuntimeError(f"the partner rows of unit {index} do not have the weights of their orbits")
+        signs = np.zeros(wedge, dtype=np.int8)
+        signs[orbits[held]] = np.where(rows.values[held] > 0.0, 1, -1).astype(np.int8)
+        full_to_wedge = np.asarray(reduction.full_to_wedge)
+        phases = (np.asarray(self.phases[index], dtype=np.int8) * signs[full_to_wedge]).astype(np.int8)
+        subgroup = AxisReflectionReduction(
+            signs=np.ones((1, 3), dtype=np.int8),
+            representative_rows=np.ascontiguousarray(representative_rows),
+            full_to_wedge=np.ascontiguousarray(orbit_class[full_to_wedge]),
+            multiplicities=np.ascontiguousarray(multiplicities),
+        )
+        decomposition = ReflectionRepresentationDecomposition(
+            reduction=subgroup,
+            characters=np.ones((1, 1), dtype=np.int8),
+            phases=np.ascontiguousarray(phases[None, :]),
+            orbit_to_sector=np.ascontiguousarray(orbit_to_sector[None, :]),
+        )
+        admitted_rows = representative_rows[orbit_to_sector >= 0]
+        if not np.all(phases[admitted_rows] == 1):
+            raise RuntimeError(f"the partner rows of unit {index} have no positive phase at their representatives")
+        self._partner_cache[key] = decomposition
+        return decomposition
+
+    def partner_expansion(self, representation: int) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
+        """``(orbits, rows, values)`` of a unit on partner rows, ``None`` for any other sector: the orbit of ``H``
+        of every coefficient of its sector that the unit fills, the partner row that gives it and the value per
+        grid point there (``e_s / sqrt(|O_s|)``), so that the orbit values of a partner vector ``x`` are
+        ``wedge[orbits] = values * x[rows]`` (the orbitals' export, ``CuPySymmetryOrbitals.to_full_host``)."""
+
+        rows = self.partner_rows(representation)
+        if rows is None:
+            return None
+        key = ("expansion", int(representation))
+        cached = self._partner_cache.get(key)
+        if cached is not None:
+            return cached
+        orbits = self.sector_orbit_indices(representation)
+        held = np.flatnonzero(rows.row_of_sector >= 0)
+        expansion = (
+            np.ascontiguousarray(orbits[held]),
+            np.ascontiguousarray(rows.row_of_sector[held]),
+            np.ascontiguousarray(
+                rows.values[held] / np.sqrt(np.asarray(self.reduction.multiplicities, dtype=np.float64)[orbits[held]])
+            ),
+        )
+        for array in expansion:
+            array.setflags(write=False)
+        self._partner_cache[key] = expansion
+        return expansion
 
     @property
     def wedge_size(self) -> int:
@@ -858,4 +1210,4 @@ class ReflectionRepresentationDecomposition:
         )
 
 
-__all__ = ["ReflectionRepresentationDecomposition", "operator_build_workers"]
+__all__ = ["PartnerRows", "ReflectionRepresentationDecomposition", "operator_build_workers"]

@@ -9,8 +9,11 @@ one.  It writes the files of a PARSEC run (``md_nrg.dat``, ``md_mech.dat``,
 ``atom.cor``, ``movie.xyz``) step by step and reports every structure
 through the text reporter of the run.
 
-As in PARSEC, molecular dynamics uses no point-group symmetry, and the mean
-force is removed before the integrator sees the forces.
+As in PARSEC, the loop itself uses no point-group symmetry, and the mean
+force is removed before the integrator sees the forces.  The accelerated
+command line solves a trajectory whose structures keep a group in the sectors
+of that group, checking it after every step (``after_step``,
+``PARSEC_MOVING_SECTORS``: ``acceleration/SCF/moving_sectors.py``).
 """
 
 from __future__ import annotations
@@ -197,6 +200,7 @@ def run_recorded_molecular_dynamics(
     restart=None,
     random=None,
     elements: Sequence[str] | None = None,
+    after_step: Callable[[MoldynStep], MoldynStep] | None = None,
 ) -> MolecularDynamicsOutcome:
     """Run the molecular dynamics of ``translation`` on a prepared system.
 
@@ -205,6 +209,9 @@ def run_recorded_molecular_dynamics(
     force where the input selects neither ``test_rng`` nor ``rng_seed``; with
     ``rng_seed`` alone the numbers are those of :func:`seeded_random_numbers`.
     ``directory`` receives the files of the run; ``None`` writes none.
+    ``after_step`` (the accelerated sectors of a trajectory that keeps a group,
+    ``acceleration/SCF/moving_sectors.py``) sees every step of the integrator
+    before it is written and returns the step the run continues with.
     """
 
     settings = translation.molecular_dynamics
@@ -262,6 +269,8 @@ def run_recorded_molecular_dynamics(
                 # (the centre of mass is not held; MolecularDynamics.moldyn).
                 **({"keep_center_of_mass": True} if getattr(forces, "net_force_kept", False) else {}),
             )
+            if after_step is not None:
+                step = after_step(step)
             files.append(step_records(state, step, species))
             write(
                 "\n".join(

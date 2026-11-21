@@ -244,7 +244,16 @@ class DefaultTrimRouteTests(unittest.TestCase):
         self.assertEqual(self._electrons(out), 8 * 32.0)
         data = read_parsec_dat(folder / "auto" / "parsec.dat", wavefunctions=False)
         self.assertEqual(int(data.ndim), 16 ** 3)
-        self.assertEqual(len(data.levels[0]), 8)
+        # the k-points of the k-point route: the irreducible wedge of the mesh (PARSEC_KPOINT_SUPERCELL_LEVELS=auto;
+        # every level at the k-point of its Bloch phases, acceleration/tests/test_kpoint_supercell_levels.py)
+        from parsec_python.Grid.kpoints import kpoint_sampling
+        from parsec_python.Input import parse_parsec_input
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            wedge = kpoint_sampling(parse_parsec_input(folder / "auto" / "parsec.in").problem)
+        self.assertEqual(len(data.levels[0]), len(wedge[1]))
+        np.testing.assert_allclose(data.periodic.k_weights, wedge[1])
         with np.load(folder / "auto" / "parsec_python_results.npz") as archive:
             self.assertEqual(archive["atom_coordinates_bohr"].shape, (8, 3))
             self.assertEqual(archive["output_effective_potential_ry"].size, 16 ** 3)

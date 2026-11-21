@@ -1,7 +1,7 @@
 """Eigensolver features of the Fortran-parity round on the accelerated driver.
 
 ``Dynamic_Diag_Tol`` (the tolerance of every SCF iteration reaches the device
-CHEBDAV first solves and ARPACK), ``Fix_Number_Eigenvalues`` (no buffer;
+CHEBDAV first solves and ARPACK), ``Fix_Number_Eigenvalues`` (under ``PARSEC_FIXED_STATES_BUFFER=off`` no buffer;
 symmetry sectors keep the counts of their first solve), ``Eigensolver: none``
 (PARSEC's TEST mode after the accelerated setup) and ``Eigensolver: arpack``
 on the device (:mod:`parsec_python.acceleration.Eigensolvers.arpack`).
@@ -377,22 +377,35 @@ class AcceleratedCalculationTests(unittest.TestCase):
             ),
             encoding="utf-8",
         )
-        code, error = _run(path)
-        self.assertEqual(code, 0, error)
-        self.assertNotIn("reference parsec_python.cli solver", error)
-        archive = _archive(self.directory)
-        self.assertLess(abs(float(archive["energy_total_ry"]) - energy), 1.0e-6)
-        counts = [int(value) for value in archive["details"]["orbital_sector_final_state_counts"].split()]
-        share = np.bincount(np.asarray(archive["representations"]) - 1, minlength=len(counts))
-        # The weighted sectors of H2 in D4h (PARSEC_ORBITAL_GROUP_FIXED_COUNT=auto): the listed levels hold every
-        # partner of a state of weight w, which its sector solves once.
-        found = re.search(r"\(weights ([0-9, ]+)\)", str(archive["details"].get("symmetry_detection", "")))
-        weights = np.ones(len(counts), dtype=np.int64) if found is None else np.array(
-            [int(value) for value in found.group(1).split(",")], dtype=np.int64
-        )
-        self.assertEqual(counts, [max(1, int(value)) for value in share // weights])
-        log = (path.parent / "parsec.out").read_text()
-        self.assertIn(" Fixing the number of eigenvalues per representation", log)
+        # PARSEC_FIXED_STATES_BUFFER: off keeps PARSEC's counts of the first solve without a buffer, auto (the
+        # default) the buffer and the counts each sector finds; the same energy either way
+        for value in ("off", "auto"):
+            with self.subTest(buffer=value), patch.dict(os.environ, {"PARSEC_FIXED_STATES_BUFFER": value}):
+                code, error = _run(path)
+                self.assertEqual(code, 0, error)
+                self.assertNotIn("reference parsec_python.cli solver", error)
+                archive = _archive(self.directory)
+                self.assertLess(abs(float(archive["energy_total_ry"]) - energy), 1.0e-6)
+                counts = [int(item) for item in archive["details"]["orbital_sector_final_state_counts"].split()]
+                share = np.bincount(np.asarray(archive["representations"]) - 1, minlength=len(counts))
+                # The weighted sectors of H2 in D4h (PARSEC_ORBITAL_GROUP_FIXED_COUNT=auto): the listed levels hold
+                # every partner of a state of weight w, which its sector solves once.
+                found = re.search(
+                    r"\(weights ([0-9, ]+)\)", str(archive["details"].get("symmetry_detection", ""))
+                )
+                weights = np.ones(len(counts), dtype=np.int64) if found is None else np.array(
+                    [int(item) for item in found.group(1).split(",")], dtype=np.int64
+                )
+                fixed = [max(1, int(item)) for item in share // weights]
+                if value == "off":
+                    self.assertEqual(counts, fixed)
+                else:
+                    self.assertTrue(all(have >= need for have, need in zip(counts, fixed)), (counts, fixed))
+                    self.assertGreater(sum(counts), sum(fixed))
+                log = (path.parent / "parsec.out").read_text()
+                self.assertIn(" Fixing the number of eigenvalues per representation", log)
+                # under auto a NOTE says that the sectors keep the counts of a run without the keyword
+                self.assertEqual("PARSEC_FIXED_STATES_BUFFER=auto" in log, value == "auto")
         # Six states from a file of four: PARSEC's error 404.
         path.write_text(
             H2.format(

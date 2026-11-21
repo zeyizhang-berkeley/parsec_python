@@ -376,18 +376,70 @@ extern "C" __global__ void sector_bloch_stencil(
 }
 """
 
-_KERNELS: dict[tuple[int, int], Any] = {}
+# The same kernel on a real block (the sectors of k = 0, PARSEC_KPOINT_REAL_GAMMA): the weights are real there, so
+# every entry is the real part of the complex kernel's, in the same order of the slots.
+_REAL_SOURCE = r"""
+extern "C" __global__ void sector_bloch_stencil_real(
+    const double* __restrict__ u,
+    double* __restrict__ out,
+    const double* __restrict__ diagonal,
+    const int* __restrict__ columns,
+    const unsigned char* __restrict__ codes,
+    const double* __restrict__ palette,
+    const double* __restrict__ weights,
+    const long long rows,
+    const long long count,
+    const double* __restrict__ nonlocal,
+    const int has_nonlocal,
+    const double* __restrict__ previous,
+    const int has_previous,
+    const double center,
+    const double scale,
+    const double* __restrict__ before,
+    const double* __restrict__ after,
+    const int has_after,
+    const int palette_size)
+{
+    __shared__ double shared_palette[PALETTE];
+    __shared__ double shared_weights[SLOTS];
+    for (int i = threadIdx.x; i < palette_size; i += blockDim.x) shared_palette[i] = palette[i];
+    for (int i = threadIdx.x; i < SLOTS; i += blockDim.x) shared_weights[i] = weights[i];
+    __syncthreads();
+    const long long t = (long long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (t >= rows * count) return;
+    const long long r = t / count;
+    const long long c = t - r * count;
+    const double centre = u[t];
+    double value = diagonal[r] * centre;
+#pragma unroll
+    for (int s = 0; s < SLOTS; ++s) {
+        const long long e = (long long)s * rows + r;
+        const int j = columns[e];
+        const double f = shared_palette[codes[e]];
+        value += (shared_weights[s] * f) * u[(long long)j * count + c];
+    }
+    if (has_nonlocal) value += nonlocal[t];
+    value = (value - center * centre) * scale;
+    if (has_previous) value -= before[c] * previous[t];
+    if (has_after) value *= after[c];
+    out[t] = value;
+}
+"""
+
+_KERNELS: dict[tuple[int, int, bool], Any] = {}
 _LOCK = Lock()
 
 
-def _kernel(cp, slots: int):
-    key = (int(cp.cuda.Device().id), int(slots))
+def _kernel(cp, slots: int, real: bool = False):
+    key = (int(cp.cuda.Device().id), int(slots), bool(real))
     with _LOCK:
         kernel = _KERNELS.get(key)
         if kernel is None:
-            source = _SOURCE.replace("SLOTS", str(int(slots))).replace("PALETTE", str(_PALETTE))
+            source = (_REAL_SOURCE if real else _SOURCE).replace("SLOTS", str(int(slots))).replace(
+                "PALETTE", str(_PALETTE)
+            )
             module = cp.RawModule(code=source, options=("--std=c++11", "--fmad=false"))
-            kernel = module.get_function("sector_bloch_stencil")
+            kernel = module.get_function("sector_bloch_stencil_real" if real else "sector_bloch_stencil")
             _KERNELS[key] = kernel
         return kernel
 
@@ -402,6 +454,8 @@ class _SectorStencil:
     def __init__(self, table: SectorStencilTable) -> None:
         self.table = table
         self.centre = float(table.centre)
+        # real weights (a sector of k = 0): the kernel also takes real blocks (PARSEC_KPOINT_REAL_GAMMA)
+        self.real_capable = bool(np.all(np.asarray(table.weights).imag == 0.0))
 
     def diagonal(self, diagonal):
         """``c_0 + v``: the diagonal the kernel adds (``v`` the potential of the sector's rows)."""
@@ -416,12 +470,14 @@ class HostSectorStencil(_SectorStencil):
     def apply(self, block, diagonal_with_centre, *, added=None, previous=None, center: float = 0.0, scale: float = 1.0,
               before=None, after=None):
         table = self.table
-        block = np.ascontiguousarray(block, dtype=np.complex128)
+        real = np.asarray(block).dtype == np.float64 and self.real_capable
+        block = np.ascontiguousarray(block, dtype=np.float64 if real else np.complex128)
         if previous is not None and before is None:
             raise ValueError("a recurrence step with a previous block needs its coefficients")
         result = np.asarray(diagonal_with_centre, dtype=np.float64)[:, None] * block
         for slot in range(table.slots):
-            result += table.factors(slot)[:, None] * block[table.columns[slot]]
+            factors = table.factors(slot)
+            result += (factors.real if real else factors)[:, None] * block[table.columns[slot]]
         if added is not None:
             result += added
         result = (result - center * block) * scale
@@ -444,6 +500,9 @@ class DeviceSectorStencil(_SectorStencil):
         self.palette = cp.asarray(table.palette)
         self.weights = cp.asarray(np.ascontiguousarray(table.weights.view(np.float64)))
         self.kernel = _kernel(cp, table.slots)
+        # the real weights and kernel of a sector of k = 0 (made at the first real block)
+        self._real_weights = None
+        self._real_kernel = None
 
     @property
     def device_bytes(self) -> int:
@@ -453,8 +512,12 @@ class DeviceSectorStencil(_SectorStencil):
               before=None, after=None):
         """``(K + v) block`` (``K`` the kinetic term of the sector) for a C-ordered complex128 block ``(rows,
         columns)``; with ``added``, ``previous``, ``before`` and ``after`` the step
-        ``(((K block + v block + added) - center block) scale - before previous) after`` of the recurrence."""
+        ``(((K block + v block + added) - center block) scale - before previous) after`` of the recurrence.  A float64
+        block of a sector with real weights (:attr:`real_capable`, a sector of ``k = 0``) takes the real kernel: the
+        real part of the complex kernel's result, bit for bit."""
         cp = self.cp
+        if block.dtype == cp.float64 and self.real_capable:
+            return self._apply_real(block, diagonal_with_centre, added, previous, center, scale, before, after)
         if block.dtype != cp.complex128 or not block.flags.c_contiguous:
             block = cp.ascontiguousarray(block, dtype=cp.complex128)
         if int(block.shape[0]) != self.rows:
@@ -493,6 +556,58 @@ class DeviceSectorStencil(_SectorStencil):
             (
                 block, out, cp.ascontiguousarray(diagonal_with_centre, dtype=cp.float64),
                 self.columns, self.codes, self.palette, self.weights,
+                np.int64(self.rows), np.int64(count),
+                nonlocal_part, has_nonlocal, previous_part, has_previous,
+                np.float64(center), np.float64(scale), before_part, after_part, has_after,
+                np.int32(self.palette.size),
+            ),
+        )
+        return out
+
+    def _apply_real(self, block, diagonal_with_centre, added, previous, center, scale, before, after):
+        """:meth:`apply` of a real block with the real kernel."""
+        cp = self.cp
+        if self._real_kernel is None:
+            self._real_weights = cp.asarray(np.ascontiguousarray(np.asarray(self.table.weights).real))
+            self._real_kernel = _kernel(cp, self.table.slots, real=True)
+        if not block.flags.c_contiguous:
+            block = cp.ascontiguousarray(block)
+        if int(block.shape[0]) != self.rows:
+            raise ValueError("the block does not match the sector")
+        out = cp.empty_like(block)
+        count = int(block.shape[1])
+        total = self.rows * count
+        if total == 0:
+            return out
+        if previous is not None and before is None:
+            raise ValueError("a recurrence step with a previous block needs its coefficients")
+
+        def same_shape(array):
+            if array is None:
+                return block, np.int32(0)
+            array = cp.ascontiguousarray(array, dtype=cp.float64)
+            if tuple(array.shape) != tuple(block.shape):
+                raise ValueError("the arrays of a recurrence step must have the shape of the block")
+            return array, np.int32(1)
+
+        def per_column(values):
+            if values is None:
+                return self.palette, np.int32(0)
+            values = cp.ascontiguousarray(cp.asarray(values, dtype=cp.float64).reshape(-1))
+            if values.size != count:
+                raise ValueError("one coefficient per column is needed")
+            return values, np.int32(1)
+
+        nonlocal_part, has_nonlocal = same_shape(added)
+        previous_part, has_previous = same_shape(previous)
+        before_part, _ = per_column(before if previous is not None else None)
+        after_part, has_after = per_column(after)
+        self._real_kernel(
+            ((total + _THREADS - 1) // _THREADS,),
+            (_THREADS,),
+            (
+                block, out, cp.ascontiguousarray(diagonal_with_centre, dtype=cp.float64),
+                self.columns, self.codes, self.palette, self._real_weights,
                 np.int64(self.rows), np.int64(count),
                 nonlocal_part, has_nonlocal, previous_part, has_previous,
                 np.float64(center), np.float64(scale), before_part, after_part, has_after,

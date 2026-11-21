@@ -421,9 +421,11 @@ def compute_periodic_forces(
     symmetry operations of the atoms to average over (none by default: the Gamma-only periodic path does not
     reduce the grid by symmetry).  A k-point run on the irreducible wedge of a Monkhorst-Pack mesh (the problem
     carries the group of :func:`parsec_python.Forces.periodic.reduced_kpoint_operations`, ``PARSEC_KPOINT_FORCE_WEDGE``)
-    has its nonlocal force completed over that group and, unless ``operations`` are given, the total averaged over it;
-    its density is averaged over the group, so its local terms are those of one atom per orbit turned onto the others
-    (:func:`_periodic_local_terms`, ``PARSEC_PERIODIC_LOCAL_ORBITS``).  ``phase_seconds`` holds the seconds of the
+    has its nonlocal force completed over that group and, unless ``operations`` are given, the total averaged over it
+    (over the larger ``force_space_group`` the problem carries for a wedge that keeps the finite-difference operators of
+    an oblique grid, ``PARSEC_KPOINT_FORCE_GROUP=crystal``); its density is averaged over the group, so its local
+    terms are those of one atom per orbit turned onto the others (:func:`_periodic_local_terms`,
+    ``PARSEC_PERIODIC_LOCAL_ORBITS``).  ``phase_seconds`` holds the seconds of the
     local terms (``local``) and, for the orbits, ``local_representatives`` and ``local_site_asymmetry`` (Ry/bohr).
     """
 
@@ -462,6 +464,20 @@ def compute_periodic_forces(
             separable = symmetrize_forces(separable, completion)
             if operations is None:
                 operations = completion
+                averaged = getattr(system.input, "force_space_group", None)
+                if averaged is not None:
+                    # PARSEC_KPOINT_FORCE_GROUP=crystal: a wedge of the operations that keep the finite-difference
+                    # operators of an oblique grid; the total is averaged over every operation that maps the grid and
+                    # the mesh onto themselves (SinglePointInput.force_space_group), the group of the converged forces
+                    from .periodic import space_group_symmetry_operations
+
+                    operations = space_group_symmetry_operations(system.atoms, lattice, averaged)
+        elif operations is None and getattr(system.input, "force_space_group", None) is not None:
+            # the whole mesh of a structure whose operations all change the finite-difference operators of an oblique
+            # grid (PARSEC_KPOINT_FORCE_GROUP=crystal): the total averaged over them
+            from .periodic import space_group_symmetry_operations
+
+            operations = space_group_symmetry_operations(system.atoms, lattice, system.input.force_space_group)
     else:
         gradients = build_periodic_projector_gradients(
             system.grid, atoms, system.pseudopotentials, specifications, lattice

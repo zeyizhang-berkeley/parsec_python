@@ -73,7 +73,7 @@ _C20 = np.sqrt(5.0 / (16.0 * np.pi))
 
 
 def complex_harmonics_with_gradients(
-    angular_momentum: int, unit: np.ndarray, inverse: np.ndarray
+    angular_momentum: int, unit: np.ndarray, inverse: np.ndarray, *, inside: np.ndarray | None = None
 ) -> tuple[np.ndarray, np.ndarray]:
     """``Y_l^m(d/|d|)`` and ``grad_d Y_l^m``, ``m = -l..l``, for ``l = 1, 2``.
 
@@ -82,6 +82,8 @@ def complex_harmonics_with_gradients(
     in ``d`` is the tangential part of ``dY/du`` over ``|d|``:
     ``(dY/du - (u . dY/du) u) / |d|`` (``inverse = 1/|d|``, zero at the
     atom).  Returns ``(n, 2l+1)`` and ``(n, 2l+1, 3)`` complex arrays.
+    ``inside`` (optional mask): points with ``unit = d/c`` for a fixed centre
+    radius ``c`` take ``dY/du / c``, the gradient of ``Y(d/c)`` itself.
     """
 
     u = np.asarray(unit, dtype=float)
@@ -123,6 +125,8 @@ def complex_harmonics_with_gradients(
     else:
         raise ValueError("spin-orbit complex harmonics support only l=1 and l=2")
     radial_part = np.einsum("nmc,nc->nm", derivatives, u)
+    if inside is not None:
+        radial_part = np.where(np.asarray(inside)[:, None], 0.0, radial_part)
     gradients = (derivatives - radial_part[:, :, None] * u[:, None, :]) * np.asarray(
         inverse, dtype=float
     )[:, None, None]
@@ -143,10 +147,16 @@ class SpinOrbitProjectorGradients:
     gradients: np.ndarray
 
 
-def _round_off_distance() -> float:
-    from .periodic import ROUND_OFF_DISTANCE
+def _projector_center_setting() -> str:
+    from ..V_ion.ionic_potential import projector_center_setting
 
-    return ROUND_OFF_DISTANCE
+    return projector_center_setting()
+
+
+def _projector_inverse_radius(radius, potential, setting):
+    from .periodic import _projector_inverse_radius as rule
+
+    return rule(radius, potential, setting)
 
 
 def _interpolant_slope(points, knots, values):
@@ -181,6 +191,7 @@ def build_spin_orbit_projector_gradients(
         return _double_grid_spin_orbit_projector_gradients(
             grid, atoms, potentials, specifications, lattice_vectors, k_point, order
         )
+    center_setting = _projector_center_setting()
     sqrt_dv = np.sqrt(grid.volume_element)
     coordinates = grid.coordinates
     result: list[SpinOrbitProjectorGradients] = []
@@ -224,16 +235,11 @@ def build_spin_orbit_projector_gradients(
             column = column_by_l[angular_momentum]
             radial_ion, radial_so, _ = potential.spin_orbit_projectors(angular_momentum, local_l)
             for rows, relative, radius, phase in images:
-                inverse = np.zeros_like(radius)
-                nonzero = radius > 0.0
-                # A round-off distance (an atom within round-off of a grid point) is clamped, as the tabulated
-                # slopes and nonloc.F90 clamp to the first radial knot: its 1/|d| made w(r0) grad Y 1e6 (Si64,
-                # h 0.513: nonlocal forces of 82 Ry/bohr).  ROUND_OFF_DISTANCE keeps the exact slope of a
-                # table whose first knot is far out.  A grid point exactly on the atom keeps 1/|d| = 0.
-                inverse[nonzero] = 1.0 / np.maximum(radius[nonzero], min(potential.radii[0], _round_off_distance()))
+                # the centre radius of the harmonics (PARSEC_PROJECTOR_CENTER, Forces.periodic._projector_inverse_radius)
+                inverse, inside = _projector_inverse_radius(radius, potential, center_setting)
                 unit = relative * inverse[:, None]
                 harmonics, harmonic_gradients = complex_harmonics_with_gradients(
-                    angular_momentum, unit, inverse
+                    angular_momentum, unit, inverse, inside=inside
                 )
                 local_rows = np.searchsorted(union, rows)
                 phase_column = phase if np.isscalar(phase) else phase[:, None]
@@ -284,6 +290,7 @@ def _double_grid_spin_orbit_projector_gradients(
 
     from ..V_ion.double_grid import double_grid_support
 
+    center_setting = _projector_center_setting()
     sqrt_dv = np.sqrt(grid.volume_element)
     spacing = float(grid.spacing)
     coordinates = grid.coordinates
@@ -334,16 +341,11 @@ def _double_grid_spin_orbit_projector_gradients(
                 points, fine = support.radius.shape
                 radius = support.radius.reshape(-1)
                 relative = support.relative.reshape(-1, 3)
-                inverse = np.zeros_like(radius)
-                nonzero = radius > 0.0
-                # A round-off distance (an atom within round-off of a grid point) is clamped, as the tabulated
-                # slopes and nonloc.F90 clamp to the first radial knot: its 1/|d| made w(r0) grad Y 1e6 (Si64,
-                # h 0.513: nonlocal forces of 82 Ry/bohr).  ROUND_OFF_DISTANCE keeps the exact slope of a
-                # table whose first knot is far out.  A grid point exactly on the atom keeps 1/|d| = 0.
-                inverse[nonzero] = 1.0 / np.maximum(radius[nonzero], min(potential.radii[0], _round_off_distance()))
+                # the centre radius of the harmonics (PARSEC_PROJECTOR_CENTER, Forces.periodic._projector_inverse_radius)
+                inverse, inside = _projector_inverse_radius(radius, potential, center_setting)
                 unit = relative * inverse[:, None]
                 harmonics, harmonic_gradients = complex_harmonics_with_gradients(
-                    angular_momentum, unit, inverse
+                    angular_momentum, unit, inverse, inside=inside
                 )
                 local_rows = np.searchsorted(union, support.rows)
                 phase_column = phase if np.isscalar(phase) else phase[:, None]

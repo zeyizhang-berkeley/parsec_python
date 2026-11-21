@@ -3,9 +3,12 @@ Scaled-down AuH molecule (same geometry and pseudopotentials as
 spin-orbit coupling.
 
 `parsec.in` (PARSEC.py-flavored: `SO_from_scratch=true`, no
-`Spin_Polarization`, since PARSEC.py's cluster self-consistent SOC
-currently only supports running without collinear spin polarization) is
-used by `tests/unit/test_0d_AuH_fortran_reference.py`. `parsec_fortran.in`
+`Spin_Polarization`) is used by
+`tests/unit/test_0d_AuH_fortran_reference.py`, and so is
+`parsec_spin_polarized.in`, the same input with `Spin_Polarization: .true.`.
+That combination runs on the reference solver (`reference_main.py`:
+-68.34106409 Ry); the GPU path does not cover it (`main.py --gpus 1` stops
+with an input error). `parsec_fortran.in`
 is the same physical system in Fortran PARSEC's own input, used to
 generate `fortran_reference.out`:
 

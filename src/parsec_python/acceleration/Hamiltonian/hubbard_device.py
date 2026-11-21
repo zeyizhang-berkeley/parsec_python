@@ -43,11 +43,52 @@ triangular Ritz hand-over; only ``(atoms, 5, 5)`` arrays come back
 orbital ``psi`` of sector ``G`` with sector vector ``c``, so the reduced
 projectors give the overlaps of the full-grid orbitals.
 
+Projector orbits (``PARSEC_LDAU_PROJECTOR_ORBITS``, since 2026-11-21).  An
+operation ``g: r -> R r + t`` of the abelian sectors that carries atom ``a``
+onto atom ``b`` carries its projectors with the d harmonics turned,
+``P_g B_a = B_b D(R)`` (:func:`parsec_python.Hamiltonian.hubbard.d_harmonic_rotation`,
+``Y(R^-1 v) = Y(v) D(R)``, orthogonal).  Every orbital of a sector of a real
+one-dimensional character is an eigenvector of ``P_g``, so the density matrix
+of the solved states commutes with it and the occupation matrices of an orbit
+follow from that of one atom, ``N_b = D N_a D^T``; so do the potential
+matrices, ``D_b = D(R) D_a D(R)^T``, hence ``B_b D_b B_b^T = P_g B_a D_a
+B_a^T P_g^T`` and every atom of an orbit gives a sector the same block.
+Under ``auto`` (the default) the sectors of a reduction that knows the orbits
+of its atoms therefore carry the KB and the fifteen LDA+U columns of one atom
+per orbit, scaled by the square root of the orbit size
+(:func:`parsec_python.acceleration.Symmetry.axis_reflection.compress_projectors_for_sectors`,
+as for the KB columns alone), the coefficients of the representative are
+written there (:class:`HubbardOrbits`), the occupation matrices are formed for
+the representatives alone and turned onto the other atoms of their orbits.
+The forces read the projectors of every atom, as before.  The images of the
+atoms are matched within ``PARSEC_SYMMETRY_ATOM_TOLERANCE`` (1e-4 bohr at
+least, :func:`_image_tolerance`), the tolerance the group was detected at;
+the driver gives a structure that keeps the group only to more than 1e-6
+bohr the columns of every atom (:func:`ldau_orbits_exact`).
+``off`` gives the sectors of an LDA+U run the columns of every atom
+(``driver._without_atom_orbits``), bit for bit as before that date in the
+abelian sectors; alone it keeps the weighted sectors below, so the former
+bits of an LDA+U run take ``PARSEC_LDAU_WEIGHTED_SECTORS=off`` too, for a cell
+``PARSEC_GAMMA_LDAU_SECTORS=off`` (its default before that date) and for a
+spin run ``PARSEC_LDAU_SPIN_SECTORS=off``.
+
+Weighted sectors (``PARSEC_LDAU_WEIGHTED_SECTORS``, since 2026-11-21).  The
+one-dimensional sectors of a subgroup ``H`` of the point group ``G`` with
+weights solve one partner of some degenerate levels; the occupation matrices
+of their weighted states are averaged over ``G``, as their density is, which
+gives those of every partner, and the potential matrices of those are
+covariant under ``G`` (:class:`HubbardGroupAverage`; the LDA+U forces are
+averaged alike).  A result lists every partner with its own occupation; its
+occupations are summed back per solved state where the orbitals carry the
+weights (:meth:`DeviceHubbard._channel_blocks`).
+
 Units: Ry, bohr; projectors and orbitals carry PARSEC's ``sqrt(h^3)``.
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+import os
 from threading import Lock
 from types import SimpleNamespace
 from typing import Any, Iterator, Sequence
@@ -60,9 +101,267 @@ from parsec_python.Hamiltonian.hubbard import (
     HubbardOperator,
     HubbardProjectors,
     HubbardTerms,
+    d_harmonic_rotation,
     hubbard_terms,
+    symmetrize_occupations,
 )
 from parsec_python.V_ion import NonlocalProjectorOperator
+
+
+#: The switch of the projector orbits of LDA+U in the symmetry sectors (see the module text).
+LDAU_PROJECTOR_ORBITS_SWITCH = "PARSEC_LDAU_PROJECTOR_ORBITS"
+
+#: Distance (bohr) within which an image of an LDA+U atom names the atom of its orbit, at least.  The orbits
+#: themselves were found by the detection of the group at its atom tolerance; this only tells which atom an
+#: operation reaches (:func:`_image_tolerance`).
+_ORBIT_IMAGE_TOLERANCE = 1.0e-4
+
+
+def _image_tolerance() -> float:
+    """The distance (bohr) within which an image of an LDA+U atom names an atom: the larger of
+    :data:`_ORBIT_IMAGE_TOLERANCE` and ``PARSEC_SYMMETRY_ATOM_TOLERANCE``, the tolerance at which the group of the
+    sectors was detected (at most: the hybrid and k-point routes take a smaller one).  A structure accepted within a
+    loose tolerance (1e-3 bohr, say) has atoms that far off their images, which a match at 1e-4 bohr alone refused
+    (an error at the preparation of every such LDA+U run in the sectors before 2026-11-21 evening)."""
+
+    from ..Symmetry.axis_reflection import symmetry_atom_tolerance
+
+    return max(_ORBIT_IMAGE_TOLERANCE, float(symmetry_atom_tolerance()))
+
+
+#: Distance (bohr) within which the atoms must keep the operations of the sectors for an LDA+U run to take the
+#: columns of one atom per orbit (that of the forces and moves in the sectors, ``Forces/sector_symmetry.MOVE_TOLERANCE``).
+LDAU_EXACT_ORBIT_TOLERANCE = 1.0e-6
+
+
+def ldau_orbits_exact(reduction, atoms, grid) -> bool:
+    """Whether the atoms keep the operations of the sectors of ``reduction`` within
+    :data:`LDAU_EXACT_ORBIT_TOLERANCE`, where the reduction knows the orbits of its atoms.
+
+    The columns of one atom per orbit give the sector blocks of every atom only for a structure that keeps the group;
+    one accepted within a loose ``PARSEC_SYMMETRY_ATOM_TOLERANCE`` (1e-3 bohr, say) with atoms off it by more gives
+    every atom of an orbit the offset of its representative.  The driver then gives an LDA+U run the columns of
+    every atom, as before 2026-11-21 (``driver._without_atom_orbits``): fcc Ag108 with one atom 5e-4 bohr off,
+    ``PARSEC_SYMMETRY_ATOM_TOLERANCE=1e-3``, A100: the energy of the full grid of that structure to 1.3e-3 Ry with
+    the orbits (as without LDA+U, 1.2e-3 Ry) and 7.7e-5 Ry with every atom's columns (the abelian route of before
+    alike), the run 9.3 against 10.7 s.  ``True`` at once at a detection tolerance of at most that distance (every
+    operation detected maps the atoms within it) and for a reduction without orbits.
+    """
+
+    from ..Symmetry.axis_reflection import abelian_sector_operations, atom_image_table, symmetry_atom_tolerance
+
+    if reduction is None or getattr(reduction, "atom_representatives", None) is None or not atoms:
+        return True
+    if float(symmetry_atom_tolerance()) <= LDAU_EXACT_ORBIT_TOLERANCE:
+        return True
+    translations = getattr(reduction, "translations", None)
+    images = atom_image_table(
+        tuple(atoms),
+        abelian_sector_operations(reduction),
+        None if translations is None else np.asarray(translations, dtype=np.int64).reshape(-1, 3),
+        grid,
+        LDAU_EXACT_ORBIT_TOLERANCE,
+    )
+    return images is not None
+
+
+def _lda_u_atom_images(atoms, operations, translations, grid, what: str) -> np.ndarray:
+    """``images[g, k]`` of :func:`..Symmetry.axis_reflection.atom_image_table` for the LDA+U atoms ``atoms`` at
+    :func:`_image_tolerance`; every row a permutation, else ``RuntimeError`` naming ``what`` (the operations)."""
+
+    from ..Symmetry.axis_reflection import _permutation_rows, atom_image_table
+
+    images = atom_image_table(atoms, operations, translations, grid, _image_tolerance())
+    if images is None or not _permutation_rows(images):
+        raise RuntimeError(f"an operation of {what} does not map the LDA+U atoms onto themselves")
+    return images
+
+
+def ldau_projector_orbits_setting() -> str:
+    """``PARSEC_LDAU_PROJECTOR_ORBITS``: ``auto`` (default) or ``off`` (``0``, ``false``, ``no`` mean ``off``)."""
+
+    value = os.environ.get(LDAU_PROJECTOR_ORBITS_SWITCH, "auto").strip().lower() or "auto"
+    if value in {"0", "false", "no"}:
+        value = "off"
+    if value not in ("auto", "off"):
+        raise ValueError(f"{LDAU_PROJECTOR_ORBITS_SWITCH} must be auto or off, not {value!r}")
+    return value
+
+
+@dataclass(frozen=True)
+class HubbardOrbits:
+    """What the sector operators of a reduction with atom orbits hold of the LDA+U term (see the module text).
+
+    ``kept``: the positions ``k`` (in ``HubbardProjectors.atom_indices``, ascending) of the LDA+U atoms whose
+    fifteen columns the sector operators keep, the representatives of their orbits; ``sources[k]``: the position
+    of the representative of the orbit of atom ``k``; ``rotations[k]``: ``D(R)`` of an operation of the sectors
+    that carries that representative onto atom ``k`` (the identity for a representative); ``kb_columns``: the KB
+    columns in front of the kept LDA+U columns in the sector operators.
+    """
+
+    kept: np.ndarray
+    sources: np.ndarray
+    rotations: np.ndarray
+    kb_columns: int
+
+    def expand(self, occupations: np.ndarray) -> np.ndarray:
+        """``N_k = D_k N_(sources[k]) D_k^T`` of every LDA+U atom from ``occupations`` of the kept ones."""
+
+        kept = np.asarray(occupations, dtype=np.float64)
+        if kept.shape != (self.kept.size, HUBBARD_ORBITALS, HUBBARD_ORBITALS):
+            raise ValueError("the occupations of the representatives have the wrong shape")
+        slot = np.full(int(self.sources.size), -1, dtype=np.int64)
+        slot[self.kept] = np.arange(self.kept.size)
+        return np.einsum(
+            "amk,akl,anl->amn", self.rotations, kept[slot[self.sources]], self.rotations
+        )
+
+
+#: The switch of LDA+U in the weighted sectors of a subgroup of the point group (see :class:`HubbardGroupAverage`).
+LDAU_WEIGHTED_SECTORS_SWITCH = "PARSEC_LDAU_WEIGHTED_SECTORS"
+LDAU_WEIGHTED_SECTORS_DEFAULT = "auto"
+
+
+def ldau_weighted_sectors_setting() -> str:
+    """``PARSEC_LDAU_WEIGHTED_SECTORS``: ``auto`` or ``off`` (``0``, ``false``, ``no`` mean ``off``).
+
+    ``auto``: an LDA+U run takes the one-dimensional sectors of a subgroup ``H`` of the point group with weights
+    where the plan of the group does (``driver._orbital_group_refusal``, ``Symmetry/orbital_groups.py``), with the
+    occupation matrices averaged over the full group (:class:`HubbardGroupAverage`); ``off``: the abelian group, as
+    before.
+    """
+
+    value = os.environ.get(LDAU_WEIGHTED_SECTORS_SWITCH, LDAU_WEIGHTED_SECTORS_DEFAULT).strip().lower()
+    value = value or LDAU_WEIGHTED_SECTORS_DEFAULT
+    if value in {"0", "false", "no"}:
+        value = "off"
+    if value not in ("auto", "off"):
+        raise ValueError(f"{LDAU_WEIGHTED_SECTORS_SWITCH} must be auto or off, not {value!r}")
+    return value
+
+
+@dataclass(frozen=True)
+class HubbardGroupAverage:
+    """The average over the full point group ``G`` of the occupation matrices and LDA+U forces of weighted sectors.
+
+    The weighted sectors (:class:`..Symmetry.PointGroupReduction`) solve one partner of some degenerate levels of
+    ``G`` in the one-dimensional sectors of a subgroup ``H`` and count it with the weight of its sector: the
+    density of the weighted states is invariant under ``H`` only, and its average over ``G`` is that of all the
+    partners.  The occupation matrices are linear in the density matrix, so the matrices of all the partners are the
+    average ``N_b = (1/|G|) sum_g D(R_g) N_(g^-1 b) D(R_g)^T``
+    (:func:`parsec_python.Hamiltonian.hubbard.symmetrize_occupations`), and the potential matrices of those are
+    covariant under ``G``: ``H_U`` commutes with every operation and its blocks in the sectors of ``H`` are exact.
+    The LDA+U forces of the weighted states at those potential matrices are averaged alike,
+    ``F_b = (1/|G|) sum_g R_g F_(g^-1 b)``.  ``operations``: ``(D(R_g), image)`` for every ``g``, ``image[k]`` the
+    LDA+U atom (position in ``HubbardProjectors.atom_indices``) that ``g`` carries atom ``k`` onto; ``rotations``:
+    the Cartesian ``R_g``.
+    """
+
+    operations: tuple
+    rotations: np.ndarray
+
+    def occupations(self, matrices: np.ndarray) -> np.ndarray:
+        return symmetrize_occupations(np.asarray(matrices, dtype=np.float64), self.operations)
+
+    def forces(self, forces: np.ndarray) -> np.ndarray:
+        """``(atoms, 3)`` forces of the LDA+U atoms averaged over ``G``."""
+
+        forces = np.asarray(forces, dtype=np.float64)
+        total = np.zeros_like(forces)
+        for (_harmonics, image), rotation in zip(self.operations, self.rotations):
+            total[image] += forces @ rotation.T
+        return total / len(self.operations)
+
+
+def sector_group_average(projectors: HubbardProjectors, reduction, atoms, grid) -> HubbardGroupAverage | None:
+    """The :class:`HubbardGroupAverage` of weighted sectors (a reduction with ``full_operations``), ``None`` for
+    the abelian groups, whose sectors solve every partner."""
+
+    full = None if reduction is None else getattr(reduction, "full_operations", None)
+    if full is None:
+        return None
+    operations = np.asarray(full, dtype=np.float64).reshape(-1, 3, 3)
+    translations = getattr(reduction, "full_translations", None)
+    indices = np.asarray(projectors.atom_indices, dtype=np.int64)
+    images = _lda_u_atom_images(
+        [atoms[int(atom)] for atom in indices],
+        operations,
+        None if translations is None else np.asarray(translations, dtype=np.int64).reshape(-1, 3),
+        grid,
+        "the point group",
+    )
+    turned: dict[bytes, np.ndarray] = {}
+    pairs = []
+    for g, rotation in enumerate(operations):
+        key = np.rint(rotation).astype(np.int64).tobytes()
+        if key not in turned:
+            turned[key] = d_harmonic_rotation(rotation)
+        pairs.append((turned[key], np.ascontiguousarray(images[g], dtype=np.int64)))
+    return HubbardGroupAverage(operations=tuple(pairs), rotations=np.ascontiguousarray(operations))
+
+
+def sector_hubbard_orbits(projectors: HubbardProjectors, kb_labels, reduction, atoms, grid) -> HubbardOrbits | None:
+    """The :class:`HubbardOrbits` of the sector operators of ``reduction``, or ``None`` where they hold every column.
+
+    The columns kept are those of
+    :func:`parsec_python.acceleration.Symmetry.axis_reflection.compress_projectors_for_sectors` applied to the KB
+    factor of ``kb_labels`` with the LDA+U columns appended (:func:`augmented_nonlocal_operator`): ``None`` where
+    that function leaves the factor as it is (no reduction, no orbits, ``PARSEC_SECTOR_PROJECTOR_ORBITS=off``, a
+    label outside the atoms, or every column kept).  The operation of each atom is found among the operations of
+    the abelian sectors (:func:`..Symmetry.axis_reflection.abelian_sector_operations`, with the translations of a
+    cell) by the images of the LDA+U atoms (:func:`..Symmetry.axis_reflection.atom_image_table`).
+    """
+
+    from ..Symmetry.axis_reflection import abelian_sector_operations, sector_projector_orbits_setting
+
+    representatives = None if reduction is None else getattr(reduction, "atom_representatives", None)
+    sizes = None if reduction is None else getattr(reduction, "atom_orbit_sizes", None)
+    if representatives is None or sizes is None or sector_projector_orbits_setting() == "off":
+        return None
+    representatives = np.asarray(representatives, dtype=np.int64)
+    indices = np.asarray(projectors.atom_indices, dtype=np.int64)
+    kb_atoms = np.fromiter((int(label[0]) for label in kb_labels), dtype=np.int64)
+    columns = np.concatenate((kb_atoms, np.repeat(indices, EXPANSION_COLUMNS)))
+    if not columns.size or columns.min() < 0 or columns.max() >= representatives.size:
+        return None
+    if np.all(representatives[columns] == columns):
+        return None
+    kept = np.flatnonzero(representatives[indices] == indices)
+    position = {int(atom): k for k, atom in enumerate(indices)}
+    try:
+        sources = np.array([position[int(representatives[atom])] for atom in indices], dtype=np.int64)
+    except KeyError as error:
+        raise RuntimeError("an orbit of LDA+U atoms has a representative without LDA+U") from error
+    operations = abelian_sector_operations(reduction)
+    translations = getattr(reduction, "translations", None)
+    images = _lda_u_atom_images(
+        [atoms[int(atom)] for atom in indices],
+        operations,
+        None if translations is None else np.asarray(translations, dtype=np.int64).reshape(-1, 3),
+        grid,
+        "the sectors",
+    )
+    rotations = np.empty((indices.size, HUBBARD_ORBITALS, HUBBARD_ORBITALS), dtype=np.float64)
+    turned: dict[int, np.ndarray] = {}
+    for k in range(indices.size):
+        if sources[k] == k:
+            rotations[k] = np.eye(HUBBARD_ORBITALS)
+            continue
+        found = np.flatnonzero(images[:, sources[k]] == k)
+        if not found.size:
+            raise RuntimeError("no operation of the sectors carries an LDA+U atom onto the atoms of its orbit")
+        g = int(found[0])
+        if g not in turned:
+            turned[g] = d_harmonic_rotation(np.asarray(operations[g], dtype=np.float64))
+        rotations[k] = turned[g]
+    for array in (kept, sources, rotations):
+        array.setflags(write=False)
+    return HubbardOrbits(
+        kept=kept,
+        sources=sources,
+        rotations=rotations,
+        kb_columns=int(np.count_nonzero(representatives[kb_atoms] == kb_atoms)),
+    )
 
 
 #: Angular label of the appended LDA+U columns: ``(atom, -2, k)``.  No KB
@@ -285,7 +584,9 @@ class DeviceHubbard:
     ``projectors`` are the LDA+U projectors of the reference system,
     ``kb_count`` the number of KB columns in front of the appended ones,
     ``backend`` the :class:`CuPyHamiltonianBackend` and ``sectors`` its
-    symmetry eigensolver, ``None`` on the full grid.
+    symmetry eigensolver, ``None`` on the full grid.  ``orbits``: what the
+    sector operators hold where they carry one atom per orbit
+    (:func:`sector_hubbard_orbits`), ``None`` where they hold every column.
     """
 
     def __init__(
@@ -294,11 +595,16 @@ class DeviceHubbard:
         kb_count: int,
         backend: Any,
         sectors: Any | None = None,
+        orbits: HubbardOrbits | None = None,
+        average: HubbardGroupAverage | None = None,
     ) -> None:
         require_symmetric_term(projectors)
         self.backend = backend
         self.sectors = sectors
         self.kb_count = int(kb_count)
+        self.orbits = orbits
+        # The average over the full point group of weighted sectors (None: the sectors solve every partner).
+        self.average = average
         self._lock = Lock()
         self._set_projectors(projectors)
         # Seconds of the overlaps and of the coefficient uploads, for reports.
@@ -322,7 +628,8 @@ class DeviceHubbard:
 
         ``moved`` is the reference system of the new structure.  The device
         operators install the returned factor with coefficient zero, which
-        is ``D`` of the first iteration of the next SCF loop.
+        is ``D`` of the first iteration of the next SCF loop.  The sectors
+        keep their group, so the orbits are those of the moved atoms under it.
         """
 
         projectors = moved.hubbard
@@ -332,6 +639,18 @@ class DeviceHubbard:
             raise ValueError("moved atoms must keep their LDA+U atoms")
         # The KB columns in front of the appended ones, of the new structure.
         self.kb_count = int(len(moved.nonlocal_operator.signs))
+        if self.orbits is not None:
+            self.orbits = sector_hubbard_orbits(
+                projectors,
+                moved.nonlocal_operator.labels,
+                self.sectors.decomposition.reduction,
+                moved.atoms,
+                moved.grid,
+            )
+        if self.average is not None:
+            self.average = sector_group_average(
+                projectors, self.sectors.decomposition.reduction, moved.atoms, moved.grid
+            )
         self._set_projectors(projectors)
         return augmented_nonlocal_operator(moved.nonlocal_operator, projectors)
 
@@ -352,6 +671,32 @@ class DeviceHubbard:
                 if worker is not None:
                     yield from worker.replicas.values()
 
+    def coefficient_layouts(self, potentials: np.ndarray | None) -> dict[int, tuple[int, np.ndarray]]:
+        """``{columns of an operator: (first LDA+U column, coefficients)}`` of ``D`` (``None``: zero).
+
+        The factor of every atom (the full grid, and the sectors under ``PARSEC_LDAU_PROJECTOR_ORBITS=off``):
+        the coefficients of every LDA+U atom behind the ``kb_count`` KB columns.  The sector operators of one atom
+        per orbit (:attr:`orbits`): those of the representatives behind the KB columns they keep (their columns
+        carry the square root of the orbit size).  The second has fewer columns, so the two never share a count.
+        """
+
+        coefficients = (
+            np.zeros(self.column_count, dtype=np.float64)
+            if potentials is None
+            else expansion_coefficients(potentials)
+        )
+        layouts = {self.kb_count + self.column_count: (self.kb_count, coefficients)}
+        orbits = self.orbits
+        if orbits is not None:
+            first = int(orbits.kb_columns)
+            kept = (
+                np.zeros(EXPANSION_COLUMNS * orbits.kept.size, dtype=np.float64)
+                if potentials is None
+                else expansion_coefficients(np.asarray(potentials, dtype=np.float64)[orbits.kept])
+            )
+            layouts.setdefault(first + kept.size, (first, kept))
+        return layouts
+
     def bind(self, potentials: np.ndarray | None) -> None:
         """Write the coefficients of ``D`` (``(atoms, 5, 5)``, ``None``: zero) on the devices."""
 
@@ -361,12 +706,9 @@ class DeviceHubbard:
 
         started = perf_counter()
         cp, _ = require_cupy()
-        coefficients = (
-            np.zeros(self.column_count, dtype=np.float64)
-            if potentials is None
-            else expansion_coefficients(potentials)
-        )
+        layouts = self.coefficient_layouts(potentials)
         start, stop = self.kb_count, self.kb_count + self.column_count
+        coefficients = layouts[stop][1]
         for host in (
             getattr(self.backend, "host_signs", None),
             getattr(getattr(self.backend, "host_nonlocal_operator", None), "signs", None),
@@ -375,14 +717,17 @@ class DeviceHubbard:
                 host[start:stop] = coefficients
         for operator in self._operators():
             signs = operator.projector_signs
-            if int(signs.shape[0]) != stop:
+            layout = layouts.get(int(signs.shape[0]))
+            if layout is None:
                 raise RuntimeError("a device operator does not hold the LDA+U columns")
+            first, values = layout
+            last = first + values.size
             with cp.cuda.Device(int(signs.device.id)):
-                signs[start:stop] = cp.asarray(coefficients)
+                signs[first:last] = cp.asarray(values)
                 mixed = getattr(operator, "mixed_precision_recurrence", None)
                 if mixed is not None:
-                    mixed.projector_signs[start:stop] = cp.asarray(
-                        coefficients, dtype=cp.float32
+                    mixed.projector_signs[first:last] = cp.asarray(
+                        values, dtype=cp.float32
                     )
                 # The sector solves run on streams of their own.
                 cp.cuda.get_current_stream().synchronize()
@@ -396,8 +741,14 @@ class DeviceHubbard:
 
     # ----- overlaps ---------------------------------------------------------
 
+    def _left_atoms(self, kind: str) -> int:
+        """The atoms of the projector columns ``kind``: every LDA+U atom (``P``), the representatives (``R``)."""
+
+        return self.atom_count if kind == "P" else int(self.orbits.kept.size)
+
     def _host_columns(self, key, kind: str, gradients=None) -> sp.csr_matrix:
-        """The CSR transpose of the columns ``kind`` (``P`` or ``G0..G2``) of sector ``key``."""
+        """The CSR transpose of the columns ``kind`` (``P``, ``R``: the representatives of the orbits, or
+        ``G0..G2``) of sector ``key``."""
 
         with self._lock:
             found = self._host.get((key, kind))
@@ -405,6 +756,12 @@ class DeviceHubbard:
             return found
         if kind == "P":
             matrix = self.projectors.projectors
+        elif kind == "R":
+            columns = (
+                HUBBARD_ORBITALS * np.asarray(self.orbits.kept, dtype=np.int64)[:, None]
+                + np.arange(HUBBARD_ORBITALS)[None, :]
+            ).reshape(-1)
+            matrix = sp.csc_matrix(self.projectors.projectors)[:, columns]
         else:
             if gradients is None:
                 raise RuntimeError("the projector gradients were not built")
@@ -438,24 +795,25 @@ class DeviceHubbard:
     def _drop_gradients(self) -> None:
         with self._lock:
             for table in (self._host, self._device):
-                for name in [name for name in table if name[1] != "P"]:
+                for name in [name for name in table if name[1] not in ("P", "R")]:
                     del table[name]
 
-    def _block_products(self, key, device: int, block, weights, gradients=None):
+    def _block_products(self, key, device: int, block, weights, gradients=None, left_kind: str = "P"):
         """``sum_n f_n c c^T`` and, with ``gradients``, ``sum_n f_n g_c c^T`` of one block.
 
         ``block`` holds the columns of the weights ``weights`` on ``device``
         or on the host; the result is a host ``(atoms, 5, 5)`` array and,
-        with gradients, a ``(3, atoms, 5, 5)`` one.
+        with gradients, a ``(3, atoms, 5, 5)`` one.  ``left_kind`` ``R``: the
+        occupations of the representatives of the orbits alone (no gradients).
         """
 
         from ..backends.cupy import require_cupy
 
         cp, _ = require_cupy()
-        atoms = self.atom_count
+        atoms = self._left_atoms(left_kind)
         weights = np.asarray(weights, dtype=np.float64)
         with cp.cuda.Device(int(device)):
-            left = self._projection(key, "P", int(device))
+            left = self._projection(key, left_kind, int(device))
             rights = (
                 ()
                 if gradients is None
@@ -513,11 +871,11 @@ class DeviceHubbard:
             return int(self.sectors._sector_device_ids[int(key)])
         return int(cp.cuda.Device().id)
 
-    def _products(self, key, vectors, weights, record=None, gradients=None):
+    def _products(self, key, vectors, weights, record=None, gradients=None, left_kind: str = "P"):
         """The products of :meth:`_block_products` for one basis of any storage."""
 
         weights = np.asarray(weights, dtype=np.float64)
-        atoms = self.atom_count
+        atoms = self._left_atoms(left_kind)
         occupation = np.zeros((atoms, HUBBARD_ORBITALS, HUBBARD_ORBITALS))
         slopes = np.zeros((3, atoms, HUBBARD_ORBITALS, HUBBARD_ORBITALS))
         occupied = np.flatnonzero(weights != 0.0)
@@ -537,13 +895,13 @@ class DeviceHubbard:
             _full, correction, corrections = correction_set(
                 weights, np.arange(weights.size), width
             )
-            total = self._products(key, vectors, np.ones(width), None, gradients)
+            total = self._products(key, vectors, np.ones(width), None, gradients, left_kind)
             occupation, slopes = total[0], total[1]
             step = max(1, CORRECTION_BYTES // (8 * max(1, int(vectors.shape[0]))))
             for start in range(0, correction.size, step):
                 chunk = slice(start, start + step)
                 ritz = ritz_columns(vectors, record, correction[chunk])
-                part = self._products(key, ritz, -corrections[chunk], None, gradients)
+                part = self._products(key, ritz, -corrections[chunk], None, gradients, left_kind)
                 occupation = occupation + part[0]
                 slopes = slopes + part[1]
                 del ritz
@@ -572,6 +930,7 @@ class DeviceHubbard:
                     block,
                     held[0] if len(held) == 1 else np.concatenate(held),
                     gradients,
+                    left_kind,
                 )
 
             # Fixed device order keeps the host sum deterministic.
@@ -582,7 +941,7 @@ class DeviceHubbard:
                         slopes = slopes + part[1]
             return occupation, slopes
         device = self._sector_device(key, vectors)
-        part = self._block_products(key, device, vectors[:, :count], weights, gradients)
+        part = self._block_products(key, device, vectors[:, :count], weights, gradients, left_kind)
         occupation = occupation + part[0]
         if part[1] is not None:
             slopes = slopes + part[1]
@@ -595,10 +954,25 @@ class DeviceHubbard:
 
         occupations = np.asarray(occupations, dtype=np.float64)
         if isinstance(wavefunctions, CuPySymmetryOrbitals):
+            repeats = getattr(wavefunctions, "state_weights", None)
+            if repeats is not None:
+                # The orbitals of a result of weighted sectors (SCF.single_point._public_states): its occupations
+                # list every partner, f each; the sums over the partners of a solved state are the occupations
+                # times the weights that the SCF loop gives the density and these matrices.
+                repeats = np.asarray(repeats, dtype=np.int64)
+                if occupations.size == int(repeats.sum()) and occupations.size != repeats.size:
+                    starts = np.concatenate(([0], np.cumsum(repeats)[:-1]))
+                    occupations = np.add.reduceat(occupations, starts)
             if wavefunctions.sector_vectors is None or wavefunctions.representation_columns is None:
                 raise RuntimeError(
                     "the symmetry orbitals of this iteration were released before "
                     "their LDA+U occupation matrices were formed"
+                )
+            if any(item is not None for item in (getattr(wavefunctions, "sector_expansions", None) or ())):
+                raise NotImplementedError(
+                    "LDA+U reads the sector orbitals on the rows of their sectors; units of irreducible "
+                    "representations on partner rows (PARSEC_ORBITAL_IRREP_ROWS=partner) are not supported with it "
+                    "(PARSEC_ORBITAL_IRREP_ROWS=sector)"
                 )
             handovers = wavefunctions.sector_handovers or ()
             for representation, vectors in enumerate(wavefunctions.sector_vectors):
@@ -623,20 +997,36 @@ class DeviceHubbard:
         With ``gradients`` (the three matrices of
         :func:`parsec_python.Forces.hubbard_force.build_hubbard_projector_gradients`)
         also ``A_c[a, m, k] = sum_n f_n <d_c phi_a,m|psi_n> <phi_a,k|psi_n>``.
+        Sector orbitals whose operators carry one atom per orbit (``orbits``)
+        give the matrices of the representatives, turned onto the other atoms
+        of their orbits (:meth:`HubbardOrbits.expand`); the products of the
+        forces read every atom.
         """
 
         from time import perf_counter
 
+        from ..Eigensolvers.symmetry import CuPySymmetryOrbitals
+
         started = perf_counter()
-        atoms = self.atom_count
+        left_kind = (
+            "R"
+            if gradients is None and self.orbits is not None and isinstance(wavefunctions, CuPySymmetryOrbitals)
+            else "P"
+        )
+        atoms = self._left_atoms(left_kind)
         occupation = np.zeros((atoms, HUBBARD_ORBITALS, HUBBARD_ORBITALS))
         slopes = np.zeros((3, atoms, HUBBARD_ORBITALS, HUBBARD_ORBITALS))
         for key, vectors, weights, record in self._channel_blocks(wavefunctions, occupations):
             if vectors is None:
                 raise RuntimeError("a sector of these orbitals holds no basis")
-            part = self._products(key, vectors, weights, record, gradients)
+            part = self._products(key, vectors, weights, record, gradients, left_kind)
             occupation = occupation + part[0]
             slopes = slopes + part[1]
+        if left_kind == "R":
+            occupation = self.orbits.expand(occupation)
+        if self.average is not None and isinstance(wavefunctions, CuPySymmetryOrbitals):
+            # weighted sectors: the matrices of every partner (HubbardGroupAverage)
+            occupation = self.average.occupations(occupation)
         self.occupation_seconds += perf_counter() - started
         if gradients is None:
             return occupation
@@ -695,13 +1085,20 @@ class DeviceHubbard:
         factor = 2.0 / len(orbitals)
         forces = np.zeros((len(system.atoms), 3), dtype=np.float64)
         indices = list(self.projectors.atom_indices)
+        hubbard = np.zeros((len(indices), 3), dtype=np.float64)
         for spin, (_occupation, slopes) in enumerate(products):
             matrix = terms.potentials[spin]
             for axis in range(3):
                 value = np.einsum("amk,amk->a", matrix, slopes[axis]) + np.einsum(
                     "amk,akm->a", matrix, slopes[axis]
                 )
-                forces[indices, axis] += factor * value
+                hubbard[:, axis] += factor * value
+        from ..Eigensolvers.symmetry import CuPySymmetryOrbitals
+
+        if self.average is not None and any(isinstance(vectors, CuPySymmetryOrbitals) for vectors, _ in orbitals):
+            # weighted sectors: the forces of every partner (HubbardGroupAverage)
+            hubbard = self.average.forces(hubbard)
+        forces[indices] += hubbard
         return forces
 
 
@@ -709,17 +1106,38 @@ def device_hubbard_for(reference, backend, sectors, selected_backend: str):
     """The :class:`DeviceHubbard` of a prepared accelerated system, or ``None``.
 
     ``None`` without LDA+U and on the CPU backends, which apply the term on
-    the host.
+    the host.  Sectors whose reduction knows the orbits of its atoms carry one
+    atom per orbit (:func:`sector_hubbard_orbits`; the driver drops the orbits
+    under ``PARSEC_LDAU_PROJECTOR_ORBITS=off``).
     """
 
     projectors = getattr(reference, "hubbard", None)
     if projectors is None or selected_backend != "cupy":
         return None
+    decomposition = getattr(sectors, "decomposition", None)
+    orbits = (
+        None
+        if decomposition is None or ldau_projector_orbits_setting() == "off"
+        else sector_hubbard_orbits(
+            projectors,
+            reference.nonlocal_operator.labels,
+            decomposition.reduction,
+            reference.atoms,
+            reference.grid,
+        )
+    )
+    average = (
+        None
+        if decomposition is None
+        else sector_group_average(projectors, decomposition.reduction, reference.atoms, reference.grid)
+    )
     return DeviceHubbard(
         projectors,
         len(reference.nonlocal_operator.signs),
         backend,
         sectors,
+        orbits,
+        average,
     )
 
 
@@ -728,6 +1146,16 @@ __all__ = [
     "EXPANSION_COLUMNS",
     "HUBBARD_COLUMN_CHANNEL",
     "HostHubbardHamiltonian",
+    "HubbardGroupAverage",
+    "HubbardOrbits",
+    "LDAU_PROJECTOR_ORBITS_SWITCH",
+    "LDAU_WEIGHTED_SECTORS_DEFAULT",
+    "LDAU_WEIGHTED_SECTORS_SWITCH",
+    "ldau_orbits_exact",
+    "ldau_projector_orbits_setting",
+    "ldau_weighted_sectors_setting",
+    "sector_group_average",
+    "sector_hubbard_orbits",
     "augmented_nonlocal_operator",
     "device_hubbard_for",
     "expansion_coefficients",

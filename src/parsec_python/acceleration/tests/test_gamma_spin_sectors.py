@@ -316,8 +316,10 @@ class SwitchAndRefusalTests(unittest.TestCase):
 
     def test_the_mpi_runner_takes_the_cell(self) -> None:
         # The full-SCF runner divides the sectors of both channels among its ranks: single points, and under
-        # PARSEC_SPIN_SECTOR_FORCES=auto the forces and relaxations that keep the sectors (_refuse_spin_ionic_steps
-        # refuses the others, and every one under off); off of PARSEC_GAMMA_SPIN_SECTORS refuses the cell as before.
+        # PARSEC_SPIN_SECTOR_FORCES=auto the forces and relaxations that keep the sectors, and (since 2026-11-21) the
+        # moves without a point group as one sector of the identity of both channels (_spin_moves_without_group);
+        # _refuse_spin_ionic_steps refuses what main.py keeps on the k-point driver, and every one under off; off of
+        # PARSEC_GAMMA_SPIN_SECTORS refuses the cell as before.
         from parsec_python.acceleration.benchmarks import mpi_full_scf
 
         translation = self._default_routines()
@@ -329,14 +331,31 @@ class SwitchAndRefusalTests(unittest.TestCase):
             # (with PARSEC_MOVE_FLAG_SUBGROUP=auto) the flags of a single point with forces move no atom: it
             # keeps the sectors; a relaxation with fixed atoms of a spin cell keeps the full grid of both channels.
             mpi_full_scf._refuse_spin_ionic_steps(replace(forces, movable=(True, False)), 4)
+            self.assertFalse(mpi_full_scf._spin_moves_without_group(replace(translation, compute_forces=False)))
+            for changed in (
+                replace(translation, molecular_dynamics=object()),
+                replace(translation, relaxation=SimpleNamespace(method="manual")),
+                replace(translation, relaxation=SimpleNamespace(method="bfgs"), movable=(True, False)),
+                # forces that keep the sectors, prepared without symmetry (Ignore_Symmetry, --symmetry off)
+                forces,
+            ):
+                with self.subTest(changed=changed):
+                    self.assertTrue(mpi_full_scf._spin_moves_without_group(changed))
+                    mpi_full_scf._refuse_spin_ionic_steps(changed, 4)
             for changed, reason in (
-                (replace(translation, molecular_dynamics=object()), "molecular dynamics uses no symmetry"),
-                (replace(translation, relaxation=SimpleNamespace(method="manual")), "manual movements"),
-                (replace(translation, relaxation=SimpleNamespace(method="bfgs"), movable=(True, False)), "Move_Flag"),
                 (replace(self.translation, compute_forces=True), "Fortran-derived routines"),
+                (replace(self.translation, molecular_dynamics=object()), "molecular dynamics uses no symmetry"),
             ):
                 with self.subTest(reason=reason), self.assertRaisesRegex(ValueError, reason):
+                    self.assertFalse(mpi_full_scf._spin_moves_without_group(changed))
                     mpi_full_scf._refuse_spin_ionic_steps(changed, 4)
+            with mock.patch.dict(os.environ, {"PARSEC_PERIODIC_SECTOR_FORCES": "off"}):
+                moving = replace(translation, molecular_dynamics=object())
+                self.assertFalse(mpi_full_scf._spin_moves_without_group(moving))
+                with self.assertRaisesRegex(ValueError, "molecular dynamics"):
+                    mpi_full_scf._refuse_spin_ionic_steps(moving, 4)
+            self.assertFalse(mpi_full_scf._spin_moves_without_group(
+                replace(translation, molecular_dynamics=object()), supercell=True))
             with self.assertRaisesRegex(ValueError, "supercell"):
                 mpi_full_scf._refuse_spin_ionic_steps(forces, 4, supercell=True)
             mpi_full_scf._refuse_spin_ionic_steps(replace(translation, molecular_dynamics=object()), 1)

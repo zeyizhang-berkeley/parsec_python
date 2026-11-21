@@ -3,8 +3,9 @@
 PARSEC 1.5 uses no point group for a cluster with ``Polarizability``, ``Add_Point_Charges``,
 ``Foldblock_Side_Length`` 2, a restart from ``wfn.dat`` (``Restart_From_Wfndat``) and, in this port, for the two
 channels of a spin-polarized ``Restart_Run``.  The accelerated driver keeps the sectors of the subgroup each of them
-leaves intact, every case behind a switch whose ``off`` restores the full grid of before, bit for bit (FDET,
-manual movements and molecular dynamics keep the full grid):
+leaves intact, every case behind a switch whose ``off`` restores the full grid of before, bit for bit (FDET keeps
+the full grid; molecular dynamics and manual movements keep the sectors of the group their structures keep under
+``PARSEC_MOVING_SECTORS``, :mod:`.moving_sectors`, which checks the group at every structure):
 
 ``PARSEC_POLARIZABILITY_SYMMETRY`` (``auto``|``on``|``off``)
     The seven field loops of ``polar.f90``; ``auto`` takes the route below where the points of the full grid times

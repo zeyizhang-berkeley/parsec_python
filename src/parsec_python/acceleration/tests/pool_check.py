@@ -4,6 +4,7 @@
     python -m parsec_python.acceleration.tests.pool_check scf DRIVER RANKS POOLS
     python -m parsec_python.acceleration.tests.pool_check sectors RANKS POOLS
     python -m parsec_python.acceleration.tests.pool_check guard RANKS SECTOR_POOLS PLAIN_POOLS
+    python -m parsec_python.acceleration.tests.pool_check buffers RANKS [EXCHANGE_BYTES]
 
 Run it with ``OPENBLAS_NUM_THREADS=1`` (test_kpoint_pools.py does): the package imports NumPy before
 this module, so the settings below come too late for the BLAS of a ``-m`` run (:mod:`.thread_mpi`).  The
@@ -44,15 +45,28 @@ from parsec_python.Eigensolvers import ChebFFSettings, EigvalSettings, SubspaceS
 _REQUESTED = 30
 
 
-def _operator():
+def _operator(real: bool = False):
+    """The Bloch operator of the fixture's k-point; ``real``: that of ``k = 0`` in real arithmetic (the real Gamma
+    point, ``PARSEC_KPOINT_REAL_GAMMA``)."""
     from parsec_python.acceleration.Hamiltonian.device_bloch import DeviceBlochConverter, NumpyArrayBackend
     from parsec_python.Hamiltonian.kpoint_operator import KPointKohnShamHamiltonian
     from parsec_python.tests.unit.test_hamiltonian_fast_paths import _PeriodicFixture
 
     _PeriodicFixture.setUpClass()
     fx = _PeriodicFixture
+    converter = DeviceBlochConverter(NumpyArrayBackend())
+    if real:
+        from parsec_python.V_ion import build_nonlocal_projectors
+
+        gamma = np.zeros(3)
+        projectors = build_nonlocal_projectors(fx.grid, fx.atoms, fx.pots, fx.specs, fx.cell.lattice_vectors, k_point=gamma)
+        converter.real_gamma = True
+        operator = converter.operator(KPointKohnShamHamiltonian(fx.laplacian, fx.gradient, fx.potential, projectors, gamma))
+        if not operator.real_arithmetic:
+            raise RuntimeError("the operator of k = 0 is not real")
+        return operator
     host = KPointKohnShamHamiltonian(fx.laplacian, fx.gradient, fx.potential, fx.nonlocal_k, fx.k_point)
-    return DeviceBlochConverter(NumpyArrayBackend()).operator(host)
+    return converter.operator(host)
 
 
 def _settings(method: str) -> EigvalSettings:
@@ -77,8 +91,32 @@ def _solves(solve, steps: int):
     return out
 
 
-def check_eigensolver(method: str, sizes: str, steps: int) -> dict:
-    operator = _operator()
+def check_buffers(ranks: int) -> dict:
+    """The round buffers a group of the block route keeps (names and bytes) after a complex solve, then a real solve
+    of ``k = 0`` (the real Gamma point beside the complex k-points of a pool), and in the other order."""
+
+    operators = {"complex": _operator(False), "real": _operator(True)}
+    settings = _settings("chebff")
+
+    def rank(context):
+        report = {}
+        for order in (("complex", "real"), ("real", "complex")):
+            group = ColumnGroup(context.comm, np)
+            group.route = "block"
+            stages = []
+            for kind in order:
+                solve_column_eigval(
+                    operators[kind], _REQUESTED, settings=settings, group=group, state=None, xp=np, route="block"
+                )
+                stages.append({str(key): int(value.nbytes) for key, value in group._buffers.items()})
+            report["-".join(order)] = stages
+        return report
+
+    return {"ranks": run_ranks(ranks, rank)}
+
+
+def check_eigensolver(method: str, sizes: str, steps: int, real: bool = False) -> dict:
+    operator = _operator(real)
     settings = _settings(method)
     converge = method.startswith("chebdav")
     reference = _solves(
@@ -89,17 +127,23 @@ def check_eigensolver(method: str, sizes: str, steps: int) -> dict:
     )
     report = {}
     for size in (int(value) for value in sizes.split(",")):
+        kinds: list[str] = []
 
         def rank(context):
             group = ColumnGroup(context.comm, np)
-            return _solves(
-                lambda state: solve_column_eigval(
+
+            def solve(state):
+                result = solve_column_eigval(
                     operator, _REQUESTED, settings=settings, group=group, state=state, xp=np, converge_first=converge
-                ),
-                steps,
-            )
+                )
+                kinds.append(np.dtype(result.state.vectors.dtype).str)
+                return result
+
+            return _solves(solve, steps)
 
         results = run_ranks(size, rank)
+        if real:
+            report.setdefault("kinds", sorted(set(kinds)))
         equal = all(
             np.array_equal(a[0], b[0]) and np.array_equal(a[1], b[1])
             for other in results[1:]
@@ -150,10 +194,15 @@ def check_scf(name: str, ranks: int, pools: int) -> dict:
     return {"serial": serial, "pooled": pooled}
 
 
-def check_sectors(ranks: int, pools: int) -> dict:
+def check_sectors(ranks: int, pools: int, real: bool = False) -> dict:
     """The scalar SCF of the silicon cube at the eight time-reversal invariant k-points, its k-points in the sectors
-    of their little groups: the pools (tasks: the sectors) against one process."""
+    of their little groups: the pools (tasks: the sectors) against one process.  ``real``: the floors of the real
+    Gamma point and of the psi gauge at 0 (``kpoint_real``), so that the small cube takes them; the summaries count
+    the real operators made (``real_operators``, over every rank of the pools)."""
     from dataclasses import replace
+
+    from parsec_python.acceleration.Hamiltonian import device_bloch
+    from parsec_python.acceleration.SCF import kpoint_real
 
     from parsec_python.acceleration.SCF import kpoint_sectors
     from parsec_python.acceleration.SCF.kpoint_sectors import sector_solver
@@ -161,8 +210,23 @@ def check_sectors(ranks: int, pools: int) -> dict:
     from parsec_python.SCF.kpoints import run_scf_kpoints
     from parsec_python.SCF.pbc import prepare_periodic_single_point
 
-    os.environ["PARSEC_KPOINT_SECTORS"] = "auto"
+    # "whole": one task per k-point (with kinetic=bloch: the psi gauge of the time-reversal invariant points)
+    os.environ["PARSEC_KPOINT_SECTORS"] = "off" if os.environ.get("POOL_CHECK_WHOLE") else "auto"
     kpoint_sectors._MINIMUM_ENTRIES = 0  # the small cube is split all the same
+    if real:
+        kpoint_real._MINIMUM_ENTRIES = kpoint_real._PSI_MINIMUM_ENTRIES = 0
+    made = {"real": 0}
+    lock = threading.Lock()
+    original = device_bloch.DeviceBlochConverter.operator
+
+    def counted(converter, hamiltonian, **keywords):
+        operator = original(converter, hamiltonian, **keywords)
+        if operator.real_arithmetic:
+            with lock:
+                made["real"] += 1
+        return operator
+
+    device_bloch.DeviceBlochConverter.operator = counted
     if os.environ.get("POOL_CHECK_GROW"):
         # no margin and no extra states: sectors miss levels, get more states and are solved again
         kpoint_sectors._EXTRA_STATES = 0
@@ -175,15 +239,16 @@ def check_sectors(ranks: int, pools: int) -> dict:
     weights = np.full(8, 0.125)
     def counters(found) -> dict:
         detail = found.timings.detail
-        names = ("tasks", "regrowths", "regrown_tasks", "rebuilds")
+        names = ("tasks", "regrowths", "regrown_tasks", "rebuilds", "pairs")
         return {name: float(detail.get(f"kpoint_sector_{name}", 0.0)) for name in names}
 
     result = run_scf_kpoints(system, k_points, weights)
-    serial = dict(_summary(result), **counters(result))
+    serial = dict(_summary(result), **counters(result), real_operators=made["real"])
+    made["real"] = 0
 
     def solver(job, **options):
-        made = sector_solver(job, _thread_solver, **options)
-        return _thread_solver(job, **options) if made is None else made
+        found = sector_solver(job, _thread_solver, **options)
+        return _thread_solver(job, **options) if found is None else found
 
     def rank(context):
         _LOCAL.context, _LOCAL.pools = context, pools
@@ -192,7 +257,7 @@ def check_sectors(ranks: int, pools: int) -> dict:
 
     with mock.patch("parsec_python.SCF.kpoints.make_kpoint_solver", solver):
         pooled = run_ranks(ranks, rank)
-    return {"serial": serial, "pooled": pooled}
+    return {"serial": serial, "pooled": pooled, "pooled_real_operators": made["real"]}
 
 
 def check_forces(ranks: int, pools: int, sectors: str) -> dict:
@@ -363,6 +428,13 @@ def main() -> None:
         os.environ["PARSEC_KPOINT_RITZ"] = argument.split("=", 1)[1]
         sys.argv.remove(argument)
     # "grow": sectors without margin (check_sectors), so that they get more states and are solved again
+    if "whole" in sys.argv[1:]:
+        os.environ["POOL_CHECK_WHOLE"] = "1"
+        sys.argv.remove("whole")
+    # "trimoff": PARSEC_KPOINT_TRIM_REAL=off (the u gauge and every sector of the time-reversal invariant points)
+    if "trimoff" in sys.argv[1:]:
+        os.environ["PARSEC_KPOINT_TRIM_REAL"] = "off"
+        sys.argv.remove("trimoff")
     if "grow" in sys.argv[1:]:
         os.environ["POOL_CHECK_GROW"] = "1"
         sys.argv.remove("grow")
@@ -370,22 +442,36 @@ def main() -> None:
     for argument in [a for a in sys.argv[1:] if a.startswith("assign=")]:
         os.environ["PARSEC_KPOINT_POOL_ASSIGN"] = argument.split("=", 1)[1]
         sys.argv.remove(argument)
+    # "kinetic=<gradient|bloch|trim>": the PARSEC_KPOINT_KINETIC of the run (the Bloch form at the time-reversal
+    # invariant points: the conjugate pairs of their sectors, PARSEC_KPOINT_TRIM_REAL)
+    for argument in [a for a in sys.argv[1:] if a.startswith("kinetic=")]:
+        os.environ["PARSEC_KPOINT_KINETIC"] = argument.split("=", 1)[1]
+        sys.argv.remove(argument)
+    # "real": the eigensolver of the real operator of k = 0 (the real Gamma point, PARSEC_KPOINT_REAL_GAMMA)
+    real = "real" in sys.argv[1:]
+    if real:
+        sys.argv.remove("real")
     mode = sys.argv[1]
     if mode == "eigensolver":
         exchange = sys.argv[5] if len(sys.argv) > 5 else None
         if exchange is not None:
             os.environ["PARSEC_MPI_SHARED_EXCHANGE_BYTES"] = exchange
-        payload = check_eigensolver(sys.argv[2], sys.argv[3], int(sys.argv[4]))
+        payload = check_eigensolver(sys.argv[2], sys.argv[3], int(sys.argv[4]), real=real)
     elif mode == "scf":
         payload = check_scf(sys.argv[2], int(sys.argv[3]), int(sys.argv[4]))
     elif mode == "sectors":
-        payload = check_sectors(int(sys.argv[2]), int(sys.argv[3]))
+        payload = check_sectors(int(sys.argv[2]), int(sys.argv[3]), real=real)
     elif mode == "forces":
         payload = check_forces(int(sys.argv[2]), int(sys.argv[3]), sys.argv[4])
     elif mode == "guard":
         payload = check_guard(int(sys.argv[2]), int(sys.argv[3]), int(sys.argv[4]))
     elif mode == "projectors":
         payload = check_projectors(int(sys.argv[2]))
+    elif mode == "buffers":
+        exchange = sys.argv[3] if len(sys.argv) > 3 else None
+        if exchange is not None:
+            os.environ["PARSEC_MPI_SHARED_EXCHANGE_BYTES"] = exchange
+        payload = check_buffers(int(sys.argv[2]))
     else:
         raise SystemExit(f"unknown mode {mode}")
     print("RESULT " + json.dumps(payload))

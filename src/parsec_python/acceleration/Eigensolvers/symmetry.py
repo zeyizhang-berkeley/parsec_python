@@ -46,7 +46,7 @@ from ..backends.implicit_stencil import (
     implicit_tile_for_sector,
     regular_tile_share,
 )
-from .distributed_state import _devices_can_filter, shared_basis_devices, shared_block_bytes
+from .distributed_state import shared_basis_devices, shared_block_bytes
 from .eigval import DEVICE_ITERATIVE_SOLVERS, CuPyEigvalResult, CuPyEigvalSolver, spill_download_order
 from .filter_graph import graph_route_name
 from .handover import (
@@ -146,6 +146,12 @@ class CuPySymmetryOrbitals:
     sector_orbits: tuple[np.ndarray | None, ...] | None = None
     sector_scales: tuple[np.ndarray | None, ...] | None = None
     wedge_size: int | None = None
+    # Per sector, ``None`` or for a unit on partner rows (PARSEC_ORBITAL_IRREP_ROWS=partner) the ``(orbits, rows,
+    # values)`` of ``ReflectionRepresentationDecomposition.partner_expansion``: its orbit values are ``values *
+    # x[rows]`` on ``orbits``.  Its ``sector_orbits`` and ``sector_scales`` name one orbit of ``H`` per partner row,
+    # which take the density of the whole orbit of ``K`` (averaged over the full group with the others); an export
+    # takes the expansion instead.
+    sector_expansions: tuple[Any, ...] | None = None
     remote_sectors: bool = False
     # The spin channel whose orbitals these are, where the solver serves the
     # two channels of a spin-polarized loop (``None`` otherwise): an MPI
@@ -219,9 +225,15 @@ class CuPySymmetryOrbitals:
                     else:
                         selected = np.asarray(source[:, source_columns])
                     wedge = np.zeros((self.wedge_size, columns.size), dtype=np.float64)
-                    wedge[self.sector_orbits[representation], :] = (
-                        selected * self.sector_scales[representation][:, None]
-                    )
+                    expansion = None if self.sector_expansions is None else self.sector_expansions[representation]
+                    if expansion is not None:
+                        # a unit on partner rows: every coefficient of its sector of H from its partner row
+                        orbits, rows, values = expansion
+                        wedge[orbits, :] = np.asarray(selected)[rows] * values[:, None]
+                    else:
+                        wedge[self.sector_orbits[representation], :] = (
+                            selected * self.sector_scales[representation][:, None]
+                        )
                 full[:, columns] = wedge[self.full_to_wedge, :] * phases[:, None]
         if self.state_weights is not None:
             # Every partner of a weighted state, from its images under the coset representatives.
@@ -299,6 +311,15 @@ class CuPySymmetryOrbitals:
                     selected = source.column_array(source_columns, device=int(cp.cuda.Device().id))
                 else:
                     selected = cp.asfortranarray(source[:, source_columns])
+                expansion = None if self.sector_expansions is None else self.sector_expansions[representation]
+                if expansion is not None:
+                    # a unit on partner rows: every coefficient of its sector of H from its partner row
+                    orbits, rows, values = expansion
+                    wedge[
+                        cp.asarray(orbits, dtype=cp.int64)[:, None],
+                        cp.asarray(output_columns, dtype=cp.int64)[None, :],
+                    ] = selected[cp.asarray(rows, dtype=cp.int64)] * cp.asarray(values, dtype=cp.float64)[:, None]
+                    continue
                 selected *= cp.asarray(
                     self.sector_scales[representation], dtype=cp.float64
                 )[:, None]
@@ -454,10 +475,14 @@ def _vectors_on_host(solver: Any) -> bool:
 
 
 def fixed_state_count_requested(reference) -> bool:
-    """Whether the input of a prepared system asks for ``Fix_Number_Eigenvalues``."""
+    """Whether the sectors of a prepared system keep the counts of their first solve: ``Fix_Number_Eigenvalues``
+    under ``PARSEC_FIXED_STATES_BUFFER=off`` (``auto``, the default, keeps the counts a run without the keyword
+    finds, with the buffer: :func:`parsec_python.models.fixed_states_buffer_setting`)."""
+
+    from parsec_python.models import fixed_states_keep_parsec_counts
 
     eigensolver = getattr(getattr(reference, "input", None), "eigensolver", None)
-    return bool(getattr(eigensolver, "fixed_state_count", False))
+    return fixed_states_keep_parsec_counts(eigensolver)
 
 
 # The margin of the initial state count of every weighted sector over its even share (see
@@ -495,12 +520,22 @@ def irrep_units_refusal(decomposition, settings) -> str | None:
     The units with a projector (``PARSEC_ORBITAL_IRREPS``) keep their bases in the range of the projector after
     every Chebyshev filter (:mod:`.irrep_projection`): the CHEBFF first solve and the SUBSPACE passes.  CHEBDAV
     inserts random vectors between its filters and ARPACK and the dense solver filter nothing, so those first solves
-    are refused (``Eigensolver: chebff``, or ``PARSEC_ORBITAL_IRREPS=off``).  ``None`` where nothing stands in the way.
+    are refused (``Eigensolver: chebff``, or ``PARSEC_ORBITAL_IRREPS=off``).  So is a unit whose representations
+    have no function on the grid (its projector's range is empty: a grid of a few points per edge of a large group,
+    :attr:`..Symmetry.representations.ReflectionRepresentationDecomposition.empty_units`), with any first solve.
+    ``None`` where nothing stands in the way.
     """
 
     projected = getattr(decomposition, "projected_sectors", ())
     if not projected:
         return None
+    empty = getattr(decomposition, "empty_units", ())
+    if empty:
+        return (
+            f"PARSEC_ORBITAL_IRREPS: the unit(s) {', '.join(map(str, empty))} of irreducible representations have no "
+            f"function on this grid (the range of their projector is empty: the grid is too coarse for the "
+            f"representations of its point group); PARSEC_ORBITAL_IRREPS=off solves the sectors of before"
+        )
     method = getattr(settings, "initial_method", "chebff")
     if method != "chebff":
         return (
@@ -525,10 +560,60 @@ def sector_limit(decomposition, representation: int, count: int) -> int:
     projected = getattr(decomposition, "sector_projected", None)
     if projected is None or not projected(representation):
         return size
+    partner = getattr(decomposition, "partner_cosets", None)
+    if partner is not None and partner(representation) is not None:
+        # a unit on partner rows (PARSEC_ORBITAL_IRREP_ROWS=partner): its rows are the range of its projector
+        return int(decomposition.solved_size(representation))
     cosets = int(getattr(decomposition.reduction, "coset_count", 1) or 1)
     if int(count) <= size // (2 * cosets):
         return size
     return int(decomposition.sector_rank(representation))
+
+
+def _solved_rows_of(solver, representation: int) -> int:
+    """The rows on which ``solver`` solves sector ``representation`` (``CuPySymmetrySCFEigensolver._solved_rows``:
+    its own, or the partner rows of a unit, ``PARSEC_ORBITAL_IRREP_ROWS``); those of the sector for a solver built
+    without them."""
+
+    rows = getattr(solver, "_solved_rows", None)
+    if rows is None:
+        return int(solver.decomposition.sector_size(representation))
+    return int(rows[int(representation)])
+
+
+def _reduce_sector_projectors(solver, operator) -> list:
+    """Full-grid projectors (or one component of their gradients) reduced to every sector ``solver`` solves.
+
+    The sectors of ``H`` by its decomposition, a unit on partner rows (``solver._partner_units``,
+    ``PARSEC_ORBITAL_IRREP_ROWS``) by its sector of ``K``
+    (:meth:`..Symmetry.representations.ReflectionRepresentationDecomposition.partner_decomposition`), the reduction
+    its operators were built with.  ``None`` for the sectors of other ranks.
+    """
+
+    decomposition = solver.decomposition
+    count = decomposition.representation_count
+    partner_units = getattr(solver, "_partner_units", ())
+    regular = tuple(index for index in solver._owned_representations if index not in partner_units)
+    reduced = list(decomposition.reduce_nonlocal_operators(operator, regular)) if regular else [None] * count
+    for representation in partner_units:
+        reduced[representation] = decomposition.partner_decomposition(representation).reduce_nonlocal_operators(
+            operator
+        )[0]
+    return reduced
+
+
+def solved_sector_sizes(decomposition) -> tuple[int, ...]:
+    """The rows on which every sector of ``decomposition`` is solved: its own, or for a unit on partner rows
+    (``PARSEC_ORBITAL_IRREP_ROWS=partner``) those of its sector of the larger subgroup
+    (:meth:`..Symmetry.representations.ReflectionRepresentationDecomposition.solved_size`).  The same on every MPI
+    rank, which places the sectors by these costs."""
+
+    sizes = getattr(decomposition, "solved_sizes", None)
+    if sizes is None:
+        sizes = getattr(decomposition, "sector_sizes", None)
+    if sizes is None:
+        sizes = [decomposition.sector_size(index) for index in range(int(decomposition.representation_count))]
+    return tuple(int(size) for size in sizes)
 
 
 def _unit_shares(decomposition):
@@ -628,10 +713,7 @@ def sector_placement_costs(decomposition, filter_plan: FilterPlan | None = None)
     the same costs from the same decomposition, so that all of them place the sectors alike.
     """
 
-    sizes = getattr(decomposition, "sector_sizes", None)
-    if sizes is None:
-        sizes = [decomposition.sector_size(index) for index in range(int(decomposition.representation_count))]
-    sizes = tuple(int(size) for size in sizes)
+    sizes = solved_sector_sizes(decomposition)
     if filter_plan is None:
         return tuple(float(size) for size in sizes)
     weights = getattr(decomposition, "sector_weights", None)
@@ -663,10 +745,7 @@ def units_fit_whole(
 
     if _unit_shares(decomposition) is None or filter_plan is None or not devices:
         return False
-    sizes = getattr(decomposition, "sector_sizes", None)
-    if sizes is None:
-        sizes = [decomposition.sector_size(index) for index in range(int(decomposition.representation_count))]
-    sizes = tuple(int(size) for size in sizes)
+    sizes = solved_sector_sizes(decomposition)
     weights = getattr(decomposition, "sector_weights", None)
     weights = np.ones(len(sizes), dtype=np.int64) if weights is None else np.asarray(weights, dtype=np.int64)
     chosen = range(len(sizes)) if owned is None else sorted({int(index) for index in owned})
@@ -716,10 +795,7 @@ def sector_bases_divisible(
     from .distributed_state import distributed_state_policy
     from .rayleigh_ritz import generalized_ritz_requested
 
-    sizes = getattr(decomposition, "sector_sizes", None)
-    if sizes is None:
-        sizes = [decomposition.sector_size(index) for index in range(int(decomposition.representation_count))]
-    sizes = tuple(int(size) for size in sizes)
+    sizes = solved_sector_sizes(decomposition)
     policy = distributed_state_policy()
     if units_fit_whole(decomposition, filter_plan, devices, device_bytes, owned=owned):
         return (False,) * len(sizes)
@@ -729,9 +805,12 @@ def sector_bases_divisible(
         return None
     weights = getattr(decomposition, "sector_weights", None)
     weights = np.ones(len(sizes), dtype=np.int64) if weights is None else np.asarray(weights, dtype=np.int64)
+    # (a unit on partner rows takes the Ritz route of its sector of H, rayleigh_ritz.ritz_route_rows)
+    partner = getattr(decomposition, "partner_cosets", None)
     return tuple(
         bool(generalized_ritz_requested(
-            size, decomposition_first_count(
+            int(decomposition.sector_size(index)) if partner is not None and partner(index) is not None else size,
+            decomposition_first_count(
                 decomposition, index, size, weights, int(filter_plan.states), int(filter_plan.buffer))))
         for index, size in enumerate(sizes)
     )
@@ -772,8 +851,11 @@ def process_pool_min_bytes() -> int:
     The device pool solves the sectors one after another, each basis shared by all the GPUs; it saves the
     imbalance of disjoint groups but adds the exchanges and synchronizations of a shared basis to every sector
     it solves, whatever its size.  One process (:func:`process_sector_device_groups`) takes it only where the
-    mean sector gives every GPU at least this many bytes of basis (:func:`process_pool_share_bytes`).  A
-    nonnegative integer of bytes; ``0`` takes the pool by the memory rule alone, as the MPI runner does.
+    mean sector gives every GPU at least this many bytes of basis (:func:`process_pool_share_bytes`), and since
+    2026-11-21 so do the GPUs of each rank of the MPI runner under its launch settings (``PARSEC_CUPY_DEVICE_RANDOM=1``
+    or ``PARSEC_CUPY_DISTRIBUTED_FILTER=1``, ``experimental/mpi_scf.runner_pool_floor_applies``; under the code
+    defaults of both the runner keeps the memory rule alone).  A
+    nonnegative integer of bytes; ``0`` takes the pool by the memory rule alone.
     """
 
     raw = os.environ.get("PARSEC_CUPY_SECTOR_POOL_MIN_BYTES", "").strip()
@@ -820,10 +902,12 @@ def process_sector_device_groups(
     devices costliest first.  Every sector spreads over all the devices instead, solved one after another (the
     device pool, ``PARSEC_SECTOR_DEVICE_POOL=auto``), where that lowers the fullest device by more than 5 % and
     the first solve divides every basis over the devices of a group: ``divided`` (``Eigensolver: chebff``)
-    and every sector marked by :func:`sector_bases_divisible`.  Unlike the runner, one process also asks that
+    and every sector marked by :func:`sector_bases_divisible`.  One process also asks that
     the mean sector give every device at least ``PARSEC_CUPY_SECTOR_POOL_MIN_BYTES`` of basis
     (:func:`process_pool_min_bytes`; not judged without ``filter_plan``, whose counts the costs need): below it
     the shared bases cost more time than the imbalance of disjoint groups, and their memory matters nowhere.
+    The ranks of the runner ask it only under ``PARSEC_CUPY_DEVICE_RANDOM=1`` or ``PARSEC_CUPY_DISTRIBUTED_FILTER=1``
+    (since 2026-11-21, ``experimental/mpi_scf.runner_pool_floor_applies``).
     One sector (the identity of ``PARSEC_CUPY_SINGLE_SECTOR=on``) gets all the devices.  A group of several
     devices shares the basis of its sector where :func:`distributed_state.shared_basis_devices` allows it, and
     the first device of a group holds the sector otherwise.  ``None`` under ``cyclic`` or with one device:
@@ -1164,11 +1248,16 @@ def bracket_deficits(values, weights, requested, failing) -> dict[int, int]:
 class CuPySymmetrySCFEigensolver:
     """Merge persistent wedge eigensolvers into one SCF eigensolver callable.
 
-    ``fixed_state_count`` is ``Fix_Number_Eigenvalues`` (set by the driver
-    that prepared the system; see :meth:`_fix_sector_states`).
+    ``fixed_state_count`` is ``Fix_Number_Eigenvalues`` under
+    ``PARSEC_FIXED_STATES_BUFFER=off`` (set by the driver that prepared the
+    system; see :meth:`_fix_sector_states`); ``fixed_state_buffer`` the
+    working buffer the sectors take back under ``Fix_Number_Eigenvalues``
+    with ``auto``, whose settings arrive without one
+    (:func:`parsec_python.models.fixed_states_sector_buffer`).
     """
 
     fixed_state_count = False
+    fixed_state_buffer = 0
 
     def __init__(
         self,
@@ -1229,6 +1318,12 @@ class CuPySymmetrySCFEigensolver:
         sector_growth_release_setting()
         cut_sectors_first_setting()
         regrown_trim_setting()
+
+        # A unit of irreducible representations without a function on the grid stops the run before its sizes
+        # place the sectors (the driver refuses it earlier, with the first solve of the input).
+        refusal = irrep_units_refusal(decomposition, None)
+        if refusal is not None:
+            raise ValueError(refusal)
 
         cp, _ = require_cupy()
         self._primary_device_id = int(cp.cuda.Device().id)
@@ -1409,31 +1504,63 @@ class CuPySymmetrySCFEigensolver:
             # recurrence completes its scalar download before any large
             # filter or host Ritz solve is submitted by the worker threads.
             self._bound_streams = self._streams
-        # Host orbit index list of every sector this process solves; an MPI
-        # rank keeps none for the sectors of other ranks.  No device copy of
-        # these lists or of the full-grid expansion maps is made here: the
-        # SCF loop reads none, and the orbital export uploads its own.
-        self._sector_orbits = tuple(
-            decomposition.sector_orbit_indices(representation)
-            if representation in self._owned_representations
-            else None
+        # The units of irreducible representations of this process solved on the orbits of a larger subgroup K
+        # (PARSEC_ORBITAL_IRREP_ROWS=partner, Symmetry/representations.partner_rows): one partner row of each of
+        # their representations, [K:H] times fewer rows, with a stencil and projectors of their own and no projector
+        # after the filters.  Their orbit list names, for every row, the orbit of H of the first coefficient of its
+        # orbit of K: that orbit takes the density of the whole orbit of K (the average over the full group, which
+        # every density of these sectors takes, spreads it) and gives the row its local potential; the export
+        # expands them (CuPySymmetryOrbitals.sector_expansions).
+        partner_cosets = getattr(decomposition, "partner_cosets", None)
+        self._partner_units = tuple(
+            representation for representation in self._owned_representations
+            if partner_cosets is not None and partner_cosets(representation) is not None
+        )
+        # The rows on which every sector is solved (its own, or the partner rows of such a unit).
+        self._solved_rows = tuple(
+            int(decomposition.solved_size(representation))
+            if representation in self._partner_units
+            else int(decomposition.sector_size(representation))
             for representation in range(decomposition.representation_count)
         )
-        # ``1/sqrt(|O_w|)`` on the orbits of the same sectors.  Every density
-        # command reads these constant arrays, so they are formed once here
-        # and, like the orbit lists, shared read-only by all SCF steps.
-        sector_scales: list[np.ndarray | None] = []
-        for orbits in self._sector_orbits:
-            if orbits is None:
-                sector_scales.append(None)
-                continue
-            scales = np.ascontiguousarray(
-                1.0 / np.sqrt(decomposition.reduction.multiplicities[orbits]),
-                dtype=np.float64,
-            )
-            scales.setflags(write=False)
-            sector_scales.append(scales)
-        self._sector_scales = tuple(sector_scales)
+
+        # The partner rows, their sectors of K and their operators (Symmetry/operator_cache.build_partner_operators:
+        # the stencil from the grid as for every sector, the projectors of one atom per orbit of H) are prepared on a
+        # thread beside the operators of the sectors of H below, which they do not read; the same arrays as one after
+        # the other.
+        partner_job = partner_executor = compressed_projectors = None
+        if self._partner_units:
+            from ..Symmetry.axis_reflection import compress_projectors_for_sectors
+            from ..Symmetry.operator_cache import build_partner_operators
+            from ..Symmetry.representations import operator_build_workers
+
+            partner_units = self._partner_units
+            # one atom per orbit of the group of the sectors, for both
+            compressed_projectors = compress_projectors_for_sectors(nonlocal_operator, decomposition.reduction)
+
+            def prepare_partner(representation: int):
+                started = perf_counter()
+                decomposition.partner_rows(representation)
+                decomposition.partner_expansion(representation)
+                partner = decomposition.partner_decomposition(representation)
+                rows_seconds = perf_counter() - started
+                stencil, reduced, builder = build_partner_operators(
+                    partner, negative_laplacian, compressed_projectors
+                )
+                return stencil, reduced, builder, rows_seconds, perf_counter() - started - rows_seconds
+
+            def prepare_partners():
+                started = perf_counter()
+                workers = operator_build_workers(len(partner_units))
+                if workers == 1:
+                    built = [prepare_partner(representation) for representation in partner_units]
+                else:
+                    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="parsec-partner-rows") as executor:
+                        built = list(executor.map(prepare_partner, partner_units))
+                return built, perf_counter() - started
+
+            partner_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="parsec-partner-units")
+            partner_job = partner_executor.submit(prepare_partners)
 
         symmetric_rows = np.flatnonzero(
             np.all(decomposition.characters == 1, axis=1)
@@ -1452,26 +1579,48 @@ class CuPySymmetrySCFEigensolver:
         prepares_poisson = (
             mpi_context is None or mpi_context.rank == mpi_context.root
         )
-        if prepares_poisson or self._owned_representations:
+        assembled = (
+            None
+            if mpi_context is None
+            else (*self._owned_representations,
+                  self.totally_symmetric_representation)
+            if prepares_poisson
+            else self._owned_representations
+        )
+        if self._partner_units:
+            # The units on partner rows take the operators of their sector of K (below); the sector of H of the
+            # totally symmetric one is still assembled where it gives the Poisson stencil.
+            base = range(decomposition.representation_count) if assembled is None else assembled
+            assembled = tuple(sorted(
+                {int(index) for index in base if int(index) not in self._partner_units}
+                | ({self.totally_symmetric_representation} if prepares_poisson else set())
+            ))
+        if (prepares_poisson or self._owned_representations) and assembled != ():
             from ..Symmetry.axis_reflection import compress_projectors_for_sectors
 
-            static_operators = load_or_build_reduced_operators(
-                decomposition,
-                negative_laplacian,
-                # one atom per orbit of the group of the sectors (the same sector operators)
-                compress_projectors_for_sectors(nonlocal_operator, decomposition.reduction),
-                cache_directory=operator_cache_directory,
-                kinetic_key_seed=kinetic_cache_key,
-                decomposition_key_seed=decomposition_cache_key,
-                representations=(
-                    None
-                    if mpi_context is None
-                    else (*self._owned_representations,
-                          self.totally_symmetric_representation)
-                    if prepares_poisson
-                    else self._owned_representations
-                ),
+            # A totally symmetric unit on partner rows: its sector of H gives the Poisson stencil alone, its
+            # projectors are those of its sector of K.
+            stencil_only = tuple(
+                index for index in (self.totally_symmetric_representation,) if index in self._partner_units
             )
+            try:
+                static_operators = load_or_build_reduced_operators(
+                    decomposition,
+                    negative_laplacian,
+                    # one atom per orbit of the group of the sectors (the same sector operators)
+                    compress_projectors_for_sectors(nonlocal_operator, decomposition.reduction)
+                    if compressed_projectors is None
+                    else compressed_projectors,
+                    cache_directory=operator_cache_directory,
+                    kinetic_key_seed=kinetic_cache_key,
+                    decomposition_key_seed=decomposition_cache_key,
+                    representations=assembled,
+                    **({"stencil_only": stencil_only} if stencil_only else {}),
+                )
+            except BaseException:
+                if partner_executor is not None:
+                    partner_executor.shutdown(wait=True)
+                raise
         else:
             # A rank of a hybrid's MPI run that owns no sector assembles no
             # sector operator: it solves pair densities of the exchange only.
@@ -1501,13 +1650,91 @@ class CuPySymmetrySCFEigensolver:
             else None
         )
         self._totally_symmetric_negative_laplacian = None
+        # The operators every owned sector is solved with: those of the bundle, or for a unit on partner rows those
+        # of its sector of K (Symmetry/operator_cache.build_partner_operators: the stencil from the grid as for every
+        # sector, the projectors of one atom per orbit of H).
+        sector_stencils = list(static_operators.stencil_metadata)
+        sector_nonlocals = list(static_operators.nonlocal_operators)
+        self.partner_rows_record = None
+        if partner_job is not None:
+            waited = perf_counter()
+            try:
+                built, partner_seconds = partner_job.result()
+            finally:
+                partner_executor.shutdown(wait=True)
+            waited = perf_counter() - waited
+            builders = set()
+            for representation, (stencil, reduced, builder, _, _) in zip(self._partner_units, built, strict=True):
+                sector_stencils[representation] = stencil
+                sector_nonlocals[representation] = reduced
+                builders.add(builder)
+            self.partner_rows_record = (
+                f"{len(self._partner_units)} unit(s) on the orbits of a larger subgroup "
+                f"(PARSEC_ORBITAL_IRREP_ROWS=partner): "
+                + ", ".join(
+                    f"{representation}: {decomposition.sector_size(representation)} -> "
+                    f"{self._solved_rows[representation]} rows"
+                    for representation in self._partner_units
+                )
+                + f"; rows {sum(item[3] for item in built):.2f} s and operators {sum(item[4] for item in built):.2f} s "
+                f"({', '.join(sorted(builders))}) in {partner_seconds:.2f} s beside the sectors of H, "
+                f"{waited:.2f} s waited for"
+            )
+
+        def solved_orbits(representation: int) -> np.ndarray:
+            orbits = decomposition.sector_orbit_indices(representation)
+            if representation not in self._partner_units:
+                return orbits
+            first = np.ascontiguousarray(orbits[decomposition.partner_rows(representation).first])
+            first.setflags(write=False)
+            return first
+
+        # Host orbit index list of every sector this process solves; an MPI
+        # rank keeps none for the sectors of other ranks.  No device copy of
+        # these lists or of the full-grid expansion maps is made here: the
+        # SCF loop reads none, and the orbital export uploads its own.
+        self._sector_orbits = tuple(
+            solved_orbits(representation)
+            if representation in self._owned_representations
+            else None
+            for representation in range(decomposition.representation_count)
+        )
+        self._sector_expansions = (
+            None
+            if not self._partner_units
+            else tuple(
+                decomposition.partner_expansion(representation) if representation in self._partner_units else None
+                for representation in range(decomposition.representation_count)
+            )
+        )
+        # ``1/sqrt(|O_w|)`` on the orbits of the same sectors.  Every density
+        # command reads these constant arrays, so they are formed once here
+        # and, like the orbit lists, shared read-only by all SCF steps.
+        sector_scales: list[np.ndarray | None] = []
+        for orbits in self._sector_orbits:
+            if orbits is None:
+                sector_scales.append(None)
+                continue
+            scales = np.ascontiguousarray(
+                1.0 / np.sqrt(decomposition.reduction.multiplicities[orbits]),
+                dtype=np.float64,
+            )
+            scales.setflags(write=False)
+            sector_scales.append(scales)
+        self._sector_scales = tuple(sector_scales)
         built_metadata = [
             item for item in static_operators.stencil_metadata if item is not None
         ]
         # Sectors assembled by this process; sizes its stencil-packing pool.
-        self.assembled_sector_count = len(built_metadata)
+        self.assembled_sector_count = len(built_metadata) + len(self._partner_units)
         # (A rank of a hybrid's MPI run may own no sector: it solves pair
-        # densities of the exchange only.)
+        # densities of the exchange only.)  The sectors of H may share their
+        # neighbor table on a device; a unit on partner rows has its own.
+        built_metadata = [
+            item
+            for representation, item in enumerate(static_operators.stencil_metadata)
+            if item is not None and representation not in self._partner_units
+        ]
         first_neighbors = built_metadata[0].neighbors if built_metadata else None
         neighbors_are_shared = bool(built_metadata) and all(
             np.array_equal(first_neighbors, item.neighbors)
@@ -1517,16 +1744,16 @@ class CuPySymmetrySCFEigensolver:
         # slot-major layout (see ``implicit_tile_for_sector``).
         sector_tiles = {
             representation: implicit_tile_for_sector(
-                decomposition.sector_size(representation),
+                self._solved_rows[representation],
                 self._filter_device_count(representation),
                 float32_filter_requested(
-                    decomposition.sector_size(representation)
+                    self._solved_rows[representation]
                 ),
                 sectors_on_device=self._device_sector_count(representation),
                 work=self._sector_filter_work(
                     representation,
                     filter_plan,
-                    static_operators.stencil_metadata[representation],
+                    sector_stencils[representation],
                 ),
             )
             for representation in self._owned_representations
@@ -1546,8 +1773,8 @@ class CuPySymmetrySCFEigensolver:
         # parsec.out).
         self.nested_representations: tuple[int, ...] = ()
         for representation, (stencil_metadata, reduced_nonlocal) in enumerate(zip(
-            static_operators.stencil_metadata,
-            static_operators.nonlocal_operators,
+            sector_stencils,
+            sector_nonlocals,
             strict=True,
         )):
             if representation not in self._owned_representations:
@@ -1560,7 +1787,7 @@ class CuPySymmetrySCFEigensolver:
             sector_orbits = self._sector_orbits[representation]
             potential_key = (device_id, sector_orbits.tobytes())
             zero_local = np.zeros(
-                decomposition.sector_size(representation), dtype=np.float64
+                self._solved_rows[representation], dtype=np.float64
             )
             with cp.cuda.Device(device_id):
                 sector_timing = CuPyTimingStats()
@@ -1573,7 +1800,7 @@ class CuPySymmetrySCFEigensolver:
                     finite_difference_metadata=stencil_metadata,
                     shared_stencil_neighbors=(
                         shared_device_neighbors.get(device_id)
-                        if neighbors_are_shared
+                        if neighbors_are_shared and representation not in self._partner_units
                         else None
                     ),
                     shared_effective_potential=shared_device_potentials.get(
@@ -1591,29 +1818,15 @@ class CuPySymmetrySCFEigensolver:
                     nested_group = self.sector_device_groups.get(representation, ())
                     if getattr(mpi_context, "nested", False) and len(nested_group) > 1:
                         # The ranks of this sector's group share its basis, each over all its devices
-                        # (one rank per node, PARSEC_MPI_NESTED_SHARING).  Every device filters its columns
-                        # with the stencil-major and fused projector kernels (distributed_state._devices_can_filter),
-                        # which a switch or a failed build on one rank can take away; the ranks of the group agree
-                        # on it (mpi_nested_basis.nested_filter_agreement, since 2026-11-20) and stop together
-                        # where one lacks them, as the group of one GPU per rank needs the same kernels
-                        # (MPIShardGroup.filter): before, such a rank attached that group alone and the others
-                        # waited in collectives it never entered.
-                        from .mpi_nested_basis import attach_nested_group, nested_filter_agreement
+                        # (one rank per node, PARSEC_MPI_NESTED_SHARING).  Every device filters its columns with
+                        # graphs where they can record the operator and without them otherwise
+                        # (filter_graph.device_filter: an operator without the stencil-major kernels,
+                        # PARSEC_CUPY_STENCIL_MAJOR=0 or a failed build, gets replicas in its CSR layout,
+                        # distributed_filter.replica_csr), so every rank of the group attaches this group alike.
+                        # From 2026-11-20 to 2026-11-21 such an operator stopped the run here with an error.
+                        from .mpi_nested_basis import attach_nested_group
 
                         sector_comm = getattr(mpi_context, "sector_comm", mpi_context.comm)
-                        unable = nested_filter_agreement(sector_comm, _devices_can_filter(operator))
-                        if unable:
-                            members = tuple(getattr(mpi_context, "rank_groups", ())[representation]) if (
-                                representation < len(getattr(mpi_context, "rank_groups", ()))) else ()
-                            named = ", ".join(
-                                str(members[rank] if rank < len(members) else rank) for rank in unable
-                            )
-                            raise RuntimeError(
-                                f"the basis of sector {representation} cannot be shared over the GPUs of MPI "
-                                f"rank(s) {named}: their sector operator has no stencil-major or no fused "
-                                "projector kernels (a switch such as PARSEC_CUPY_STENCIL_MAJOR=0, or a failed "
-                                "build of those kernels), which every GPU of a shared basis filters with"
-                            )
                         attach_nested_group(
                             operator,
                             sector_comm,
@@ -1637,14 +1850,24 @@ class CuPySymmetrySCFEigensolver:
                             # device: one set of round buffers for all of them, as _state_fit_bytes counts.
                             round_buffers=shared_round_buffers,
                         )
-                if decomposition.sector_projected(representation) if hasattr(decomposition, "sector_projected") else False:
+                if representation in self._partner_units:
+                    # its Ritz route is that of its sector of H (rayleigh_ritz.ritz_route_rows)
+                    operator.ritz_route_rows = int(decomposition.sector_size(representation))
+                if (
+                    representation not in self._partner_units
+                    and getattr(decomposition, "sector_projected", lambda index: False)(representation)
+                ):
                     # A unit of irreducible representations of the full group: its filtered blocks are projected
                     # onto them (irrep_projection; PARSEC_ORBITAL_IRREPS).
                     from .irrep_projection import IrrepProjection
 
                     operator.irrep_projection = IrrepProjection(
                         *decomposition.projection_tables(representation), representation=representation)
-                if neighbors_are_shared and device_id not in shared_device_neighbors:
+                if (
+                    neighbors_are_shared
+                    and representation not in self._partner_units
+                    and device_id not in shared_device_neighbors
+                ):
                     selected_stencil = operator.compact_finite_difference
                     shared_device_neighbors[device_id] = getattr(
                         selected_stencil, "neighbors", None
@@ -2270,9 +2493,8 @@ class CuPySymmetrySCFEigensolver:
             return  # (a rank of a hybrid's MPI run without sectors)
         from ..Symmetry.axis_reflection import compress_projectors_for_sectors
 
-        reduced = self.decomposition.reduce_nonlocal_operators(
-            compress_projectors_for_sectors(nonlocal_operator, self.decomposition.reduction),
-            self._owned_representations,
+        reduced = _reduce_sector_projectors(
+            self, compress_projectors_for_sectors(nonlocal_operator, self.decomposition.reduction)
         )
         for representation in self._owned_representations:
             replace_operator_projectors(
@@ -2448,13 +2670,13 @@ class CuPySymmetrySCFEigensolver:
             # A rank of a hybrid's MPI run without sectors adds no terms.
             return len(gradients.labels), {}, {"gradients": built - started, "reduction": 0.0}
         reduced = [
-            self.decomposition.reduce_nonlocal_operators(
+            _reduce_sector_projectors(
+                self,
                 SimpleNamespace(
                     projectors=component,
                     signs=gradients.signs,
                     labels=gradients.labels,
-                ),
-                self._owned_representations,
+                )
             )
             for component in gradients.components
         ]
@@ -2565,7 +2787,7 @@ class CuPySymmetrySCFEigensolver:
         for representation, count in enumerate(counts):
             if self._solvers[representation] is None:
                 continue
-            rows = self.decomposition.sector_size(representation)
+            rows = _solved_rows_of(self, representation)
             owner = self._sector_device_ids[representation]
             group = getattr(self._operators[representation], "_mpi_shared_group", None)
             divided = _first_solve_divides_bases(self, representation)
@@ -2809,7 +3031,7 @@ class CuPySymmetrySCFEigensolver:
                 continue
             device_id = self._sector_device_ids[representation]
             persistent_bytes[device_id] += (
-                self.decomposition.sector_size(representation)
+                _solved_rows_of(self, representation)
                 * int(count)
                 * np.dtype(np.float64).itemsize
                 * self.spin_channel_count
@@ -2858,7 +3080,7 @@ class CuPySymmetrySCFEigensolver:
         self._spill_seconds = {}
         if self._host_spill_sector_states and staging == "persistent":
             sizes = {
-                representation: self.decomposition.sector_size(representation)
+                representation: _solved_rows_of(self, representation)
                 * int(count)
                 * np.dtype(np.float64).itemsize
                 for representation, count in enumerate(counts)
@@ -2952,7 +3174,7 @@ class CuPySymmetrySCFEigensolver:
         # With weighted sectors (a subgroup's one-dimensional sectors) every sector holds about
         # requested / sum(weights) of the states: the sum is the count of sectors of before.
         return decomposition_first_count(
-            self.decomposition, representation, self.decomposition.sector_size(representation),
+            self.decomposition, representation, _solved_rows_of(self, representation),
             self._sector_weight_array, requested_states, safety_buffer, margin)
 
     def _fit_sector_margins(self, requested_states: int, safety_buffer: int) -> None:
@@ -3377,7 +3599,7 @@ class CuPySymmetrySCFEigensolver:
         if counts is None:
             return 0
         return np.dtype(np.float64).itemsize * sum(
-            self.decomposition.sector_size(representation)
+            _solved_rows_of(self, representation)
             * int(counts[representation])
             for representation in self._owned_representations
         )
@@ -3868,6 +4090,7 @@ class CuPySymmetrySCFEigensolver:
             # sectors, and the root's density hook reads just the selection.
             sector_orbits=self._sector_orbits,
             sector_scales=self._sector_scales,
+            sector_expansions=getattr(self, "_sector_expansions", None),
             wedge_size=self.decomposition.wedge_size,
             point_group=(
                 self.decomposition.reduction
@@ -3903,6 +4126,11 @@ class CuPySymmetrySCFEigensolver:
         requested_states = int(requested_states)
         if requested_states < 1:
             raise ValueError("requested_states must be positive")
+        buffer = int(getattr(self, "fixed_state_buffer", 0) or 0)
+        if buffer > int(settings.safety_buffer):
+            # Fix_Number_Eigenvalues under PARSEC_FIXED_STATES_BUFFER=auto: the sectors work with the buffer of a run
+            # without the keyword, which the settings of the SCF (PARSEC's nn = nec) leave out
+            settings = replace(settings, safety_buffer=buffer)
         refusal = irrep_units_refusal(self.decomposition, settings)
         if refusal is not None:
             raise ValueError(refusal)

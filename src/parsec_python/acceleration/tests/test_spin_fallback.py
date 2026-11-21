@@ -337,6 +337,34 @@ class SharedFallbackRunTests(unittest.TestCase):
         np.testing.assert_allclose(results["on"][1], results["off"][1], rtol=0, atol=1e-6)
         self.assertLess(float(np.max(np.abs(results["off"][1]))), 1e-3)
 
+    def test_a_cell_is_prepared_as_the_identity_sector_of_the_ranks(self) -> None:
+        # The runner's ranks prepare a spin cell as one sector of the identity of both channels (after its guard
+        # fired, PARSEC_SPIN_FALLBACK_SHARED, or for moves without a point group, mpi_full_scf._spin_moves_without_group):
+        # before 2026-11-21 the early refusal of spin cells without a group in the driver stopped that preparation
+        # ("it is prepared without symmetry"; the runner's shared fallback of a cell on 4 ranks failed so on A100).
+        from parsec_python.acceleration import driver
+        from parsec_python.acceleration.experimental.mpi_scf import MPISectorContext
+        from parsec_python.acceleration.tests.test_kpoint_sector_guard import _oxygen
+        from parsec_python.acceleration.tests.test_mpi_domain import _Comm, _World
+
+        directory, problem = _oxygen("80", criterion="1.0e-8")
+        self.addCleanup(shutil.rmtree, directory, True)
+        context = MPISectorContext(_Comm(_World(1), 0))
+        context.divided_bases = True
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            system = driver.prepare_single_point(problem, backend="auto", symmetry="off", mpi_context=context,
+                                                 spin_identity_sector=True)
+        solver = system.backend.symmetry_eigensolver
+        self.assertEqual(solver.decomposition.representation_count, 1)
+        self.assertIn("for both spin channels", dict(system.backend_info.details)["symmetry_detection"])
+        self.assertIsNone(system.spin_sector_fallback)
+        # without the identity sector the cell is still refused before its preparation, as before
+        with warnings.catch_warnings(), self.assertRaisesRegex(ValueError, "it is prepared without symmetry"):
+            warnings.simplefilter("ignore")
+            driver.prepare_single_point(problem, backend="auto", symmetry="off",
+                                        mpi_context=MPISectorContext(_Comm(_World(1), 0)))
+
     def test_a_plan_that_does_not_fit_stops_before_the_full_grid(self) -> None:
         from parsec_python.acceleration import driver
         from parsec_python.acceleration.tests.test_kpoint_sector_guard import _oxygen

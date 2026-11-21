@@ -302,6 +302,11 @@ class DeviceTermTest(unittest.TestCase):
         )
         materialize_wavefunctions(system, result)
         expected = occupation_matrices(system.hubbard, result.wavefunctions, result.occupations)
+        average = system.hubbard_device.average
+        if average is not None:
+            # weighted sectors (PARSEC_LDAU_WEIGHTED_SECTORS): the matrices of the density the loop uses, averaged
+            # over the full group as that density is; the partners of the full-grid orbitals average to the same
+            expected = average.occupations(expected)
         np.testing.assert_allclose(sectors, expected, rtol=0.0, atol=1.0e-12)
 
     def test_sector_loop_converges_to_the_reference_state(self):

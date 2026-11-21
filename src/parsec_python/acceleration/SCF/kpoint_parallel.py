@@ -38,6 +38,7 @@ from typing import Any, Callable
 import numpy as np
 
 from parsec_python.Eigensolvers import solve_eigval
+from parsec_python.Eigensolvers.eigval import first_solve_converges
 from parsec_python.SCF.kpoint_solver import (
     KPointJob,
     device_solver_supports,
@@ -49,6 +50,7 @@ from parsec_python.SCF.kpoint_solver import (
 )
 
 from ..Eigensolvers.chebff_spinor import SpinorEigvalState, solve_spinor_eigval
+from .kpoint_real import as_complex, matched_state, psi_gauge_for, real_gamma_applies
 from .kpoint_sectors import carried_state
 from ..Parallel import WORKERS_ENV, make_pool, mpi
 
@@ -121,7 +123,7 @@ class _SolveWorker:
     """Owns the k-point tasks ``tasks``: their Ritz states and eigenvectors."""
 
     def __init__(
-        self, job: KPointJob, tasks: list[int], index: int, plan=None
+        self, job: KPointJob, tasks: list[int], index: int, plan=None, real_gamma: bool = False
     ) -> None:
         self.job = job
         self.tasks = tasks
@@ -133,6 +135,15 @@ class _SolveWorker:
         # Built here, in the worker (thread), so the device is current for it.
         self.converter = plan.converter(index) if plan is not None else None
         self.device_solver = self.converter is not None and _device_solver_requested()
+        if self.device_solver:
+            # the Gamma point in real arithmetic on the device solver (``real_gamma``: the solver's decision,
+            # .kpoint_real.real_gamma_applies, PARSEC_KPOINT_REAL_GAMMA); not where a host CHEBDAV makes the first
+            # solve (PARSEC_KPOINT_FIRST_SOLVE=chebdav: its subspace is complex)
+            self.converter.real_gamma = bool(real_gamma) and not _first_solve_on_host()
+        # the psi gauge of the time-reversal invariant points in the Bloch form, solved in real arithmetic
+        # (PARSEC_KPOINT_TRIM_REAL, .kpoint_real.PsiGauge): by task, None where the task keeps the u gauge
+        self.gauges: dict[int, Any] = {}
+        self._psi = self.device_solver and not _first_solve_on_host()
         self._spill: bool | None = None
         # export_states hands the device subspaces as they are (the SCF loops of a hybrid's Fock loop)
         self.device_states = False
@@ -147,7 +158,8 @@ class _SolveWorker:
     # ------------------------------------------------------------- host route
     def operator(self, hamiltonian):
         if self.converter is not None:
-            return self.converter.operator(hamiltonian).as_linear_operator()
+            # the host eigensolvers (ARPACK, DIAGLA) take complex blocks: the complex operator, as before
+            return self.converter.operator(hamiltonian, real=False).as_linear_operator()
         return hamiltonian.as_linear_operator()
 
     # ----------------------------------------------------------- device route
@@ -167,15 +179,29 @@ class _SolveWorker:
     def _to_host(self, array) -> np.ndarray:
         return array if isinstance(array, np.ndarray) else self.converter.backend.asnumpy(array)
 
+    def _gauge(self, task: int, hamiltonian):
+        """The psi gauge of ``task`` (:func:`.kpoint_real.psi_gauge_for`), ``None`` for the u gauge."""
+        if not self._psi:
+            return None
+        return psi_gauge_for(self.job, task, hamiltonian, self.gauges)
+
     def _solve_on_device(self, task: int, hamiltonian, settings):
         backend = self.converter.backend
         backend.use()
         start = time.perf_counter()
+        gauge = self._gauge(task, hamiltonian)
+        if gauge is not None:
+            hamiltonian = gauge.hamiltonian(hamiltonian)
         operator = self.converter.operator(hamiltonian)
         self._tick("upload", start)
         requested = task_states(self.job, task)
         solve_start = time.perf_counter()
-        state = self.states.pop(task, None)
+        # a real subspace into a complex solve, a complex one (or one of another gauge) dropped before a real solve
+        # (.kpoint_real)
+        state = matched_state(
+            self.states.pop(task, None), bool(getattr(operator, "real_arithmetic", False)),
+            None if gauge is None else "psi",
+        )
         self.vectors.pop(task, None)  # release the previous basis before the next one is made
         # a task whose states the refit of the k-point sectors cut keeps its lowest Ritz pairs (kpoint_sectors)
         state = carried_state(state, requested, settings, int(operator.shape[0]))
@@ -218,7 +244,8 @@ class _SolveWorker:
                 sync=backend.synchronize,
                 # Eigensolver: chebdav converges its first solve; on the device that is CHEBFF plus
                 # more cycles to the same residual test
-                converge_first=settings.initial_method == "chebdav",
+                # and the CHEBFF band k-points under PARSEC_BAND_CONVERGENCE=auto
+                converge_first=first_solve_converges(settings),
             )
             new_state = result.state
             eigenvalues = result.eigenvalues
@@ -226,6 +253,7 @@ class _SolveWorker:
             for name, value in result.stats.items():
                 self.stats[name] = self.stats.get(name, 0.0) + value
         self._tick("solve", solve_start)
+        new_state.gauge = None if gauge is None else "psi"
         if self._spill is None:
             self._spill = self._should_spill(new_state.operator_dimension, new_state.working_states)
         if self._spill:
@@ -326,9 +354,15 @@ class _SolveWorker:
         yield None, None
 
     def device_vectors_of(self, task: int):
-        """The final eigenvectors of ``task`` where they are (a device array, or a spilled host one)."""
+        """The final eigenvectors of ``task`` where they are (a device array, or a spilled host one); complex, as
+        Bloch orbitals are (a real Gamma point's are cast, .kpoint_real)."""
         if task in self.vectors:
-            yield task, self.vectors[task]
+            vectors = self.vectors[task]
+            xp = np
+            if self.converter is not None and not isinstance(vectors, np.ndarray):
+                self.converter.backend.use()
+                xp = self.converter.backend.xp
+            yield task, as_complex(self._u_gauge(task, vectors, xp))
 
     def device_of(self):
         """``(task, device id)`` of every task of a device worker (none on the CPU)."""
@@ -357,18 +391,24 @@ class _SolveWorker:
                 self.states[task] = states[task]  # a host subspace goes to the device when it is solved
         yield None, None
 
+    def _u_gauge(self, task: int, vectors, xp=np):
+        """``vectors`` of ``task`` in the u gauge of the Bloch factor (those of the psi gauge converted)."""
+        gauge = self.gauges.get(task)
+        return vectors if gauge is None else gauge.to_u(vectors, xp)
+
     def extras(self):
         for task in self.tasks:
             vectors = self.vectors[task]
             if self.converter is not None and not isinstance(vectors, np.ndarray):
                 self.converter.backend.use()
-                yield task, self.job.extras(task, vectors, xp=self.converter.backend.xp)
+                xp = self.converter.backend.xp
+                yield task, self.job.extras(task, self._u_gauge(task, vectors, xp), xp=xp)
             else:
-                yield task, self.job.extras(task, self._host_vectors(task))
+                yield task, self.job.extras(task, self._u_gauge(task, self._host_vectors(task)))
 
     def vectors_of(self, task: int):
         if task in self.vectors:
-            yield task, self._host_vectors(task)
+            yield task, as_complex(self._u_gauge(task, self._host_vectors(task)))
 
     def stats_of(self):
         yield None, dict(self.stats)
@@ -387,6 +427,7 @@ class PooledKPointSolver:
         workers: int | str | None = None,
         problem_size: int | None = None,
         backend: str | None = None,
+        real_gamma: bool | None = None,
     ) -> None:
         self.job = job
         plan = resolve_backend(backend)
@@ -394,9 +435,12 @@ class PooledKPointSolver:
             workers = device_worker_count(plan, job.n_tasks)
         self.backend = plan.name if plan is not None else "cpu"
         self._values: dict[int, np.ndarray] = {}
+        # the Gamma point in real arithmetic (PARSEC_KPOINT_REAL_GAMMA): given by a solver of sectors (decided on the
+        # k-points it splits), else decided on this job (.kpoint_real.real_gamma_applies)
+        real = real_gamma_applies(job, problem_size) if real_gamma is None else bool(real_gamma)
         self.pool = make_pool(
             range(job.n_tasks),
-            lambda tasks, index: _SolveWorker(job, tasks, index, plan),
+            lambda tasks, index: _SolveWorker(job, tasks, index, plan, real),
             workers=workers,
             problem_size=problem_size,
         )
@@ -567,8 +611,17 @@ def make_solver(job: KPointJob, **options):
     little groups (``PARSEC_KPOINT_SECTORS``, :mod:`.kpoint_sectors`) gets that solver of its sectors."""
     from .kpoint_sectors import sector_solver
 
-    solver = sector_solver(job, _plain_solver, **options)
-    return _plain_solver(job, **options) if solver is None else solver
+    notes: list[str] = []
+    solver = sector_solver(job, _plain_solver, notes=notes, **options)
+    chosen = _plain_solver(job, **options) if solver is None else solver
+    if notes:
+        # the cell group of the sectors and its tolerance, or why there are none: the kpoint_symmetry_detection line
+        # of parsec.out (SCF/kpoints.py, _run_timings)
+        try:
+            chosen.kpoint_symmetry_detection = notes[-1]
+        except AttributeError:  # a solver that takes no attributes
+            pass
+    return chosen
 
 
 def _plain_solver(job: KPointJob, **options):

@@ -32,8 +32,11 @@ from parsec_python.Hamiltonian.hubbard import (
     hubbard_cutoff_radius,
     hubbard_terms,
     hubbard_terms_from_orbitals,
+    hubbard_support,
     interpolate_hubbard_radial,
     occupation_matrices,
+    periodic_replica_translations,
+    support_tree,
 )
 from parsec_python.Hamiltonian.hubbard_tensors import P3_ENTRIES, P4_ENTRIES
 from parsec_python.Pseudopotential import read_parsec_pseudopotential
@@ -265,6 +268,30 @@ class HubbardProjectorTest(unittest.TestCase):
         np.testing.assert_allclose(projectors.projectors.toarray(), expected, atol=1e-14)
         with self.assertRaises(ValueError):
             build_hubbard_projectors(grid, atoms, {"Ag": potential}, specifications, np.diag([1.5] * 3))
+
+    def test_the_tree_gives_the_support_of_every_point_bit_for_bit(self):
+        # points exactly on the radius along an axis and on the sphere, a periodic cell and a cluster
+        generator = np.random.default_rng(1121)
+        side, spacing, radius = 4.2, 0.35, 1.4
+        steps = np.arange(0.0, side, spacing)
+        coordinates = np.stack(np.meshgrid(steps, steps, steps, indexing="ij"), axis=-1).reshape(-1, 3)
+        positions = [
+            np.array([0.0, 0.0, 0.0]),
+            np.array([radius, 0.0, 0.0]),
+            np.array([steps[3], steps[4], steps[5]]),
+            generator.uniform(0.0, side, 3),
+            generator.uniform(-1.0, side + 1.0, 3),
+        ]
+        tree = support_tree(coordinates)
+        for lattice in (np.diag([side] * 3), None):
+            translations = periodic_replica_translations(lattice)
+            for position in positions:
+                for size in (radius, 1.05, 2 * spacing):
+                    expected = hubbard_support(coordinates, position, size, translations)
+                    found = hubbard_support(coordinates, position, size, translations, tree=tree)
+                    np.testing.assert_array_equal(found[0], expected[0])
+                    self.assertEqual(found[1].tobytes(), expected[1].tobytes())
+        self.assertGreater(hubbard_support(coordinates, positions[1], radius, translations)[0].size, 0)
 
     def test_no_projectors_without_parameters(self):
         potential = read_parsec_pseudopotential(AG)

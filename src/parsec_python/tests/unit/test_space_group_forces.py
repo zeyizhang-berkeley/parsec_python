@@ -407,10 +407,22 @@ class InputAndCommandLineTests(unittest.TestCase):
         self.assertIsNone(self.parse(weighted, cubic).problem.space_group)
         with self.assertRaisesRegex(UnsupportedParsecOptionError, "Molecular_Dynamics"):
             self.parse(weighted + "Molecular_Dynamics: .true.\n", cubic)
-        # Movable flags that the group exchanges with fixed atoms.
+        # Movable flags that the group exchanges with fixed atoms: the wedge of the operations that map the fixed atom
+        # onto itself (PARSEC_MOVE_FLAG_SPACE_GROUP=auto, since 2026-11-21), a refusal under off, as before.
+        import os
+        from unittest import mock
+
+        from parsec_python.Grid.space_group import respects_flags
+
         flagged = cubic.replace("Local_Component: s\n", "Local_Component: s\nMove_Flag: 1\n")
-        with self.assertRaisesRegex(UnsupportedParsecOptionError, "Move_Flag"):
-            self.parse(shift + "Minimization: bfgs\n", flagged)
+        kept = self.parse(shift + "Minimization: bfgs\n", flagged).problem
+        self.assertGreater(kept.space_group.order, 1)
+        self.assertLess(kept.space_group.order, relaxation.problem.space_group.order)
+        self.assertTrue(respects_flags(kept.space_group, kept.periodic_cell.lattice_vectors, kept.atoms,
+                                       [True, False]))
+        with mock.patch.dict(os.environ, {"PARSEC_MOVE_FLAG_SPACE_GROUP": "off"}):
+            with self.assertRaisesRegex(UnsupportedParsecOptionError, "Move_Flag"):
+                self.parse(shift + "Minimization: bfgs\n", flagged)
 
 
 if __name__ == "__main__":

@@ -1,7 +1,8 @@
 """Double-group sectors and Kramers pairs of the self-consistent spin-orbit loop of a cluster.
 
-``PARSEC_SOC_SECTORS`` (``off`` by default; ``kramers``, ``on``).  PARSEC 1.5 drops to the identity with spin-orbit
-coupling, and so does the accelerated spinor loop of :mod:`.self_consistent_soc` without this switch: it filters
+``PARSEC_SOC_SECTORS`` (``auto`` by default since 2026-11-21, ``off`` before; ``kramers``, ``on``; ``auto`` is
+``kramers`` from :data:`MINIMUM_ENTRIES` on, :func:`resolve_soc_sectors`).  PARSEC 1.5 drops to the identity with
+spin-orbit coupling, and so does the accelerated spinor loop of :mod:`.self_consistent_soc` under ``off``: it filters
 ``N_e + 6`` complex spinors of ``2 n`` rows.  With it, the loop solves the sectors of the double group of the cluster
 that hold one state of every Kramers pair:
 
@@ -55,7 +56,18 @@ import numpy as np
 import scipy.sparse as sp
 
 SWITCH = "PARSEC_SOC_SECTORS"
-_SETTINGS = ("off", "kramers", "on")
+_SETTINGS = ("off", "auto", "kramers", "on")
+#: The value where none is named (since 2026-11-21; ``off`` before): :func:`resolve_soc_sectors`.
+DEFAULT = "auto"
+#: The smallest whole-grid spinor basis, ``2 n`` rows times the states and the buffer of the filter (complex
+#: entries), from which ``auto`` takes the Kramers sector (2^25).  Below it the kernels of the real-arithmetic sector,
+#: compiled once on a machine (an empty CuPy kernel cache), cost more than the smaller solve saves on a first run.
+#: One A100, every run a fresh process with an empty kernel cache, process wall seconds ``off`` -> ``kramers``
+#: (entries): AuH 10.5 -> 13.2 (3.7e5), Au2 at h = 0.4 bohr 12.7 -> 17.7 (4.7e6), Au2 19.0 -> 20.5 (1.48e7), Au4
+#: 19.8 -> 22.0 (1.80e7), H-Au-Au-H 23.0 -> 21.2 (2.04e7), Au6 27.1 -> 25.5 (3.38e7), Au13 28.6 -> 22.8 (3.76e7),
+#: Au13 at h = 0.33 bohr 47.0 -> 26.7 (6.68e7), Au20 74.6 -> 29.1 (1.30e8); with a warm cache the sector is faster
+#: at every size (README, ``PARSEC_SOC_SECTORS``).
+MINIMUM_ENTRIES = 1 << 25
 
 # Sign operations (x, y, z) -> (s_x x, s_y y, s_z z) of the axis-reflection group.
 _C2Z = (-1, -1, 1)
@@ -85,15 +97,49 @@ _NAMES = {
 
 
 def soc_sectors_setting() -> str:
-    """``PARSEC_SOC_SECTORS``: ``off`` (default, the whole grid), ``kramers`` (the ``+i`` sector of a two-fold
-    operation: one state per Kramers pair) or ``on`` (that sector split by inversion parity where the cluster has a
-    centre of inversion).  A cluster without a two-fold rotation or mirror keeps the whole grid with a note.  Another
-    value is an error before the SCF."""
+    """``PARSEC_SOC_SECTORS``: ``auto`` (the default since 2026-11-21: ``kramers`` from :data:`MINIMUM_ENTRIES` on,
+    :func:`resolve_soc_sectors`), ``off`` (the whole grid, the default before), ``kramers`` (the ``+i`` sector of a
+    two-fold operation at every size: one state per Kramers pair) or ``on`` (that sector split by inversion parity
+    where the cluster has a centre of inversion).  A cluster without a two-fold rotation or mirror keeps the whole
+    grid with a note.  Another value is an error before the SCF."""
 
-    text = os.environ.get(SWITCH, "off").strip().lower() or "off"
+    text = os.environ.get(SWITCH, DEFAULT).strip().lower() or DEFAULT
     if text not in _SETTINGS:
         raise ValueError(f"{SWITCH} must be one of {', '.join(_SETTINGS)}, not {text!r}")
     return text
+
+
+def whole_grid_spinor_entries(system) -> int:
+    """The complex entries of the whole-grid spinor basis of ``system``: ``2 n`` rows times the states the spinor
+    loop asks for and the buffer of its filter (``SCF/self_consistent_soc._number_of_states``)."""
+
+    from parsec_python.SCF.self_consistent_soc import _number_of_states
+
+    states = int(_number_of_states(system)) + int(system.input.eigensolver.subspace_buffer)
+    return 2 * int(system.grid.size) * states
+
+
+def resolve_soc_sectors(setting: str, system, *, forced: bool = False) -> tuple[str, str]:
+    """The route of ``setting`` for ``system``: ``(route, reason)`` with ``route`` ``off``, ``kramers`` or ``on``.
+
+    ``auto`` takes ``kramers`` where the whole-grid spinor basis (:func:`whole_grid_spinor_entries`) reaches
+    :data:`MINIMUM_ENTRIES`, or where ``--symmetry on`` asks for a reduction (``forced``), and ``off`` below it with
+    the ``reason`` of the note; every other value is its own route (``reason`` empty).  The decision reads only the
+    grid and the input, so it is the same in every process that prepares the run.
+    """
+
+    if setting != "auto":
+        return setting, ""
+    if forced:
+        return "kramers", ""
+    entries = whole_grid_spinor_entries(system)
+    if entries >= MINIMUM_ENTRIES:
+        return "kramers", ""
+    return "off", (
+        f"the whole-grid spinor basis ({entries} complex entries: 2 x {int(system.grid.size)} rows x states and "
+        f"buffer) is below the floor of auto ({MINIMUM_ENTRIES}), where the kernels of the sector compiled on a first "
+        "run cost more than it saves; PARSEC_SOC_SECTORS=kramers takes it at every size"
+    )
 
 
 def _spin_axis(signs: tuple[int, ...]) -> int | None:

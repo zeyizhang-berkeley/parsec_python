@@ -575,7 +575,10 @@ class SymmetrizedDensitySectorTests(unittest.TestCase):
                                       [.25, .75, .75], [.75, .25, .75], [.75, .75, .25]]) * 10.26).tolist())]
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as name:
             root = Path(name)
-            for label, keywords in (("CsCl", {}), ("Si8", {"species": si8, "side": 10.26, "states": 20})):
+            # (Si8: 24 states complete the six-fold lowest conduction level, which Fermi_Temp 300 K occupies at 1e-4 per
+            # state; 20 states cut it after four, and the reference solver then kept its residual near 2e-4 Ry for all
+            # of its 200 iterations, on every route, with or without the symmetrization: Output/state_truncation.py)
+            for label, keywords in (("CsCl", {}), ("Si8", {"species": si8, "side": 10.26, "states": 24})):
                 with self.subTest(cell=label):
                     sectors = _run_cli(
                         _cell_input(root / f"{label}_auto", "Symmetrize_Charge_Density: .true.", **keywords),
@@ -587,17 +590,12 @@ class SymmetrizedDensitySectorTests(unittest.TestCase):
                         options=("--backend", "auto"),
                     )
                     self.assertEqual(sectors[0], 0, f"sectors: {sectors[3]}\n{sectors[2][-4000:]}")
-                    # (the reference solver keeps the residual of the Si cube near 2e-4 for all its 200 iterations
-                    # while its energy has settled: status 3; its energy is still compared)
-                    self.assertIn(full[0], (0, 3) if label == "Si8" else (0,), f"full: {full[3]}\n{full[2][-4000:]}")
+                    self.assertEqual(full[0], 0, f"full: {full[3]}\n{full[2][-4000:]}")
                     self.assertIn("orbital_symmetry = CuPy real", sectors[2])
                     # the density of every iteration averaged and reported, as by the reference solver
                     self.assertIn("electron charge after symmetrization", sectors[2])
-                    # (the Si cube: within the residual the reference solver stops at)
                     self.assertAlmostEqual(
-                        float(sectors[1]["energy_total_ry"]),
-                        float(full[1]["energy_total_ry"]),
-                        delta=1e-5 if label == "Si8" else 2e-6,
+                        float(sectors[1]["energy_total_ry"]), float(full[1]["energy_total_ry"]), delta=2e-6
                     )
 
     def test_forces_of_a_cell_on_the_accelerated_full_grid(self) -> None:

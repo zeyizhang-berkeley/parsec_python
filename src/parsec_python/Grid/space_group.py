@@ -50,6 +50,7 @@ formats the report.
 from __future__ import annotations
 
 import math
+import threading
 from dataclasses import dataclass, field, replace
 
 import numpy as np
@@ -984,6 +985,47 @@ def space_group_atom_images(
     return images
 
 
+FIXED_SPECIES_SUFFIX = "|fixed"
+"""What :func:`atoms_with_fixed_species` appends to the symbol of a fixed atom (the label of the accelerated
+driver's detection, ``acceleration.driver.FIXED_ATOM_LABEL``)."""
+
+
+def atoms_with_fixed_species(atoms, movable) -> tuple:
+    """``atoms`` with those ``movable`` marks ``False`` as a species of their own, for a symmetry search.
+
+    A search of the space group of these atoms (:func:`find_space_group`, :func:`find_grid_space_group`) finds the
+    operations that map the fixed atoms onto fixed atoms, each rotation with a translation that does so where one
+    exists: the subgroup a relaxation whose ``Move_Flag`` fixes atoms keeps (its forces and moved positions averaged
+    over it stay invariant under it).  The group of the atoms themselves holds one translation per rotation, which
+    need not fix them (in a supercell any lattice vector of the smaller cell may be added), so its operations alone
+    do not give that subgroup.  The labels are read by the search only.
+    """
+
+    flags = [bool(flag) for flag in movable]
+    if len(flags) != len(atoms):
+        raise ValueError("one movable flag per atom is required")
+    return tuple(
+        atom if moves else replace(atom, symbol=atom.symbol + FIXED_SPECIES_SUFFIX)
+        for atom, moves in zip(atoms, flags)
+    )
+
+
+def respects_flags(group: SpaceGroup, lattice_vectors, atoms, movable) -> bool | None:
+    """Whether every operation of ``group`` maps the atoms ``movable`` marks onto atoms it marks alike.
+
+    ``None`` where an operation maps an atom onto no atom (:func:`space_group_atom_images` raises).
+    """
+
+    mask = np.asarray([bool(flag) for flag in movable], dtype=bool)
+    if mask.size != len(atoms):
+        raise ValueError("one movable flag per atom is required")
+    try:
+        images = space_group_atom_images(group, lattice_vectors, atoms)
+    except ValueError:
+        return None
+    return all(np.array_equal(mask[row], mask) for row in images)
+
+
 def _unit_box(fractions: np.ndarray) -> np.ndarray:
     """Lattice coordinates in ``[0, 1)`` for a periodic k-d tree of box 1 (``mod`` can round up to 1)."""
 
@@ -1001,6 +1043,13 @@ class PeriodicGridSymmetry(GridPointGroup):
     the periodic grid of this port is never reduced to a wedge, as PARSEC's
     grid of a k-point run is not (its Abelian subgroup is the identity), so the
     printed deviation is relative to the sum over the whole cell.
+
+    ``images`` is the table ``(operations, points)`` of the image rows, or, where every operation is an integer
+    affine map of a row-major grid (``affine_maps``) and ``PARSEC_PERIODIC_IMAGE_ROWS`` takes them
+    (:func:`periodic_grid_symmetry`), an :class:`AffineImageRows` that computes a row where it is read and holds only
+    the rows of its oblique operations (48 operations of 10^7 points are 1.9 GB of int32 as a table).  The readers take
+    the rows through :meth:`image_row`, :meth:`image_rows`, :meth:`gather` and :meth:`accumulate`, which give the
+    integers and values of the table either way.
     """
 
     affine_maps: tuple | None = field(default=None, kw_only=True, compare=False, repr=False)
@@ -1015,6 +1064,76 @@ class PeriodicGridSymmetry(GridPointGroup):
     @property
     def reduced_order(self) -> int:
         return 1
+
+    @property
+    def size(self) -> int:
+        """The points of the grid (the length of a row of ``images``)."""
+
+        return int(self.images.shape[1])
+
+    @property
+    def holds_table(self) -> bool:
+        """Whether ``images`` is a table in memory (``False`` for :class:`AffineImageRows`)."""
+
+        return isinstance(self.images, np.ndarray)
+
+    @property
+    def table_bytes(self) -> int:
+        """The bytes of the table ``images`` (held, or computed row by row where :attr:`holds_table` is false)."""
+
+        operations, points = self.images.shape
+        return int(operations) * int(points) * int(np.dtype(self.images.dtype).itemsize)
+
+    @property
+    def held_bytes(self) -> int:
+        """The bytes of the images held now: the table, or what an :class:`AffineImageRows` keeps (its index vectors
+        and the rows of its oblique operations, :attr:`AffineImageRows.held_bytes`; never more than the table)."""
+
+        if isinstance(self.images, AffineImageRows):
+            return self.images.held_bytes
+        return int(np.asarray(self.images).nbytes)
+
+    def image_row(self, operation: int) -> np.ndarray:
+        """``images[operation]``: the row of the image of every point under the operation."""
+
+        if isinstance(self.images, AffineImageRows):
+            return self.images.row(operation)
+        return self.images[operation]
+
+    def image_rows(self, operation: int, rows) -> np.ndarray:
+        """``images[operation, rows]`` for an index array ``rows``, without the whole row where none is held."""
+
+        if isinstance(self.images, AffineImageRows):
+            return self.images.at(operation, rows)
+        return self.images[operation][np.asarray(rows)]
+
+    def gather(self, values, operation: int) -> np.ndarray:
+        """``values[..., images[operation]]`` of an array ``(..., points)``: a new array (with the points along the last axis
+        innermost in memory, as the gather of a row of the table lays it out), the same values."""
+
+        if isinstance(self.images, AffineImageRows):
+            return self.images.gather(values, operation)
+        return np.asarray(values)[..., self.images[operation]]
+
+    def accumulate(self, total: np.ndarray, values: np.ndarray, operation: int) -> None:
+        """``total += values[images[operation]]`` (float arrays of the points), the same sum element by element."""
+
+        if isinstance(self.images, AffineImageRows):
+            self.images.accumulate(total, values, operation)
+            return
+        total += values[self.images[operation]]
+
+    def image_sum(self, values) -> np.ndarray:
+        """``sum_g values[images[g]]`` over the operations in order, from a zero field (the sum of
+        :func:`~parsec_python.Grid.point_group.symmetrize_scalar` before its division by the order)."""
+
+        values = np.asarray(values, dtype=np.float64)
+        if isinstance(self.images, AffineImageRows):
+            return self.images.image_sum(values)
+        total = np.zeros_like(values)
+        for images in self.images:
+            total += values[images]
+        return total
 
 
 def grid_fractional_points(grid) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -1074,8 +1193,17 @@ def periodic_grid_symmetry(grid, group: SpaceGroup) -> PeriodicGridSymmetry:
     coordinates ``rw = (i + s)/n`` goes to ``rrw = M (rw - t)`` and to the
     integer point ``nint(rrw n - s)``, folded into the cell.  Raises
     ``ValueError`` where an operation does not map the grid onto itself.
+
+    Where every operation is an integer affine map of a row-major grid, ``images`` is an :class:`AffineImageRows` that
+    computes the rows where they are read: under ``PARSEC_PERIODIC_IMAGE_ROWS=auto`` (the default since 2026-11-21)
+    for a grid of at least :data:`_IMAGE_ROWS_POINTS` points whose averages run on two threads or more (the periodic
+    setup's, ``PARSEC_PERIODIC_SETUP_THREADS`` / ``OMP_NUM_THREADS``); a smaller grid (a table of at most 24 MiB for 48
+    operations) and a run on one thread keep the table, whose gathers are faster there; ``on`` takes the rows at
+    every size and thread count (the least memory); ``off`` builds the table of operations x points as before.  The
+    rows are the same integers.
     """
 
+    rows_setting = periodic_image_rows_setting()
     points, counts, shift = grid_fractional_points(grid)
     problem = grid_commensurability_problem(group, counts, shift)
     if problem is not None:
@@ -1087,12 +1215,20 @@ def periodic_grid_symmetry(grid, group: SpaceGroup) -> PeriodicGridSymmetry:
     # One row of point indices per operation (int32: half the memory of the
     # table, operations x points, for any grid below 2**31 points).
     index_type = np.int32 if points.shape[0] < 2**31 - 1 else np.int64
-    images = np.empty((group.order, points.shape[0]), dtype=index_type)
     maps = [
         grid_affine_map(matrix, translation, counts, shift)
         for matrix, translation in zip(group.rotation_matrices, group.translation_vectors)
     ]
     row_major = all(entry is not None for entry in maps) and _row_major_points(grid, points, counts)
+    if row_major and _image_rows_taken(rows_setting, points.shape[0]):
+        # no table: the rows (M i + c) mod n of every operation are formed where they are read, the same integers
+        return PeriodicGridSymmetry(
+            matrices=group.rotation_matrices.astype(np.float64),
+            images=AffineImageRows(maps, counts, index_type),
+            affine_maps=tuple(maps),
+            counts=tuple(int(value) for value in counts),
+        )
+    images = np.empty((group.order, points.shape[0]), dtype=index_type)
     fractional = None
     for index, (matrix, translation) in enumerate(
         zip(group.rotation_matrices, group.translation_vectors)
@@ -1148,6 +1284,26 @@ def grid_affine_map(matrix, translation, counts, shift, *, tolerance: float = GR
     return matrix, whole.astype(np.int64)
 
 
+def affine_grid_indices(matrix, constant, counts, *, xp=np) -> list:
+    """The three index arrays ``j_d = (M i + c)_d mod n_d`` of the image of every point ``i`` of a grid of ``counts``
+    points, each of a shape that broadcasts to ``counts`` (a length along the axes its row of ``M`` reads, one along
+    the others): ``values.reshape(counts)[j_0, j_1, j_2]`` is the field at the images, without a row of the points."""
+
+    n = [int(value) for value in counts]
+    axes = [
+        xp.arange(n[axis], dtype=xp.int64).reshape([n[axis] if other == axis else 1 for other in range(3)])
+        for axis in range(3)
+    ]
+    indices = []
+    for row in range(3):
+        component = xp.full((1, 1, 1), int(constant[row]), dtype=xp.int64)
+        for column in range(3):
+            if matrix[row][column]:
+                component = component + int(matrix[row][column]) * axes[column]
+        indices.append(component % n[row])
+    return indices
+
+
 def affine_grid_images(matrix, constant, counts, index_type=np.int64, *, xp=np):
     """Row of the image ``(M i + c) mod n`` of every point ``i`` of a row-major grid of ``counts`` points.
 
@@ -1158,17 +1314,7 @@ def affine_grid_images(matrix, constant, counts, index_type=np.int64, *, xp=np):
 
     n = [int(value) for value in counts]
     strides = (n[1] * n[2], n[2], 1)
-    axes = [
-        xp.arange(n[axis], dtype=xp.int64).reshape([n[axis] if other == axis else 1 for other in range(3)])
-        for axis in range(3)
-    ]
-    terms = []
-    for row in range(3):
-        component = xp.full((1, 1, 1), int(constant[row]), dtype=xp.int64)
-        for column in range(3):
-            if matrix[row][column]:
-                component = component + int(matrix[row][column]) * axes[column]
-        terms.append((component % n[row]) * strides[row])
+    terms = [index * stride for index, stride in zip(affine_grid_indices(matrix, constant, n, xp=xp), strides)]
     size = n[0] * n[1] * n[2]
     if xp is not np or size < _THREADED_IMAGES:
         flat = terms[0] + terms[1] + terms[2]
@@ -1192,26 +1338,86 @@ def affine_grid_images(matrix, constant, counts, index_type=np.int64, *, xp=np):
 _THREADED_IMAGES = 1 << 22
 """Points of a grid from which :func:`affine_grid_images` fills its result by slabs on threads."""
 
+_THREADED_SUMS = 1 << 17
+"""Points of a grid from which :meth:`AffineImageRows.image_sum` and :meth:`AffineImageRows.gather` work by slabs on
+threads (a laptop, 4 threads, 48 operations: 262,144 points 39 ms with the table, 57 ms unthreaded, 17 ms threaded;
+46,656 points 4, 8 and 7 ms)."""
+
+_IMAGE_ROWS_POINTS = 1 << 17
+"""Points of a grid from which :func:`periodic_grid_symmetry` keeps no table under ``PARSEC_PERIODIC_IMAGE_ROWS=auto``
+(below, the gathers of the table are faster than those of the index vectors: 48 operations on a laptop, 46,656
+points 3.9 against 6.8 ms per average, 262,144 points 43 against 13 ms with 4 threads; the table of 48 operations of
+2^17 points is 24 MiB)."""
+
+
+def _image_rows_taken(setting: str, points: int) -> bool:
+    """Whether a row-major affine grid group of ``points`` points takes :class:`AffineImageRows` under ``setting``
+    (``PARSEC_PERIODIC_IMAGE_ROWS``): ``on`` always; ``auto`` from :data:`_IMAGE_ROWS_POINTS` points where the averages
+    run on two threads or more (on one thread the gathers of a row of the table are faster than those of the index
+    vectors: an A100 node, the diamond cube on 2.4 M points, 24 operations, a scalar average 0.206 s with the table
+    and 0.305 s with the rows, a field of three components 1.07 and 1.40 s; on 16 threads 0.048 and 0.605 s with the
+    rows); ``off`` never.  The rows are the same integers either way, so the ranks of an MPI run may differ in it
+    without any change of their numbers."""
+
+    if setting == "off":
+        return False
+    if setting == "on":
+        return True
+    from ..Laplacian.finite_difference import _build_threads
+
+    return points >= _IMAGE_ROWS_POINTS and _build_threads() >= 2
+
 
 def _run_by_slabs(work, count: int) -> None:
     """``work(first, last)`` over slabs of ``range(count)`` on the threads of the periodic setup."""
 
-    from concurrent.futures import ThreadPoolExecutor
-
     from ..Laplacian.finite_difference import _build_threads
 
     threads = max(1, min(_build_threads(), count))
-    if threads == 1:
+    if threads == 1 or threading.current_thread().name.startswith(_SLAB_THREAD_PREFIX):
+        # (one thread, or a call from a slab of the kept pool itself, which must not wait on its own workers)
         work(0, count)
         return
     bounds = np.linspace(0, count, threads + 1).astype(int)
-    with ThreadPoolExecutor(max_workers=threads) as pool:
-        for future in [pool.submit(work, int(a), int(b)) for a, b in zip(bounds[:-1], bounds[1:]) if b > a]:
-            future.result()
+    pool = _slab_pool(threads)
+    for future in [pool.submit(work, int(a), int(b)) for a, b in zip(bounds[:-1], bounds[1:]) if b > a]:
+        future.result()
+
+
+_SLAB_POOLS: dict = {}
+"""The thread pools of :func:`_run_by_slabs` by ``(process id, threads)``: kept, so that the gathers of an average
+(one call per operation for a vector field) do not start their threads each time; a forked process makes its own."""
+
+_SLAB_POOL_LOCK = threading.Lock()
+
+_SLAB_THREAD_PREFIX = "parsec-slabs"
+
+
+def _slab_pool(threads: int):
+    """The kept thread pool of ``threads`` workers of this process (:data:`_SLAB_POOLS`)."""
+
+    import os
+    from concurrent.futures import ThreadPoolExecutor
+
+    key = (os.getpid(), int(threads))
+    pool = _SLAB_POOLS.get(key)
+    if pool is None:
+        with _SLAB_POOL_LOCK:
+            pool = _SLAB_POOLS.get(key)
+            if pool is None:
+                for stale in [entry for entry in _SLAB_POOLS if entry[0] != key[0]]:
+                    del _SLAB_POOLS[stale]  # the pools of a parent process: their threads are not in this one
+                pool = _SLAB_POOLS[key] = ThreadPoolExecutor(
+                    max_workers=key[1], thread_name_prefix=_SLAB_THREAD_PREFIX
+                )
+    return pool
 
 
 def _row_major_points(grid, points, counts) -> bool:
-    """Whether the points of ``grid`` are its integer points in row-major order with the identity lookup."""
+    """Whether the points of ``grid`` are its integer points in row-major order with the identity lookup.
+
+    Tested by blocks of :data:`_ROW_MAJOR_BLOCK` points (the same answer as one test of the whole grid, without its
+    arrays of every point: 10^7 points took 0.3 GB of them)."""
 
     size = int(np.prod(counts))
     if points.shape != (size, 3):
@@ -1219,15 +1425,288 @@ def _row_major_points(grid, points, counts) -> bool:
     lookup = np.asarray(getattr(grid, "lookup", None))
     if lookup.shape != tuple(int(value) for value in counts):
         return False
-    order = np.arange(size, dtype=np.int64)
-    if not np.array_equal(lookup.reshape(-1), order):
-        return False
+    flat_lookup = lookup.reshape(-1)
     n1, n2 = int(counts[1]), int(counts[2])
-    return bool(
-        np.array_equal(points[:, 0], order // (n1 * n2))
-        and np.array_equal(points[:, 1], (order // n2) % n1)
-        and np.array_equal(points[:, 2], order % n2)
-    )
+    for first in range(0, size, _ROW_MAJOR_BLOCK):
+        last = min(size, first + _ROW_MAJOR_BLOCK)
+        order = np.arange(first, last, dtype=np.int64)
+        if not (
+            np.array_equal(flat_lookup[first:last], order)
+            and np.array_equal(points[first:last, 0], order // (n1 * n2))
+            and np.array_equal(points[first:last, 1], (order // n2) % n1)
+            and np.array_equal(points[first:last, 2], order % n2)
+        ):
+            return False
+    return True
+
+
+_ROW_MAJOR_BLOCK = 1 << 20
+"""Points per block of :func:`_row_major_points`."""
+
+
+_IMAGE_ROWS_SWITCH = "PARSEC_PERIODIC_IMAGE_ROWS"
+
+
+def periodic_image_rows_setting() -> str:
+    """``PARSEC_PERIODIC_IMAGE_ROWS``: ``auto`` (default, since 2026-11-21) keeps no table of the images of a
+    :class:`PeriodicGridSymmetry` whose operations are integer affine maps of a row-major grid of at least
+    :data:`_IMAGE_ROWS_POINTS` points, where its averages run on two threads or more (:class:`AffineImageRows`: the
+    rows are formed where they are read, the density average gathers the field at the images by broadcast index
+    vectors, or from the row of an oblique operation, by slabs on threads; the same integers and the same sums bit
+    for bit); a smaller grid or a run on one thread keeps its table; ``on`` takes the rows at every size and thread
+    count; ``off`` builds the table of operations x points (int32) at the preparation for every grid, as before."""
+
+    import os
+
+    value = os.environ.get(_IMAGE_ROWS_SWITCH, "auto").strip().lower() or "auto"
+    if value not in {"auto", "on", "off"}:
+        raise ValueError(f"{_IMAGE_ROWS_SWITCH} must be auto, on or off, not {value!r}")
+    return value
+
+
+class AffineImageRows:
+    """The table ``images[g, i] = (M_g i + c_g) mod n`` of a :class:`PeriodicGridSymmetry` on a row-major grid,
+    formed where it is read instead of held (``PARSEC_PERIODIC_IMAGE_ROWS``, :func:`periodic_grid_symmetry`).
+
+    It reads as the table does where its readers take it: ``shape``, ``dtype``, ``len``, iteration over the rows,
+    ``rows[g]`` and ``rows[g, index]``; ``numpy.asarray`` builds the whole table (tests and old readers).
+    :meth:`row` is :func:`affine_grid_images` of the operation, the row the table held; :meth:`at` the entries of
+    some points of a row; :meth:`gather` and :meth:`image_sum` the field at the images, by the broadcast index
+    vectors of :func:`affine_grid_indices` (no row of indices), the values and sums of the gathers of the table.
+
+    What it keeps after the first average (:attr:`held_bytes`, never more than the table): for an operation whose
+    rows of ``M`` read at most two axes each (a signed permutation of a box; the hexagonal, bcc and rhombohedral
+    cells) its broadcast index vectors, lengths of an axis or planes, kilobytes; for an oblique one (:meth:`oblique`:
+    a row of ``M`` that reads all three axes, as the mirrors of a cubic crystal in the primitive fcc cell, rows such
+    as ``(1, 1, 1)``), whose index vector would be an int64 array of every point, the row of the table itself (int32,
+    4 bytes a point).  Diamond in the primitive fcc cell keeps 36 rows of its 48.
+    """
+
+    __slots__ = ("maps", "counts", "dtype", "_held")
+
+    ndim = 2
+
+    def __init__(self, maps, counts, index_type) -> None:
+        self.maps = tuple(
+            (np.asarray(matrix, dtype=np.int64).reshape(3, 3), np.asarray(constant, dtype=np.int64).reshape(3))
+            for matrix, constant in maps
+        )
+        self.counts = tuple(int(value) for value in counts)
+        self.dtype = np.dtype(index_type)
+        # what each operation's gathers read, once formed: its broadcast index vectors (a tuple of three arrays), or,
+        # where those would hold more than the row of every point (an oblique operation), that row (a 1-D array)
+        self._held = {}
+
+    def __getstate__(self):
+        return {"maps": self.maps, "counts": self.counts, "dtype": self.dtype}
+
+    def __setstate__(self, state) -> None:
+        for name in ("maps", "counts", "dtype"):
+            object.__setattr__(self, name, state[name])
+        object.__setattr__(self, "_held", {})
+
+    @property
+    def held_bytes(self) -> int:
+        """The bytes this object keeps now: the index vectors and rows formed by the averages so far."""
+
+        total = 0
+        for held in self._held.values():
+            total += int(held.nbytes) if isinstance(held, np.ndarray) else sum(int(part.nbytes) for part in held)
+        return total
+
+    def oblique(self, operation: int) -> bool:
+        """Whether the broadcast index vectors of the operation would hold at least the bytes of its row (a row of
+        ``M`` that reads all three axes: an int64 array of every point), so its gathers read the row instead."""
+
+        matrix, _ = self.maps[self._operation(operation)]
+        points = int(np.prod(self.counts))
+        vector_bytes = sum(
+            int(np.prod([self.counts[column] for column in range(3) if matrix[row, column]], dtype=np.int64)) * 8
+            for row in range(3)
+        )
+        return vector_bytes >= points * self.dtype.itemsize
+
+    @property
+    def shape(self) -> tuple[int, int]:
+        return (len(self.maps), int(np.prod(self.counts)))
+
+    @property
+    def size(self) -> int:
+        operations, points = self.shape
+        return operations * points
+
+    def __len__(self) -> int:
+        return len(self.maps)
+
+    def __iter__(self):
+        for operation in range(len(self.maps)):
+            yield self.row(operation)
+
+    def _operation(self, operation) -> int:
+        index = int(operation)
+        if index < 0:
+            index += len(self.maps)
+        if not 0 <= index < len(self.maps):
+            raise IndexError(f"operation {operation} of {len(self.maps)}")
+        return index
+
+    def row(self, operation: int) -> np.ndarray:
+        """``images[operation]``: the image row of every point (the row of the table, the same integers; read-only
+        where it is the row an oblique operation keeps)."""
+
+        index = self._operation(operation)
+        held = self._held.get(index)
+        if isinstance(held, np.ndarray):
+            return held
+        matrix, constant = self.maps[index]
+        return affine_grid_images(matrix, constant, self.counts, self.dtype)
+
+    def at(self, operation: int, rows) -> np.ndarray:
+        """``images[operation, rows]`` for an index array ``rows`` (row-major points), the integers of the row."""
+
+        matrix, constant = self.maps[self._operation(operation)]
+        rows = np.asarray(rows)
+        flat = rows.astype(np.int64, copy=False).reshape(-1)
+        n0, n1, n2 = self.counts
+        if flat.size and (int(flat.min()) < -(n0 * n1 * n2) or int(flat.max()) >= n0 * n1 * n2):
+            raise IndexError("a row outside the grid")
+        flat = np.where(flat < 0, flat + n0 * n1 * n2, flat)
+        coordinates = (flat // (n1 * n2), (flat // n2) % n1, flat % n2)
+        strides = (n1 * n2, n2, 1)
+        result = np.zeros(flat.shape, dtype=np.int64)
+        for row in range(3):
+            component = np.full(flat.shape, int(constant[row]), dtype=np.int64)
+            for column in range(3):
+                if matrix[row, column]:
+                    component = component + int(matrix[row, column]) * coordinates[column]
+            result += (component % self.counts[row]) * strides[row]
+        return result.astype(self.dtype).reshape(rows.shape)
+
+    def _gatherer(self, operation: int):
+        """What the gathers of the operation read (formed once, kept, read-only): its broadcast index vectors of
+        :func:`affine_grid_indices` (a tuple of three arrays), or the row of an :meth:`oblique` operation."""
+
+        index = self._operation(operation)
+        found = self._held.get(index)
+        if found is None:
+            matrix, constant = self.maps[index]
+            if self.oblique(index):
+                found = affine_grid_images(matrix, constant, self.counts, self.dtype)
+                found.flags.writeable = False
+            else:
+                found = tuple(affine_grid_indices(matrix, constant, self.counts))
+                for part in found:
+                    part.flags.writeable = False
+            self._held[index] = found
+        return found
+
+    def _slab(self, held, first: int, last: int):
+        """The piece of ``held`` (:meth:`_gatherer`) for the planes ``first:last`` of the first axis."""
+
+        if isinstance(held, np.ndarray):
+            plane = self.counts[1] * self.counts[2]
+            return held[first * plane:last * plane]
+        return tuple(index[first:last] if index.shape[0] > 1 else index for index in held)
+
+    def _gathered_slab(self, source: np.ndarray, piece):
+        """``source[row]`` (a 1-D field of the points) at the planes of ``piece`` (:meth:`_slab`): the field at the
+        images there, a new array of their points in row-major order (the values of the gather of the table)."""
+
+        if isinstance(piece, np.ndarray):
+            return source[piece]
+        return source.reshape(self.counts)[piece]
+
+    def _run(self, work) -> None:
+        """``work(first, last)`` over the planes of the first axis: by slabs on the threads of the periodic setup for a
+        grid of ``_THREADED_SUMS`` points or more, else at once."""
+
+        if self.shape[1] < _THREADED_SUMS:
+            work(0, self.counts[0])
+        else:
+            _run_by_slabs(work, self.counts[0])
+
+    def gather(self, values, operation: int) -> np.ndarray:
+        """``values[..., images[operation]]`` of an array ``(..., points)``: a new array laid out as NumPy lays out the
+        gather of a row of the table (the points outermost in memory, the leading axes inside them in C order: strides
+        ``(8, 24)`` for a field ``(3, points)``), the same values; each component of the leading axes in turn, by
+        slabs on threads (:meth:`_run`)."""
+
+        values = np.asarray(values)
+        points = self.shape[1]
+        if values.ndim < 1 or values.shape[-1] != points:
+            raise ValueError(f"a field of {points} grid points is required, got shape {values.shape}")
+        held = self._gatherer(operation)
+        lead = values.shape[:-1]
+        sources = values.reshape(-1, points)
+        storage = np.empty((points,) + lead, dtype=values.dtype)
+        result = np.moveaxis(storage, 0, -1)
+        targets = storage.reshape(points, -1).T
+        plane = self.counts[1] * self.counts[2]
+
+        def work(first: int, last: int) -> None:
+            piece = self._slab(held, first, last)
+            for source, target in zip(sources, targets):
+                target[first * plane:last * plane] = self._gathered_slab(source, piece).reshape(-1)
+
+        self._run(work)
+        return result
+
+    def image_sum(self, values, operations=None) -> np.ndarray:
+        """``sum_g values[images[g]]`` over ``operations`` (all, in order, where ``None``) of a float field of the
+        points: the zero field plus each gather in turn, as ``total += values[images[g]]`` adds them, element by
+        element; a grid of ``_THREADED_SUMS`` points or more by slabs of the first axis on the threads of the
+        periodic setup, each slab taking every operation in turn (the same additions)."""
+
+        values = np.asarray(values)
+        if values.ndim != 1 or values.shape[0] != self.shape[1]:
+            raise ValueError(f"a field of {self.shape[1]} grid points is required, got shape {values.shape}")
+        chosen = range(len(self.maps)) if operations is None else [self._operation(value) for value in operations]
+        held = [self._gatherer(operation) for operation in chosen]
+        total = np.zeros_like(values)
+        plane = self.counts[1] * self.counts[2]
+
+        def work(first: int, last: int) -> None:
+            slab = total[first * plane:last * plane]
+            for one in held:
+                slab += self._gathered_slab(values, self._slab(one, first, last)).reshape(-1)
+
+        self._run(work)
+        return total
+
+    def accumulate(self, total: np.ndarray, values: np.ndarray, operation: int) -> None:
+        """``total += values[images[operation]]`` for float fields of the points (1-D), the same additions."""
+
+        if total.shape != (self.shape[1],) or not total.flags.c_contiguous:
+            raise ValueError("the total must be a contiguous field of the grid points")
+        values = np.asarray(values)
+        total += self._gathered_slab(values, self._slab(self._gatherer(operation), 0, self.counts[0])).reshape(-1)
+
+    def __getitem__(self, key):
+        if isinstance(key, (int, np.integer)):
+            return self.row(key)
+        if isinstance(key, tuple) and len(key) == 2 and isinstance(key[0], (int, np.integer)):
+            operation, points = key
+            if isinstance(points, slice):
+                return self.row(operation)[points]
+            return self.at(operation, points)
+        if (
+            isinstance(key, tuple)
+            and len(key) == 2
+            and isinstance(key[0], slice)
+            and key[0] == slice(None)
+            and not isinstance(key[1], slice)
+        ):
+            return np.stack([self.at(operation, key[1]) for operation in range(len(self.maps))])
+        return np.asarray(self)[key]
+
+    def __array__(self, dtype=None, copy=None):
+        table = np.empty(self.shape, dtype=self.dtype)
+        for operation in range(len(self.maps)):
+            table[operation] = self.row(operation)
+        return table if dtype is None else table.astype(dtype, copy=False)
+
+    def __repr__(self) -> str:
+        return f"AffineImageRows({len(self.maps)} operations, counts {self.counts}, {self.dtype})"
 
 
 def confined_symmetry_lattice(lattice_vectors, periodicity: int, radius: float) -> np.ndarray:
@@ -1465,6 +1944,73 @@ def slab_mesh_wedge_exactness(
     return True, wedge.count, pairs.count
 
 
+def sheet_preserving_operations(group: SpaceGroup, sheets, alatt, *, tolerance: float = 1.0e-6):
+    """The operations of a slab group that map its charged sheets onto sheets of the same charge.
+
+    ``sheets`` are ``(charge, height)`` pairs (or objects with ``charge`` and ``height``: the ``add_charged_sheets``
+    planes ``z = height``, whose potential ``sum_s 4 pi (q_s/A) |z - z_s|`` enters the Hamiltonian of a slab), ``alatt``
+    the rows of :func:`confined_symmetry_lattice`.  An operation ``r -> U (r - A t)`` maps the plane ``z = z_s`` onto
+    the plane ``z = U_zz z_s - (U A t)_z`` where ``U`` does not mix ``z`` with the plane; it is kept when that maps the
+    multiset of ``(charge, height)`` onto itself within ``tolerance`` bohr.  PARSEC 1.5 searches the group of a slab
+    from the atoms alone (``symmetries.f90``), so with a band structure, spin-orbit coupling or an NSCF run a
+    ``z``-reversing operation symmetrized the density of an asymmetric capacitor; the kept operations form a group
+    (the stabilizer of the sheets).  Returns ``(subgroup, dropped)``; every other field of ``group`` is kept,
+    ``full_holohedry`` becomes false when an operation is dropped.
+    """
+
+    pairs = []
+    for sheet in sheets:
+        charge, height = (sheet.charge, sheet.height) if hasattr(sheet, "charge") else sheet
+        pairs.append((float(charge), float(height)))
+    if not pairs or group.order <= 1:
+        return group, 0
+    charges = np.array([charge for charge, _ in pairs], dtype=np.float64)
+    heights = np.array([height for _, height in pairs], dtype=np.float64)
+    alatt = np.asarray(alatt, dtype=np.float64).reshape(3, 3)
+    kept = []
+    for index, (rotation, translation) in enumerate(zip(group.cartesian_rotations, group.translations)):
+        matrix = np.asarray(rotation, dtype=np.float64)
+        if abs(matrix[2, 0]) > tolerance or abs(matrix[2, 1]) > tolerance:
+            continue
+        shift = -(matrix @ (np.asarray(translation, dtype=np.float64) @ alatt))[2]
+        mapped = matrix[2, 2] * heights + shift
+        unmatched = list(range(len(pairs)))
+        for charge, height in zip(charges, mapped):
+            match = next(
+                (
+                    position
+                    for position, other in enumerate(unmatched)
+                    if abs(charges[other] - charge) <= 1.0e-12 * max(1.0, abs(charge))
+                    and abs(heights[other] - height) <= tolerance
+                ),
+                None,
+            )
+            if match is None:
+                break
+            del unmatched[match]
+        if not unmatched:
+            kept.append(index)
+    dropped = group.order - len(kept)
+    if dropped == 0:
+        return group, 0
+    last = group.translations[kept[-1]]
+    return (
+        SpaceGroup(
+            rotations=tuple(group.rotations[index] for index in kept),
+            translations=tuple(group.translations[index] for index in kept),
+            cartesian_rotations=tuple(group.cartesian_rotations[index] for index in kept),
+            labels=tuple(group.labels[index] for index in kept),
+            crystal_system=group.crystal_system,
+            full_holohedry=False,
+            lattice_operations=group.lattice_operations,
+            candidate_numbers=tuple(group.candidate_numbers[index] for index in kept),
+            symmorphic=not (abs(last[0]) + abs(last[1]) + abs(last[2]) > SYMMETRY_TOLERANCE),
+            ignored=group.ignored,
+        ),
+        dropped,
+    )
+
+
 def confined_grid_symmetry(grid, group: SpaceGroup) -> PeriodicGridSymmetry:
     """The operations of ``group`` as permutations of a wire or slab grid.
 
@@ -1519,12 +2065,15 @@ __all__ = [
     "fast_crystal_operations",
     "find_grid_space_group",
     "find_space_group",
+    "FIXED_SPECIES_SUFFIX",
+    "atoms_with_fixed_species",
     "find_wire_slab_space_group",
     "grid_affine_map",
     "snapped_translation",
     "space_group_with_search",
     "skipped_space_group",
     "SLAB_MESH_SYMMETRY_ENV",
+    "sheet_preserving_operations",
     "slab_mesh_subgroup",
     "slab_mesh_symmetry_setting",
     "slab_mesh_wedge_exactness",
@@ -1536,5 +2085,6 @@ __all__ = [
     "identity_space_group",
     "lattice_point_group",
     "periodic_grid_symmetry",
+    "respects_flags",
     "space_group_atom_images",
 ]

@@ -3,10 +3,12 @@
 A collinear spin-polarized bulk cell sampled at the Gamma point alone (a defect supercell: a vacancy, an NV-type
 centre, an open-shell molecule in a box) has real orbitals, as its unpolarized twin.  With
 ``PARSEC_GAMMA_SPIN_SECTORS=auto`` (the default) the accelerated driver solves it on the route of the Gamma sectors
-(:func:`parsec_python.acceleration.driver.periodic_sector_refusal`): in one process the weighted sectors of the
-cell's point group with its translations, as clusters take them (``PARSEC_ORBITAL_GROUP_SPIN=auto`` since 2026-11-19,
-:class:`~parsec_python.acceleration.Symmetry.PointGroupReduction`; ``driver._weighted_spin_refusal``: several MPI ranks
-and ``PARSEC_ORBITAL_GROUP_SPIN=off`` keep the abelian group), else the commuting involutions of the cell group with
+(:func:`parsec_python.acceleration.driver.periodic_sector_refusal`): the weighted sectors of the cell's point group
+with its translations, as clusters take them (``PARSEC_ORBITAL_GROUP_SPIN=auto`` since 2026-11-19, in one process and,
+since 2026-11-21, on several MPI ranks, ``PARSEC_ORBITAL_GROUP_MPI``;
+:class:`~parsec_python.acceleration.Symmetry.PointGroupReduction`; ``driver._weighted_spin_refusal``:
+``PARSEC_ORBITAL_GROUP_SPIN=off`` and ``PARSEC_ORBITAL_GROUP_MPI=off`` on several ranks keep the abelian group), else
+the commuting involutions of the cell group with
 their half-cell translations (:func:`~parsec_python.acceleration.Symmetry.axis_reflection.periodic_abelian_reduction`),
 both channels in those sectors with the symmetry guard of
 :mod:`.spin_sectors` (``Spin_Symmetry_Sectors``; its density test takes the operations ``r -> R r + t`` of the sector
@@ -22,10 +24,11 @@ process or the ranks of the runner share (``PARSEC_SPIN_FALLBACK_SHARED``, ``dri
 factors, the abelian little-group sectors of ``acceleration/SCF/kpoint_sectors.py``), bit for bit.
 
 What stays on that route with ``auto`` too (:func:`gamma_spin_sector_refusal`): spin-orbit species and spinors, a
-wire or slab of the Fortran-derived routines, k-points beyond Gamma, an oblique cell, a hybrid or LDA+U run, a
-meta-GGA, libxc or TS run that its switch keeps off the sectors (the refusals of the unpolarized route:
-:mod:`.gamma_features`; under ``auto`` a cell below 2^27 or 2^28 grid points x states, and TS of every size, whose
-spin sectors were slower than this route), ``Spin_Symmetry_Sectors: off``, ``Symmetrize_Charge_Density``, the
+wire or slab of the Fortran-derived routines, k-points beyond Gamma, an oblique cell, a hybrid run, an LDA+U, a
+meta-GGA, libxc or TS run that its switch keeps off the sectors (LDA+U also under ``PARSEC_LDAU_SPIN_SECTORS=off``;
+the refusals of the unpolarized route:
+:mod:`.gamma_features`; under ``auto`` a cell below 2^27 (a meta-GGA), 2^28 (libxc) or 2^26 (LDA+U) grid points x
+states, and TS of every size, whose spin sectors were slower than this route), ``Spin_Symmetry_Sectors: off``, ``Symmetrize_Charge_Density``, the
 occupations of ``occup.in`` and a ``Restart_Run``.  The command line (:func:`gamma_spin_on_sector_route`) also keeps
 ``--mpi`` (the k-point pools of ``main.py``) and a backend that does not resolve to CuPy on that route.  Andrew
 Grieder's slab (``Boundary_Conditions: slab`` on the default routines, a 3-D grid with
@@ -46,9 +49,11 @@ atoms (and forces with ``Ignore_Symmetry`` or ``--symmetry off``) take the accel
 unpolarized cell: both channels on the full grid (no point group, no guard), planned from the input
 (:func:`spin_full_grid_moves_plan`, ``driver.spin_full_grid_plan``): of one device where 4 times both bases fit it,
 one sector of the identity whose basis the GPUs of the process share where they do not
-(``PARSEC_SPIN_FALLBACK_SHARED``), the 1x1x1 k-point driver with a NOTE where neither holds them.  The
-Fortran-derived routines and ``PARSEC_PERIODIC_SECTOR_FORCES=off`` keep the 1x1x1
-k-point driver, as ``off`` keeps every forces, relaxation and dynamics run of a spin cell.  The full-SCF runner
+(``PARSEC_SPIN_FALLBACK_SHARED``), the reference solver with a NOTE where neither holds them.  The
+Fortran-derived routines and ``PARSEC_PERIODIC_SECTOR_FORCES=off`` keep the reference solver, as ``off`` keeps
+every forces, relaxation and dynamics run of a spin cell there: its ionic loop is the 1x1x1 k-point run of the
+device k-point solver on the Fortran-derived routines (``PARSEC_SPIN_IONIC_KPOINT``, since 2026-11-21) and the
+Gamma-point loop of the host on the default routines.  The full-SCF runner
 takes the forces and relaxations of spin-polarized runs on several ranks under ``auto`` where they keep their
 sectors (clusters and these cells alike), and refuses the others (molecular dynamics among them), and every one
 under ``off``, as before.  Units Ry, bohr.

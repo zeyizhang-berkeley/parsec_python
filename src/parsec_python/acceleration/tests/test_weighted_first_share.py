@@ -29,12 +29,32 @@ class WeightedFirstShareTests(unittest.TestCase):
     def test_the_switch(self) -> None:
         from parsec_python.acceleration.Symmetry.sector_shares import weighted_first_share_setting
 
-        for value, expected in (("", "even"), ("even", "even"), ("ORBITALS", "orbitals")):
+        from parsec_python.acceleration.Symmetry.sector_shares import weighted_first_share_route
+
+        for value, expected in (("", "auto"), ("auto", "auto"), ("even", "even"), ("ORBITALS", "orbitals")):
             with mock.patch.dict(os.environ, {"PARSEC_WEIGHTED_FIRST_SHARE": value}):
                 self.assertEqual(weighted_first_share_setting(), expected)
-        with mock.patch.dict(os.environ, {"PARSEC_WEIGHTED_FIRST_SHARE": "auto"}):
-            with self.assertRaisesRegex(ValueError, "PARSEC_WEIGHTED_FIRST_SHARE"):
+        with mock.patch.dict(os.environ, {"PARSEC_WEIGHTED_FIRST_SHARE": "valence"}):
+            with self.assertRaisesRegex(ValueError, "PARSEC_WEIGHTED_FIRST_SHARE must be auto, even or orbitals"):
                 weighted_first_share_setting()
+        # the default since 2026-11-21: auto, the shares of the valence orbitals in one process and the even share
+        # on the ranks of an MPI run
+        from parsec_python.acceleration.Symmetry.sector_shares import MINIMUM_ENTRIES
+
+        self.assertEqual(MINIMUM_ENTRIES, 1 << 27)
+        with mock.patch.dict(os.environ):
+            os.environ.pop("PARSEC_WEIGHTED_FIRST_SHARE", None)
+            self.assertEqual(weighted_first_share_setting(), "auto")
+            self.assertEqual(weighted_first_share_route(mpi=False, entries=MINIMUM_ENTRIES), "orbitals")
+            self.assertEqual(weighted_first_share_route(mpi=True, entries=MINIMUM_ENTRIES), "even")
+            # below the floor, or a basis that is not known: the even share
+            self.assertEqual(weighted_first_share_route(mpi=False, entries=MINIMUM_ENTRIES - 1), "even")
+            self.assertEqual(weighted_first_share_route(mpi=False), "even")
+        for value in ("even", "orbitals"):
+            with mock.patch.dict(os.environ, {"PARSEC_WEIGHTED_FIRST_SHARE": value}):
+                self.assertEqual(weighted_first_share_route(mpi=False), value)
+                self.assertEqual(weighted_first_share_route(mpi=True), value)
+                self.assertEqual(weighted_first_share_route(mpi=False, entries=1), value)
 
     def test_characters_of_the_harmonics(self) -> None:
         from parsec_python.acceleration.Symmetry.sector_shares import angular_character
@@ -108,8 +128,27 @@ class WeightedFirstShareTests(unittest.TestCase):
                                    return_value=np.full(counts.shape, 2, dtype=np.int64)):
                 self.assertIsNone(sector_shares.attach_valence_orbital_counts(decomposition, atoms, tables, grid))
             self.assertFalse(hasattr(decomposition, "valence_orbital_counts"))
-        for setting in ("", "even"):
+        for setting in ("even",):
             with mock.patch.dict(os.environ, {"PARSEC_WEIGHTED_FIRST_SHARE": setting}):
+                self.assertIsNone(sector_shares.attach_valence_orbital_counts(decomposition, atoms, tables, grid))
+        # auto (the default): attached in one process from the floor of the basis on, not on the ranks of an MPI run
+        # and not below the floor
+        floor = sector_shares.MINIMUM_ENTRIES
+        for setting in ("", "auto"):
+            with mock.patch.dict(os.environ, {"PARSEC_WEIGHTED_FIRST_SHARE": setting}):
+                np.testing.assert_array_equal(
+                    sector_shares.attach_valence_orbital_counts(decomposition, atoms, tables, grid, entries=floor),
+                    counts,
+                )
+                self.assertIsNone(
+                    sector_shares.attach_valence_orbital_counts(
+                        decomposition, atoms, tables, grid, mpi=True, entries=floor
+                    )
+                )
+                self.assertFalse(hasattr(decomposition, "valence_orbital_counts"))
+                self.assertIsNone(
+                    sector_shares.attach_valence_orbital_counts(decomposition, atoms, tables, grid, entries=floor - 1)
+                )
                 self.assertIsNone(sector_shares.attach_valence_orbital_counts(decomposition, atoms, tables, grid))
 
     def test_shares_and_first_counts(self) -> None:

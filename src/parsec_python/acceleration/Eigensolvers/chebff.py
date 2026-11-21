@@ -22,6 +22,7 @@ from .rayleigh_ritz import (
     generalized_rayleigh_ritz,
     generalized_ritz_requested,
     rayleigh_ritz,
+    ritz_route_rows,
     streaming_ritz_requested,
 )
 from .spectral_bounds import LanczosBoundResult, lanczos_upper_bound
@@ -182,7 +183,9 @@ def run_chebff(
                 # to keep a single tall array.
                 out=vectors if streaming_ritz_requested(operator) else None,
             )
-        if generalized and generalized_ritz_requested(*map(int, vectors.shape)):
+        if generalized and generalized_ritz_requested(
+            ritz_route_rows(operator, int(vectors.shape[0])), int(vectors.shape[1])
+        ):
             # Opt-in: solve Rayleigh--Ritz directly in the filtered basis, as
             # later SUBSPACE passes do.  For large sectors the tall QR below
             # is about two thirds of the whole first solve, while the Gram

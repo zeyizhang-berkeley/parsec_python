@@ -90,6 +90,119 @@ def graph_filter(operator, matrix, blocks, lower, upper, reference, reset, out=N
     return workspace.apply(matrix, blocks, lower, upper, reference, reset, out=out)
 
 
+def graphs_can_filter(operator: Any) -> bool:
+    """Whether :class:`BlockFilterGraphs` can record the recurrence of ``operator``.
+
+    Its graphs launch the fused recurrence of the stencil-major kernels and,
+    where there are projectors, the tree projection of the operator
+    (``custom_projector_projection``).  An operator built without the
+    stencil-major layout (``PARSEC_CUPY_STENCIL_MAJOR=0``, or a failed build
+    of it: the CSR-order compact stencil, or the generic CSR where that
+    cannot be built either) has no such recurrence; one with projectors but
+    no tree projection has nothing to record the coefficients with.  The
+    devices of a sector and the ranks of a shared basis filter such an
+    operator with :class:`PlainBlockFilter` (:func:`device_filter`).
+    """
+
+    stencil = getattr(operator, "compact_finite_difference", None)
+    if not isinstance(stencil, CuPyStencilMajorFiniteDifference):
+        return False
+    return not operator.projector_count or (
+        getattr(operator, "custom_projector_projection", None) is not None
+    )
+
+
+class PlainBlockFilter:
+    """The block filter of :class:`BlockFilterGraphs` without graphs, for an operator they cannot record.
+
+    :meth:`apply` takes the arguments of :meth:`BlockFilterGraphs.apply` and
+    carries sigma from block to block as :func:`fill_recurrence_table` does,
+    but filters every block with :func:`chebyshev.chebyshev_filter`, which
+    steps with the operator's own recurrence: the arithmetic of the filter of
+    one device without graphs (``chebyshev._subspace_filter``).  The devices
+    of a sector (:class:`distributed_filter.DistributedFilter`) and the ranks
+    of a shared basis (``mpi_shared_basis.MPIShardGroup.filter``) filter the
+    columns of such an operator with it; before 2026-11-21 they stopped with
+    an ``AttributeError`` (``neighbors``, ``chebyshev_recurrence``) of the
+    graphs.  Nothing is recorded, so :attr:`recorded` stays false.
+    """
+
+    reuse = False
+    recorded = False
+    buffer_bytes = 0
+
+    def __init__(self, operator: Any):
+        cp, _ = require_cupy()
+        self.cp = cp
+        # As BlockFilterGraphs: the operator owns this object, not the reverse.
+        self._operator_ref = ref(operator)
+        self.device = int(operator.effective_potential.device.id)
+        self.lock = RLock()
+
+    @property
+    def operator(self):
+        operator = self._operator_ref()
+        if operator is None:
+            raise ReferenceError("filter owner has been released")
+        return operator
+
+    def apply(self, matrix, blocks, lower, upper, reference, reset, initial_sigma=None, out=None):
+        from .chebyshev import chebyshev_filter
+
+        cp = self.cp
+        operator = self.operator
+        starts = None
+        if initial_sigma is not None and not np.isscalar(initial_sigma):
+            starts = tuple(initial_sigma)
+            if len(starts) != len(blocks):
+                raise ValueError("one starting sigma per block is required")
+        carried = None if starts is not None else initial_sigma
+        with self.lock, cp.cuda.Device(self.device):
+            if out is None:
+                order = "F" if os.environ.get("PARSEC_CUPY_FILTER_COLUMN_MAJOR", "0") == "1" else "K"
+                result = cp.empty_like(matrix, dtype=cp.float64, order=order)
+            else:
+                if out.shape != matrix.shape or out.dtype != cp.dtype(cp.float64):
+                    raise ValueError("out must be a float64 device array matching the input")
+                result = out
+            for index, block in enumerate(blocks):
+                if starts is not None:
+                    carried = starts[index]
+                # Every block reads its own columns only, and has read them before they are overwritten (in
+                # order on the current stream), so ``out`` may be the input.
+                filtered, carried = chebyshev_filter(
+                    operator,
+                    matrix[:, block.start : block.stop],
+                    block.degree,
+                    lower,
+                    upper,
+                    reference,
+                    initial_sigma=None if reset or carried is None else carried,
+                    return_final_sigma=True,
+                    mixed_precision=False,
+                )
+                result[:, block.start : block.stop] = filtered
+            return result
+
+
+def device_filter(operator: Any):
+    """A new block filter of ``operator``: :class:`BlockFilterGraphs` where :func:`graphs_can_filter`, else
+    :class:`PlainBlockFilter`."""
+
+    return BlockFilterGraphs(operator) if graphs_can_filter(operator) else PlainBlockFilter(operator)
+
+
+def operator_filter(operator: Any):
+    """The block filter that ``operator`` keeps for itself (``_filter_graph_workspace``), made once by
+    :func:`device_filter`."""
+
+    workspace = getattr(operator, "_filter_graph_workspace", None)
+    if workspace is None:
+        workspace = device_filter(operator)
+        operator._filter_graph_workspace = workspace
+    return workspace
+
+
 def fill_recurrence_table(table, blocks, center, half_span, sigma_one, reset, initial_sigma=None):
     """Write the coefficients of every recurrence step of ``blocks`` into ``table``.
 

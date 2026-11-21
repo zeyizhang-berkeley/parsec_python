@@ -22,6 +22,13 @@ class OrbitalDensityTests(unittest.TestCase):
         direct = (np.abs(self.vectors) ** 2) @ self.occupations
         np.testing.assert_allclose(weighted_square_sum(self.vectors, self.occupations), direct, rtol=1e-13)
 
+    def test_real_orbitals(self) -> None:
+        # real orbitals (the Gamma point of a k-point SCF in real arithmetic): the sum of their complex casts
+        real = self.vectors.real.copy()
+        np.testing.assert_array_equal(
+            weighted_square_sum(real, self.occupations), weighted_square_sum(real.astype(complex), self.occupations)
+        )
+
     def test_rows_given_are_rows_returned(self) -> None:
         whole = weighted_square_sum(self.vectors, self.occupations)
         pieces = [weighted_square_sum(self.vectors[a:b], self.occupations) for a, b in ((0, 11), (11, 37))]

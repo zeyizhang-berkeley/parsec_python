@@ -262,7 +262,10 @@ def kpoint_kinetic_setting() -> str:
     """``PARSEC_KPOINT_KINETIC``: the kinetic term of a k-point.  ``gradient`` (default): ``-nabla^2 - 2ik.nabla +
     k^2`` with the gradient discretized on its own; ``bloch``: the Bloch block of the finite-difference Laplacian
     (:func:`build_bloch_negative_laplacian`), whose mesh of ``m`` points along an axis gives the Gamma point of the
-    supercell of ``m`` cells exactly; ``auto``: ``bloch`` where it applies, ``gradient`` elsewhere.
+    supercell of ``m`` cells exactly; ``auto``: ``bloch`` where it applies, ``gradient`` elsewhere; ``trim``:
+    ``bloch`` at the time-reversal invariant k-points other than Gamma (``k = G/2``, :func:`is_trim_point`) where
+    it applies, ``gradient`` at the others (the real TRIM route: in the psi gauge the Bloch form of such a point is
+    real, and the k-point solvers solve one sector of each of its conjugate pairs, ``PARSEC_KPOINT_TRIM_REAL``).
 
     Both forms converge to the same energies.  Neither is closer at every spacing: on silicon (2 x 2 x 2 and
     3 x 3 x 3 meshes, 12 to 28 points per cubic edge) the total energy of ``bloch`` is as close or closer to the
@@ -273,9 +276,33 @@ def kpoint_kinetic_setting() -> str:
     import os
 
     value = os.environ.get(_KINETIC_SWITCH, "gradient").strip().lower() or "gradient"
-    if value not in {"auto", "gradient", "bloch"}:
-        raise ValueError(f"{_KINETIC_SWITCH} must be gradient, bloch or auto, not {value!r}")
+    if value not in {"auto", "gradient", "bloch", "trim"}:
+        raise ValueError(f"{_KINETIC_SWITCH} must be gradient, bloch, trim or auto, not {value!r}")
     return value
+
+
+def is_trim_point(grid, k_point) -> bool:
+    """Whether ``k_point`` (Cartesian, 1/bohr) is a time-reversal invariant point other than Gamma of the
+    orthorhombic periodic box ``grid``: ``2k`` a reciprocal lattice vector (``k_a L_a / pi`` an integer along every
+    axis, to 1e-9), ``k`` not zero."""
+
+    k = np.asarray(k_point, dtype=np.float64).reshape(-1)
+    if k.size != 3 or not np.any(k != 0.0):
+        return False
+    lattice = np.asarray(grid.cell.lattice_vectors, dtype=np.float64)
+    if not np.allclose(lattice, np.diag(np.diag(lattice)), atol=1.0e-12):
+        return False
+    halves = k * np.diag(lattice) / np.pi
+    return bool(np.all(np.abs(halves - np.round(halves)) <= 1.0e-9))
+
+
+def bloch_form_at(grid, k_point, *, meta_gga: bool = False) -> bool:
+    """Whether :func:`bloch_laplacian_or_none` gives the Bloch form at ``k_point`` (``PARSEC_KPOINT_KINETIC``)."""
+
+    setting = kpoint_kinetic_setting()
+    if setting == "gradient" or meta_gga or not _wrapped_box(grid):
+        return False
+    return setting != "trim" or is_trim_point(grid, k_point)
 
 
 def bloch_laplacian_or_none(grid, k_point, cache: dict | None = None, key=None, *, meta_gga: bool = False):
@@ -283,15 +310,18 @@ def bloch_laplacian_or_none(grid, k_point, cache: dict | None = None, key=None, 
 
     It applies to a scalar (not spinor) Hamiltonian without a meta-GGA on a bulk orthorhombic cell of the default
     routines (:func:`_wrapped_box`): ``auto`` takes it there and the gradient form elsewhere, ``bloch`` refuses
-    the others, ``gradient`` never takes it.
+    the others, ``gradient`` never takes it, ``trim`` takes it at the time-reversal invariant points other than
+    Gamma (:func:`is_trim_point`) where it applies and the gradient form elsewhere.
     """
 
     setting = kpoint_kinetic_setting()
     if setting == "gradient":
         return None
+    if setting == "trim" and not is_trim_point(grid, k_point):
+        return None
     applies = _wrapped_box(grid) and not meta_gga
     if not applies:
-        if setting == "auto":
+        if setting in ("auto", "trim"):
             return None
         raise ValueError(
             "PARSEC_KPOINT_KINETIC=bloch needs a bulk orthorhombic cell of the default routines (an orthorhombic "

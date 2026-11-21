@@ -1076,14 +1076,96 @@ def orbital_irreps_setting() -> str:
     Chebyshev filter (:meth:`.representations.ReflectionRepresentationDecomposition.projection_tables`); ``split``
     also splits a sector that holds two representations of one weight (the 3-dimensional ones of a diamond
     supercell's 192 operations), which halves its Rayleigh-Ritz work.  The rows of every unit are those of its
-    sector.  ``off`` keeps the sectors of before, bit for bit; so do ``once`` and ``split`` where the units are the
-    sectors.  Td: five units of ``M/24, M/24, M/12, M/8, M/8`` states instead of four of ``M/8`` (rows times states
+    sector, or, for a unit that is a sector of a larger subgroup, those of that subgroup
+    (:func:`orbital_irrep_rows_setting`, ``partner``; ``sector`` by default).  ``off`` keeps the sectors of before,
+    bit for bit;
+    so do ``once`` and ``split`` where the units are the sectors.  Td: five units of ``M/24, M/24, M/12, M/8, M/8`` states instead of four of ``M/8`` (rows times states
     1.2, Rayleigh-Ritz 1.5 times less work); the largest unit, and with it the peak memory of a sector, is the same.
     """
 
     value = os.environ.get(_ORBITAL_IRREPS_SWITCH, "off").strip().lower() or "off"
     if value not in ("off", "once", "split"):
         raise ValueError(f"{_ORBITAL_IRREPS_SWITCH} must be off, once or split, not {value!r}")
+    return value
+
+
+_SECTOR_OVERHEAD_SWITCH = "PARSEC_SECTOR_OVERHEAD"
+#: The work of a solved sector that does not shrink with it, in grid points times states (``PARSEC_SECTOR_OVERHEAD``,
+#: :func:`sector_overhead_entries`).
+SECTOR_OVERHEAD_ENTRIES = 1 << 21
+
+
+def sector_overhead_entries() -> int:
+    """``PARSEC_SECTOR_OVERHEAD``: the fixed cost of one solved sector of a periodic cell in the choice of its
+    weighted plan, in grid points times states (``auto``, the default: :data:`SECTOR_OVERHEAD_ENTRIES`; ``off``: none,
+    the choice of before; an integer >= 0: that many).
+
+    Every solved sector costs an SCF iteration of one A100 about 10 ms that its size does not change (its filter
+    launches, Rayleigh-Ritz step and synchronizations; 7-16 ms per sector measured on the 8-atom cells of Si, Al,
+    MgO, NaCl, TiO2 and the 64-atom MgO and SrTiO3 cells), against about 5 ns per grid point and state of a sector's
+    filter: a sector costs as much as ``2^21`` entries.  :func:`.orbital_groups.orbital_group_plan` then takes the
+    plan of the least ``rows x states + sectors x entries`` instead of the least rows x states, which on a small
+    cell solves fewer, larger sectors (the 8-atom cubes: 2 to 4 instead of 5 to 16).  The comparison with the
+    abelian group (:func:`detect_point_group_reduction`) is that of before, and the full group ``G`` is the same, so
+    the fields, forces and moves keep their average over ``G``.  Under ``auto`` the driver applies the cost only to
+    a cell whose whole basis is at most that of one sector's fixed cost (``driver._periodic_sector_cost``); an
+    integer applies to every unpolarized cell.  A spin-polarized run keeps the plan of before under every value: its
+    guard does not see the multiplets whose partners the plans of fewer sectors hold in one sector of weight 1.
+    """
+
+    raw = sector_overhead_setting()
+    if raw == "auto":
+        return SECTOR_OVERHEAD_ENTRIES
+    if raw == "off":
+        return 0
+    return int(raw)
+
+
+def sector_overhead_setting() -> str:
+    """The value of ``PARSEC_SECTOR_OVERHEAD`` as given: ``auto``, ``off`` or a number of entries (a string of
+    digits); another value is refused (:func:`sector_overhead_entries`)."""
+
+    raw = os.environ.get(_SECTOR_OVERHEAD_SWITCH, "auto").strip().lower() or "auto"
+    if raw in ("auto", "off"):
+        return raw
+    try:
+        value = int(raw)
+    except ValueError:
+        value = -1
+    if value < 0:
+        raise ValueError(f"{_SECTOR_OVERHEAD_SWITCH} must be auto, off or a number of entries >= 0, not {raw!r}")
+    return str(value)
+
+
+_ORBITAL_IRREP_ROWS_SWITCH = "PARSEC_ORBITAL_IRREP_ROWS"
+#: The default of ``PARSEC_ORBITAL_IRREP_ROWS`` (:func:`orbital_irrep_rows_setting`).
+ORBITAL_IRREP_ROWS_DEFAULT = "sector"
+
+
+def orbital_irrep_rows_setting() -> str:
+    """``PARSEC_ORBITAL_IRREP_ROWS``: ``sector`` (the default) or ``partner``; read only with ``PARSEC_ORBITAL_IRREPS``.
+
+    A projected unit of :func:`orbital_irreps_setting` whose states are a whole one-dimensional sector ``mu`` of a
+    larger subgroup ``K`` of ``G`` (:attr:`.orbital_groups.IrrepUnit.subgroup_cosets`: A1 and A2 of Td are the
+    sectors of Td itself, a 3-dimensional representation of the 192 operations of a diamond supercell one of a
+    subgroup of 64) holds one partner row of each of its representations.  ``partner`` solves such a unit on the
+    orbits of ``K`` (:meth:`.representations.ReflectionRepresentationDecomposition.partner_rows`), ``[K:H]`` times
+    fewer rows with its own stencil and projectors and no projector after the filters; its density is summed on the
+    orbits of ``K`` and averaged over ``G`` with the others, which gives the other partners.  ``sector`` keeps the
+    rows of its sector of ``H`` with the projector, bit for bit as before 2026-11-21.  Units that are no such sector
+    (the E of Td) keep the rows of their sector under both.
+
+    ``partner`` is opt-in: faster where the units it shrinks carry the work of their devices (one GPU for a cluster,
+    the cubes of 4,096 atoms and more, MgO of 1,000 atoms), but measured 1 to 4 % slower over whole first runs on
+    A100 where they do not or where the units are launch-bound (nanodiamond k10 on two ranks of four GPUs, its
+    partner rows prepared on one rank; the 1,728-atom diamond cube and the 512-atom Si cube on the four GPUs of one
+    process, their first solves), see the switch table of ``acceleration/README.md``.
+    """
+
+    value = os.environ.get(_ORBITAL_IRREP_ROWS_SWITCH, ORBITAL_IRREP_ROWS_DEFAULT).strip().lower()
+    value = value or ORBITAL_IRREP_ROWS_DEFAULT
+    if value not in ("partner", "sector"):
+        raise ValueError(f"{_ORBITAL_IRREP_ROWS_SWITCH} must be partner or sector, not {value!r}")
     return value
 
 
@@ -1175,6 +1257,12 @@ class PointGroupReduction(SignedPermutationReduction):
     # of D2d); ``None``: not known.  Fixed occupations must fill those partners alike (the weighted density is
     # averaged over ``G``), which ``Occupations.partner_occupations`` checks.
     sector_partner_irreps: tuple = None
+    # Per solved sector (row of ``sector_characters``), whether every representation of ``G`` it holds has partners
+    # in two or more sectors of the abelian group of the atoms, the group a calculation that leaves these sectors
+    # takes (:func:`.orbital_groups.abelian_split_sectors`; the spin guard, ``SCF/spin_sectors.abelian_partner_labels``);
+    # ``None``: not known (a cell with translations, whose abelian sectors take them; a cell whose operations take no
+    # translation has the flags where its abelian route keeps the group about the origin).
+    sector_abelian_split: np.ndarray = None
     # The units of the irreducible representations of ``G`` (``PARSEC_ORBITAL_IRREPS``, :func:`.orbital_groups.irrep_units`):
     # ``sector_characters`` then holds one row per unit (a character of ``H`` may recur), ``sector_weights`` the
     # unit's weight; ``sector_projected[s]`` whether unit ``s`` keeps only some representations of its character,
@@ -1184,6 +1272,10 @@ class PointGroupReduction(SignedPermutationReduction):
     sector_projected: np.ndarray = None
     sector_projections: np.ndarray = None
     sector_shares: np.ndarray = None
+    # Per unit, the positions of the right cosets (into ``coset_images``) that make a larger subgroup ``K`` whose
+    # one-dimensional sector the projected unit is (:attr:`.orbital_groups.IrrepUnit.subgroup_cosets`), or ``None``;
+    # ``None`` for the sectors of before.  Read under ``PARSEC_ORBITAL_IRREP_ROWS=partner``.
+    sector_partner_cosets: tuple = None
 
     def operation_translation(self, index: int) -> np.ndarray | None:
         """The translation of ``operations[index]`` (grid steps), ``None`` without translations."""
@@ -2540,6 +2632,39 @@ def sector_gradient_atoms(reduction):
     return np.flatnonzero(representatives == np.arange(representatives.size))
 
 
+def _abelian_split_flags(table, plan, operations, abelian, *, units: bool = False) -> np.ndarray | None:
+    """:func:`.orbital_groups.abelian_split_sectors` of ``plan`` for the operations of ``abelian`` (its signed
+    permutations, or the diagonal signs of an axis-reflection group) among ``operations`` (those of ``table``), as a
+    read-only boolean array; ``None`` where an operation of ``abelian`` is not among them."""
+
+    from .orbital_groups import _key, abelian_split_sectors
+
+    matrices = getattr(abelian, "operations", None)
+    if matrices is None:
+        matrices = [np.diag(np.asarray(signs, dtype=np.int64)) for signs in np.asarray(abelian.signs)]
+    index = {_key(np.asarray(operation, dtype=np.int64)): number for number, operation in enumerate(operations)}
+    members = [index.get(_key(np.asarray(matrix, dtype=np.int64))) for matrix in matrices]
+    if any(member is None for member in members):
+        return None
+    flags = np.asarray(abelian_split_sectors(table, plan, members, units=units), dtype=bool)
+    flags.setflags(write=False)
+    return flags
+
+
+def _abelian_is_largest_involution_group(table, operations, abelian) -> bool:
+    """Whether no group of commuting involutions among ``operations`` (the operations of a cell about the origin,
+    the identity first; ``table`` their multiplication table) is larger than ``abelian``: then
+    :func:`periodic_abelian_reduction` keeps ``abelian`` for the cell (its :class:`..SCF.kpoint_sectors.CellGroup`
+    holds the same operations, :func:`_space_group_operations`)."""
+
+    from ..SCF.kpoint_sectors import largest_commuting_involutions
+
+    if not len(operations) or not np.array_equal(np.asarray(operations[0]), np.eye(3)):
+        return False
+    elements, _ = largest_commuting_involutions(np.asarray(table), range(len(operations)))
+    return len(elements) <= abelian.group_order
+
+
 def detect_point_group_reduction(
     grid: RealSpaceGrid,
     atoms: Sequence[Atom],
@@ -2547,6 +2672,7 @@ def detect_point_group_reduction(
     *,
     atom_tolerance: float = 1.0e-7,
     lattice_tolerance: float = 1.0e-10,
+    sector_cost: float = 0.0,
 ) -> AxisReflectionReduction:
     """``abelian`` (the reduction of before), or a :class:`PointGroupReduction` where that solves less.
 
@@ -2555,6 +2681,12 @@ def detect_point_group_reduction(
     its sectors.  ``abelian`` is returned unchanged where ``G`` is no group (an atom tolerance that accepts
     two operations and refuses their product), where the plan solves more than :func:`orbital_group_max_cost` of
     what ``abelian`` does (``1/|abelian|`` of the rows times states), or under ``PARSEC_ORBITAL_GROUP=abelian``.
+
+    ``sector_cost``: the fixed cost of one solved sector in units of the grid points times states of the calculation
+    (``PARSEC_SECTOR_OVERHEAD``, :func:`sector_overhead_entries`, which the driver divides by those of a periodic
+    cell in one process): the plan is that of the least rows x states plus ``sector_cost`` per solved sector, and it
+    is compared with the abelian group with the cost of its sectors added on both sides.  ``0`` (the default) is the
+    choice of before.
     """
 
     if orbital_group_policy() == "abelian" or not atoms:
@@ -2567,6 +2699,8 @@ def detect_point_group_reduction(
     # r -> R r + t; PARSEC_PERIODIC_TRANSLATIONS=off keeps the point group about the origin alone, half the
     # half-cell translations alone).  Without any translation the operations are those of the point group.
     candidates = shifts = modulus = None
+    # a cell whose operations take no translation (a defect at the origin of a symmorphic cell)
+    cell_about_origin = False
     if (
         _lattice_period(grid) is not None
         and _periodic_row_major(grid)
@@ -2578,6 +2712,7 @@ def detect_point_group_reduction(
             )
             if not any(np.any(np.asarray(shift) != 0) for shift in found_shifts):
                 candidates = found
+                cell_about_origin = True
                 break
             counts = np.asarray(grid.points_per_axis, dtype=np.int64)
             try:
@@ -2601,7 +2736,7 @@ def detect_point_group_reduction(
     if len(elements) <= abelian.group_order:
         return abelian
     try:
-        multiplication_table(elements, modulus=modulus)
+        group_table = multiplication_table(elements, modulus=modulus)
     except ValueError:
         return abelian
     # the pure translations, in every candidate subgroup (orbital_group_plan, ``required``)
@@ -2613,8 +2748,10 @@ def detect_point_group_reduction(
         )
     )
     irreps = orbital_irreps_setting()
+    sector_cost = float(sector_cost)
     plan = orbital_group_plan(elements, modulus=modulus, required=required,
-                              units=None if irreps == "off" else irreps)
+                              units=None if irreps == "off" else irreps,
+                              **({} if sector_cost <= 0.0 else {"sector_cost": sector_cost}))
     # Taken where it solves at most PARSEC_ORBITAL_GROUP_MAX_COST of what the abelian group does (Td, Oh, T, Th: a
     # half to a quarter; D4h, D2d, D4, C4v: three quarters, the partner sectors of their E levels merged); a smaller
     # gain keeps the group of before.  ``abelian`` is the group about the origin; a cell refused here takes its
@@ -2623,8 +2760,11 @@ def detect_point_group_reduction(
     # iteration follows the sectors per device times their rows x states, the same per sector on both routes (Si
     # 4x4x4 on one node: 0.57 s per iteration with 10 weighted sectors, 1.71 s with 32 abelian ones; Si 3x3x2, 3/4 of
     # the rows x states: 0.82 of the time), so the plan is the faster route also where it saves less than this
-    # threshold asks of the cell's abelian group (tests/test_plan_cost.py).
-    if not plan.cost <= orbital_group_max_cost() / abelian.group_order + 1.0e-12:
+    # threshold asks of the cell's abelian group (tests/test_plan_cost.py).  With a fixed cost per sector
+    # (PARSEC_SECTOR_OVERHEAD, sector_cost > 0) the comparison is that of before, with the plan of the least rows x
+    # states (least_cost), so that the cell keeps the route of before (weighted sectors of G, or the abelian group) and
+    # its full group G: the fixed cost chooses which subgroup's sectors solve it.
+    if not plan.least_cost <= orbital_group_max_cost() / abelian.group_order + 1.0e-12:
         return abelian
     subgroup = [candidates[index] for index in plan.subgroup]
     # The smallest image of every row under H, map by map: the maps are not kept together (32 maps of the 46.7 M
@@ -2652,9 +2792,22 @@ def detect_point_group_reduction(
     partner_irreps = tuple(tuple(int(g) for g in held) for held in plan.partner_irreps)
     unit_fields = {}
     units = plan.units
-    if units is not None and (
+    by_units = units is not None and (
         len(units) != len(plan.characters) or any(unit.projection is not None for unit in units)
+    )
+    # Per solved sector (unit), whether the sectors of ``abelian`` split every representation it holds: what the spin
+    # guard of the weighted sectors asks of a stop (PARSEC_WEIGHTED_GUARD_SHORTCUT).  Only where ``abelian`` is the
+    # group a calculation that leaves these sectors takes: a cluster, and a cell whose operations take no translation
+    # where periodic_abelian_reduction keeps ``abelian`` (no larger group of commuting involutions among them).  A
+    # cell with translations takes its commuting involutions with their translations: ``None`` (no shortcut).
+    abelian_split = None
+    if shifts is None and not (
+        cell_about_origin
+        and periodic_abelian_translation_setting() != "off"
+        and not _abelian_is_largest_involution_group(group_table, candidates, abelian)
     ):
+        abelian_split = _abelian_split_flags(group_table, plan, candidates, abelian, units=by_units)
+    if by_units:
         # PARSEC_ORBITAL_IRREPS: one row per unit of the irreducible representations of G; units that are the
         # sectors of before keep the reduction of before, bit for bit.
         characters = np.ascontiguousarray(characters[[unit.sector for unit in units]])
@@ -2668,6 +2821,10 @@ def detect_point_group_reduction(
                 dtype=np.float64,
             ),
             "sector_shares": np.asarray([unit.share for unit in units], dtype=np.float64),
+            "sector_partner_cosets": tuple(
+                None if unit.subgroup_cosets is None else tuple(int(c) for c in unit.subgroup_cosets)
+                for unit in units
+            ),
         }
     coset_images = np.empty((len(plan.cosets), representative_rows.size), dtype=np.int64)
     for c, index in enumerate(plan.cosets):
@@ -2706,6 +2863,7 @@ def detect_point_group_reduction(
         sector_characters=np.ascontiguousarray(characters),
         sector_weights=weights,
         sector_partner_irreps=partner_irreps,
+        sector_abelian_split=abelian_split,
         coset_images=np.ascontiguousarray(coset_images),
         coset_operations=np.ascontiguousarray([candidates[index] for index in plan.cosets], dtype=np.int8),
         grid=grid,

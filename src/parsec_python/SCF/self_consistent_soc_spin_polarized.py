@@ -65,7 +65,11 @@ from ..SCF.single_point import (
     preconditioner_neighbors,
     state_for_new_potential,
 )
-from ..SCF.spin_polarized import _weighted_initial_polarization
+from ..SCF.spin_polarized import (
+    _weighted_initial_polarization,
+    initchrg_spin_start,
+    initchrg_start_needed,
+)
 from ..models import SelfConsistentSOCIteration, SelfConsistentSOCResult
 
 
@@ -219,13 +223,20 @@ def run_self_consistent_soc_spin_polarized(
     ionic_potential = system.ionic_potential
     n_grid = system.grid.size
 
-    polarization = _weighted_initial_polarization(system)
-    density_up = 0.5 * (1.0 + polarization) * system.initial_density
-    density_down = 0.5 * (1.0 - polarization) * system.initial_density
+    if initchrg_start_needed(system):
+        # PARSEC_SPIN_START: PARSEC 1.5's per-species start (initchrg.f90), the
+        # Hartree potential of the total starting density
+        density_up, density_down = initchrg_spin_start(system)
+        hartree_source = np.asarray(system.initial_density, dtype=np.float64)
+    else:
+        polarization = _weighted_initial_polarization(system)
+        density_up = 0.5 * (1.0 + polarization) * system.initial_density
+        density_down = 0.5 * (1.0 - polarization) * system.initial_density
+        hartree_source = density_up + density_down
 
     if initial_potential is None and warm_start is None:
         initial_hartree = system.solve_hartree(
-            density_up + density_down, initial_potential=-ionic_potential
+            hartree_source, initial_potential=-ionic_potential
         )
         hartree_potential = initial_hartree.potential
         xc = system.evaluate_xc_spin_polarized(density_up, density_down)

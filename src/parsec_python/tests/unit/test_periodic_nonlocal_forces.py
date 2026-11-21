@@ -6,8 +6,10 @@ eigenstates for the total energy), so random orbitals test it fully.
 
 from __future__ import annotations
 
+import os
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import numpy as np
 
@@ -105,13 +107,19 @@ class PeriodicNonlocalForceTests(unittest.TestCase):
         np.testing.assert_allclose(case.forces(), gamma, atol=1.0e-12)
 
     def test_gradient_columns_of_an_atom_on_a_grid_point(self) -> None:
-        # The first samples of a POTRE table are rounding noise: u_l(r)/r is constant there instead of growing as r**l,
-        # so the gradient of a p projector at the grid point on top of its atom must not be taken at the first sample
-        # (it was 800 times too large there).  The radial functions are smooth from 1e-3 bohr on.
-        # The projector itself is not well defined at that point (the direction of a zero displacement), so the energy
-        # has a small jump when an atom crosses a grid point and only the columns are compared with finite differences.
-        for name in _CELLS:
-            with self.subTest(cell=name):
+        # PARSEC_PROJECTOR_CENTER=off (the rule of before 2026-11-21): the first samples of a POTRE table are rounding
+        # noise (u_l(r)/r is constant there instead of growing as r**l), the gradient of a p projector at the grid point
+        # on top of its atom is taken at 1e-3 bohr, where the radial functions are smooth, and the projector has no
+        # defined value at that point (the direction of a zero displacement), so only the columns are compared with
+        # finite differences of 1e-3 bohr.  auto (the default): within the first radial sample rs(2) the projector is
+        # w(rs(2)) P(d/rs(2)), continuous, and the gradient of the point on the atom is its exact derivative, which
+        # finite differences within rs(2) give (the energy derivative of the SCF, nonloc.F90's rnorm).
+        from parsec_python.V_ion import ionic_potential
+
+        for name, setting in ((name, setting) for name in _CELLS for setting in ("off", "auto")):
+            with self.subTest(cell=name, setting=setting), mock.patch.dict(
+                os.environ, {ionic_potential.PROJECTOR_CENTER_ENV: setting}
+            ):
                 case = _Case(name, True, species="H")
                 steps = case.grid.step_vectors
                 case.positions = np.round(np.array([[0.2, 0.3, 0.5], [0.6, 0.8, 0.1]]) * case.grid.points_per_axis) @ steps
@@ -129,7 +137,8 @@ class PeriodicNonlocalForceTests(unittest.TestCase):
                     def central(step: float, axis=axis):
                         return (operator(step) - operator(-step)) / (2.0 * step)
 
-                    derivative = ((4.0 * central(1.0e-3) - central(2.0e-3)) / 3.0).toarray()
+                    step = 1.0e-3 if setting == "off" else 0.05 * float(case.potentials["H"].radii[0])
+                    derivative = ((4.0 * central(step) - central(2.0 * step)) / 3.0).toarray()
                     analytic = -gradients.components[axis].toarray()
                     columns = [q for q, label in enumerate(gradients.labels) if label[0] == 0]
                     largest = float(np.max(np.abs(analytic[:, columns])))

@@ -55,7 +55,16 @@ mesh (``t`` has a partner).  A tile of ``t`` solves its pairs with the
 sources of ``r > t`` and the triangle ``m >= n`` of ``r = t`` and adds both
 sides; the pairs with ``r < t`` come from the tiles of ``r``.  A third kernel
 adds the partner sides to a ``W`` of the occupied states kept on the device,
-delivered to the owners at the end.
+delivered to the owners at the end.  On a wedge (``PARSEC_HYBRID_IMAGE_PAIRS``,
+on by default) an image source ``i = (r, g)`` (``P_g u_r``) and a target ``t``
+whose mirror source ``j = (t, g^-1)`` is in the list
+(``MeshStars.mirrors``) pair up the same way: the partner of ``(n t | m i)``
+is ``(m r | n j)``, whose potential is ``P_(g^-1) conj(w)`` (``P_(g^-1) w``
+for a conjugated image) where the pair potentials keep the operation (tested
+once per pair of wave vectors, :meth:`DevicePeriodicPairSolvers.image_pair_relation`);
+a fourth kernel adds the partner sides to ``W`` of ``r`` at the turned
+points (the image's own gather); the first of the two blocks in
+``(target, source)`` order solves them (``_image_pair_roles``).
 
 The Gamma point of a cell (real orbitals) takes the device loop of
 isolated systems (:func:`parsec_python.acceleration.Hamiltonian.exchange_device.apply_device_exchange`)
@@ -423,6 +432,53 @@ def _kernels(cp):
     return found
 
 
+# The partner sides of the pairs of an image source turned onto the mirror (PARSEC_HYBRID_IMAGE_PAIRS): the kernel
+# bloch_pair_partner with the row of point p written at turn[p] (the image's own gather, P_(g^-1) of the term).  A
+# module of its own, so that the module above is compiled as before.
+_TURNED_KERNEL_SOURCE = r"""
+#include <cupy/complex.cuh>
+
+extern "C" __global__ void bloch_pair_partner_turned(
+    const complex<double>* __restrict__ box,       // (nt * ns, box_size) potentials
+    const complex<double>* __restrict__ targets,   // (nt, n) rows
+    const double* __restrict__ coefficients,       // (nt) f_t / N
+    const int conjugate,
+    const long long* __restrict__ box_index,
+    const long long* __restrict__ turn,            // (n) the point each term goes to (a permutation)
+    complex<double>* __restrict__ partner,         // (ns, n) rows
+    const long long n,
+    const long long box_size,
+    const int nt,
+    const int ns,
+    const int skip)
+{
+    const long long p = (long long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (p >= n) return;
+    const int j = blockIdx.y;
+    if (j == skip) return;
+    const long long q = box_index ? box_index[p] : p;
+    complex<double> sum(0.0, 0.0);
+    for (int i = 0; i < nt; ++i) {
+        const complex<double> t = targets[(long long)i * n + p];
+        const complex<double> w = box[((long long)i * ns + j) * box_size + q];
+        sum += coefficients[i] * (conjugate ? conj(t) * w : t * conj(w));
+    }
+    partner[(long long)j * n + turn[p]] -= sum;
+}
+"""
+_TURNED_KERNELS: dict[int, Any] = {}
+
+
+def _turned_kernel(cp):
+    device = int(cp.cuda.Device().id)
+    with _KERNELS_LOCK:
+        found = _TURNED_KERNELS.get(device)
+        if found is None:
+            module = cp.RawModule(code=_TURNED_KERNEL_SOURCE, options=("--fmad=false",))
+            found = _TURNED_KERNELS[device] = module.get_function("bloch_pair_partner_turned")
+    return found
+
+
 def _shutdown(executors: dict) -> None:
     for executor in executors.values():
         executor.shutdown(wait=False)
@@ -473,6 +529,8 @@ class DevicePeriodicPairSolvers:
         # latest build in such classes (describe).
         self._class_kernels: dict = {}
         self._translation_label = ""
+        # the tested relations of the mirror pairs of a wedge's image sources (image_pair_relation), for the run
+        self._image_relations: dict = {}
         import weakref
 
         weakref.finalize(self, _shutdown, self._executors)
@@ -727,7 +785,7 @@ class DevicePeriodicPairSolvers:
 
     def accumulate_bloch(self, cp, q, targets, sources, coefficients, applied, *, conjugate: bool,
                          inverse_volume: float, timing: list | None = None, partner=None,
-                         target_coefficients=None, skip_self: bool = False) -> int:
+                         target_coefficients=None, skip_self: bool = False, partner_turn=None) -> int:
         """``applied -= sum_j c_j u_s,j w(conj(u_s,j) u_t,i / dV; q)`` for every pair of rows.
 
         ``targets`` ``(nt, N)`` and ``applied`` ``(nt, N)`` are C-contiguous
@@ -744,7 +802,10 @@ class DevicePeriodicPairSolvers:
         or ``d_i conj(u_t,i) w_ij`` with ``conjugate``; ``d`` are the
         ``target_coefficients`` ``(nt,)`` ``f_t/N``.  ``skip_self`` (one target
         row) leaves out the partner of the pair with source row 0: the pair of
-        a state with itself.
+        a state with itself.  ``partner_turn`` (a device permutation of the
+        grid, ``(n,)`` int64) writes the partner side of point ``p`` at
+        ``partner_turn[p]``: the mirror of an image source's pairs
+        (``PARSEC_HYBRID_IMAGE_PAIRS``), ``P_(g^-1)`` of the term.
         """
 
         import cupyx.scipy.fft as cufft
@@ -830,7 +891,26 @@ class DevicePeriodicPairSolvers:
                         np.int32(width),
                     ),
                 )
-                if partner is not None:
+                if partner is not None and partner_turn is not None:
+                    _turned_kernel(cp)(
+                        (blocks, width),
+                        (_THREADS,),
+                        (
+                            chunk,
+                            targets[i0:i1],
+                            target_coefficients[i0:i1],
+                            np.int32(1 if conjugate else 0),
+                            index_pointer,
+                            partner_turn,
+                            partner[j0:j1],
+                            np.int64(n),
+                            np.int64(self.box.fft_size),
+                            np.int32(i1 - i0),
+                            np.int32(width),
+                            np.int32(0 if (skip_self and j0 == 0) else -1),
+                        ),
+                    )
+                elif partner is not None:
                     accumulate_partner(
                         (blocks, width),
                         (_THREADS,),
@@ -850,6 +930,42 @@ class DevicePeriodicPairSolvers:
                     )
                 solves += pairs
         return solves
+
+    def image_pair_relation(self, cp, q_first, q_mirror, operation: int, gather, conjugate: bool) -> bool:
+        """Whether the pair potentials at ``q_mirror`` of the densities turned by ``gather`` (the operation of a mirror
+        source, :attr:`parsec_python.V_xc.bloch_exchange.MeshStars.mirrors`) are those at ``q_first`` turned, to
+        round-off (:func:`parsec_python.V_xc.bloch_exchange.image_pair_relation_holds` on the current device, with the
+        cached kernel values of both wave vectors).  Tested once per ``(q_first, q_mirror, operation, conjugate)``
+        for the run."""
+
+        from parsec_python.V_xc.bloch_exchange import image_pair_relation_holds, image_pair_test_density
+        import cupyx.scipy.fft as cufft
+
+        key = (_q_key(q_first), _q_key(q_mirror), int(operation), bool(conjugate))
+        with self._lock:
+            found = self._image_relations.get(key)
+        if found is not None:
+            return found
+
+        def solve(rows, q):
+            box = self.box.to_box(cp, cp.ascontiguousarray(rows.T))
+            transformed = cufft.fftn(box, axes=(1, 2, 3))
+            transformed *= self.cache.values(cp, q)[None]
+            solved = cufft.ifftn(transformed, axes=(1, 2, 3), overwrite_x=True)
+            return cp.ascontiguousarray(self.box.from_box(cp, solved).T)
+
+        found = image_pair_relation_holds(
+            solve,
+            cp.asarray(image_pair_test_density(self.box.points)),
+            np.asarray(q_first, dtype=np.float64),
+            np.asarray(q_mirror, dtype=np.float64),
+            cp.asarray(np.asarray(gather, dtype=np.int64)),
+            bool(conjugate),
+            xp=cp,
+        )
+        with self._lock:
+            self._image_relations[key] = found
+        return found
 
     def tile_bytes(self, columns: int) -> int:
         """Device bytes of one tile beside the source copies: the target rows, their ``W`` and the chunk box."""
@@ -1054,23 +1170,71 @@ def _symmetric(channel, target: int, conjugate: bool, operation: int = -1) -> bo
     potential ``conj(w)``); for the partner ``-k`` of a representative only
     when the target has a partner too (the partner pair's source is then
     ``-k_target``, a point of the sum with the same density and ``q``); never
-    for the image of a representative under an operation of the grid (a
-    wedge's star, whose columns are no targets).
+    here for the image of a representative under an operation of the grid (a
+    wedge's star, whose columns are no targets: its pairs have the mirrors of
+    :func:`_image_pair_roles` instead).
     """
 
     return operation < 0 and ((not conjugate) or bool(channel.partners[target]))
 
 
-def _tile_cost(channel, tile: _Tile, sources, counts, symmetric: bool) -> int:
+def _image_pair_roles(cp, channel, solvers, sources, counts, device: int, symmetric: bool) -> dict:
+    """``{(target, source index): (role, mirror source index)}`` of the image sources of a wedge whose pairs with the
+    occupied targets are solved once for both sides (``PARSEC_HYBRID_IMAGE_PAIRS``,
+    :attr:`parsec_python.V_xc.bloch_exchange.MeshStars.mirrors`).
+
+    Of the two blocks ``(t, i)`` and ``(r, j)`` of a mirror the first in ``(target, source)`` order solves its pairs
+    and adds the partners (``lead``), the other leaves its occupied tiles to it (``follow``); a block that is its own
+    mirror (``self``: ``g = g^-1``) solves the triangle ``m >= n``, as the source of the representative itself does.
+    Only mirrors whose pair potentials keep the operation to round-off (tested once on ``device``,
+    :meth:`DevicePeriodicPairSolvers.image_pair_relation`) are taken; ``{}`` without a wedge, without pair symmetry
+    or under ``off``."""
+
+    from parsec_python.V_xc.bloch_exchange import image_pairs_setting
+
+    stars = getattr(channel, "stars", None)
+    if stars is None or not symmetric or not getattr(stars, "mirrors", None) or not image_pairs_setting():
+        return {}
+    roles: dict = {}
+    with cp.cuda.Device(int(device)):
+        for (target, index), mirror in sorted(stars.mirrors.items()):
+            rep = int(sources[index][0])
+            if not counts[target] or not counts[rep]:
+                continue
+            own, other = (int(target), int(index)), (rep, int(mirror))
+            lead_target, lead_index = min(own, other)
+            lead_rep = int(sources[lead_index][0])
+            lead_mirror = int(stars.mirrors[(lead_target, lead_index)])
+            operation = int(sources[lead_mirror][3])
+            holds = solvers.image_pair_relation(
+                cp,
+                np.asarray(channel.k_points[lead_target], dtype=np.float64) - np.asarray(sources[lead_index][1]),
+                np.asarray(channel.k_points[lead_rep], dtype=np.float64) - np.asarray(sources[lead_mirror][1]),
+                operation,
+                stars.gathers[operation],
+                bool(sources[lead_index][2]),
+            )
+            if holds:
+                roles[own] = ("self" if own == other else ("lead" if own < other else "follow"), int(mirror))
+    return roles
+
+
+def _tile_cost(channel, tile: _Tile, sources, counts, symmetric: bool, roles: dict | None = None) -> int:
     """Pairs a tile solves."""
 
     width = int(tile.columns.size)
     total = 0
-    for rep, _k, conjugate, operation in sources:
+    for index, (rep, _k, conjugate, operation) in enumerate(sources):
         count = counts[rep]
         if not count:
             continue
-        if tile.start is None or not symmetric or not _symmetric(channel, tile.rep, conjugate, operation):
+        role = (roles or {}).get((tile.rep, index)) if (tile.start is not None and symmetric) else None
+        if role is not None:
+            if role[0] == "lead":
+                total += width * count
+            elif role[0] == "self":
+                total += width * max(0, count - tile.start - width) + width * (width + 1) // 2
+        elif tile.start is None or not symmetric or not _symmetric(channel, tile.rep, conjugate, operation):
             total += width * count
         elif rep > tile.rep:
             total += width * count
@@ -1090,8 +1254,8 @@ def planned_bloch_exchange_bytes(channel: DeviceBlochChannel, solvers: DevicePer
     if getattr(channel, "stars", None) is not None:
         # the image of the occupied columns of one representative under an operation of the grid (a wedge's star),
         # with the gather of its rows
-        sources += 16 * points * max((int(channel.occupied(rep).size) for rep in range(channel.representatives)),
-                                     default=0) + 8 * points * len(channel.stars.gathers)
+        largest = max((int(channel.occupied(rep).size) for rep in range(channel.representatives)), default=0)
+        sources += 16 * points * largest + 8 * points * len(channel.stars.gathers)
     work = solvers.tile_bytes(TILE_COLUMNS) + solvers.cache.array_bytes
     needed = {int(device): sources + work for device in devices}
     for rep in range(channel.representatives):
@@ -1180,12 +1344,14 @@ def apply_device_bloch_exchange(
             tiles.append(_Tile(rep, block, 0, positions[int(block[0])]))
         for start in range(0, len(empty), TILE_COLUMNS):
             tiles.append(_Tile(rep, np.asarray(empty[start : start + TILE_COLUMNS], dtype=np.int64), 0))
+    # the image sources of a wedge whose pairs with occupied targets are solved once (PARSEC_HYBRID_IMAGE_PAIRS)
+    roles = _image_pair_roles(cp, channel, solvers, sources, counts, devices[0], symmetric)
     for tile in tiles:
         if tile.start is not None and not np.array_equal(
             tile.columns, np.asarray(occupied[tile.rep][tile.start : tile.start + tile.columns.size])
         ):
             raise AssertionError("an occupied tile must be a contiguous run of the occupied list")
-        tile.cost = _tile_cost(channel, tile, sources, counts, symmetric)
+        tile.cost = _tile_cost(channel, tile, sources, counts, symmetric, roles)
     if len(devices) > 1 and sum(tile.cost for tile in tiles) * float(solvers.box.fft_size) < SMALL_BUILD_POINTS:
         held = [sum(1 for owner in channel.devices if owner == device) for device in devices]
         devices = (devices[int(np.argmax(held))],)
@@ -1283,12 +1449,46 @@ def apply_device_bloch_exchange(
                     target_weights = cp.asarray(
                         np.asarray(channel.occupations[tile.rep])[tile.columns] / float(channel.mesh_size)
                     )
-                for rep, k_source, conjugate, operation in sources:
+                for index, (rep, k_source, conjugate, operation) in enumerate(sources):
                     if rep not in copies:
                         continue
                     source_rows, weights = copies[rep]
                     keywords = dict(conjugate=conjugate, inverse_volume=inverse_volume, timing=pending)
                     q = k_target - k_source
+                    role = roles.get((tile.rep, index)) if (operation >= 0 and target_weights is not None) else None
+                    if role is not None and role[0] == "follow":
+                        # the pairs of these occupied targets come as the partners of the mirror's tiles
+                        continue
+                    if role is not None:
+                        # an image source with its mirror: the partner sides go to W of rep, turned by the
+                        # operation of the mirror source (g^-1: point p to the image's own gather[p])
+                        image = image_rows(rep, operation)
+                        side = partner_rows(rep)
+                        keywords["partner_turn"] = gathers[operation]
+                        if role[0] == "lead":
+                            solved[device] += solvers.accumulate_bloch(
+                                cp, q, targets, image, weights, rows,
+                                partner=side, target_coefficients=target_weights, **keywords
+                            )
+                        else:
+                            # its own mirror (rep is the target's): the triangle m >= n, as for the
+                            # representative itself
+                            width = int(tile.columns.size)
+                            start = int(tile.start)
+                            if start + width < counts[rep]:
+                                solved[device] += solvers.accumulate_bloch(
+                                    cp, q, targets, image[start + width :], weights[start + width :], rows,
+                                    partner=side[start + width :], target_coefficients=target_weights, **keywords
+                                )
+                            for row in range(width):
+                                begin, end = start + row, start + width
+                                solved[device] += solvers.accumulate_bloch(
+                                    cp, q, targets[row : row + 1], image[begin:end], weights[begin:end],
+                                    rows[row : row + 1], partner=side[begin:end],
+                                    target_coefficients=target_weights[row : row + 1], skip_self=True, **keywords
+                                )
+                        del image, side
+                        continue
                     if operation >= 0:
                         # an image of the representative (a wedge's star): its rows permuted, no partner pairs
                         image = image_rows(rep, operation)

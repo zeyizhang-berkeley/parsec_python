@@ -315,6 +315,17 @@ def compute_periodic_forces(
     if (symmetrize or operations) and completion is None and abelian is None and _left_spin_sectors(system):
         kept = tuple(operations) if operations else ()
     if (symmetrize or operations) and completion is None and abelian is None and kept is None:
+        from ..SCF.gamma_hybrid_route import full_grid_forces_averaged
+
+        if full_grid_forces_averaged(system):
+            # A Gamma hybrid on the full grid below the floor of its sectors (PARSEC_GAMMA_HYBRID_SECTOR_FORCES=auto):
+            # its forces averaged over the operations of the cell, those the ionic loop found for the first structure
+            # (which its moved positions keep) or, for a single point, those the Fortran-derived routines take on the
+            # full grid (periodic_force_operations).
+            from parsec_python.Forces.periodic import periodic_force_operations
+
+            kept = tuple(operations) if operations else tuple(periodic_force_operations(system, None))
+    if (symmetrize or operations) and completion is None and abelian is None and kept is None:
         raise ValueError(
             "a periodic cell has no symmetrized forces: its structure is not reduced by space-group operations"
         )

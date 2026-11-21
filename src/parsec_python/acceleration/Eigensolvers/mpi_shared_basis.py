@@ -100,7 +100,7 @@ from .distributed_state import (
     ColumnLayout,
     interleaved_ranges,
 )
-from .filter_graph import BlockFilterGraphs
+from .filter_graph import operator_filter
 from .lapack_random import LapackRandom
 from .rayleigh_ritz import (
     GeneralizedRitzStabilityError,
@@ -752,11 +752,9 @@ class MPIShardGroup:
         if local:
             operator = self._operator()
             with cp.cuda.Device(self.device):
-                workspace = getattr(operator, "_filter_graph_workspace", None)
-                if workspace is None:
-                    workspace = BlockFilterGraphs(operator)
-                    operator._filter_graph_workspace = workspace
-                result = workspace.apply(
+                # With graphs where they can record the operator, without them otherwise (an operator without the
+                # stencil-major kernels, PARSEC_CUPY_STENCIL_MAJOR=0: filter_graph.PlainBlockFilter).
+                result = operator_filter(operator).apply(
                     block, tuple(local), lower, upper, reference, reset, initial_sigma=starts, out=block
                 )
                 # A unit of irreducible representations: this rank's columns projected onto them

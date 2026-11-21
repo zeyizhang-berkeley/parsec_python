@@ -97,6 +97,7 @@ from .rayleigh_ritz import (
     generalized_ritz_requested,
     gram_multiple,
     rayleigh_ritz,
+    ritz_route_rows,
     solve_whitened_ritz,
     solve_whitened_ritz_on_device,
 )
@@ -4352,7 +4353,7 @@ def shared_basis_devices(operator: Any, columns: int | None = None) -> tuple[int
         or (
             columns is not None
             and not (
-                generalized_ritz_requested(int(operator.shape[0]), columns)
+                generalized_ritz_requested(ritz_route_rows(operator, int(operator.shape[0])), columns)
                 and shared_basis_fits(
                     int(operator.shape[0]),
                     columns,

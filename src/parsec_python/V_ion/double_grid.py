@@ -17,11 +17,12 @@ projector radius ``rc``), and ``505-569`` sums the values and the gradients
 contributes nothing; the radial table is evaluated at the distance clamped
 below to the first radial sample.  ``N = 1`` is the ordinary sampling.
 
-The harmonics of a fine point use its true direction, as the projectors of
-:func:`parsec_python.V_ion.build_nonlocal_projectors` do, so that ``N = 1``
-reproduces them exactly; ``ylm_real`` of ``nonloc.F90`` divides the vector
-by the clamped distance, which differs only for fine points closer to the
-atom than the first radial sample (``~1e-4`` bohr).
+The harmonics of a fine point closer to the atom than the first radial
+sample divide the vector by that sample, as ``ylm_real`` of ``nonloc.F90``
+does with its clamped distance and as the projectors of
+:func:`parsec_python.V_ion.build_nonlocal_projectors` do
+(``PARSEC_PROJECTOR_CENTER=auto``, since 2026-11-21); under ``off`` they take
+the true direction, as before.
 """
 
 from __future__ import annotations
@@ -141,9 +142,13 @@ def build_double_grid_projectors(
         NonlocalProjectorOperator,
         _periodic_image_translations,
         _projector_support_radius,
+        projector_center_radius,
+        projector_center_setting,
         real_spherical_harmonics,
     )
 
+    # the centre radius of the harmonics: rs(2) under PARSEC_PROJECTOR_CENTER=auto, the true direction under off
+    center_setting = projector_center_setting()
     if order is None:
         order = int(getattr(grid.settings, "double_grid_order", 1))
     complex_valued = k_point is not None
@@ -211,7 +216,9 @@ def build_double_grid_projectors(
                     potential, table, support.radius.reshape(-1), spline
                 )
                 harmonics = real_spherical_harmonics(
-                    angular_momentum, support.relative.reshape(-1, 3)
+                    angular_momentum,
+                    support.relative.reshape(-1, 3),
+                    center_radius=projector_center_radius(potential, center_setting, off_radius=0.0),
                 )
                 scaled = (sqrt_dv * radial)[:, None] * harmonics
                 summed = np.einsum(

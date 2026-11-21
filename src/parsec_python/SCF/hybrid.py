@@ -1199,6 +1199,12 @@ def run_hybrid_scf(
         start_functional = definition.start_functional
     else:
         sets = tuple(carried)
+        # An engine may run the structure on the k-points of the orbitals carried over, with the system of those (a
+        # relaxation that took the deferred wedge of PARSEC_HYBRID_KPOINT_WEDGE=auto at its first structure,
+        # parsec_python.SCF.hybrid_periodic.BlochExchange.adopt_carried); unchanged otherwise.
+        adopt = getattr(engine, "adopt_carried", None)
+        if callable(adopt):
+            system = adopt(system, sets)
         inner_start = replace(warm_start, exchange_orbitals=None)
         start = None
         start_criterion = None
@@ -1440,6 +1446,12 @@ def run_hybrid_scf(
         previous_energy = exchange_energy
         inner_start = engine.next_warm_start(system, inner)
 
+    # An engine may report what the end of the Fock loop says about its route (a Fock loop that
+    # PARSEC_HYBRID_KPOINT_WEDGE=auto moved to the wedge and that ends with partly filled states: a NOTE,
+    # parsec_python.SCF.hybrid_periodic.BlochExchange.after_loop); nothing of the result changes.
+    after_loop = getattr(engine, "after_loop", None)
+    if callable(after_loop) and inner is not None:
+        after_loop(system, inner, callback=callback)
     seconds = perf_counter() - started
     summary = FockLoopSummary(
         functional=definition.label,
@@ -1471,19 +1483,22 @@ def run_hybrid_scf(
     )
 
 
-def exchange_start_orbitals(result) -> tuple[OrbitalSet, ...] | None:
+def exchange_start_orbitals(result, system=None) -> tuple[OrbitalSet, ...] | None:
     """The orbitals of a hybrid result for the first operator of the next structure.
 
-    ``None`` for a result without a Fock loop.
+    ``None`` for a result without a Fock loop.  ``system`` (the system of ``result``) gives the Bloch factors of a
+    run on the irreducible wedge of its mesh their stars
+    (:func:`parsec_python.SCF.hybrid_periodic.result_stars`, ``PARSEC_HYBRID_KPOINT_FORCE_WEDGE``).
     """
 
     if getattr(result, "exact_exchange", None) is None:
         return None
     if getattr(result, "k_points", None) is not None:
         # Bloch factors of a periodic cell with k-points (parsec_python.SCF.hybrid_periodic).
-        from .hybrid_periodic import bloch_orbital_sets_of
+        from .hybrid_periodic import bloch_orbital_sets_of, result_stars
 
-        return bloch_orbital_sets_of(result)
+        stars = None if system is None else result_stars(system, result)
+        return bloch_orbital_sets_of(result, stars=stars)
     return orbital_sets_of(result)
 
 

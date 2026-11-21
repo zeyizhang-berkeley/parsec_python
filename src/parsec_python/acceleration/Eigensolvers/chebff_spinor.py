@@ -73,6 +73,9 @@ class SpinorEigvalState:
     first_filter: bool = True
     filter_lower_bound: float | None = None
     filters_completed: int = 0
+    # the gauge of the vectors where it is not the u gauge of the Bloch factor: "psi" at a time-reversal invariant
+    # point solved in real arithmetic (..SCF.kpoint_real.PsiGauge); set by the k-point solvers
+    gauge: str | None = None
 
 
 # Name kept for the earlier state type.
@@ -166,7 +169,9 @@ def _local_rows(operator, dimension: int) -> int:
 
 def _real_arithmetic(operator) -> bool:
     """Whether ``operator`` is a real symmetric operator on real blocks (``real_arithmetic``: the real sectors of
-    :mod:`parsec_python.acceleration.SCF.soc_sectors`); every other operator is complex Hermitian."""
+    :mod:`parsec_python.acceleration.SCF.soc_sectors`, the Gamma point and the psi gauge of a time-reversal invariant
+    point of a k-point SCF, :mod:`parsec_python.acceleration.SCF.kpoint_real`); every other operator is complex
+    Hermitian."""
     return bool(getattr(operator, "real_arithmetic", False))
 
 
@@ -239,12 +244,14 @@ def _distributed_orthonormalize(xp, vectors, operator):
 def _solve_triangular_inverse(xp, lower):
     """``(L^H)^-1`` for a lower-triangular ``L`` (the inverse of the Cholesky factor ``R = L^H``)."""
     count = lower.shape[0]
+    # complex128 for a complex factor; a real one (the real basis of a Gamma point) stays real
+    dtype = xp.float64 if lower.dtype == xp.float64 else xp.complex128
     try:
         if xp is np:
             from scipy.linalg import solve_triangular
         else:
             from cupyx.scipy.linalg import solve_triangular
-        return solve_triangular(lower.conj().T, xp.eye(count, dtype=xp.complex128), lower=False)
+        return solve_triangular(lower.conj().T, xp.eye(count, dtype=dtype), lower=False)
     except ImportError:
         return xp.linalg.inv(lower.conj().T)
 

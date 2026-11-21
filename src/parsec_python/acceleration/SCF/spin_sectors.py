@@ -101,7 +101,14 @@ hold.  Tests 1 and 3 therefore count a state of weight ``w`` as ``w`` partner le
 of three levels, as the same triplet in three sectors of D2 is.  A pair of partners with integer but unequal
 occupations (one filled, one empty: degenerate within :data:`MULTIPLET_WIDTH`), which the average over ``G``
 would turn into the symmetric ensemble, fails test 3 too (``min(f, 1 - f)`` of the mean occupation of the
-multiplet).  A run that fails starts again in the abelian sectors.
+multiplet).  A run that fails starts again in the abelian sectors; a report of a cluster (or of a cell whose
+operations take no translation) says whether those would fail it too (``FractionalOccupations.abelian``: the tests
+run again on the labels of :func:`abelian_partner_labels`, which tell the abelian sectors of the partners apart where
+every representation of a state's sector splits there), and such a run goes straight to the full grid
+(``PARSEC_WEIGHTED_GUARD_SHORTCUT``).  For test 1 this is exact: the abelian sectors start from the same Hamiltonian.
+For test 3 it is a prediction from the weighted run's own final occupations: the abelian SCF that it skips is not
+bound by the density averaged over ``G`` and could break the degeneracy and end with integer occupations, which
+its guard passes; the full grid then gives the reference without symmetry where ``off`` keeps that sector result.
 
 With ``PARSEC_SPIN_FLIP_SYMMETRY=auto`` (:mod:`.spin_flip`) the loop solves the
 up channel of an antiferromagnetic start alone and takes the down channel as its
@@ -125,7 +132,7 @@ Units Ry, bohr.  Nothing here prints or opens files.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import os
 from types import SimpleNamespace
 
@@ -189,6 +196,13 @@ class FractionalOccupations:
     lines: tuple[str, ...]
     reason: str = "fractional occupations"
     measure: str = "largest min(f, 1-f)"
+    # (a report of the weighted sectors of a cluster or of a cell whose operations take no translation, tests 1 and
+    # 3) whether the sectors of the abelian group of the atoms would report the same levels: a multiplet that it finds
+    # holds a state whose representations of the point group all have partners in two or more abelian sectors
+    # (:func:`abelian_partner_labels`), so that the run of those sectors that replaces the weighted ones would stop
+    # the same state (``PARSEC_WEIGHTED_GUARD_SHORTCUT``): exactly for test 1 (the same start Hamiltonian), as
+    # predicted from the weighted run's final occupations for test 3
+    abelian: bool = False
 
 
 def _multiplets(values: np.ndarray, width: float) -> list[list[int]]:
@@ -314,6 +328,34 @@ def partner_levels(values, filled, sectors, weights):
         np.repeat(filled / repeats, repeats),
         np.repeat(sectors, repeats) * PARTNER_LABEL_STRIDE + partners,
     )
+
+
+def abelian_partner_labels(sectors, weights, split):
+    """The labels of the partner levels of weighted states (those of :func:`partner_levels`) as the sectors of the
+    abelian group of the atoms tell them apart; ``None`` where ``split`` is not known.
+
+    ``sectors`` (labels from one) and ``weights`` of the solved states, ``split`` one flag per solved sector
+    (``PointGroupReduction.sector_abelian_split``): every representation of ``G`` that the sector holds has partners
+    in two or more sectors of the abelian group.  The partner levels of a state of such a sector take labels of
+    their own (distinct from each other and from every other label), every other partner level the label 0.  A
+    multiplet holds every partner of each of its levels, so one with a level of such a state lies in two or more
+    abelian sectors whatever the sector of each partner, and the tests of the module, which ask for two labels,
+    find it as the abelian sectors would; one without (the e of Td, whose partners lie in one sector of D2, where
+    they mix freely) counts as one sector, so the abelian sectors are not taken to stop what they may keep.
+    """
+
+    if split is None:
+        return None
+    sectors = np.asarray(sectors, dtype=np.int64)
+    repeats = np.rint(np.asarray(weights, dtype=np.float64)).astype(np.int64)
+    split = np.asarray(split, dtype=bool)
+    if repeats.shape != sectors.shape or np.any(repeats < 1):
+        raise ValueError("one positive integer weight per state is needed")
+    if sectors.size and (int(sectors.min()) < 1 or int(sectors.max()) > split.size):
+        raise ValueError("a sector label lies outside the flags of the sectors")
+    partners = np.arange(int(repeats.sum()), dtype=np.int64) - np.repeat(np.cumsum(repeats) - repeats, repeats)
+    labels = np.repeat(sectors, repeats)
+    return np.where(split[labels - 1], labels * PARTNER_LABEL_STRIDE + partners + 1, 0)
 
 
 def _key(matrix: np.ndarray) -> tuple:
@@ -1263,8 +1305,14 @@ class SpinSectorReducer:
 
         if not self.guard:
             return None
+        abelian_labels = None
         if self.sector_weights is not None:
             # Weighted sectors: every partner of a weighted state as a level of its own (see the module).
+            split = self.sector_abelian_split
+            if split is not None:
+                abelian_labels = [
+                    abelian_partner_labels(sectors, self._weights_of(sectors), split) for sectors in representations
+                ]
             expanded = [
                 partner_levels(values, filled, sectors, self._weights_of(sectors))
                 for values, filled, sectors in zip(eigenvalues, occupations, representations)
@@ -1272,7 +1320,21 @@ class SpinSectorReducer:
             eigenvalues = [item[0] for item in expanded]
             occupations = [item[1] for item in expanded]
             representations = [item[2] for item in expanded]
-        return partly_filled_multiplets(eigenvalues, occupations, representations, fixed=self.fixed_occupations)
+        report = partly_filled_multiplets(eigenvalues, occupations, representations, fixed=self.fixed_occupations)
+        if report is not None and abelian_labels is not None:
+            # (whether the sectors of the abelian group would find the same partly filled multiplet)
+            abelian = partly_filled_multiplets(eigenvalues, occupations, abelian_labels, fixed=self.fixed_occupations)
+            report = replace(report, abelian=abelian is not None)
+        return report
+
+    @property
+    def sector_abelian_split(self):
+        """Per solved sector of weighted sectors, whether its representations of the point group all have partners in
+        two or more sectors of the abelian group (``PointGroupReduction.sector_abelian_split``); ``None`` where that
+        is not known (a cell, whose abelian sectors take translations of their own, or no weights)."""
+
+        split = getattr(self.reducer.reduction, "sector_abelian_split", None)
+        return None if split is None else np.asarray(split, dtype=bool)
 
     @property
     def sector_weights(self):
@@ -1305,12 +1367,9 @@ class SpinSectorReducer:
         """Raise :class:`SpinSectorsAbandoned` for a converged report of :meth:`start_spectrum_report`."""
 
         if passes:
-            report = FractionalOccupations(
-                largest=report.largest,
-                tolerance=report.tolerance,
+            report = replace(
+                report,
                 lines=report.lines + (f"(the levels of the start Hamiltonian after {passes} further solve(s))",),
-                reason=report.reason,
-                measure=report.measure,
             )
         raise SpinSectorsAbandoned("the start Hamiltonian", report)
 
@@ -1379,10 +1438,31 @@ class SpinSectorReducer:
         if self.fixed_occupations:
             return
         weighted = self.sector_weights is not None
+        originals = channels
         if weighted:
             channels = [self._partner_channel(channel) for channel in channels]
         report = fractional_occupations(channels, self.tolerance, unequal_partners=weighted)
         if report is not None:
+            split = self.sector_abelian_split if weighted else None
+            if split is not None and all(getattr(item, "sector_states", None) is not None for item in originals):
+                # (whether the sectors of the abelian group would find a fractional multiplet of the same levels: a
+                # fractional level itself, not only partners filled unequally, which those sectors may hold; from the
+                # weighted run's levels, a prediction for the abelian SCF, which is not bound by the density averaged
+                # over G: where it ends integer instead, the full grid gives the reference that off would not)
+                abelian = fractional_occupations(
+                    [
+                        SimpleNamespace(
+                            eigenvalues=item.eigenvalues,
+                            occupations=item.occupations,
+                            representations=abelian_partner_labels(
+                                original.sector_states[0], original.sector_states[2], split
+                            ),
+                        )
+                        for item, original in zip(channels, originals)
+                    ],
+                    self.tolerance,
+                )
+                report = replace(report, abelian=abelian is not None)
             raise SpinSectorsAbandoned(self._stage(final), report)
 
 
@@ -1421,6 +1501,7 @@ __all__ = [
     "spin_fallback_shared_setting",
     "spin_guard_cell_group_setting",
     "partly_filled_multiplets",
+    "abelian_partner_labels",
     "partner_levels",
     "HostSpinXCOnOrbits",
     "MULTIPLET_WIDTH",

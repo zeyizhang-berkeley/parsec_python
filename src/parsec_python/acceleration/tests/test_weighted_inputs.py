@@ -104,11 +104,17 @@ class SwitchTests(unittest.TestCase):
                         self.assertEqual(forced_abelian_reason(), "left")
                         self.assertEqual(refusal(problem, polarized, None), "left")
                     self.assertIsNone(forced_abelian_reason())
-            # on several MPI ranks occup.in and spin keep the abelian group; Fix_Number_Eigenvalues does not
+            # on several MPI ranks occup.in and spin take them too since 2026-11-21 (PARSEC_ORBITAL_GROUP_MPI=auto);
+            # under off they keep the abelian group there, as before; Fix_Number_Eigenvalues takes them either way
             context = SimpleNamespace(rank=0, size=4, exchange=False)
-            self.assertIsNotNone(refusal(fixed, False, context))
-            self.assertIsNotNone(refusal(spin, True, context))
+            self.assertIsNone(refusal(fixed, False, context))
+            self.assertIsNone(refusal(spin, True, context))
             self.assertIsNone(refusal(counted, False, context))
+            with mock.patch.dict(os.environ, {"PARSEC_ORBITAL_GROUP_MPI": "off"}):
+                self.assertIsNotNone(refusal(fixed, False, context))
+                self.assertIsNotNone(refusal(spin, True, context))
+                self.assertIsNone(refusal(counted, False, context))
+                self.assertIsNone(refusal(spin, True, None))
             # spin on the full grid, with spin-orbit coupling, or with a hybrid keeps it; a cell takes it
             self.assertIsNotNone(refusal(_problem_namespace(spin_polarized=True, spin_symmetry_sector_mode="off"),
                                          True, None))
@@ -406,6 +412,15 @@ class FallbackTests(unittest.TestCase):
         self.assertEqual([record.route for record in records], ["spin"])
 
 
+def _weighted_spin_at_any_size(case: unittest.TestCase) -> None:
+    """The spin tests of the weighted sectors run on small systems, whatever floor ``PARSEC_ORBITAL_GROUP_SPIN_FLOOR``
+    of the environment would keep the abelian group of (none by default, ``test_weighted_mpi_route.py``)."""
+
+    patcher = mock.patch.dict(os.environ, {"PARSEC_ORBITAL_GROUP_SPIN_FLOOR": "off"})
+    patcher.start()
+    case.addCleanup(patcher.stop)
+
+
 def _device_available() -> bool:
     return cupy_available() and native_available()
 
@@ -439,6 +454,9 @@ def _write_problem(directory: Path, extra=()):
 @unittest.skipUnless(_device_available(), "CUDA runtime and native extension are unavailable")
 class DeviceTests(unittest.TestCase):
     """Complete calculations of GeH4 on a GPU."""
+
+    def setUp(self) -> None:
+        _weighted_spin_at_any_size(self)
 
     @classmethod
     def setUpClass(cls) -> None:
@@ -652,6 +670,9 @@ class DeviceTests(unittest.TestCase):
 class SpinFixtureTests(unittest.TestCase):
     """The spin fixtures of ``test_spin_sectors.py`` (O2 and the O atom, D4h of the grid) in the weighted sectors."""
 
+    def setUp(self) -> None:
+        _weighted_spin_at_any_size(self)
+
     def solve(self, *arguments, **options):
         import shutil
 
@@ -728,6 +749,7 @@ class GammaSpinTests(unittest.TestCase):
         patcher = mock.patch.dict(os.environ, {"PARSEC_GAMMA_SPIN_SECTORS": "auto"})
         patcher.start()
         self.addCleanup(patcher.stop)
+        _weighted_spin_at_any_size(self)
 
     def test_the_negative_vacancy(self) -> None:
         # V- (S = 3/2: a1 and t2^3 in the up channel), Td about the vacancy: the weighted sectors of D2d against the

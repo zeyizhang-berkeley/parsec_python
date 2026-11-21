@@ -474,19 +474,23 @@ def single_sector_setting() -> str:
 def spin_cell_group_refusal(reason: str) -> str:
     """The refusal of a spin-polarized periodic cell that would reach an MPI SCF without a sector group.
 
-    The ranks of the MPI runner solve both channels of a spin cell only in the abelian sectors of its group
-    (``PARSEC_GAMMA_SPIN_SECTORS=auto``): the one sector of the identity, whose basis the ranks share, takes no spin
-    channels (``single_sector`` below needs an unpolarized run).  ``reason`` says why this cell has no such group.
-    The runner asks this before its preparation where it knows (no symmetry, ``PARSEC_PERIODIC_SYMMETRY=off``), the
+    The ranks of the MPI runner solve both channels of a spin cell in the abelian sectors of its group
+    (``PARSEC_GAMMA_SPIN_SECTORS=auto``); the one sector of the identity, whose basis the ranks share, takes both
+    channels only for the forces, relaxations and molecular dynamics that a run takes without a group (since
+    2026-11-21: ``--symmetry off``, ``spin_identity_sector``, ``PARSEC_SPIN_SECTOR_FORCES=auto``, with
+    ``Use_Fortran_Routines: .false.``; ``single_sector`` below needs an unpolarized run).  ``reason`` says why this
+    cell has no such group.  The runner asks this before its preparation where it knows (no symmetry, ``PARSEC_PERIODIC_SYMMETRY=off``), the
     driver before the reference preparation in the same cases and after the detection otherwise (since
     2026-11-19; before, the message named ``PARSEC_CUPY_SINGLE_SECTOR``, which cannot help).
     """
 
     return (
         "a spin-polarized periodic cell runs as an MPI SCF only in the abelian sectors of its group, both channels "
-        "divided among the ranks (the shared sector of the identity takes no spin channels), and this cell has "
-        f"none: {reason}. Run it with parsec_python/main.py, whose one process solves both channels on the full "
-        "grid of one device, or with --serial-control"
+        f"divided among the ranks, and this cell has none: {reason}. Its forces, relaxations and molecular dynamics "
+        "with Use_Fortran_Routines: .false. run on the ranks with --symmetry off, both channels as one shared "
+        "sector of the identity (PARSEC_SPIN_SECTOR_FORCES=auto, with PARSEC_CUPY_DISTRIBUTED_FILTER=0); "
+        "a single point runs with parsec_python/main.py, whose one process solves both channels on the full grid of "
+        "one device, or with --serial-control"
     )
 
 
@@ -497,8 +501,9 @@ def periodic_sector_refusal(problem, *, hybrid_sectors: bool = False, features: 
     orbitals: an orthorhombic cell, unpolarized or with collinear spin
     (``PARSEC_GAMMA_SPIN_SECTORS=auto``: both channels in the abelian
     sectors, :mod:`.SCF.gamma_spin`), with a native LDA or GGA, or in one
-    process a meta-GGA, a libxc functional, LDA+U (unpolarized) or the TS
-    correction under their switches (``features`` below).
+    process a meta-GGA, a libxc functional, LDA+U (unpolarized, and with
+    spin under ``PARSEC_LDAU_SPIN_SECTORS=auto``) or the TS correction under
+    their switches (``features`` below).
     Its orbitals are solved in the sectors of the point group of the cell
     about its origin (``PARSEC_PERIODIC_SYMMETRY=auto``, the default), whose
     density, potentials and mixer keep one value per orbit, the Hartree
@@ -524,8 +529,9 @@ def periodic_sector_refusal(problem, *, hybrid_sectors: bool = False, features: 
 
     ``features``: the caller runs the cell of the input in one process (the
     driver without an MPI context, the spin route of the command line), where
-    the Tkatchenko-Scheffler correction, LDA+U (unpolarized), a meta-GGA and a
-    libxc functional take the sectors under their switches
+    the Tkatchenko-Scheffler correction, LDA+U (a spin cell too, from 2^26
+    grid points x states under ``PARSEC_LDAU_SPIN_SECTORS=auto``), a meta-GGA
+    and a libxc functional take the sectors under their switches
     (``PARSEC_GAMMA_TS_SECTORS``, ``PARSEC_GAMMA_LDAU_SECTORS``,
     ``PARSEC_GAMMA_META_GGA_SECTORS``, ``PARSEC_GAMMA_LIBXC_SECTORS``:
     :mod:`.SCF.gamma_features`); not with a hybrid.  The other callers keep
@@ -564,7 +570,7 @@ def periodic_sector_refusal(problem, *, hybrid_sectors: bool = False, features: 
     return correction_refusal(problem, features=features)
 
 
-def _gamma_hybrid_in_sectors(problem, mpi_context) -> bool:
+def _gamma_hybrid_in_sectors(problem, mpi_context, *, sector_forces: bool = False) -> bool:
     """Whether an unpolarized hybrid of a bulk cell at the Gamma point takes the sectors of the Gamma route here.
 
     ``PARSEC_GAMMA_HYBRID_SECTORS=auto`` (the default, ``SCF/gamma_hybrid_route.py``) in one process: the orbitals
@@ -574,19 +580,75 @@ def _gamma_hybrid_in_sectors(problem, mpi_context) -> bool:
     densities, and its compressed operator folded to every sector (``Hamiltonian/exchange_device.py``).  A cell
     whose basis (grid points times states) is below the floor of the k-point sectors (``2^24`` entries,
     ``gamma_hybrid_route.sector_basis_reached``) keeps the full grid, where the sectors gain nothing (an 8-atom
-    cube took 1.8 times longer in them).  ``off`` and ``kpoint`` keep the former routes; with an MPI context it is
-    ``False``, and :func:`periodic_sector_refusal` then names the hybrid, which the MPI runner refuses (run it with
-    main.py), as before.
+    cube took 1.8 times longer in them).  With ``sector_forces`` (its caller averages the forces and moved positions
+    over the group of the sectors, :func:`prepare_single_point`) such a cell takes the sectors whatever its size
+    under ``PARSEC_GAMMA_HYBRID_SECTOR_FORCES=sectors`` (an opt-in, slower on small cells); under ``auto`` (the
+    default) it keeps the full grid, whose forces and moves are averaged over the operations of the cell
+    (:func:`_gamma_hybrid_full_grid_forces`), and under ``off`` it keeps the full grid as before.  ``off`` and
+    ``kpoint`` of ``PARSEC_GAMMA_HYBRID_SECTORS`` keep the former routes; with an MPI context it is ``False``, and
+    :func:`periodic_sector_refusal` then names the hybrid, which the MPI runner refuses (run it with main.py), as
+    before.
     """
 
-    from .SCF.gamma_hybrid_route import gamma_hybrid_sectors_setting, sector_basis_reached
+    from .SCF.gamma_hybrid_route import (
+        gamma_hybrid_sector_forces_setting,
+        gamma_hybrid_sectors_setting,
+        sector_basis_reached,
+    )
 
-    return (
+    if not (
         mpi_context is None
         and bool(getattr(getattr(problem, "scf", None), "is_hybrid", False))
         and gamma_hybrid_sectors_setting() == "auto"
-        and sector_basis_reached(problem)
+    ):
+        return False
+    if sector_basis_reached(problem):
+        return True
+    return bool(sector_forces) and gamma_hybrid_sector_forces_setting() == "sectors"
+
+
+def _gamma_hybrid_full_grid_forces(
+    problem, mpi_context, *, sector_forces: bool, symmetry_mode: str, periodic_symmetry_mode: str
+) -> bool:
+    """Whether a Gamma-point hybrid kept on the full grid below the floor averages its forces and moved positions over
+    the operations of the cell (``PARSEC_GAMMA_HYBRID_SECTOR_FORCES=auto``, the default since 2026-11-21).
+
+    The command line counts the forces and the relaxation by an optimizer of a bulk cell at the Gamma point as forces
+    of the sectors (``sector_forces``, ``PARSEC_PERIODIC_SECTOR_FORCES=auto``), which it averages over the group of
+    the sectors; a hybrid whose basis is below the floor of :func:`_gamma_hybrid_in_sectors` keeps the full grid,
+    where nothing averaged them on the default (Grieder) routines.  This is ``True`` for such a cell: an unpolarized
+    hybrid in one process under ``PARSEC_GAMMA_HYBRID_SECTORS=auto``, ``PARSEC_PERIODIC_SYMMETRY=auto`` and a
+    symmetry mode that is not ``off``, on the default routines, that the route of the sectors would take above the
+    floor (:func:`periodic_sector_refusal`).  Its forces and the moved positions of a relaxation are then averaged
+    over the operations the Fortran-derived routines take on the full grid
+    (:func:`parsec_python.Forces.periodic.periodic_force_operations`: the space group the problem carries, else the
+    point operations about the origin that keep the lattice, the grid and the atoms), the SCF unchanged.  The
+    Fortran-derived routines average over them already (``use_symmetry`` of the parser) and are left as they are.
+    """
+
+    from .SCF.gamma_hybrid_route import (
+        gamma_hybrid_sector_forces_setting,
+        gamma_hybrid_sectors_setting,
+        sector_basis_reached,
     )
+
+    scf = getattr(problem, "scf", None)
+    if not (
+        sector_forces
+        and mpi_context is None
+        and getattr(problem, "periodic_cell", None) is not None
+        and bool(getattr(scf, "is_hybrid", False))
+        and not bool(getattr(scf, "spin_polarized", False))
+        and symmetry_mode != "off"
+        and periodic_symmetry_mode == "auto"
+        and gamma_hybrid_sectors_setting() == "auto"
+        and gamma_hybrid_sector_forces_setting() == "auto"
+        and not getattr(getattr(problem, "grid", None), "fortran_routines", False)
+    ):
+        return False
+    if sector_basis_reached(problem):
+        return False
+    return periodic_sector_refusal(problem, hybrid_sectors=True, features=True) is None
 
 
 _PERIODIC_FLOOR_SWITCH = "PARSEC_PERIODIC_SECTOR_FLOOR"
@@ -598,7 +660,8 @@ def periodic_sector_floor_setting() -> int:
 
     ``auto`` (the default): ``2^24`` entries, the floor of the k-point sectors and of the Gamma hybrids
     (``SCF/kpoint_sectors._MINIMUM_ENTRIES``); a smaller cell keeps the full grid of one device, where its SCF is
-    faster (the sectors build their orbit maps, stencils and kernels for a few seconds of work).  ``off``: no floor,
+    faster (every sector costs an SCF step about 10 ms of fixed work, ``PARSEC_SECTOR_OVERHEAD``; re-measured on
+    2026-11-21 after the setup of the sectors was cut, the crossover lies near 10^7 entries, README).  ``off``: no floor,
     every cell with a group takes the sectors, as before (to 2026-11-19); an integer: that floor.  An MPI run keeps
     its sectors whatever the size (its ranks share no full grid).
     """
@@ -617,6 +680,48 @@ def periodic_sector_floor_setting() -> int:
     if value < 0:
         raise ValueError(f"{_PERIODIC_FLOOR_SWITCH} must be auto, off or a number of entries >= 0, not {raw!r}")
     return value
+
+
+def _periodic_sector_cost(problem, reference, mpi_context) -> float:
+    """The fixed cost of one solved sector of a periodic cell in units of its grid points times states
+    (``PARSEC_SECTOR_OVERHEAD``, :func:`.Symmetry.axis_reflection.sector_overhead_entries`), which the choice of its
+    weighted plan adds per sector (:func:`.Symmetry.detect_point_group_reduction`); ``0`` (the choice of before) under
+    ``off`` and in an MPI run, whose ranks solve their sectors beside each other and must divide them.
+
+    Under ``auto`` only where that cost is at least the whole basis of the cell (grid points x states at most
+    ``2^21``: the cells of a few atoms), where the fixed cost of the sectors decides their SCF; a larger cell keeps the
+    plan of the least rows x states (its fewer, larger sectors save less than the SCF steps they may add: Si 2x2x2
+    took 24 instead of 10 steps, README).  An integer value applies its cost to every unpolarized cell.
+
+    ``0`` for a spin-polarized (or non-collinear, spin-orbit) run under every value: the guard of the spin sectors
+    (:mod:`.SCF.spin_sectors`) sees a partly filled multiplet only where its partners lie in two or more sectors or
+    in a state of weight above one, while the weighted sectors average each channel density over ``G``.  The plans of
+    fewer sectors hold the partners of most multiplets of ``G`` as several states of one sector of weight 1 (bcc Fe2:
+    the subgroup ``{E, t(1/2,1/2,1/2)}``, weights 1 and 1), where the guard cannot fire: spin-polarized bcc Fe2 at
+    100 K stayed 0.125 Ry above the full grid, which the plan of the least rows x states reaches through its guard.
+    """
+
+    from .Symmetry.axis_reflection import sector_overhead_entries, sector_overhead_setting
+
+    entries = sector_overhead_entries()
+    if mpi_context is not None or entries <= 0:
+        return 0.0
+    scf = getattr(problem, "scf", None)
+    if any(bool(getattr(scf, name, False)) for name in ("spin_polarized", "noncollinear", "self_consistent_spin_orbit")):
+        # the plan of the least rows x states, whose sectors the spin guard was built for
+        return 0.0
+    from .SCF.gamma_hybrid_route import _states
+
+    try:
+        basis = int(reference.grid.size) * int(_states(problem))
+    except (AttributeError, OSError, TypeError, ValueError):
+        return 0.0
+    if basis <= 0:
+        return 0.0
+    cost = float(entries) / float(basis)
+    if sector_overhead_setting() == "auto" and cost < 1.0:
+        return 0.0
+    return cost
 
 
 def _periodic_basis_below_floor(
@@ -642,23 +747,27 @@ def _periodic_basis_below_floor(
     return (rows, states) if rows * states < floor else None
 
 
-def _orbital_group_refusal(problem, spin_polarized: bool, mpi_context) -> str | None:
+def _orbital_group_refusal(problem, spin_polarized: bool, mpi_context, *, basis: int | None = None) -> str | None:
     """Why the orbitals keep the abelian group of before, or ``None`` where the weighted sectors serve.
 
     The sectors of a subgroup with weights (:class:`.Symmetry.PointGroupReduction`) solve one partner of a
     degenerate level where others exist: what reads every partner of every occupied state is refused here
-    (exact exchange, LDA+U, the meta-GGA kinetic density), as is spin-orbit coupling.  Since 2026-11-19 four
+    (exact exchange, the meta-GGA kinetic density; LDA+U only under ``PARSEC_LDAU_WEIGHTED_SECTORS=off``, whose
+    ``auto`` averages its occupation matrices over the full group since 2026-11-21), as is spin-orbit coupling.  Since 2026-11-19 four
     inputs take the weighted sectors where their switch is ``auto`` (``Symmetry/weighted_inputs.py``):
     ``Fix_Number_Eigenvalues``, a libxc LDA or GGA, ``occup.in`` (equal occupations of partners, else the run
     starts again in the abelian sectors) and collinear spin in the symmetry sectors (``Spin_Symmetry_Sectors``;
     a channel pair whose guard fires starts again in the abelian sectors).  ``off`` refuses that input as before.
     A calculation prepared again after it left the weighted sectors keeps the abelian group
-    (:func:`.Symmetry.weighted_inputs.abelian_orbitals`).
+    (:func:`.Symmetry.weighted_inputs.abelian_orbitals`).  Since 2026-11-21 spin and ``occup.in`` take them on
+    several MPI ranks too (``PARSEC_ORBITAL_GROUP_MPI=auto``), and a spin run whose ``basis`` (grid points times
+    states of a channel; ``None`` where the grid is not built yet, which applies no floor) is below the floor of
+    ``PARSEC_ORBITAL_GROUP_SPIN_FLOOR`` keeps the abelian group (:func:`_weighted_spin_refusal`).
     """
 
     from parsec_python.V_xc.libxc import is_libxc_functional
 
-    from .Symmetry.weighted_inputs import forced_abelian_reason, weighted_input_setting
+    from .Symmetry.weighted_inputs import forced_abelian_reason, mpi_weighted_setting, weighted_input_setting
 
     scf = getattr(problem, "scf", None)
     if scf is None:
@@ -671,7 +780,7 @@ def _orbital_group_refusal(problem, spin_polarized: bool, mpi_context) -> str | 
     if spin_polarized:
         if weighted_input_setting("spin") == "off":
             return "spin polarization or spin-orbit coupling"
-        spin_refusal = _weighted_spin_refusal(problem, mpi_context)
+        spin_refusal = _weighted_spin_refusal(problem, mpi_context, basis=basis)
         if spin_refusal is not None:
             return spin_refusal
     if getattr(scf, "is_hybrid", False) or bool(getattr(mpi_context, "exchange", False)):
@@ -680,13 +789,19 @@ def _orbital_group_refusal(problem, spin_polarized: bool, mpi_context) -> str | 
         return "a meta-GGA functional"
     if is_libxc_functional(getattr(scf, "xc_functional", "ca")) and weighted_input_setting("libxc") == "off":
         return "a libxc functional"
-    if getattr(scf, "fixed_occupations", None) is not None and (
-        weighted_input_setting("occupations") == "off" or mpi_context is not None
-    ):
-        # (on several ranks a file that fills partners unequally could not start again in the abelian sectors)
-        return "occupations from occup.in"
+    if getattr(scf, "fixed_occupations", None) is not None:
+        if weighted_input_setting("occupations") == "off":
+            return "occupations from occup.in"
+        if mpi_context is not None and mpi_weighted_setting() == "off":
+            # (as before 2026-11-21: a file that fills partners unequally starts again in the abelian sectors on every
+            # rank since, MPISectorContext.reprepare)
+            return f"occupations from occup.in on several MPI ranks ({_MPI_WEIGHTED_OFF})"
     if any(getattr(item, "has_hubbard", False) for item in getattr(problem, "pseudopotentials", {}).values()):
-        return "LDA+U"
+        from .Hamiltonian.hubbard_device import LDAU_WEIGHTED_SECTORS_SWITCH, ldau_weighted_sectors_setting
+
+        # (the occupation matrices of the weighted states averaged over the full group: HubbardGroupAverage)
+        if ldau_weighted_sectors_setting() == "off":
+            return f"LDA+U ({LDAU_WEIGHTED_SECTORS_SWITCH}=off)"
     if (
         getattr(getattr(problem, "eigensolver", None), "fixed_state_count", False)
         and weighted_input_setting("fixed_count") == "off"
@@ -695,28 +810,95 @@ def _orbital_group_refusal(problem, spin_polarized: bool, mpi_context) -> str | 
     return None
 
 
-def _weighted_spin_refusal(problem, mpi_context) -> str | None:
+_MPI_WEIGHTED_OFF = "PARSEC_ORBITAL_GROUP_MPI=off"
+
+
+def _weighted_spin_refusal(problem, mpi_context, *, basis: int | None = None) -> str | None:
     """Why a collinear spin-polarized input keeps the abelian group with ``PARSEC_ORBITAL_GROUP_SPIN=auto``.
 
     The weighted sectors serve two channels that the symmetry sectors solve: a cluster whose
     ``Spin_Symmetry_Sectors`` takes them (:func:`_spin_sector_refusal`), or a bulk cell at the Gamma point on the
     route of its sectors (``SCF/gamma_spin.py``, which :func:`periodic_sector_refusal` has admitted), in one process
-    (an MPI run that left the sectors would be prepared again on its root alone; it keeps the abelian group of
-    before).  Two channels on the full grid read no group of the orbitals; they keep the detection of before.
+    and, since 2026-11-21, on several MPI ranks (``PARSEC_ORBITAL_GROUP_MPI=auto``: every rank prepares the same plan,
+    and a run that leaves them is prepared again in the abelian sectors on every rank; ``off`` keeps the abelian
+    group there, as before).  Two channels on the full grid read no group of the orbitals; they keep the detection
+    of before.  A ``basis`` (grid points times states of a channel) below ``PARSEC_ORBITAL_GROUP_SPIN_FLOOR`` keeps
+    the abelian group, whose sectors are as fast there (``None``: not known yet, no floor).
     """
 
-    if mpi_context is not None:
-        return "spin polarization on several MPI ranks"
+    from .Symmetry.weighted_inputs import SPIN_FLOOR_SWITCH, mpi_weighted_setting, spin_floor_setting
+
+    if mpi_context is not None and mpi_weighted_setting() == "off":
+        return f"spin polarization on several MPI ranks ({_MPI_WEIGHTED_OFF})"
     if _spin_sector_refusal(problem) is not None:
         return "spin polarization on the full grid"
+    floor = spin_floor_setting()
+    if basis is not None and int(basis) < floor:
+        return (
+            f"spin polarization with {int(basis)} grid points x states, below the floor of the weighted spin sectors "
+            f"({floor}, {SPIN_FLOOR_SWITCH})"
+        )
     return None
+
+
+def _spin_floor_basis(problem, grid) -> int | None:
+    """Grid points of ``grid`` times the states of a channel of ``problem`` (``States_Num``, or half its valence
+    electrons and six): what ``PARSEC_ORBITAL_GROUP_SPIN_FLOOR`` compares, the same on the thread of the maps and in
+    line (:func:`_weighted_spin_refusal`); ``None`` where it cannot be counted (no floor then)."""
+
+    from .SCF.gamma_hybrid_route import _states
+
+    try:
+        return int(grid.size) * int(_states(problem))
+    except (AttributeError, OSError, TypeError, ValueError, KeyError):
+        return None
+
+
+def _kept_abelian_note(refusal) -> str | None:
+    """The NOTE of a run whose spin or ``occup.in`` keeps the abelian group by a rule of 2026-11-21 (``None`` for any
+    other ``refusal`` of :func:`_orbital_group_refusal`): ``PARSEC_ORBITAL_GROUP_MPI=off`` on several ranks, or the
+    floor of the weighted spin sectors.  The larger point group is then not looked for."""
+
+    from .Symmetry.weighted_inputs import SPIN_FLOOR_SWITCH
+
+    if refusal is None or not (_MPI_WEIGHTED_OFF in refusal or SPIN_FLOOR_SWITCH in refusal):
+        return None
+    return (
+        f"the orbitals keep the sectors of the abelian group ({refusal}); the weighted sectors of a larger point "
+        "group are not looked for"
+    )
+
+
+def _ldau_keeps_orbits(reference, setting: str, reduction, atoms) -> bool:
+    """Whether the sectors of ``reduction`` take the projectors of one atom per orbit: always without LDA+U; with
+    LDA+U under ``PARSEC_LDAU_PROJECTOR_ORBITS=auto`` where the atoms keep the group of the sectors within 1e-6 bohr
+    (``hubbard_device.ldau_orbits_exact``; a structure accepted within a looser ``PARSEC_SYMMETRY_ATOM_TOLERANCE``
+    keeps the projectors of every atom, as before 2026-11-21)."""
+
+    if getattr(reference, "hubbard", None) is None:
+        return True
+    if setting != "auto":
+        return False
+    from .Hamiltonian.hubbard_device import ldau_orbits_exact
+
+    return ldau_orbits_exact(reduction, atoms, reference.grid)
+
+
+#: The report of an LDA+U run whose atoms keep the group of its sectors only within a loose atom tolerance.
+_LDAU_LOOSE_ORBITS_NOTE = (
+    "LDA+U keeps the projectors of every atom: the atoms keep the group only to more than 1e-6 bohr "
+    "(PARSEC_SYMMETRY_ATOM_TOLERANCE)"
+)
 
 
 def _without_atom_orbits(reduction):
     """``reduction`` without the orbits of its atoms (the projectors of every atom in its sectors).
 
     LDA+U appends fifteen columns per LDA+U atom to the KB factor, whose coefficients every SCF iteration writes
-    atom by atom (``Hamiltonian/hubbard_device.py``); the sectors keep the columns of every atom.  The reductions
+    atom by atom (``Hamiltonian/hubbard_device.py``); under ``PARSEC_LDAU_PROJECTOR_ORBITS=off`` the sectors keep
+    the columns of every atom, as before 2026-11-21 (``auto``, the default, keeps the orbits: the coefficients of
+    the representatives, ``hubbard_device.HubbardOrbits``; not for atoms off the group by more than 1e-6 bohr,
+    :func:`_ldau_keeps_orbits`).  The reductions
     of a cell with translations (``SCF/kpoint_sectors.LittleGroupReduction``) know their atom orbits from the
     start (one atom per orbit, :func:`.Symmetry.axis_reflection.compress_projectors_for_sectors`): a copy without
     them.  ``reduction`` itself where it knows none.
@@ -853,6 +1035,22 @@ def sector_palette_ladder_setting() -> str:
     return value
 
 
+def _partner_rows_note(candidate) -> str:
+    """``, n of them on the orbits of larger subgroups (PARSEC_ORBITAL_IRREP_ROWS)`` where units of ``candidate`` are
+    solved on partner rows, else empty."""
+
+    from .Symmetry.axis_reflection import orbital_irrep_rows_setting
+
+    cosets = getattr(candidate, "sector_partner_cosets", None)
+    if cosets is None or orbital_irrep_rows_setting() != "partner":
+        return ""
+    projected = getattr(candidate, "sector_projected", None)
+    count = sum(
+        1 for index, item in enumerate(cosets) if item is not None and (projected is None or bool(projected[index]))
+    )
+    return f", {count} of them on the orbits of larger subgroups (PARSEC_ORBITAL_IRREP_ROWS)" if count else ""
+
+
 def _symmetry_detection_text(candidate) -> str:
     """The ``symmetry_detection`` of the backend details for the group the orbitals of a run take."""
 
@@ -874,6 +1072,7 @@ def _symmetry_detection_text(candidate) -> str:
         + (
             f", as {len(candidate.sector_weights)} units of the irreducible representations of the point group, "
             f"{int(np.count_nonzero(candidate.sector_projected))} of them projected (PARSEC_ORBITAL_IRREPS)"
+            + _partner_rows_note(candidate)
             if getattr(candidate, "sector_projected", None) is not None
             else ""
         )
@@ -888,6 +1087,24 @@ def _symmetry_detection_text(candidate) -> str:
         else "exact commuting signed-permutation subgroup detected"
         if isinstance(candidate, SignedPermutationReduction)
         else "exact Cartesian axis-reflection subgroup detected"
+    )
+
+
+def _below_minimum_sector_order(reduction, minimum: int) -> bool:
+    """Whether the sectors of ``reduction`` have fewer operations than ``minimum`` (``minimum_sector_order`` of
+    :func:`prepare_single_point`; ``0`` or ``1`` keeps every group)."""
+
+    return int(minimum) > 1 and reduction is not None and 1 < int(getattr(reduction, "group_order", 1)) < int(minimum)
+
+
+def _minimum_sector_order_text(reduction, minimum: int, found: str) -> str:
+    """The ``symmetry_detection`` of a cell whose sectors :func:`_below_minimum_sector_order` dropped."""
+
+    return (
+        f"skipped: the sectors of {int(reduction.group_order)} operations found for the cell are fewer than the "
+        f"{int(minimum)} from which PARSEC_MOVING_SECTORS=auto takes them for molecular dynamics, manual movements and "
+        f"the relaxations with fixed atoms of the Fortran-derived routines (on takes them); found: {found}; the full "
+        "grid is used"
     )
 
 
@@ -997,8 +1214,12 @@ def _spin_sector_refusal(problem) -> str | None:
     ``off`` keeps the full grid; ``auto`` takes the symmetry sectors of the
     point group where the run can use them (the driver still needs a group,
     the CuPy backend and symmetry on), except for what the spin loop of the
-    sectors does not carry: LDA+U, the triangular Ritz hand-over and a filter
-    spread over several devices.  ``Symmetrize_Charge_Density`` averages each
+    sectors does not carry: LDA+U of a cluster under ``PARSEC_LDAU_SPIN_SECTORS``
+    ``auto`` (the default) and of every input under ``off``
+    (``SCF/gamma_features.py``; where it takes them, each channel writes its own
+    potential matrices into the shared sector operators before its solve), the
+    triangular Ritz hand-over and a filter spread over several devices.
+    ``Symmetrize_Charge_Density`` averages each
     channel on the orbits of the sectors under
     ``PARSEC_SYMMETRIZED_DENSITY_SECTORS=auto`` (since 2026-11-19,
     :mod:`.SCF.density_symmetry`); ``off`` keeps the full grid with it, as
@@ -1006,6 +1227,7 @@ def _spin_sector_refusal(problem) -> str | None:
     """
 
     from .SCF.density_symmetry import SYMMETRIZED_DENSITY_SECTORS_SWITCH, symmetrized_density_sectors_setting
+    from .SCF.gamma_features import LDAU_SPIN_SWITCH, ldau_spin_sector_setting
 
     scf = problem.scf
     mode = scf.spin_symmetry_sector_mode
@@ -1013,7 +1235,14 @@ def _spin_sector_refusal(problem) -> str | None:
         return "Spin_Symmetry_Sectors: off"
     species = getattr(problem, "pseudopotentials", {}).values()
     for condition, reason in (
-        (any(getattr(item, "has_hubbard", False) for item in species), "LDA+U"),
+        (
+            any(getattr(item, "has_hubbard", False) for item in species)
+            and (
+                ldau_spin_sector_setting() == "off"
+                or (ldau_spin_sector_setting() == "auto" and getattr(problem, "periodic_cell", None) is None)
+            ),
+            f"LDA+U ({LDAU_SPIN_SWITCH}={ldau_spin_sector_setting()})",
+        ),
         (
             bool(getattr(scf, "symmetrize_density", False)) and symmetrized_density_sectors_setting() == "off",
             f"Symmetrize_Charge_Density ({SYMMETRIZED_DENSITY_SECTORS_SWITCH}=off)",
@@ -1155,8 +1384,11 @@ class _OverlappedSymmetryMaps:
         # asks for them (:meth:`start`): detected here after the reduction, and decomposed in its place.
         self._point_group: Future = Future()
         # Set by the caller where the weighted sectors serve the orbitals (no refusal of
-        # ``_orbital_group_refusal``): :meth:`start` then detects them on this thread.
+        # ``_orbital_group_refusal``): :meth:`start` then detects them on this thread.  ``point_group_wanted_for``
+        # (a callable of the grid, or None) decides it on the grid :meth:`start` is given where the refusal depends
+        # on its size (the floor of the weighted spin sectors, PARSEC_ORBITAL_GROUP_SPIN_FLOOR).
         self.point_group_wanted = False
+        self.point_group_wanted_for = None
         # Whether the MPI ranks can take the sectors of a reduction (_ranks_divide_sectors; None: one process).
         # Where they cannot take the weighted ones, the caller keeps the reduction of before, which is decomposed.
         self.ranks_divide = None
@@ -1187,7 +1419,10 @@ class _OverlappedSymmetryMaps:
 
         if self._executor is not None:
             raise RuntimeError("the symmetry maps of a preparation start once")
-        point_group = bool(point_group or self.point_group_wanted)
+        wanted = self.point_group_wanted
+        if wanted and callable(self.point_group_wanted_for):
+            wanted = bool(self.point_group_wanted_for(grid))
+        point_group = bool(point_group or wanted)
         # Imported by the calling thread, as it imports them in line.
         from .Symmetry import (
             load_or_build_reflection_decomposition,
@@ -2690,6 +2925,68 @@ def _process_placement_refusal(reference) -> str | None:
     return None
 
 
+_PERIODIC_SECTOR_DEVICES_SWITCH = "PARSEC_PERIODIC_SECTOR_DEVICES"
+#: The first bases (FP64, every sector, both spin channels) below which one process keeps the sectors of a periodic
+#: cell on its first GPU under ``PARSEC_PERIODIC_SECTOR_DEVICES=auto``.
+PERIODIC_ONE_DEVICE_BYTES = 1 << 29
+
+
+def periodic_sector_devices_setting() -> int | None:
+    """``PARSEC_PERIODIC_SECTOR_DEVICES``: where one process with several GPUs spreads the sectors of a periodic cell.
+
+    ``auto`` (the default): a periodic cell whose first sector bases (rows times first state counts, FP64, every
+    sector and spin channel) total less than :data:`PERIODIC_ONE_DEVICE_BYTES` keeps all its sectors on the first
+    GPU of the process (:func:`_periodic_one_device_note`): its SCF is faster there than spread over four A100, or as
+    fast, in every cell measured from 8 to 1728 atoms (first runs about twice as fast: every GPU compiles the kernels
+    of its sectors), so the other GPUs idle; diamond with 2744 atoms (1.8 GiB) keeps the four, which win there.  ``all``: the placement by size over every GPU, as before; an integer: that
+    many bytes instead.  Returns the bytes (``None`` for ``all``).  A wrong value is refused at setup.
+    """
+
+    raw = os.environ.get(_PERIODIC_SECTOR_DEVICES_SWITCH, "auto").strip().lower() or "auto"
+    if raw == "auto":
+        return PERIODIC_ONE_DEVICE_BYTES
+    if raw == "all":
+        return None
+    try:
+        value = int(raw)
+    except ValueError:
+        value = -1
+    if value < 0:
+        raise ValueError(f"{_PERIODIC_SECTOR_DEVICES_SWITCH} must be auto, all or a number of bytes >= 0, not {raw!r}")
+    return value
+
+
+def _periodic_one_device_note(reference, decomposition, device_ids, filter_plan) -> str | None:
+    """Why one process keeps all the sectors of a periodic cell on its first GPU, or ``None`` where they spread.
+
+    The first bases of the sectors (:func:`.Eigensolvers.symmetry.sector_placement_costs`: rows times first state
+    counts; twice for two spin channels) against ``PARSEC_PERIODIC_SECTOR_DEVICES``
+    (:func:`periodic_sector_devices_setting`); a cluster, a single device, one sector (of the identity) or no filter
+    plan (no first counts) spread as before.
+    """
+
+    limit = periodic_sector_devices_setting()
+    problem = getattr(reference, "input", None)
+    if limit is None or len(tuple(device_ids)) < 2 or filter_plan is None:
+        return None
+    if int(decomposition.representation_count) <= 1:
+        # one sector (of the identity: PARSEC_CUPY_SINGLE_SECTOR=on, the shared full grid of a spin fallback) is
+        # shared by the GPUs on purpose
+        return None
+    if getattr(problem, "periodic_cell", None) is None:
+        return None
+    from .Eigensolvers.symmetry import sector_placement_costs
+
+    channels = 2 if getattr(getattr(problem, "scf", None), "spin_polarized", False) else 1
+    total = 8.0 * channels * float(sum(sector_placement_costs(decomposition, filter_plan)))
+    if total >= float(limit):
+        return None
+    return (
+        f"one GPU: the first bases of the {int(decomposition.representation_count)} sectors total "
+        f"{total / 2**20:.1f} MiB, below {limit / 2**20:g} MiB ({_PERIODIC_SECTOR_DEVICES_SWITCH})"
+    )
+
+
 def _process_sector_placement(reference, decomposition, device_ids, filter_plan=None):
     """The device groups of the sectors of one process (``None``: the cyclic deal), whether the first solve
     divides their bases, and why the cyclic deal stays (``None`` where it does not or is asked for).
@@ -2714,6 +3011,13 @@ def _process_sector_placement(reference, decomposition, device_ids, filter_plan=
         return None, None, f"cyclic with {refusal} (PARSEC_CUPY_SECTOR_PLACEMENT=size)"
     method = getattr(getattr(getattr(reference, "input", None), "eigensolver", None), "method", "chebff")
     divided = str(method).strip().lower() == "chebff"
+    # A periodic cell whose sector bases are small keeps them on one GPU (PARSEC_PERIODIC_SECTOR_DEVICES)
+    one_device = _periodic_one_device_note(reference, decomposition, device_ids, filter_plan)
+    if one_device is not None:
+        first = int(tuple(device_ids)[0])
+        groups = {int(sector): (first,) for sector in range(int(decomposition.representation_count))}
+        record = process_placement_record(groups, device_ids, int(decomposition.representation_count))
+        return groups, divided, f"{record}; {one_device}"
     notes: list[str] = []
     groups = process_sector_device_groups(decomposition, device_ids, filter_plan, divided=divided, notes=notes)
     # The record of the placement with the reason of a pool decision (PARSEC_CUPY_SECTOR_POOL_MIN_BYTES).
@@ -2813,6 +3117,10 @@ def _reported_pack_workers(storage: str) -> str:
         return str(pack_worker_setting())
     except ValueError:
         return "no tiles packed"
+
+
+#: The filter plan of a preparation not asked for yet (``_prepare_single_point``: the plan is asked once).
+_NOT_PLANNED = object()
 
 
 def _filter_plan(reference) -> FilterPlan | None:
@@ -3800,6 +4108,7 @@ def prepare_single_point(
     symmetry_fixed_atoms=None,
     symmetry_constraints: tuple = (),
     sector_forces: bool = False,
+    minimum_sector_order: int = 0,
 ) -> AcceleratedPreparedSinglePointSystem:
     """Prepare physics, automatically reducing exact symmetry when usable.
 
@@ -3846,6 +4155,14 @@ def prepare_single_point(
     that it finds the subgroup a relaxation with those flags keeps
     (``PARSEC_MOVE_FLAG_SUBGROUP``).  ``None``, the default, detects the
     group of the atoms as they are.
+
+    ``minimum_sector_order`` (a periodic cell, ``symmetry`` other than
+    ``on``): sectors whose group has fewer operations are dropped after the
+    detection, before they are built, and the cell takes the full grid (the
+    molecular dynamics and manual movements of a cell, and the relaxations
+    with fixed atoms of the Fortran-derived routines, under
+    ``PARSEC_MOVING_SECTORS=auto``, :mod:`.SCF.moving_sectors`).  ``0``, the
+    default, keeps every group.
     """
 
     if spin_identity_sector and not getattr(getattr(problem, "scf", None), "spin_polarized", False):
@@ -3871,6 +4188,7 @@ def prepare_single_point(
             symmetry_fixed_atoms=symmetry_fixed_atoms,
             symmetry_constraints=tuple(symmetry_constraints),
             sector_forces=bool(sector_forces),
+            **({"minimum_sector_order": int(minimum_sector_order)} if minimum_sector_order else {}),
         )
     finally:
         # A preparation that returns has joined its threads where it read
@@ -4153,6 +4471,7 @@ def _prepare_single_point(
     symmetry_fixed_atoms=None,
     symmetry_constraints: tuple = (),
     sector_forces: bool = False,
+    minimum_sector_order: int = 0,
 ) -> AcceleratedPreparedSinglePointSystem:
     """Run the stages of :func:`prepare_single_point`, which joins their threads."""
 
@@ -4256,6 +4575,10 @@ def _prepare_single_point(
 
     # Read in every run, so that a value it does not know is refused.
     periodic_symmetry_mode = periodic_symmetry_setting()
+    # (PARSEC_ORBITAL_IRREP_ROWS, which the units of PARSEC_ORBITAL_IRREPS read)
+    from .Symmetry.axis_reflection import orbital_irrep_rows_setting
+
+    orbital_irrep_rows_setting()
     # (and so are the switches of the detection: PARSEC_SYMMETRY_ATOM_TOLERANCE, PARSEC_PERIODIC_TRIVIAL_ORIGIN,
     # PARSEC_PERIODIC_SYMMETRY_CENTRE, PARSEC_PERIODIC_DEFECT_CENTRE, PARSEC_PERIODIC_ABELIAN_TRANSLATIONS,
     # PARSEC_ORBITAL_IRREPS)
@@ -4293,13 +4616,39 @@ def _prepare_single_point(
 
     # (and the switches of TS, LDA+U, meta-GGA and libxc in the Gamma sectors: SCF/gamma_features.py)
     gamma_feature_settings()
+    from .SCF.gamma_hybrid_route import gamma_hybrid_sector_forces_setting
+
+    # (and PARSEC_GAMMA_HYBRID_SECTOR_FORCES, whether a small Gamma hybrid with forces or moves averaged over the
+    # group averages them on the full grid or takes the sectors: _gamma_hybrid_in_sectors and
+    # _gamma_hybrid_full_grid_forces)
+    gamma_hybrid_sector_forces_setting()
+    hybrid_full_grid_forces = is_periodic and _gamma_hybrid_full_grid_forces(
+        problem,
+        mpi_context,
+        sector_forces=bool(sector_forces),
+        symmetry_mode=symmetry_mode,
+        periodic_symmetry_mode=periodic_symmetry_mode,
+    )
+    from .Hamiltonian.hubbard_device import ldau_projector_orbits_setting
+    from .SCF.gamma_features import ldau_sector_forces_setting, ldau_spin_sector_setting
+
+    # (and the projector orbits of LDA+U in the sectors, PARSEC_LDAU_PROJECTOR_ORBITS, its spin sectors,
+    # PARSEC_LDAU_SPIN_SECTORS, and the sector forces of its cells, PARSEC_LDAU_SECTOR_FORCES, which the command
+    # line reads: read in every run, so that a value they do not know is refused before the SCF)
+    ldau_orbits = ldau_projector_orbits_setting()
+    ldau_spin_sector_setting()
+    ldau_sector_forces_setting()
+    from .Hamiltonian.hubbard_device import ldau_weighted_sectors_setting
+
+    # (PARSEC_LDAU_WEIGHTED_SECTORS too, which _orbital_group_refusal reads for an LDA+U run only)
+    ldau_weighted_sectors_setting()
     # A periodic cell in an MPI sector context: one sector of the identity
     # whose basis the ranks share (a bulk cell at Gamma; see
     # periodic_sector_refusal for what that route does not take).
     periodic_refusal = (
         periodic_sector_refusal(
             problem,
-            hybrid_sectors=_gamma_hybrid_in_sectors(problem, mpi_context),
+            hybrid_sectors=_gamma_hybrid_in_sectors(problem, mpi_context, sector_forces=sector_forces),
             features=mpi_context is None,
         )
         if is_periodic
@@ -4316,6 +4665,10 @@ def _prepare_single_point(
     )
     # (read in every run, so that a value it does not know is refused)
     periodic_floor = periodic_sector_floor_setting()
+    from .Symmetry.axis_reflection import sector_overhead_entries
+
+    # (and PARSEC_SECTOR_OVERHEAD, the fixed cost of a sector in the choice of the weighted plan of a cell)
+    sector_overhead_entries()
     from .SCF.band_sectors import band_kpoint_sectors_setting
     from .Symmetry.sector_shares import weighted_first_share_setting
 
@@ -4324,8 +4677,9 @@ def _prepare_single_point(
     band_kpoint_sectors_setting()
     # An unpolarized cell whose basis is below the floor keeps the full grid in one process
     # (PARSEC_PERIODIC_SECTOR_FLOOR; --symmetry on and the spin channels, which this route alone takes, keep the
-    # sectors; a hybrid has the same floor in _gamma_hybrid_in_sectors).  Forces and moves averaged over the group
-    # of the sectors (sector_forces) keep the sectors too: the full grid would not average them.
+    # sectors; a hybrid has the same floor in _gamma_hybrid_in_sectors, below which its forces and moves are averaged
+    # on the full grid: _gamma_hybrid_full_grid_forces).  Forces and moves averaged over the group of the sectors
+    # (sector_forces) keep the sectors too: the full grid would not average them.
     below_floor = (
         _periodic_basis_below_floor(problem, mpi_context, periodic_floor, sector_forces=sector_forces)
         if periodic_symmetry and symmetry_mode != "on" and not spin_polarized
@@ -4341,7 +4695,16 @@ def _prepare_single_point(
             "PARSEC_PERIODIC_SYMMETRY=auto"
             + ("" if periodic_refusal is None else f"; this calculation has {periodic_refusal}")
         )
-    if is_periodic and spin_polarized and mpi_context is not None and periodic_refusal is None and not periodic_symmetry:
+    if (
+        is_periodic
+        and spin_polarized
+        and mpi_context is not None
+        and periodic_refusal is None
+        and not periodic_symmetry
+        # (the one sector of the identity of both channels that the runner's ranks prepare for spin moves without
+        # a point group or after a spin guard fired, spin_identity_sector: it takes no group by design)
+        and not spin_identity_sector
+    ):
         # Without a detection the cell takes no group, and the identity sector of the ranks takes no spin channels:
         # refused before the reference is prepared.
         raise ValueError(
@@ -4368,6 +4731,8 @@ def _prepare_single_point(
     # several GPUs places its sectors by them below (_process_sector_placement).
     process_sector_placement_setting()
     process_pool_min_bytes()
+    # (and PARSEC_PERIODIC_SECTOR_DEVICES, the one GPU of the small sectors of a cell: _periodic_one_device_note)
+    periodic_sector_devices_setting()
     from .Symmetry.sector_stencil import sector_stencil_route
 
     # The symmetry sectors take their packed stencils from the grid, or from
@@ -4377,10 +4742,13 @@ def _prepare_single_point(
     # switch is read here whatever the symmetry mode, so that a value it does
     # not know is refused in every run.
     stencil_route = sector_stencil_route()
-    from .Symmetry.weighted_inputs import weighted_input_settings
+    from .Symmetry.weighted_inputs import weighted_input_settings, weighted_route_settings
 
-    # (and so are those of the weighted sectors of Fix_Number_Eigenvalues, libxc, occup.in and spin)
+    # (and so are those of the weighted sectors of Fix_Number_Eigenvalues, libxc, occup.in and spin, and where
+    # spin and occup.in take them: PARSEC_ORBITAL_GROUP_MPI, PARSEC_WEIGHTED_GUARD_SHORTCUT,
+    # PARSEC_ORBITAL_GROUP_SPIN_FLOOR)
     weighted_input_settings()
+    spin_floor = weighted_route_settings()[2]
     from .SCF.symmetry_fields import sector_input_group_average_setting
 
     # PARSEC_SECTOR_INPUT_GROUP_AVERAGE (the full-grid inputs of weighted sectors averaged over the full group):
@@ -4426,6 +4794,14 @@ def _prepare_single_point(
         preparation.symmetry_maps.point_group_wanted = (
             _orbital_group_refusal(problem, spin_polarized, mpi_context) is None
         )
+        if spin_polarized and spin_floor > 0:
+            # (decided again on the grid: the floor of the weighted spin sectors, as the detection in line decides)
+            preparation.symmetry_maps.point_group_wanted_for = lambda grid: (
+                _orbital_group_refusal(
+                    problem, spin_polarized, mpi_context, basis=_spin_floor_basis(problem, grid)
+                )
+                is None
+            )
         preparation.symmetry_maps.ionic_sum_group = ionic_sum_group
         if mpi_context is not None:
             preparation.symmetry_maps.ranks_divide = lambda reduction: _ranks_divide_sectors(reduction, mpi_context)
@@ -4460,6 +4836,9 @@ def _prepare_single_point(
     detected_group_order = 1
     symmetry_detection = "disabled by option"
     undivided_note = None
+    # (the NOTE of a spin or occup.in run that keeps the abelian group by PARSEC_ORBITAL_GROUP_MPI=off or the floor of
+    # PARSEC_ORBITAL_GROUP_SPIN_FLOOR: _kept_abelian_note)
+    orbital_group_note = None
     # the commuting signed permutations about the origin (the last group of the palette ladder below)
     origin_group = None
     symmetry_maps = preparation.symmetry_maps
@@ -4543,7 +4922,17 @@ def _prepare_single_point(
             )
         else:
             detected_group_order = candidate.group_order
-            refusal = _orbital_group_refusal(problem, spin_polarized, mpi_context)
+            refusal = _orbital_group_refusal(
+                problem,
+                spin_polarized,
+                mpi_context,
+                # (counted only where a floor is given: none under auto, SPIN_FLOOR_ENTRIES = 0)
+                basis=_spin_floor_basis(problem, reference.grid) if spin_polarized and spin_floor > 0 else None,
+            )
+            if candidate.group_order > 1 or is_periodic:
+                # A spin or occup.in run that keeps the abelian group by the rules of 2026-11-21 says so at every
+                # output level (PARSEC_ORBITAL_GROUP_MPI=off, PARSEC_ORBITAL_GROUP_SPIN_FLOOR).
+                orbital_group_note = _kept_abelian_note(refusal)
             # A periodic cell looks for its group even where its abelian group about the origin is the identity
             # alone: the half-cell translations of a cell that repeats a smaller one, the operations about a
             # centre off the origin (PARSEC_PERIODIC_TRIVIAL_ORIGIN=off: only where that group is larger).
@@ -4563,7 +4952,12 @@ def _prepare_single_point(
                     from .Symmetry import detect_point_group_reduction
 
                     candidate = stages.timed("orbital_group", detect_point_group_reduction)(
-                        reference.grid, detection_atoms, candidate, atom_tolerance=atom_tolerance
+                        reference.grid,
+                        detection_atoms,
+                        candidate,
+                        atom_tolerance=atom_tolerance,
+                        # the fixed cost of a sector of a cell in one process (PARSEC_SECTOR_OVERHEAD)
+                        sector_cost=_periodic_sector_cost(problem, reference, mpi_context) if is_periodic else 0.0,
                     )
                     if detection_atoms is not real_atoms:
                         from .SCF.symmetry_off_inputs import orbits_of_real_atoms
@@ -4594,18 +4988,34 @@ def _prepare_single_point(
                     f"per rank): the orbitals keep the group about the origin"
                 )
             if candidate.group_order > 1:
-                if getattr(reference, "hubbard", None) is None:
+                dropped_note = None
+                if _ldau_keeps_orbits(reference, ldau_orbits, candidate, detection_atoms):
                     # Abelian sectors take the projectors of one atom per orbit, as those of a point group do
-                    # (PARSEC_SECTOR_PROJECTOR_ORBITS; the device LDA+U columns follow every KB column).
+                    # (PARSEC_SECTOR_PROJECTOR_ORBITS; the device LDA+U columns follow the KB columns of their
+                    # atom, and their coefficients those of the representatives, PARSEC_LDAU_PROJECTOR_ORBITS).
                     from .Symmetry.axis_reflection import attach_abelian_atom_orbits
 
                     attach_abelian_atom_orbits(candidate, detection_atoms, reference.grid)
+                    if len(detection_atoms) > len(real_atoms):
+                        # the pseudo-atoms of the detection (point charges, a field axis, the constraints of
+                        # PARSEC_MOVING_SECTORS) after the atoms have orbits of their own labels: the orbits of the
+                        # atoms alone, as for a point group above (the projectors, their gradients and the check of
+                        # moved atoms read one orbit per atom)
+                        from .SCF.symmetry_off_inputs import orbits_of_real_atoms
+
+                        orbits_of_real_atoms(candidate, len(real_atoms))
                 else:
-                    # LDA+U: the projectors of every atom (the fifteen columns of every LDA+U atom that
-                    # Hamiltonian/hubbard_device.py writes), also where the group of a cell knows its atom orbits
+                    # LDA+U under PARSEC_LDAU_PROJECTOR_ORBITS=off, or atoms off the group by more than 1e-6 bohr
+                    # (a loose PARSEC_SYMMETRY_ATOM_TOLERANCE): the projectors of every atom (the fifteen columns
+                    # of every LDA+U atom that Hamiltonian/hubbard_device.py writes), also where the group of a
+                    # cell knows its atom orbits
+                    if ldau_orbits == "auto" and getattr(candidate, "atom_representatives", None) is not None:
+                        dropped_note = _LDAU_LOOSE_ORBITS_NOTE
                     candidate = _without_atom_orbits(candidate)
                 symmetry_reduction = candidate
                 symmetry_detection = _symmetry_detection_text(candidate)
+                if dropped_note is not None:
+                    symmetry_detection += "; " + dropped_note
             else:
                 symmetry_detection = (
                     "identity only; no nontrivial supported symmetry detected"
@@ -4658,6 +5068,11 @@ def _prepare_single_point(
                     f"; the {fixed_count} atom{'s' if fixed_count != 1 else ''} that Move_Flag fixes count as a "
                     "species of their own: the operations map them onto fixed atoms (PARSEC_MOVE_FLAG_SUBGROUP=auto)"
                 )
+    # The molecular dynamics and manual movements of a cell under PARSEC_MOVING_SECTORS=auto take sectors of
+    # minimum_sector_order operations or more: dropped here, before they are built (SCF/moving_sectors.py).
+    if is_periodic and symmetry_mode != "on" and _below_minimum_sector_order(symmetry_reduction, minimum_sector_order):
+        symmetry_detection = _minimum_sector_order_text(symmetry_reduction, minimum_sector_order, symmetry_detection)
+        symmetry_reduction = None
     # A cell whose sector stencils would need more coefficients than their palette holds (_sector_palette_check):
     # a smaller group whose stencils fit, or the full grid, decided before the identity sector of an MPI run is
     # chosen, from the same inputs on every rank (PARSEC_SECTOR_PALETTE_LADDER).
@@ -4738,7 +5153,7 @@ def _prepare_single_point(
                         break
                     refusals.append(refusal)
             if chosen is not None:
-                if getattr(reference, "hubbard", None) is None:
+                if _ldau_keeps_orbits(reference, ldau_orbits, chosen, detection_atoms):
                     from .Symmetry.axis_reflection import attach_abelian_atom_orbits
 
                     attach_abelian_atom_orbits(chosen, detection_atoms, reference.grid)
@@ -4770,6 +5185,11 @@ def _prepare_single_point(
                     f"automatic detection fell back to full grid: {'; '.join(refusals)}; found: {symmetry_detection}"
                 )
                 symmetry_reduction = None
+    # (a smaller group of the palette ladder, under the minimum_sector_order of PARSEC_MOVING_SECTORS=auto)
+    if is_periodic and symmetry_mode != "on" and _below_minimum_sector_order(symmetry_reduction, minimum_sector_order):
+        symmetry_detection = _minimum_sector_order_text(symmetry_reduction, minimum_sector_order, symmetry_detection)
+        symmetry_reduction = None
+        palette_note = None
     # Without a point group the orbitals may still take the route of the
     # sectors, as one sector of the identity, so that the devices of the
     # process share its basis (PARSEC_CUPY_SINGLE_SECTOR).
@@ -4885,6 +5305,8 @@ def _prepare_single_point(
     # a sector calculation never applies the full-grid GPU Hamiltonian, so
     # uploading that duplicate allocation would be pure setup and memory cost.
     orbital_decomposition = None
+    # the filter plan of the input where the first shares of weighted sectors asked for it (asked once: below)
+    share_filter_plan = _NOT_PLANNED
     # A/B control and conservative architecture override: with the
     # stabilizer policy off Hartree retains the detected scalar reduction of
     # a group that fixes grid points, while orbitals use the full grid.
@@ -4941,13 +5363,24 @@ def _prepare_single_point(
         else:
             sector_sizes = orbital_decomposition.sector_sizes
             # The first counts of weighted sectors from their shares of the valence orbitals of the atoms
-            # (PARSEC_WEIGHTED_FIRST_SHARE=orbitals, opt-in; even, the default: the even share with its margin).
+            # (PARSEC_WEIGHTED_FIRST_SHARE: auto, the default since 2026-11-21, takes them in one process from a
+            # full-grid basis of sector_shares.MINIMUM_ENTRIES on and keeps the even share with its margin on the ranks
+            # of an MPI run and below it; even keeps it everywhere, as before).
             from .Symmetry.axis_reflection import symmetry_atom_tolerance
-            from .Symmetry.sector_shares import attach_valence_orbital_counts
+            from .Symmetry.sector_shares import attach_valence_orbital_counts, weighted_first_share_setting
 
+            share_plan = share_filter_plan = _filter_plan(reference)
+            # (a grid without a size, a stand-in of the tests, counts as not known: the even share)
+            grid_points = getattr(reference.grid, "size", None)
             valence_counts = attach_valence_orbital_counts(
                 orbital_decomposition, tuple(getattr(reference, "atoms", ()) or ()),
                 getattr(reference, "pseudopotentials", None), reference.grid, tolerance=symmetry_atom_tolerance(),
+                mpi=mpi_context is not None,
+                entries=(
+                    None
+                    if share_plan is None or grid_points is None
+                    else int(grid_points) * (int(share_plan.states) + int(share_plan.buffer))
+                ),
             )
             orbital_symmetry = (
                 "CuPy real one-dimensional representations with exact "
@@ -4958,7 +5391,8 @@ def _prepare_single_point(
             if valence_counts is not None:
                 orbital_symmetry += (
                     "; first state counts from the shares of the valence orbitals of the atoms per sector, "
-                    f"{', '.join(str(int(count)) for count in valence_counts)} (PARSEC_WEIGHTED_FIRST_SHARE=orbitals)"
+                    f"{', '.join(str(int(count)) for count in valence_counts)} "
+                    f"(PARSEC_WEIGHTED_FIRST_SHARE={weighted_first_share_setting()})"
                 )
     if symmetry_maps is not None:
         # The thread of the maps has ended here at the latest, whether its
@@ -5072,6 +5506,9 @@ def _prepare_single_point(
     if palette_note is not None:
         # the group the palette of the sector stencils left the orbitals (_sector_palette_check), at every output level
         full_grid_notes.append(palette_note)
+    if orbital_group_note is not None and symmetry_reduction is not None:
+        # a spin or occup.in run that keeps the abelian group (_kept_abelian_note), at every output level
+        full_grid_notes.append(orbital_group_note)
     # A spin run in the sectors: where the full grid of both channels would go if its guard fired, and a NOTE where it
     # would not fit one device (PARSEC_SPIN_FALLBACK_SHARED; the shared full grid of a fallback is that full grid).
     spin_fallback = None
@@ -5123,7 +5560,13 @@ def _prepare_single_point(
     # that takes it.  None keeps the cyclic deal of before.
     process_sector_groups = process_divided_bases = process_placement_note = None
     # What the input fixes of the filter work: asked once, for the placement and the sector eigensolver.
-    sector_filter_plan = None if orbital_decomposition is None else _filter_plan(reference)
+    sector_filter_plan = (
+        None
+        if orbital_decomposition is None
+        else share_filter_plan
+        if share_filter_plan is not _NOT_PLANNED
+        else _filter_plan(reference)
+    )
     if orbital_decomposition is not None and mpi_context is None and selection.selected == "cupy":
         from .Eigensolvers.symmetry import selected_device_ids
         from .backends.cupy import require_cupy
@@ -5385,10 +5828,18 @@ def _prepare_single_point(
         )
         implementation.symmetry_eigensolver = symmetry_eigensolver
         implementation.eigenproblem_solver = symmetry_eigensolver
-        # Fix_Number_Eigenvalues: the sectors keep their counts.
+        # Fix_Number_Eigenvalues under PARSEC_FIXED_STATES_BUFFER=off: the sectors keep the counts of the first
+        # solve (auto: their own counts with the buffer, as a run without the keyword, and a NOTE says so).
+        from parsec_python.models import fixed_states_note, fixed_states_sector_buffer
+
         from .Eigensolvers.symmetry import fixed_state_count_requested
 
         symmetry_eigensolver.fixed_state_count = fixed_state_count_requested(reference)
+        _fixed_eigensolver = getattr(getattr(reference, "input", None), "eigensolver", None)
+        symmetry_eigensolver.fixed_state_buffer = fixed_states_sector_buffer(_fixed_eigensolver)
+        _fixed_note = fixed_states_note(_fixed_eigensolver)
+        if _fixed_note is not None and not sector_worker:
+            full_grid_notes.append(_fixed_note)
         # A sector that shares its basis gives the device with the Hartree
         # objects work beside its own only where it has no other device for
         # it and the sharing rule counts the room for it there.
@@ -6718,6 +7169,11 @@ def _prepare_single_point(
                 "orbital_sector_dimensions",
                 " ".join(map(str, orbital_decomposition.sector_sizes)),
             ),
+            *(
+                (("orbital_partner_rows", symmetry_eigensolver.partner_rows_record),)
+                if getattr(symmetry_eigensolver, "partner_rows_record", None)
+                else ()
+            ),
             (
                 "orbital_sector_stabilizer_handling",
                 "exact character selection on every orbit stabilizer",
@@ -7418,22 +7874,25 @@ def _prepare_single_point(
             plan=spin_fallback,
             symmetry_fixed_atoms=symmetry_fixed_atoms,
             symmetry_constraints=tuple(symmetry_constraints),
+            sector_forces=sector_forces,
         )
     elif (
-        mpi_context is None
-        and getattr(getattr(getattr(reference, "input", None), "scf", None), "fixed_occupations", None) is not None
+        getattr(getattr(getattr(reference, "input", None), "scf", None), "fixed_occupations", None) is not None
         and _weighted_sectors(symmetry_eigensolver)
     ):
         # occup.in in the weighted sectors: a run whose file fills partners unequally starts again in the
-        # abelian sectors (PARSEC_ORBITAL_GROUP_OCCUPATIONS).
+        # abelian sectors (PARSEC_ORBITAL_GROUP_OCCUPATIONS), on several MPI ranks too (every rank prepares them again,
+        # PARSEC_ORBITAL_GROUP_MPI=auto).
         spin_sector_fallback = _SpinSectorFallback(
             given_problem,
             tuple(reference.atoms),
             backend=backend,
             symmetry=symmetry,
             symmetry_cache_directory=symmetry_cache_directory,
+            mpi_context=mpi_context,
             symmetry_fixed_atoms=symmetry_fixed_atoms,
             symmetry_constraints=tuple(symmetry_constraints),
+            sector_forces=sector_forces,
             spin=False,
         )
     # PARSEC_SPIN_FLIP_SYMMETRY=auto: the down channel as the image of the up
@@ -7462,7 +7921,8 @@ def _prepare_single_point(
                             for label, partner in spin_flip.partners.items()
                             if label != partner
                         )
-                        + "); the state keeps this magnetic symmetry"
+                        + "); the state keeps this magnetic symmetry unless a loop leaves the route (a fractional "
+                        "occupation of the up channel or a failed test of the spin sectors: a NOTE, then both channels)"
                     )
                     if spin_flip is not None
                     else f"auto: both channels solved ({spin_flip_reason})",
@@ -7494,6 +7954,22 @@ def _prepare_single_point(
                     )
                     if spin_sectors
                     else f"{problem.scf.spin_symmetry_sector_mode}: full grid",
+                ),
+            ),
+        )
+    if hybrid_full_grid_forces and (symmetry_reduction is None or int(symmetry_reduction.group_order) <= 1):
+        # PARSEC_GAMMA_HYBRID_SECTOR_FORCES=auto: a Gamma hybrid below the floor of its sectors on the full grid,
+        # whose forces and moved positions the command line and Forces/compute.py average over the operations of
+        # the cell (_gamma_hybrid_full_grid_forces); moved structures keep this system and its details.
+        from .SCF.gamma_hybrid_route import FULL_GRID_FORCES_DETAIL, FULL_GRID_FORCES_VALUE
+
+        implementation.info = replace(
+            implementation.info,
+            details=implementation.info.details
+            + (
+                (
+                    FULL_GRID_FORCES_DETAIL,
+                    f"{FULL_GRID_FORCES_VALUE}; forces and moved positions averaged over the operations of the cell",
                 ),
             ),
         )
@@ -7943,13 +8419,36 @@ def _weighted_sectors(sectors) -> bool:
     return isinstance(reduction, PointGroupReduction)
 
 
+def _keep_spin_flip_left(system) -> None:
+    """A system prepared again in the place of one whose run left ``PARSEC_SPIN_FLIP_SYMMETRY`` keeps both channels.
+
+    The mark of :func:`parsec_python.SCF.spin_polarized.leave_spin_flip` stays on the system object that
+    :class:`_SpinSectorFallback` fills; this corrects the detail ``spin_flip_symmetry`` that the new preparation wrote
+    (the route of ``off`` from there on, as the run had it).
+    """
+
+    from parsec_python.SCF.spin_polarized import SPIN_FLIP_LEFT, leave_spin_flip
+
+    reason = getattr(system, SPIN_FLIP_LEFT, None)
+    if reason:
+        leave_spin_flip(system, reason)
+
+
 class _SpinSectorFallback:
     """How a spin-polarized run in the symmetry sectors goes back to the full grid.
 
     A run in the weighted sectors of a subgroup (``Symmetry/weighted_inputs.py``) whose spin guard fires, or whose
     ``occup.in`` fills the partners of a weighted state unequally (``spin=False``: an unpolarized run with
     ``occup.in``, which has no guard), is first prepared again in the sectors of the abelian group
-    (:meth:`replace_with_abelian`), whose own guard may still send a spin run to the full grid.
+    (:meth:`replace_with_abelian`; on every rank of ``mpi_context``, which the root tells to prepare them with it),
+    whose own guard may still send a spin run to the full grid.  A spin guard whose report the abelian sectors
+    would repeat on the same levels (``FractionalOccupations.abelian``: a multiplet with partners in two or more of
+    their sectors; a cluster, or a cell whose operations take no translation) goes straight to the full grid under
+    ``PARSEC_WEIGHTED_GUARD_SHORTCUT=auto``: those sectors would solve the same state again and stop it there
+    (``off``: through them, as before).  At the start Hamiltonian (test 1), which both share, that is exact, and the
+    result is the abelian route's bit for bit; at the end of the SCF (test 3) it is predicted from the weighted
+    occupations, and the full grid gives the reference without symmetry, the abelian route's result wherever that
+    route stops at its end too.
 
     ``Spin_Symmetry_Sectors`` keeps a sector result only where the symmetry
     guard of :mod:`.SCF.spin_sectors` passes.  Otherwise :meth:`run`
@@ -7990,9 +8489,13 @@ class _SpinSectorFallback:
         symmetry_fixed_atoms=None,
         symmetry_constraints=(),
         spin: bool = True,
+        sector_forces: bool = False,
     ) -> None:
         self.problem = problem
         self.spin = bool(spin)
+        # (the forces and moves of a cell averaged over the group of its sectors: the abelian sectors prepared again
+        # keep that, as the weighted ones were prepared, prepare_single_point)
+        self.sector_forces = bool(sector_forces)
         self.atoms = tuple(atoms)
         self.backend = backend
         self.symmetry = symmetry
@@ -8048,6 +8551,8 @@ class _SpinSectorFallback:
             if not weighted:
                 break
             stage, report = abandoned
+            # PARSEC_WEIGHTED_GUARD_SHORTCUT=auto: the abelian sectors would stop the same state (see the class).
+            skip_abelian = self.spin and self.abelian_shortcut(report)
             if callback is not None:
                 from parsec_python.models import SpinSectorFallbackRecord
 
@@ -8060,8 +8565,11 @@ class _SpinSectorFallback:
                         reason=report.reason,
                         measure=report.measure,
                         route="weighted",
+                        **({"abelian_skipped": True} if skip_abelian else {}),
                     )
                 )
+            if skip_abelian:
+                break
             self.replace_with_abelian(system, stage, report)
             warm_start = self.full_grid_warm_start(warm_start)
         stage, report = abandoned
@@ -8083,6 +8591,17 @@ class _SpinSectorFallback:
             )
         self.replace_with_full_grid(system, stage, report)
         return run(system, callback=callback, warm_start=self.full_grid_warm_start(warm_start), **keywords)
+
+    @staticmethod
+    def abelian_shortcut(report) -> bool:
+        """Whether a guard ``report`` of the weighted sectors goes straight to the full grid
+        (``PARSEC_WEIGHTED_GUARD_SHORTCUT=auto`` and the abelian sectors would report the same levels:
+        ``FractionalOccupations.abelian``, set by the guard of the weighted sectors of a cluster or of a cell whose
+        operations take no translation)."""
+
+        from .Symmetry.weighted_inputs import guard_shortcut_setting
+
+        return bool(getattr(report, "abelian", False)) and guard_shortcut_setting() == "auto"
 
     @staticmethod
     def full_grid_warm_start(warm_start):
@@ -8147,7 +8666,11 @@ class _SpinSectorFallback:
         """Prepare the system in the sectors of the abelian group and put its objects into ``system``.
 
         What the weighted sectors hold on the devices goes first.  The preparation keeps the abelian group of the
-        orbitals (:func:`.Symmetry.weighted_inputs.abelian_orbitals`) and says why in its backend details.
+        orbitals (:func:`.Symmetry.weighted_inputs.abelian_orbitals`) and says why in its backend details.  With an
+        ``mpi_context`` (the full-SCF runner, ``PARSEC_ORBITAL_GROUP_MPI=auto``) the root first tells the other ranks
+        to prepare the same input in the abelian sectors (:meth:`.experimental.mpi_scf.MPISectorContext.reprepare`),
+        so that every rank configures the sectors of the same plan again, and its own densities are summed over the
+        ranks, as the runner set up those of the first preparation.
         """
 
         import gc
@@ -8166,17 +8689,35 @@ class _SpinSectorFallback:
                 sectors.reset()
         gc.collect()
         reason = f"the weighted sectors were left after {stage} ({report.reason})"
+        context = self.mpi_context
+        options = dict(
+            backend=self.backend,
+            symmetry=self.symmetry,
+            symmetry_cache_directory=self.symmetry_cache_directory,
+            # (the abelian group of a relaxation that keeps the subgroup of its Move_Flag is detected with the
+            # fixed atoms labelled too, PARSEC_MOVE_FLAG_SUBGROUP)
+            symmetry_fixed_atoms=self.symmetry_fixed_atoms,
+            symmetry_constraints=self.symmetry_constraints,
+            **({"sector_forces": True} if self.sector_forces else {}),
+        )
+        if context is not None:
+            # The ranks of the runner prepare the abelian sectors together: the root sends them the input first (with
+            # the pseudopotential files of the input, which every rank read at its start), and each replaces the
+            # sector solver of its worker loop.
+            context.reprepare(dict(problem=problem, abelian_reason=reason, **options))
         with tempfile.TemporaryDirectory() as copies, abelian_orbitals(reason):
             problem = self._with_present_pseudopotentials(problem, Path(copies))
             abelian = prepare_single_point(
                 problem,
-                backend=self.backend,
-                symmetry=self.symmetry,
-                symmetry_cache_directory=self.symmetry_cache_directory,
-                # (the abelian group of a relaxation that keeps the subgroup of its Move_Flag is detected with the
-                # fixed atoms labelled too, PARSEC_MOVE_FLAG_SUBGROUP)
-                symmetry_fixed_atoms=self.symmetry_fixed_atoms,
-                symmetry_constraints=self.symmetry_constraints,
+                **options,
+                **({"mpi_context": context} if context is not None else {}),
+            )
+        if context is not None:
+            # The root's densities of the abelian sectors are summed over the ranks, as the runner set it up.
+            from .experimental.mpi_scf import MPISymmetryDensityBuilder
+
+            abelian.orbital_density_builder = MPISymmetryDensityBuilder(
+                abelian.orbital_density_builder, context, abelian.backend.symmetry_eigensolver
             )
         note = (
             "weighted_sectors",
@@ -8192,6 +8733,7 @@ class _SpinSectorFallback:
         for item in fields(abelian):
             setattr(system, item.name, getattr(abelian, item.name))
         system.materialize_final_wavefunctions = kept
+        _keep_spin_flip_left(system)
         del abelian, sectors
         gc.collect()
         from .backends.cupy import require_cupy
@@ -8301,6 +8843,7 @@ class _SpinSectorFallback:
         for item in fields(full_grid):
             setattr(system, item.name, getattr(full_grid, item.name))
         system.materialize_final_wavefunctions = kept
+        _keep_spin_flip_left(system)
         del full_grid, sectors, exchange
         gc.collect()
         from .backends.cupy import require_cupy

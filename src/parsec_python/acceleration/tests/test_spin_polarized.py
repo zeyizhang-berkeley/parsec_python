@@ -397,14 +397,23 @@ class SciPyBackendTests(_BackendCases, unittest.TestCase):
                 _refuse_spin_ionic_steps(translation, 1)  # one rank (a serial control) is one process
         with mock.patch.dict(os.environ, {"PARSEC_SPIN_SECTOR_FORCES": "auto"}):
             _refuse_spin_ionic_steps(SimpleNamespace(**{**vars(single), "compute_forces": True}), 2)
-            for changed, reason in (
-                (dict(molecular_dynamics=object()), "molecular dynamics uses no symmetry"),
-                (dict(compute_forces=True, ignore_symmetry=True), "uses no point group"),
-            ):
-                translation = SimpleNamespace(**{**vars(single), **changed})
-                with self.subTest(reason=reason), self.assertRaisesRegex(ValueError, reason):
+            # (since 2026-11-21) the moves without a point group run as one sector of the identity of both channels
+            from parsec_python.acceleration.benchmarks.mpi_full_scf import _spin_moves_without_group
+
+            self.assertFalse(_spin_moves_without_group(single))
+            # a hybrid or a meta-GGA keeps one device per basis in that layout: refused as before
+            for functional in ("is_hybrid", "is_meta_gga"):
+                translation = SimpleNamespace(**{**vars(single), "molecular_dynamics": object(), "problem": SimpleNamespace(
+                    scf=SimpleNamespace(spin_polarized=True, **{functional: True}), periodic_cell=None)})
+                self.assertFalse(_spin_moves_without_group(translation))
+                with self.assertRaisesRegex(ValueError, "molecular dynamics uses no symmetry"):
                     _refuse_spin_ionic_steps(translation, 2)
-                _refuse_spin_ionic_steps(translation, 1)
+            for changed in (dict(molecular_dynamics=object()), dict(compute_forces=True, ignore_symmetry=True)):
+                translation = SimpleNamespace(**{**vars(single), **changed})
+                with self.subTest(changed=changed):
+                    self.assertTrue(_spin_moves_without_group(translation))
+                    _refuse_spin_ionic_steps(translation, 2)
+                    _refuse_spin_ionic_steps(translation, 1)
 
 
 @unittest.skipUnless(native_available(), "native extension is unavailable")

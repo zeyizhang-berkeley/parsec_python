@@ -198,6 +198,35 @@ class MethylRadicalTests(_FortranCase, unittest.TestCase):
             sum(line.endswith("   up") or line.endswith("   dn") for line in last), 2
         )
 
+    def test_archive_of_channels_of_unequal_lengths(self) -> None:
+        # The weighted sectors list every partner of the last multiplet of each channel: the down channel here one
+        # level shorter.  Its lists are padded (NaN levels, empty occupations, sector 0) and spin_state_counts says
+        # how many levels each channel holds (before 2026-11-21 the archive could not be written).
+        from dataclasses import replace
+
+        up, down = self.result.spin
+        shorter = replace(
+            down,
+            eigenvalues=down.eigenvalues[:-1],
+            occupations=down.occupations[:-1],
+            representations=None if down.representations is None else np.asarray(down.representations)[:-1],
+        )
+        result = replace(self.result, spin=(up, shorter))
+        states = up.eigenvalues.size
+        with tempfile.TemporaryDirectory() as directory:
+            path = save_result_archive(Path(directory) / "result", result)
+            with np.load(path) as archive:
+                self.assertEqual(archive["spin_eigenvalues_ry"].shape, (2, states))
+                np.testing.assert_array_equal(archive["spin_eigenvalues_ry"][1][:-1], down.eigenvalues[:-1])
+                self.assertTrue(np.isnan(archive["spin_eigenvalues_ry"][1][-1]))
+                self.assertEqual(archive["spin_occupations"][1][-1], 0.0)
+                self.assertEqual(archive["spin_state_counts"].tolist(), [states, states - 1])
+        # equal lengths: no count member, as before
+        with tempfile.TemporaryDirectory() as directory:
+            path = save_result_archive(Path(directory) / "result", self.result)
+            with np.load(path) as archive:
+                self.assertNotIn("spin_state_counts", archive.files)
+
     def test_archive_keeps_both_channels(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = save_result_archive(Path(directory) / "result", self.result)

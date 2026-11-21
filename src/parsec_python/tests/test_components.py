@@ -414,7 +414,7 @@ class IntegrationTests(unittest.TestCase):
                 self.assertGreaterEqual(getattr(result.history[0], name), 0.0)
         self.assertIs(result.timings.preparation, system.timings)
         for name, value in vars(result.timings).items():
-            if name in ("preparation", "detail"):
+            if name in ("preparation", "detail", "notes"):
                 continue
             with self.subTest(run_timing=name):
                 self.assertGreaterEqual(value, 0.0)

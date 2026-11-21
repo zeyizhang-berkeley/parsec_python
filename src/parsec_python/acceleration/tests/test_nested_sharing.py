@@ -286,16 +286,6 @@ class HintTests(unittest.TestCase):
             # refused under off unless PARSEC_SINGLE_SECTOR_NODE_LAYOUT=allow, test_runner_fixes.NestedLayoutTests).
             self.assertIsNone(_nested_sharing_line(run_ranks(2, lambda ctx: configure(ctx, 1))[0], 4))
 
-    def test_the_ranks_of_a_group_agree_on_the_nested_group(self):
-        from parsec_python.acceleration.Eigensolvers.mpi_nested_basis import nested_filter_agreement
-
-        # A rank whose operator took a fallback (no stencil-major or fused projector kernels) is named on every
-        # rank of its group, which then stop together instead of waiting in collectives that it never enters.
-        answers = run_ranks(3, lambda ctx: nested_filter_agreement(ctx.comm, ctx.rank != 1))
-        self.assertEqual(answers, [(1,), (1,), (1,)])
-        self.assertEqual(run_ranks(3, lambda ctx: nested_filter_agreement(ctx.comm, True)), [(), (), ()])
-        self.assertEqual(nested_filter_agreement(_Comm(0, 1), False), (0,))
-
     def test_the_line_names_the_groups_attached(self):
         from parsec_python.acceleration.benchmarks.mpi_full_scf import _nested_attachment, _nested_sharing_line
 

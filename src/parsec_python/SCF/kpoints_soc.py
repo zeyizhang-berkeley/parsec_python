@@ -63,7 +63,11 @@ from .stage_timer import StageTimer, solver_residual_max, solver_timings
 from ..Mixer import make_mixer, potential_residual_metrics
 from ..SCF.pbc import PeriodicPreparedSinglePointSystem
 from .self_consistent_soc import first_iteration_degree, initial_spinor_potentials
-from ..SCF.spin_polarized import _weighted_initial_polarization
+from ..SCF.spin_polarized import (
+    _weighted_initial_polarization,
+    initchrg_spin_start,
+    initchrg_start_needed,
+)
 from ..SCF.single_point import (
     SpinorIterationFields,
     first_diagonalization_tolerance,
@@ -801,13 +805,20 @@ def run_self_consistent_soc_kpoints_spin_polarized(
     ionic_potential = system.ionic_potential
 
     timer = StageTimer()
-    polarization = _weighted_initial_polarization(system)
-    density_up = 0.5 * (1.0 + polarization) * system.initial_density
-    density_down = 0.5 * (1.0 - polarization) * system.initial_density
+    if initchrg_start_needed(system):
+        # PARSEC_SPIN_START: PARSEC 1.5's per-species start (initchrg.f90), the
+        # Hartree potential of the total starting density
+        density_up, density_down = initchrg_spin_start(system)
+        hartree_source = np.asarray(system.initial_density, dtype=np.float64)
+    else:
+        polarization = _weighted_initial_polarization(system)
+        density_up = 0.5 * (1.0 + polarization) * system.initial_density
+        density_down = 0.5 * (1.0 - polarization) * system.initial_density
+        hartree_source = density_up + density_down
     if initial_potential is None and warm_start is None:
         with timer.stage("setup_potentials"):
             initial_hartree = system.solve_hartree(
-                density_up + density_down, initial_potential=-ionic_potential
+                hartree_source, initial_potential=-ionic_potential
             )
             hartree_potential = initial_hartree.potential
             xc = system.evaluate_xc_spin_polarized(density_up, density_down)

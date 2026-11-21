@@ -34,19 +34,44 @@ import numpy as np
 SWITCH = "PARSEC_WEIGHTED_FIRST_SHARE"
 
 
-def weighted_first_share_setting() -> str:
-    """``PARSEC_WEIGHTED_FIRST_SHARE``: ``even`` (default) gives every weighted sector the even share of the states at
-    its first solve with a margin of 10 %, as before; ``orbitals`` (opt-in, 2026-11-19) gives it the share of the
-    valence orbitals of the atoms that it holds (:func:`valence_orbital_sector_counts`) with a margin of 3 % (a run
-    without whole counts or with the same count in every sector, :func:`attach_valence_orbital_counts`, keeps the
-    even share).  Not the default: on one node of 4 A100 the first solve of the nanodiamond k10 took 91 instead of
-    105 s, but in the MPI runner on two nodes its SCF took 14.1 instead of 12.8 s and 9.1 instead of 8.1 GiB, since
-    the smaller counts of two sectors fell below the work at which a basis is divided over the devices of a group
-    (``sector_bases_divisible``), which changed the device layout of the sectors."""
+#: The value where none is named (since 2026-11-21; ``even`` before).
+DEFAULT = "auto"
+#: The smallest basis of the full grid (grid points times the states and the buffer) from which ``auto`` takes the
+#: shares of the valence orbitals in one process (2^27).  First runs (empty kernel caches) on one node of 4 A100, even
+#: -> orbitals, SCF seconds: nanodiamonds k06 16.3 -> 11.0, k08 39.0 -> 19.5, k10 135.9 -> 56.4 (the counts of the
+#: shares let the placement give each sector the device pool); the negative diamond vacancy, spin-polarized, 4^3
+#: (3.8e8 entries) 21.5 -> 20.9 and 5^3 (1.5e9) 25.1 -> 13.6; but 3^3 (6.9e7) 9.6 -> 13.4 on a first run (its second
+#: run 4.7 -> 3.2), and molecules and clusters on one A100 (SF6, CF4, Na55, Si86, Si113, CH4, H2) the same times.
+MINIMUM_ENTRIES = 1 << 27
 
-    value = os.environ.get(SWITCH, "even").strip().lower() or "even"
-    if value not in {"even", "orbitals"}:
-        raise ValueError(f"{SWITCH} must be even or orbitals, not {value!r}")
+
+def weighted_first_share_setting() -> str:
+    """``PARSEC_WEIGHTED_FIRST_SHARE``: ``auto`` (the default since 2026-11-21) is ``orbitals`` in one process and
+    ``even`` in the ranks of an MPI run (:func:`weighted_first_share_route`); ``even`` (the default before) gives every
+    weighted sector the even share of the states at its first solve with a margin of 10 %, as before; ``orbitals``
+    (2026-11-19) gives it the share of the valence orbitals of the atoms that it holds
+    (:func:`valence_orbital_sector_counts`) with a margin of 3 % (a run without whole counts or with the same count
+    in every sector, :func:`attach_valence_orbital_counts`, keeps the even share).  ``auto`` keeps the even share in
+    MPI runs: in the MPI runner on two nodes the SCF of the nanodiamond k10 took 14.1 s with ``orbitals`` instead of
+    12.8 s and 9.1 instead of 8.1 GiB, since the smaller counts of two sectors fell below the work at which a basis is
+    divided over the devices of a group (``sector_bases_divisible``), which changed the device layout of the
+    sectors; one process with the GPUs of a node was faster with ``orbitals`` (README, the row of the switch)."""
+
+    value = os.environ.get(SWITCH, DEFAULT).strip().lower() or DEFAULT
+    if value not in {"auto", "even", "orbitals"}:
+        raise ValueError(f"{SWITCH} must be auto, even or orbitals, not {value!r}")
+    return value
+
+
+def weighted_first_share_route(*, mpi: bool, entries: int | None = None) -> str:
+    """The share of the first counts of weighted sectors: ``orbitals`` or ``even``.  ``auto`` is ``orbitals`` in one
+    process from :data:`MINIMUM_ENTRIES` of the full-grid basis on (``entries``: grid points times the states and the
+    buffer; ``None``, not known, keeps the even share) and ``even`` where the run has ranks (``mpi``: an MPI context,
+    the same on every rank) or a smaller basis."""
+
+    value = weighted_first_share_setting()
+    if value == "auto":
+        return "even" if mpi or entries is None or int(entries) < MINIMUM_ENTRIES else "orbitals"
     return value
 
 
@@ -145,11 +170,14 @@ def predicted_level_shares(counts, weights, requested_states: int) -> np.ndarray
 
 
 def attach_valence_orbital_counts(decomposition, atoms, pseudopotentials, grid, *,
-                                  tolerance: float = 1.0e-7) -> np.ndarray | None:
+                                  tolerance: float = 1.0e-7, mpi: bool = False,
+                                  entries: int | None = None) -> np.ndarray | None:
     """Give a weighted ``decomposition`` the counts of the valence orbitals of ``atoms`` in its sectors
-    (``valence_orbital_counts``, :func:`valence_orbital_sector_counts`) under ``PARSEC_WEIGHTED_FIRST_SHARE=orbitals``;
+    (``valence_orbital_counts``, :func:`valence_orbital_sector_counts`) where ``PARSEC_WEIGHTED_FIRST_SHARE`` gives
+    ``orbitals`` (:func:`weighted_first_share_route`: ``auto`` in one process, ``mpi`` false, from ``entries`` of
+    :data:`MINIMUM_ENTRIES` on);
     the first counts of its sectors then take their shares (``Eigensolvers/symmetry.first_level_share``).  The
-    counts, or ``None`` where none are set (the setting ``even``, no weights, no channels, no whole counts, or the
+    counts, or ``None`` where none are set (the route ``even``, no weights, no channels, no whole counts, or the
     same count in every sector: their shares are the even ones, and the even share with its margin of 10 % stays,
     as for the bulk cells of diamond and silicon, whose one fewer margin took an SCF step more on A100).
 
@@ -160,7 +188,7 @@ def attach_valence_orbital_counts(decomposition, atoms, pseudopotentials, grid, 
     # a decomposition kept from an earlier preparation (the geometry cache) drops the counts of that run first
     if "valence_orbital_counts" in getattr(decomposition, "__dict__", {}):
         object.__delattr__(decomposition, "valence_orbital_counts")
-    if weighted_first_share_setting() != "orbitals":
+    if weighted_first_share_route(mpi=mpi, entries=entries) != "orbitals":
         return None
     weights = getattr(decomposition, "sector_weights", None)
     weights = np.zeros(0, dtype=np.int64) if weights is None else np.asarray(weights, dtype=np.int64)
@@ -177,11 +205,13 @@ def attach_valence_orbital_counts(decomposition, atoms, pseudopotentials, grid, 
 
 
 __all__ = [
+    "MINIMUM_ENTRIES",
     "SWITCH",
     "angular_character",
     "attach_valence_orbital_counts",
     "predicted_level_shares",
     "valence_channels",
     "valence_orbital_sector_counts",
+    "weighted_first_share_route",
     "weighted_first_share_setting",
 ]

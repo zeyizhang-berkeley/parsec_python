@@ -7,6 +7,7 @@ potentials are in Rydberg unless a field explicitly says otherwise.
 from __future__ import annotations
 
 from dataclasses import dataclass, field, fields
+import os
 from pathlib import Path
 import re
 from typing import Literal, Mapping, Sequence
@@ -876,6 +877,67 @@ class HartreeSettings:
         object.__setattr__(self, "direct_chunk_size", direct_chunk_size)
 
 
+FIXED_STATES_BUFFER_SWITCH = "PARSEC_FIXED_STATES_BUFFER"
+
+
+def fixed_states_buffer_setting() -> str:
+    """``PARSEC_FIXED_STATES_BUFFER``: what ``Fix_Number_Eigenvalues`` keeps in the symmetry sectors of the
+    accelerated driver.
+
+    ``auto`` (the default since 2026-11-21): the sectors (``CuPySymmetrySCFEigensolver``) work with the
+    eigensolver's working buffer (``Subspace_Buffer_Size``) and the state counts each sector finds for itself, as
+    a run without the keyword; the restart file must still hold ``States_Num`` levels (PARSEC error 404).
+    ``off``: as before, no buffer and the sector counts of the first solve of the run, frozen.  Every other route
+    (the full grid, the reference solver, the k-point drivers) keeps PARSEC's ``nn = nec``
+    (``eigval.F90:679-685``) under both values: ``States_Num`` working vectors, no buffer
+    (:attr:`EigensolverSettings.working_buffer`).  A restart never reads the stored orbitals (``restart_run.F90``
+    resets the computed states to zero), so the first solve of a restart starts anew; in the sectors its
+    counts are those of an unconverged solve where the first solver is CHEBFF, and frozen without a buffer they
+    lost occupied levels: a 1095-atom nanodiamond with six empty states ended 2.1 to 4.8 Ry above its ground
+    state under ``off``.
+    """
+
+    value = os.environ.get(FIXED_STATES_BUFFER_SWITCH, "auto").strip().lower() or "auto"
+    if value not in ("auto", "off"):
+        raise ValueError(f"{FIXED_STATES_BUFFER_SWITCH} must be auto or off, not {value!r}")
+    return value
+
+
+def fixed_states_keep_parsec_counts(eigensolver) -> bool:
+    """Whether the symmetry sectors of ``eigensolver`` (:class:`EigensolverSettings`) freeze the counts of their
+    first solve: ``Fix_Number_Eigenvalues`` under ``PARSEC_FIXED_STATES_BUFFER=off``."""
+
+    return bool(getattr(eigensolver, "fixed_state_count", False)) and fixed_states_buffer_setting() == "off"
+
+
+def fixed_states_sector_buffer(eigensolver) -> int:
+    """The working buffer the symmetry sectors of ``eigensolver`` (:class:`EigensolverSettings`) take back under
+    ``Fix_Number_Eigenvalues`` (``PARSEC_FIXED_STATES_BUFFER=auto``): ``subspace_buffer``, the buffer of a run
+    without the keyword; 0 without the keyword, under ``off`` and with ``exact_state_count``."""
+
+    if not bool(getattr(eigensolver, "fixed_state_count", False)) or bool(
+        getattr(eigensolver, "exact_state_count", False)
+    ):
+        return 0
+    if fixed_states_buffer_setting() == "off":
+        return 0
+    return int(getattr(eigensolver, "subspace_buffer", 0))
+
+
+def fixed_states_note(eigensolver) -> str | None:
+    """The NOTE of a run in the symmetry sectors with ``Fix_Number_Eigenvalues`` under
+    ``PARSEC_FIXED_STATES_BUFFER=auto``, else ``None``."""
+
+    if not bool(getattr(eigensolver, "fixed_state_count", False)) or fixed_states_buffer_setting() == "off":
+        return None
+    return (
+        "Fix_Number_Eigenvalues in the symmetry sectors: the state counts of the sectors and the working buffer "
+        "are those of a run without the keyword (PARSEC_FIXED_STATES_BUFFER=auto); only the check that the restart "
+        "file holds States_Num levels (PARSEC error 404) applies.  PARSEC_FIXED_STATES_BUFFER=off keeps the counts "
+        "of the first solve, frozen, without a buffer"
+    )
+
+
 @dataclass(frozen=True)
 class EigensolverSettings:
     """PARSEC eigensolver controls retained by the pure-Python port.
@@ -908,7 +970,10 @@ class EigensolverSettings:
     the restart file gave (``nn = nec`` of ``restart_run.F90``, the stored
     ``States_Num`` levels; ``eigval.F90:679-685`` resets ``nn = nec = mm``
     after every solve), so the eigensolver works with ``States_Num`` vectors
-    and no ``subspace_buffer`` (see :attr:`working_buffer`).  The new fields
+    and no ``subspace_buffer`` (see :attr:`working_buffer`); the symmetry
+    sectors of the accelerated driver take the buffer back and keep their
+    own counts under ``PARSEC_FIXED_STATES_BUFFER=auto``
+    (:func:`fixed_states_buffer_setting`).  The new fields
     print nothing at their defaults, so the text of the settings of every
     earlier calculation is unchanged (it enters cache keys of the
     accelerated driver).
@@ -1014,7 +1079,10 @@ class EigensolverSettings:
 
         ``subspace_buffer``, or none with ``fixed_state_count``
         (``Fix_Number_Eigenvalues``: PARSEC keeps the stored number of
-        eigenpairs, ``States_Num``, in every solve).
+        eigenpairs, ``States_Num``, in every solve) and with
+        ``exact_state_count``.  The symmetry sectors of the accelerated
+        driver take the buffer back under ``PARSEC_FIXED_STATES_BUFFER=auto``
+        (:func:`fixed_states_sector_buffer`).
         """
 
         return 0 if self.fixed_state_count or self.exact_state_count else self.subspace_buffer
@@ -2283,6 +2351,25 @@ class SinglePointInput:
     twice the weight, :func:`~parsec_python.Grid.kpoints.time_reversal_reduced`): set by the input reader for the
     whole mesh that forces and moving atoms of scalar or collinear-spin orbitals or of non-magnetic spin-orbit
     coupling keep (``PARSEC_KPOINT_TIME_REVERSAL``, ``PARSEC_SOC_KPOINT_WEDGE``)."""
+    kpoint_shortest_representatives: bool = False
+    """Whether the representatives of the irreducible wedge of ``monkhorst_pack_shift`` are the shortest images of
+    the folded points modulo the reciprocal lattice (:func:`~parsec_python.Grid.kpoints.fold_to_shortest`): set by
+    the input reader for the default routines under ``PARSEC_KPOINT_FOLD=shortest``.  ``False``: folded into
+    ``(-1/2, 1/2]`` (:func:`~parsec_python.Grid.kpoints.fold_to_centered_zone`)."""
+    kpoint_tie_images: bool = False
+    """Whether a point of the Monkhorst-Pack mesh of the default routines on an oblique cell with several shortest
+    images on the zone boundary runs as all of them, each with an equal share of its weight: every point of
+    ``kpoints`` (the whole mesh in shortest images, :func:`~parsec_python.Grid.kpoints.tie_shared_points` in
+    :func:`~parsec_python.Grid.kpoints.kpoint_sampling`) and the stars of the wedge of ``monkhorst_pack_shift``, split
+    into the orbits of exact images (:func:`~parsec_python.Grid.kpoints.irreducible_monkhorst_pack` with ``ties``).
+    Set by the input reader under ``PARSEC_KPOINT_FOLD=shortest`` except for a hybrid (whose exchange needs one point
+    per class) and for ``Create_DOS`` and ``Output_GW`` (one point per mesh point, BerkeleyGW's unfolding)."""
+    force_space_group: object | None = None
+    """The operations the forces and the moved positions are averaged over where they are more than those of
+    ``space_group`` (a :class:`~parsec_python.Grid.space_group.SpaceGroup`): the operations that map the grid and the
+    mesh onto themselves, of which a wedge of the default routines keeps those that keep the grid's finite-difference
+    operators (``PARSEC_KPOINT_FORCE_GROUP=crystal``, :func:`parsec_python.Forces.periodic.periodic_force_operations`).
+    ``None``: those of ``space_group``."""
     hybrid_kpoint_wedge: bool = False
     """Whether the Monkhorst-Pack mesh of a hybrid single point runs as its irreducible wedge under the operations of
     ``space_group`` that map the mesh onto itself and the grid's finite-difference operators onto themselves (and time
@@ -2331,6 +2418,9 @@ class SinglePointInput:
             "monkhorst_pack_shift": self.monkhorst_pack_shift is None,
             "space_group": self.space_group is None,
             "embedding": self.embedding is None,
+            "kpoint_shortest_representatives": not self.kpoint_shortest_representatives,
+            "kpoint_tie_images": not self.kpoint_tie_images,
+            "force_space_group": self.force_space_group is None,
         }
         shown = [
             f"{item.name}={getattr(self, item.name)!r}"
@@ -2550,7 +2640,11 @@ class HybridMeshRouteRecord:
     ran on its ``pairs_points`` time-reversal pairs); ``pairs``: ``partly_filled`` states of the start lay within
     ``tolerance`` of neither 0 nor 1 (the largest ``min(f, 1 - f)`` is ``largest_fractional_occupation``), and the
     run keeps the pairs, as ``off`` (``points`` the k-points of the wedge ``on`` would run, 0 where unknown), or the
-    wedge could not be made (``reason``).  It is no SCF iteration and carries no levels of its own."""
+    wedge could not be made (``reason``); ``wedge_partly_filled``: the Fock loop that ``auto`` moved to the wedge of
+    ``points`` k-points ended with ``partly_filled`` states (:meth:`parsec_python.SCF.hybrid_periodic.BlochExchange.
+    after_loop`; ``reason`` ``start`` after an insulating start, ``carried`` for a later structure of a relaxation that
+    kept the wedge of the structure before), a NOTE that changes nothing.  It is no SCF iteration and carries no
+    levels of its own."""
 
     route: str
     points: int
@@ -2597,6 +2691,9 @@ class SpinSectorFallbackRecord:
     # ``on the full grid of one device (...)``, ``as one sector of the identity whose basis ... share (...)``, or
     # ``none`` where no layout fits and the run stops; empty where no plan was made (the reference solver).
     layout: str = ""
+    # (route ``weighted``) the sectors of the abelian group would stop the same state, and the run goes straight to
+    # the full grid, whose own record follows (PARSEC_WEIGHTED_GUARD_SHORTCUT=auto)
+    abelian_skipped: bool = False
 
 
 @dataclass(frozen=True)
@@ -2732,6 +2829,9 @@ class RunTimings:
     detail: dict[str, float] = field(default_factory=dict)
     """Seconds and counters of the parts of a stage that a driver measures inside its eigensolver
     workers (k-point drivers); worker seconds are summed over the workers."""
+    notes: dict[str, str] = field(default_factory=dict)
+    """Lines of text a driver's solver reports beside ``detail`` (``kpoint_symmetry_detection``: the cell group of
+    the k-point sectors and its atom tolerance, or why there are none)."""
 
 
 @dataclass(frozen=True)

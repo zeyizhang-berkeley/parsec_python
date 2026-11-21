@@ -203,6 +203,33 @@ def hybrid_mesh_route_lines(record) -> list[str]:
     """``parsec.out`` lines of a :class:`parsec_python.models.HybridMeshRouteRecord`
     (``PARSEC_HYBRID_KPOINT_WEDGE=auto``)."""
 
+    if record.route == "wedge_partly_filled":
+        # the end of a Fock loop that auto moved to the wedge (SCF/hybrid_periodic.py, BlochExchange.after_loop)
+        kept = (
+            [
+                "       This structure kept the wedge its relaxation took at the first structure (a relaxation keeps "
+                "that route);",
+                "       PARSEC_HYBRID_KPOINT_FORCE_WEDGE=off keeps the pairs for the forces and relaxations, "
+                "PARSEC_HYBRID_KPOINT_WEDGE=off for every run.",
+            ]
+            if getattr(record, "reason", "") == "carried"
+            else [
+                "       PARSEC_HYBRID_KPOINT_WEDGE=off keeps the pairs (forces and relaxations: "
+                "PARSEC_HYBRID_KPOINT_FORCE_WEDGE=off too).",
+            ]
+        )
+        return [
+            "",
+            f" NOTE: hybrid k-point mesh: the Fock loop on the irreducible wedge of {record.points} k-points "
+            f"({record.operations} operations and time reversal)",
+            f"       ends with {record.partly_filled} partly filled state(s) at the Fermi level (largest min(f, 1-f) = "
+            f"{record.largest_fractional_occupation:.3E}, partly filled from {record.tolerance:.0E}):",
+            "       a metal, held in the symmetric state of the wedge; on the "
+            f"{record.pairs_points} time-reversal pairs of the {record.mesh_points}-point mesh its Fock loop",
+            "       may break the crystal symmetry at such levels and end lower.",
+            *kept,
+            "",
+        ]
     if record.route == "wedge":
         return [
             "",
@@ -271,13 +298,24 @@ def spin_sector_fallback_lines(record) -> list[str]:
             "",
         ]
     if getattr(record, "route", "spin") == "weighted":
+        where = (
+            [
+                "       one occupation; the sectors of the abelian group would split the same multiplet and stop",
+                "       there too, so the calculation goes straight to the full grid (the NOTE below;",
+                "       PARSEC_WEIGHTED_GUARD_SHORTCUT=off goes through the abelian sectors).",
+            ]
+            if getattr(record, "abelian_skipped", False)
+            else [
+                "       one occupation; the calculation starts again in the sectors of the abelian group",
+                "       (PARSEC_ORBITAL_GROUP_SPIN=off or PARSEC_ORBITAL_GROUP_OCCUPATIONS=off start there).",
+            ]
+        )
         return [
             "",
             f" NOTE: weighted symmetry sectors: {record.reason} after {record.stage}",
             f"       ({record.measure} = {record.largest_fractional_occupation:.3E}).",
             "       The one-dimensional sectors of a subgroup with weights give every partner of a degenerate level",
-            "       one occupation; the calculation starts again in the sectors of the abelian group",
-            "       (PARSEC_ORBITAL_GROUP_SPIN=off or PARSEC_ORBITAL_GROUP_OCCUPATIONS=off start there).",
+            *where,
             *(f"       {line}" for line in record.multiplets),
             "",
         ]
@@ -2890,12 +2928,16 @@ class ParsecTextReporter:
             if result.converged
             else "Maximum SCF iterations reached without convergence."
         )
+        from .state_truncation import truncated_states_note
+
         lines = [
             # The TS report of parsec.F90 after convergence (Van_Der_Waals).
             *dispersion_report_lines(result),
             # A hybrid functional: the energies of the Fock loop.
             *hybrid_finish_lines(result),
             status,
+            # (a loop that did not converge with its highest computed state occupied: States_Num may cut a multiplet)
+            *truncated_states_note(result),
             "",
             (
                 "Time for self-consistent field [sec] : "
@@ -3255,6 +3297,12 @@ class ParsecTextReporter:
         if not detail:
             return []
         lines = ["", " K-point solver detail", " --------------------------------------------------"]
+        # the cell group of the k-point sectors and the atom tolerance it was built at, or why there are none
+        # (acceleration/SCF/kpoint_sectors.plan_sectors), at every output level as the symmetry_detection line of the
+        # Gamma route
+        detection = (getattr(timings, "notes", None) or {}).get("kpoint_symmetry_detection")
+        if detection:
+            lines.append(f" kpoint_symmetry_detection = {detection}")
         if "workers" in detail:
             lines.append(f" {'Workers':30s} : {int(detail['workers']):12d}")
         lines.append(f" {'Solver and worker start-up':30s} : {detail.get('solver_setup', 0.0):12.6f}")
@@ -3355,6 +3403,12 @@ class ParsecTextReporter:
                 f" {'Rows x states^2 of the whole':30s} : {detail.get('kpoint_sector_work_fraction', 0.0):12.4f}"
                 f"   (states added and solved again {int(detail.get('kpoint_sector_regrowths', 0))} time(s))"
             )
+            if detail.get("kpoint_sector_pairs", 0.0):
+                # the conjugate pairs of the time-reversal invariant points in the Bloch form (PARSEC_KPOINT_TRIM_REAL)
+                lines.append(
+                    f" {'Sectors of conjugate pairs':30s} : {int(detail['kpoint_sector_pairs']):12d}"
+                    "   (not solved: the orbitals e^{-iG.r} conj(u) of their partners)"
+                )
         lines.extend(ParsecTextReporter._kpoint_guard_lines(detail))
         lines.append(" --------------------------------------------------")
         return lines
@@ -3425,12 +3479,15 @@ class ParsecTextReporter:
             if result.converged
             else "Maximum SCF iterations reached without convergence."
         )
+        from .state_truncation import truncated_states_note
+
         lines = [
             # The TS report of parsec.F90 after convergence (Van_Der_Waals).
             *dispersion_report_lines(result),
             # A hybrid functional: the energies of the Fock loop.
             *hybrid_finish_lines(result),
             status,
+            *truncated_states_note(result),
             "",
             f"Time for self-consistent field [sec] : {elapsed_seconds:10.2f}",
             *self._extended_driver_dipole_lines(
@@ -3662,12 +3719,16 @@ class ParsecTextReporter:
             if result.converged
             else "Maximum SCF iterations reached without convergence."
         )
+        from .state_truncation import truncated_states_note
+
         lines = [
             # The TS report of parsec.F90 after convergence (Van_Der_Waals).
             *dispersion_report_lines(result),
             # A hybrid functional: the energies of the Fock loop.
             *hybrid_finish_lines(result),
             status,
+            # (the spinors of every k-point: a highest computed spinor occupied in a loop that did not converge)
+            *truncated_states_note(result),
             "",
             f"Time for self-consistent field [sec] : {elapsed_seconds:10.2f}",
             "",
@@ -3764,10 +3825,20 @@ class ParsecTextReporter:
                 f"(up to {int(attempts.max())} attempts) to converge degenerate levels."
             )
         if worst > 1.0e-2:
-            if self.problem.eigensolver.method == "chebff":
+            from ..SCF.bands import band_convergence_setting
+
+            if self.problem.eigensolver.method == "chebff" and band_convergence_setting() == "off":
                 advice = (
                     "CHEBFF has no convergence test: increase FF_MaxIter and/or "
                     "Chebdav_Degree, or use Eigensolver: chebdav."
+                )
+            elif self.problem.eigensolver.method == "chebff":
+                from ..Eigensolvers.eigval import first_solve_extra_cycles
+
+                advice = (
+                    "the CHEBFF cycles stopped at Bands_FF_MaxIter + PARSEC_KPOINT_EXTRA_CYCLES "
+                    f"({first_solve_extra_cycles()}) before the residual test: raise PARSEC_KPOINT_EXTRA_CYCLES, "
+                    "Bands_FF_MaxIter or Subspace_Buffer_Size."
                 )
             else:
                 advice = (

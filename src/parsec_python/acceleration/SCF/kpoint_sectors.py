@@ -56,6 +56,13 @@ device, and more of them would add the cost of the tasks (the 4631 k-points of a
 The density of a sector, ``|U v|^2``, is ``q_s / m_w`` on the rows of the orbit ``w`` of its column ``s``
 (``q = sum_n f_n |v_n|^2``, ``m_w`` the orbit size): expanded on the host and summed by the job of the driver.
 
+At a time-reversal invariant point ``k = G/2`` in the Bloch form of the kinetic term the antiunitary ``e^{-iG.r} conj``
+commutes with ``H_k`` and carries the sector of a character ``chi`` into that of ``chi lambda``, ``lambda(h) = e^{-iG.t}``
+(``-1`` on the half-cell translations along the axes where ``k`` sits at ``pi/L``): the two have one spectrum and the
+same densities.  With ``PARSEC_KPOINT_TRIM_REAL=auto`` (the default, :mod:`.kpoint_real`) an unpolarized loop without the exchange of a hybrid solves the lower sector of each pair only
+(:class:`SectorKPointSolver`: the partner takes its levels, its occupations go onto the columns of the sector solved,
+its orbitals are ``e^{-iG.r} conj(u)``, its nonlocal forces those of ``u``).
+
 The k-point SCF of a bulk orthorhombic cell takes it, scalar or spin-polarized, with the exchange of a hybrid, forces
 and kept orbitals, without meta-GGA, LDA+U or the fixed occupations of ``occup.in`` (the driver then gives the job its
 ``geometry``); ``PARSEC_KPOINT_SECTORS=off`` keeps one task per k-point, bit for bit as before, and
@@ -588,6 +595,23 @@ def little_group_reduction(cell: CellGroup, elements: list[int], generators: lis
     )
 
 
+def _image_row(symmetry, operation: int) -> np.ndarray:
+    """``images[operation]`` of a density group: through ``image_row`` where it has one (a
+    :class:`parsec_python.Grid.space_group.PeriodicGridSymmetry`, which may hold no table), else of its table."""
+
+    reader = getattr(symmetry, "image_row", None)
+    return np.asarray(reader(operation) if reader is not None else np.asarray(symmetry.images)[operation])
+
+
+def _image_rows(symmetry, operation: int, rows) -> np.ndarray:
+    """``images[operation, rows]`` of a density group, as :func:`_image_row` reads a whole row."""
+
+    reader = getattr(symmetry, "image_rows", None)
+    if reader is not None:
+        return np.asarray(reader(operation, rows))
+    return np.asarray(symmetry.images)[operation][np.asarray(rows)]
+
+
 class PotentialInvariance:
     """Whether the potential of the loop is invariant under an operation of the cell (see the module text)."""
 
@@ -606,10 +630,17 @@ class PotentialInvariance:
         self._sample = None
         self._sampled = None
         images = getattr(density_symmetry, "images", None)
-        if images is not None and np.ndim(images) == 2 and np.shape(images)[1] == cell.grid.size:
+        shape = getattr(images, "shape", None) if images is not None else None
+        if shape is None and images is not None:
+            shape = np.shape(images)
+        if shape is not None and len(shape) == 2 and shape[1] == cell.grid.size:
             size = int(cell.grid.size)
             self._sample = np.unique(np.linspace(0, size - 1, self._SAMPLES).astype(np.int64))
-            self._sampled = np.asarray(images)[:, self._sample]
+            # the rows of the group at the sample only (Grid.space_group.PeriodicGridSymmetry.image_rows: from the
+            # affine maps of a group that holds no table, PARSEC_PERIODIC_IMAGE_ROWS), the same integers
+            self._sampled = np.stack(
+                [_image_rows(density_symmetry, operation, self._sample) for operation in range(int(shape[0]))]
+            )
 
     def __call__(self, index: int) -> bool:
         decided = self._decided.get(index)
@@ -655,9 +686,8 @@ class PotentialInvariance:
         whole = _grid_row_mapping_operation(grid, matrix, tolerance, table=self._row_table, translation=shift)
         if whole is None:
             return False
-        images = np.asarray(self.symmetry.images)
-        # the maps of a group are the same set in either direction (it holds the inverses)
-        return any(np.array_equal(images[hit], whole) for hit in hits)
+        # the maps of a group are the same set in either direction (it holds the inverses); one row at a time
+        return any(np.array_equal(_image_row(self.symmetry, int(hit)), whole) for hit in hits)
 
     def admits(self, matrix, shift) -> bool:
         """:meth:`__call__` for an operation ``r -> R r + t`` of the atoms given by itself (one the cell group may
@@ -892,6 +922,10 @@ class KPointSectors:
         # whether the operators of the sectors go to the device code (sector_solver sets it from the k-point
         # backend): only there does the kinetic term take its gathered stencil (_stencil_parts)
         self.device_operators = True
+        # the partner of every sector at a time-reversal invariant k-point in the Bloch form, None elsewhere
+        # (PARSEC_KPOINT_TRIM_REAL, .kpoint_real.trim_partners; set by plan_sectors): the sector of the lower index of
+        # each pair is solved, its partner's orbitals are ``e^{-iG.r} conj(u)`` (``G = 2k``)
+        self.partners: np.ndarray | None = None
 
     @property
     def order(self) -> int:
@@ -1163,6 +1197,13 @@ class KPointSectors:
         rows, factor = found
         return xp.take(block, rows, axis=0) * factor[:, None]
 
+    def partner_orbitals(self, grid, whole: np.ndarray) -> np.ndarray:
+        """The orbitals of the partner sector from those of the sector solved (whole grid, :attr:`partners`):
+        ``A u = e^{-iG.r} conj(u)``, ``G = 2k``."""
+
+        phases = np.exp(-1j * (np.asarray(grid.coordinates, dtype=np.float64) @ (2.0 * self.k_point)))
+        return phases[:, None] * np.conj(np.asarray(whole, dtype=np.complex128))
+
     def orbitals(self, sector: int, block: np.ndarray) -> np.ndarray:
         """``U v`` on the whole grid for the columns of ``block`` (rows of ``sector``)."""
 
@@ -1213,8 +1254,13 @@ def check_kpoint_sector_switches() -> None:
     know is refused at the preparation of a run (``ValueError``) and not first at the setup of its k-point solver:
     ``PARSEC_KPOINT_SECTORS``, ``PARSEC_KPOINT_SECTOR_TOLERANCE``, ``PARSEC_SYMMETRY_ATOM_TOLERANCE``,
     ``PARSEC_PERIODIC_TRANSLATIONS``, ``PARSEC_PERIODIC_TRIVIAL_ORIGIN``, ``PARSEC_PERIODIC_SYMMETRY_CENTRE``,
-    ``PARSEC_PERIODIC_DEFECT_CENTRE`` and ``PARSEC_HYBRID_KPOINT_SECTORS``.  Reading them changes nothing else."""
+    ``PARSEC_PERIODIC_DEFECT_CENTRE``, ``PARSEC_HYBRID_KPOINT_SECTORS``, ``PARSEC_PERIODIC_IMAGE_ROWS`` (the
+    density group of the k-point wedge) and the real arithmetic of the Gamma point (``PARSEC_KPOINT_REAL_GAMMA``,
+    :mod:`.kpoint_real`).  Reading them changes nothing else."""
 
+    from parsec_python.Grid.space_group import periodic_image_rows_setting
+
+    from .kpoint_real import check_switches as check_real_switches
     from ..Symmetry.axis_reflection import (
         periodic_centre_setting,
         periodic_defect_centre_setting,
@@ -1223,6 +1269,7 @@ def check_kpoint_sector_switches() -> None:
         symmetry_atom_tolerance,
     )
 
+    periodic_image_rows_setting()
     kpoint_sectors_setting()
     kpoint_sector_tolerance_setting()
     symmetry_atom_tolerance()
@@ -1231,50 +1278,95 @@ def check_kpoint_sector_switches() -> None:
     periodic_centre_setting()
     periodic_defect_centre_setting()
     hybrid_kpoint_sectors_setting()
+    check_real_switches()
 
 
-def plan_sectors(job: KPointJob) -> list[KPointSectors | None] | None:
+def _cell_group_text(cell: "CellGroup", tolerance: float) -> str:
+    """What the detection of the k-point sectors names of their cell group: its operations, those with a
+    translation, and the atom tolerance it was built at (with the switches that set it)."""
+
+    translated = sum(1 for shift in cell.shifts if np.any(np.asarray(shift) != 0))
+    return (
+        f"cell group of {cell.order} operations r -> R r + t of the grid and the atoms detected (signed permutations, "
+        f"{translated} of them with a translation; PARSEC_PERIODIC_TRANSLATIONS, PARSEC_PERIODIC_SYMMETRY_CENTRE) at an "
+        f"atom tolerance of {tolerance:.1e} bohr (PARSEC_SYMMETRY_ATOM_TOLERANCE, "
+        f"{_TOLERANCE_SWITCH}={kpoint_sector_tolerance_setting()})"
+    )
+
+
+def plan_sectors(job: KPointJob, notes: list | None = None) -> list[KPointSectors | None] | None:
     """The sectors of every k-point of ``job`` (``None`` for a k-point that stays one task), ``None`` for none.
 
     The cell group is built at :func:`kpoint_sector_atom_tolerance` (``PARSEC_SYMMETRY_ATOM_TOLERANCE``, at most 1e-6
     bohr for a job with extras, the forces; 1e-7 under ``PARSEC_KPOINT_SECTOR_TOLERANCE=fixed``); the plans of a loop
     before on the same structure (the cache of ``geometry``, same signature) are taken before any search of the group.
+    ``notes`` (a list): the line of the report that says which cell group was found and at which tolerance, or why
+    none was searched, is appended to it (:func:`sector_solver`; ``kpoint_symmetry_detection`` of ``parsec.out``).
     """
+
+    def said(text: str, plans=None):
+        if notes is not None:
+            notes.append(text)
+        return plans
 
     geometry = job.geometry
     grid = geometry["grid"]
     try:
         if _lattice_period(grid) is None or not _periodic_row_major(grid):
-            return None
+            return said("skipped: the k-point sectors take a bulk orthorhombic box of row-major points, not this grid")
     except ValueError:  # not a bulk orthorhombic cell
-        return None
+        return said("skipped: the k-point sectors take a bulk orthorhombic box of row-major points, not this grid")
     k_points = np.asarray(geometry["k_points"], dtype=np.float64).reshape(-1, 3)
     # the k-point of every task (the channels of a spin-polarized run share the k-points: tasks spin * n_k + k)
     k_of_task = np.asarray(geometry.get("k_of_task", np.arange(k_points.shape[0])), dtype=np.int64).reshape(-1)
     if k_of_task.shape[0] != job.n_tasks or k_of_task.size == 0 or int(k_of_task.max()) >= k_points.shape[0]:
-        return None
+        return said("skipped: the tasks of this job are not one per k-point and spin channel")
     states, rows = int(job.number_of_states), int(grid.size)
     cache = geometry.get("cache")
     # PARSEC_HYBRID_KPOINT_SECTORS=on (the loops of a Fock loop): every k-point with sectors, whatever its size and the
     # work they save
     any_size = isinstance(cache, dict) and bool(cache.get(ANY_SIZE_KEY))
     if not any_size and rows * states < _MINIMUM_ENTRIES:  # before any search of the group: a small cell stays as it was
-        return None
+        return said(
+            f"skipped: {rows} grid points x {states} states are below the floor of the k-point sectors, "
+            f"{_MINIMUM_ENTRIES} entries (no cell group searched; one task per k-point)"
+        )
     tolerance = kpoint_sector_atom_tolerance(forces=job.extras is not None)
     margin = sector_margin()
+    # the conjugate pairs of the sectors of the time-reversal invariant points in the Bloch form
+    # (PARSEC_KPOINT_TRIM_REAL, .kpoint_real): an unpolarized loop without the exchange of a hybrid, not the band
+    # k-points of a Gamma cell (their own invariance)
+    from parsec_python.Laplacian.finite_difference import bloch_form_at
+
+    from .kpoint_real import trim_partners, trim_real_setting
+
+    pairs = (
+        trim_real_setting() == "auto"
+        and len(set(int(value) for value in k_of_task)) == int(k_of_task.size)
+        and geometry.get("exchange_cross_scale") is None
+        and geometry.get("invariance") is None
+    )
+    bloch = tuple(bool(pairs and bloch_form_at(grid, k_point)) for k_point in k_points)
     signature = (
         int(job.n_tasks), states, rows, margin, _EXTRA_STATES, tuple(int(value) for value in k_of_task),
-        tuple(np.round(k_points, 12).ravel().tolist()), tolerance, any_size,
+        tuple(np.round(k_points, 12).ravel().tolist()), tolerance, any_size, bloch,
     )
     # The plans the loops before kept for this structure (the cache of its projectors), before the group is searched
     # again: they were made from the same atoms and grid.
     if isinstance(cache, dict):
         found = cache.get(_CACHE_KEY)
         if found is not None and found[0] == signature:
+            if len(found) > 2 and found[2] is not None:
+                said(found[2])
             return found[1]
     cell = CellGroup(grid, geometry["atoms"], atom_tolerance=tolerance)
     if cell.table is None or cell.order < 2:
-        return None
+        return said(
+            "identity only: no cell group of more than one operation at an atom tolerance of "
+            f"{tolerance:.1e} bohr (PARSEC_SYMMETRY_ATOM_TOLERANCE, {_TOLERANCE_SWITCH}="
+            f"{kpoint_sector_tolerance_setting()}); one task per k-point"
+        )
+    group_text = _cell_group_text(cell, tolerance)
     # a caller whose potential is invariant under a known group (the band k-points of a Gamma cell solved in sectors,
     # .band_sectors) gives its own test
     invariance_of = geometry.get("invariance")
@@ -1316,9 +1408,20 @@ def plan_sectors(job: KPointJob) -> list[KPointSectors | None] | None:
         # the operations of the sectors that the density is not symmetrized over: the sectors assume the invariance
         # of the potential under them (the symmetry guard, SectorKPointSolver.start_spectrum_report)
         plan.assumed = any(not invariance.in_density_group(element) for element in elements[1:])
+        if bloch[index]:
+            plan.partners = trim_partners(cell, elements, generators, k_point)
         plans.append(plan)
     if not any(plan is not None for plan in plans):
-        return None
+        return said(
+            f"{group_text}; no k-point of the {k_points.shape[0]} splits (no commuting involutions in a little group "
+            "the potential keeps, or sectors that would not halve the work)"
+        )
+    split = [plan for plan in plans if plan is not None]
+    detection = (
+        f"{group_text}; {len(split)} of {k_points.shape[0]} k-point(s) split into the sectors of commuting "
+        f"involutions of their little groups (the largest of {max(plan.order for plan in split)} operations)"
+    )
+    said(detection)
     from .spin_sectors import spin_guard_cell_group_setting
 
     # (read here, before the first solve: a bad value stops the run before its first loop)
@@ -1343,7 +1446,8 @@ def plan_sectors(job: KPointJob) -> list[KPointSectors | None] | None:
             by_task.append(plan)
     if isinstance(cache, dict):
         # the next loops of this structure (the Fock loop of a hybrid) take these plans and their static operators
-        cache[_CACHE_KEY] = (signature, by_task)
+        # (and the line of the report that names their group)
+        cache[_CACHE_KEY] = (signature, by_task, detection)
     return by_task
 
 
@@ -1365,6 +1469,12 @@ class SectorKPointSolver:
         self._make_solver = make_solver
         self._options = dict(options)
         self._grid_size = int(job.geometry["grid"].size)
+        # the Gamma point in real arithmetic (PARSEC_KPOINT_REAL_GAMMA), decided on the k-points of this job (the
+        # size of a whole k-point; the band paths not) and handed to every inner solver
+        if self._options.get("real_gamma") is None:
+            from .kpoint_real import real_gamma_applies
+
+            self._options["real_gamma"] = real_gamma_applies(job, self._grid_size)
         items: list[tuple[int, int | None]] = []
         for k_index in range(job.n_tasks):
             plan = plans[k_index]
@@ -1374,6 +1484,21 @@ class SectorKPointSolver:
                 items.extend((k_index, sector) for sector in range(plan.order))
         self._items = sorted(items, key=lambda item: -self._rows(item) * self._states(item) ** 2)
         self._position = {item: position for position, item in enumerate(self._items)}
+        # The conjugate pairs of the sectors of a time-reversal invariant point in the Bloch form (KPointSectors.partners,
+        # PARSEC_KPOINT_TRIM_REAL): the item of the higher sector of a pair is not solved, it takes the levels of its
+        # partner (``_source``: its position -> the partner's).  ``_solved``: the positions the inner solver solves, in
+        # order (all of them without pairs: the inner tasks are the items, as before).
+        self._source: dict[int, int] = {}
+        for position, (k_index, sector) in enumerate(self._items):
+            plan = plans[k_index]
+            partners = None if plan is None or sector is None else plan.partners
+            if partners is None:
+                continue
+            other = int(partners[sector])
+            if other < sector and plan.sizes[other] == plan.sizes[sector]:
+                self._source[position] = self._position[(k_index, other)]
+        self._solved = [position for position in range(len(self._items)) if position not in self._source]
+        self._task_of = {position: task for task, position in enumerate(self._solved)}
         self._kept: dict[int, tuple[np.ndarray, np.ndarray] | None] = {}
         self._returned: dict[int, int] = {}
         self._regrowths = 0
@@ -1399,25 +1524,40 @@ class SectorKPointSolver:
         return int(self.job.number_of_states) if sector is None else self._plans[k_index].counts[sector]
 
     def _new_inner(self):
-        counts = tuple(self._states(item) for item in self._items)
+        solved = [self._items[position] for position in self._solved]
+        counts = tuple(self._states(item) for item in solved)
         inner_job = KPointJob(
-            len(self._items),
+            len(solved),
             max(counts),
             self.job.eigval_settings,
             self._make_hamiltonian,
             self._accumulate,
             states_per_task=counts,
-            rows_per_task=tuple(self._rows(item) for item in self._items),
+            rows_per_task=tuple(self._rows(item) for item in solved),
             grid_points=self._grid_size,
             extras=None if self.job.extras is None else self._inner_extras,
             extras_by_columns=self.job.extras is not None,
         )
         options = dict(self._options)
-        options["problem_size"] = max(self._rows(item) for item in self._items)
+        options["problem_size"] = max(self._rows(item) for item in solved)
         return self._make_solver(inner_job, **options)
 
+    def _inner_task(self, position: int) -> int:
+        """The task of the inner solver that solves the item at ``position`` (that of its partner for an item of a
+        conjugate pair that is not solved)."""
+
+        return self._task_of[self._source.get(position, position)]
+
+    def _expanded(self, values) -> list:
+        """The levels of the inner solver's tasks as levels of every item (an item of a pair not solved takes those
+        of its partner)."""
+
+        if not self._source:
+            return list(values)
+        return [values[self._inner_task(position)] for position in range(len(self._items))]
+
     def _make_hamiltonian(self, task: int, potentials: dict):
-        k_index, sector = self._items[task]
+        k_index, sector = self._items[self._solved[task]]
         full = self.job.make_hamiltonian(k_index, potentials)
         if sector is None:
             return full
@@ -1432,11 +1572,11 @@ class SectorKPointSolver:
             return None
         return [
             sector for position, (k, sector) in enumerate(self._items)
-            if k == k_index and sector is not None and position in tasks
+            if k == k_index and sector is not None and position in self._task_of and self._task_of[position] in tasks
         ]
 
     def _accumulate(self, task: int, vectors, occupations, xp=np) -> dict:
-        k_index, sector = self._items[task]
+        k_index, sector = self._items[self._solved[task]]
         if sector is None:
             return self.job.accumulate(k_index, vectors, occupations, xp=xp)
         sums = _host(weighted_square_sum(vectors, occupations, xp))
@@ -1544,15 +1684,21 @@ class SectorKPointSolver:
                 continue
             owners = np.concatenate([np.full(part.size, sector, dtype=np.int64) for sector, part in enumerate(parts)])
             held = np.bincount(owners[np.argsort(levels, kind="stable")[:states]], minlength=plan.order)
+            if plan.partners is not None and self._source:
+                # a conjugate pair holds as many as the member that holds more (the cut may split a degenerate pair)
+                held = np.maximum(held, held[np.asarray(plan.partners, dtype=np.int64)])
             for sector in range(plan.order):
                 count = refitted_count(int(held[sector]), plan.sizes[sector], plan.counts[sector])
                 if count < plan.counts[sector]:
                     cut.append((k_index, sector, count))
-                    counts[self._position[(k_index, sector)]] = count
+                    position = self._position[(k_index, sector)]
+                    if position not in self._source:
+                        counts[self._task_of[position]] = count
         if not counts or not trim(counts):
             return
         for k_index, sector, count in cut:
-            self._refit_states += self._plans[k_index].counts[sector] - count
+            if self._position[(k_index, sector)] not in self._source:
+                self._refit_states += self._plans[k_index].counts[sector] - count
             self._plans[k_index].counts[sector] = count
             self._trimmed.add((k_index, sector))
 
@@ -1574,23 +1720,35 @@ class SectorKPointSolver:
                 grown = count + _EXTRA_STATES + deficits[(k_index, sector)]
             else:
                 grown = max(math.ceil(_GROWTH * count), count + _EXTRA_STATES)
-            plan.counts[sector] = min(plan.sizes[sector], grown)
-            counts[self._position[(k_index, sector)]] = plan.counts[sector]
+            position = self._position[(k_index, sector)]
+            solved = self._items[self._source.get(position, position)][1]  # the sector of a pair that is solved
+            task = self._inner_task(position)
+            plan.counts[solved] = min(plan.sizes[sector], max(grown, counts.get(task, 0)))
+            counts[task] = plan.counts[solved]
+        self._pair_counts()
         self._regrowths += 1
         resize = getattr(self._inner, "resize_tasks", None)
         if resize is not None and resize(counts):
             self._regrown_tasks += len(counts)
-            return self._inner.solve(potentials, filter_degree, tolerance, tasks=sorted(counts))
+            return self._expanded(self._inner.solve(potentials, filter_degree, tolerance, tasks=sorted(counts)))
         self._rebuilds += 1
         self._inner.close()
         self._inner = None
         self._inner = self._new_inner()
-        return self._inner.solve(potentials, filter_degree, tolerance)
+        return self._expanded(self._inner.solve(potentials, filter_degree, tolerance))
+
+    def _pair_counts(self) -> None:
+        """Give each item of a conjugate pair that is not solved the states of its partner, which solves both."""
+
+        for position, source in self._source.items():
+            k_index, sector = self._items[position]
+            plan = self._plans[k_index]
+            plan.counts[sector] = plan.counts[self._items[source][1]]
 
     def solve(self, potentials: dict, filter_degree: int, tolerance: float | None = None) -> list[np.ndarray]:
         """The lowest ``number_of_states`` levels of every k-point (task order)."""
 
-        values = self._inner.solve(potentials, filter_degree, tolerance)
+        values = self._expanded(self._inner.solve(potentials, filter_degree, tolerance))
         for _ in range(_ATTEMPTS):
             short = self._short_sectors(values)
             if not short:
@@ -1641,10 +1799,16 @@ class SectorKPointSolver:
                 mask = owners == sector
                 if np.any(mask):
                     inner[self._position[(k_index, sector)]][indices[mask]] = values[mask]
+        if self._source:
+            # an item of a conjugate pair that is not solved: its orbitals have the density of its partner's
+            # (A u = e^{-iG.r} conj(u)), so its occupations go onto the partner's columns
+            for position, source in self._source.items():
+                inner[source] = inner[source] + inner[position]
+            inner = [inner[position] for position in self._solved]
         return self._inner.accumulate(inner)
 
     def residuals(self) -> list[float]:
-        inner = self._inner.residuals()
+        inner = self._expanded(self._inner.residuals())
         result = []
         for k_index in range(self.job.n_tasks):
             plan = self._plans[k_index]
@@ -1659,16 +1823,23 @@ class SectorKPointSolver:
 
         plan = self._plans[task]
         if plan is None:
-            return self._inner.vectors(self._position[(task, None)])
+            return self._inner.vectors(self._inner_task(self._position[(task, None)]))
         owners, indices = self._kept[task]
         columns = np.zeros((self._grid_size, owners.size), dtype=np.complex128)
         for sector in range(plan.order):
             mask = owners == sector
             if not np.any(mask):
                 continue
-            block = _host(self._inner.vectors(self._position[(task, sector)]))
+            position = self._position[(task, sector)]
+            block = _host(self._inner.vectors(self._inner_task(position)))
             if block.ndim != 2 or block.shape[1] == 0:
                 return np.zeros((0, 0), dtype=np.complex128)
+            if position in self._source:
+                # the partner of a conjugate pair: A u = e^{-iG.r} conj(u) of the orbitals of the sector solved
+                solved = self._items[self._source[position]][1]
+                whole = plan.orbitals(solved, block[:, indices[mask]])
+                columns[:, mask] = plan.partner_orbitals(self.job.geometry["grid"], whole)
+                continue
             columns[:, mask] = plan.orbitals(sector, block[:, indices[mask]])
         return columns
 
@@ -1680,28 +1851,40 @@ class SectorKPointSolver:
             raise NotImplementedError("the job computes no per-state extras")
         inner = self._inner.extras()
         found: list[Any] = [None] * self.job.n_tasks
-        for position, (k_index, _sector) in enumerate(self._items):
-            value = np.asarray(_host(inner[position]), dtype=np.float64)
+        # the items solved (an item of a conjugate pair that is not solved is in its partner's extras)
+        for task, position in enumerate(self._solved):
+            k_index = self._items[position][0]
+            value = np.asarray(_host(inner[task]), dtype=np.float64)
             found[k_index] = value if found[k_index] is None else found[k_index] + value
         return found
 
     def _inner_extras(self, position: int, vectors, xp=np, columns=None):
         """The extras of the states ``columns`` of task ``position`` (a sector): its kept states, ``U v`` on the
         whole grid a block of :data:`_FORCE_COLUMNS` at a time, with their places among the levels of the k-point
-        (the occupations the job holds)."""
+        (the occupations the job holds).  The sector solved for a conjugate pair (``PARSEC_KPOINT_TRIM_REAL``) stands
+        for its partner as well: the partner's orbitals ``A u`` give the forces of ``u``, so its columns are taken
+        once more at the partner's places."""
 
+        position = self._solved[position]  # the inner task -> its item
         k_index, sector = self._items[position]
         count = int(vectors.shape[1])
         columns = np.arange(count, dtype=np.int64) if columns is None else np.asarray(columns, dtype=np.int64)
         if sector is None:
             return self.job.extras(k_index, vectors, xp=xp, columns=columns)
         owners, indices = self._kept[k_index]
-        mine = np.flatnonzero(owners == sector)
-        size = int(max(int(indices[mine].max()) + 1 if mine.size else 0, int(columns.max()) + 1 if columns.size else 0))
-        place = np.full(max(size, 1), -1, dtype=np.int64)
-        place[indices[mine]] = mine
-        wanted = place[columns] if columns.size else np.zeros(0, dtype=np.int64)
-        keep = np.flatnonzero(wanted >= 0)
+        keep_parts, place_parts = [], []
+        held = [sector] + [self._items[other][1] for other, source in self._source.items() if source == position]
+        for member in held:
+            mine = np.flatnonzero(owners == member)
+            size = int(max(int(indices[mine].max()) + 1 if mine.size else 0, int(columns.max()) + 1 if columns.size else 0))
+            place = np.full(max(size, 1), -1, dtype=np.int64)
+            place[indices[mine]] = mine
+            wanted = place[columns] if columns.size else np.zeros(0, dtype=np.int64)
+            keep = np.flatnonzero(wanted >= 0)
+            keep_parts.append(keep)
+            place_parts.append(wanted[keep])
+        keep = np.concatenate(keep_parts) if len(keep_parts) > 1 else keep_parts[0]
+        places = np.concatenate(place_parts) if len(place_parts) > 1 else place_parts[0]
         plan = self._plans[k_index]
         # PARSEC_KPOINT_FORCE_ORBITS: the forces of one atom per orbit of the little group, turned onto the others
         orbits = plan.force_orbits(self.job.geometry) if self._force_orbits else None
@@ -1713,7 +1896,8 @@ class SectorKPointSolver:
             piece = np.asarray(
                 _host(
                     self.job.extras(
-                        k_index, plan.expand(sector, block, xp), xp=xp, columns=wanted[chosen], **options
+                        k_index, plan.expand(sector, block, xp), xp=xp, columns=places[c0 : c0 + _FORCE_COLUMNS],
+                        **options,
                     )
                 ),
                 dtype=np.float64,
@@ -1901,8 +2085,11 @@ class SectorKPointSolver:
 
         return max((part for part, _ in self._fractional_parts(levels, occupations, capacity)), default=0.0)
 
-    def _layout(self) -> list[tuple[int, int, int]]:
-        return [(int(k), -1 if sector is None else int(sector), self._rows((k, sector))) for k, sector in self._items]
+    def _layout(self) -> list[tuple]:
+        layout = [(int(k), -1 if sector is None else int(sector), self._rows((k, sector))) for k, sector in self._items]
+        if self._source:  # the conjugate pairs (PARSEC_KPOINT_TRIM_REAL): which items their partners solve
+            layout = [entry + (self._source.get(position, position),) for position, entry in enumerate(layout)]
+        return layout
 
     def export_states(self) -> dict:
         """The Ritz states of the sectors with their layout and numbers of states (for the next loop of the same
@@ -1941,7 +2128,7 @@ class SectorKPointSolver:
         rows, states = self._grid_size, int(self.job.number_of_states)
         split = [plan for plan in self._plans if plan is not None]
         whole_work = float(rows) * states * states * self.job.n_tasks
-        work = sum(self._rows(item) * self._states(item) ** 2 for item in self._items)
+        work = sum(self._rows(self._items[position]) * self._states(self._items[position]) ** 2 for position in self._solved)
         stats.update(
             {
                 "kpoint_sector_tasks": float(len(self._items)),
@@ -1955,6 +2142,8 @@ class SectorKPointSolver:
                 "kpoint_sector_refit_sectors": float(len(self._trimmed)),
             }
         )
+        if self._source:  # the sectors of conjugate pairs not solved (PARSEC_KPOINT_TRIM_REAL)
+            stats["kpoint_sector_pairs"] = float(len(self._source))
         return stats
 
     def describe_sectors(self) -> str:
@@ -1982,24 +2171,38 @@ class SectorKPointSolver:
         return getattr(inner, name)
 
 
-def sector_solver(job: KPointJob, make_solver: Callable[..., Any], **options):
+def sector_solver(job: KPointJob, make_solver: Callable[..., Any], *, notes: list | None = None, **options):
     """A :class:`SectorKPointSolver` for ``job`` where its k-points split, else ``None``.
 
     A job with extras takes them where they sum over the states (the forces of the scalar SCF,
     ``extras_by_columns``): each sector's part from its kept states, in one process or on the ranks of the MPI pools.
+    ``notes`` (a list) receives the line of the report on the cell group of the sectors, or why there are none
+    (:func:`plan_sectors`).
     """
 
     from ..Hamiltonian.sector_bloch_stencil import sector_stencil_setting
 
     sector_stencil_setting()  # read here: a bad value stops the run before its first solve
-    if (
-        getattr(job, "geometry", None) is None
-        or (job.extras is not None and not job.extras_by_columns)
-        or job.states_per_task is not None
-        or kpoint_sectors_setting() == "off"
-    ):
+    # (in the order of before: a reason found first leaves the switches after it unread)
+    if getattr(job, "geometry", None) is None:
+        refusal = (
+            "skipped: this k-point loop takes no sectors (the spinors of a spin-orbit or non-collinear run, LDA+U, "
+            "a meta-GGA, fixed occupations, refined levels under PARSEC_KPOINT_SECTOR_LEVELS=off, or the loop after "
+            "the symmetry guard left the sectors)"
+        )
+    elif job.extras is not None and not job.extras_by_columns:
+        refusal = "skipped: the extras of this k-point job (spinor or non-collinear forces) need whole k-points"
+    elif job.states_per_task is not None:
+        refusal = "skipped: the k-point job holds its own count of states per task"
+    elif kpoint_sectors_setting() == "off":
+        refusal = f"disabled by option ({_SWITCH}=off; one task per k-point)"
+    else:
+        refusal = None
+    if refusal is not None:
+        if notes is not None:
+            notes.append(refusal)
         return None
-    plans = plan_sectors(job)
+    plans = plan_sectors(job, notes)
     if plans is None:
         return None
     # the gathered stencils of the kinetic terms only where the operators go to the device code

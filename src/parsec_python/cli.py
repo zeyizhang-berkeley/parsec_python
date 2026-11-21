@@ -62,7 +62,12 @@ from .SCF.bands import (
     run_band_structure,
 )
 from .SCF.kpoints import run_scf_kpoints, run_scf_kpoints_spin_polarized
-from .SCF.kpoint_solver import parallel_backend_report, parallel_backend_uses_device
+from .SCF.kpoint_solver import (
+    parallel_backend_report,
+    parallel_backend_uses_device,
+    start_kpoint_setup_notes,
+    stop_kpoint_setup_notes,
+)
 from .SCF.noncollinear import (
     run_self_consistent_noncollinear,
     run_self_consistent_noncollinear_kpoints,
@@ -182,7 +187,7 @@ def _k_point_payload(result) -> dict[str, np.ndarray]:
     eigenvalues = getattr(result, "eigenvalues", None)
     if eigenvalues is None:
         eigenvalues = result.eigenvalues_up
-    return {
+    payload = {
         "k_points_cartesian_inv_bohr": k_points,
         "k_weights": np.asarray(weights, dtype=float),
         "n_kpoints": np.asarray(k_points.shape[0]),
@@ -190,6 +195,12 @@ def _k_point_payload(result) -> dict[str, np.ndarray]:
             np.asarray(eigenvalues).size // k_points.shape[0]
         ),
     }
+    # A k-point mesh solved as its supercell lists at every k-point the levels its Bloch phases give it, which can be
+    # fewer than the states of a k-point of the run (SCF/supercell_levels.py): those are kept for --bands-from.
+    run_states = getattr(result, "run_states_per_kpoint", None)
+    if run_states is not None:
+        payload["run_states_per_kpoint"] = np.asarray(int(run_states))
+    return payload
 
 
 def _scf_potential_payload(result) -> dict[str, np.ndarray]:
@@ -458,6 +469,11 @@ def save_result_archive(
             [channel.electron_count for channel in channels]
         )
         payload["net_magnetic_moment"] = np.asarray(result.net_magnetic_moment)
+        # The weighted sectors list every partner of the last multiplet of each channel, so the two channels may
+        # hold different numbers of levels: the shorter lists are padded (levels NaN, occupations and sector labels
+        # 0) and spin_state_counts says how many each channel holds.  Lists of equal lengths are written as before.
+        counts = [np.asarray(channel.eigenvalues).size for channel in channels]
+        unequal = len(set(counts)) > 1
         for name, member in (
             ("eigenvalues", "spin_eigenvalues_ry"),
             ("occupations", "spin_occupations"),
@@ -468,9 +484,20 @@ def save_result_archive(
             ("output_effective_potential", "spin_output_effective_potential_ry"),
             ("next_effective_potential", "spin_next_effective_potential_ry"),
         ):
-            payload[member] = np.asarray(
-                [getattr(channel, name) for channel in channels]
-            )
+            values = [getattr(channel, name) for channel in channels]
+            if unequal and name in ("eigenvalues", "occupations", "representations") and all(
+                value is not None for value in values
+            ):
+                arrays = [np.asarray(value).ravel() for value in values]
+                width = max(array.size for array in arrays)
+                fill = np.nan if name == "eigenvalues" else 0
+                values = [
+                    np.concatenate((array, np.full(width - array.size, fill, dtype=np.result_type(array, fill))))
+                    for array in arrays
+                ]
+            payload[member] = np.asarray(values)
+        if unequal:
+            payload["spin_state_counts"] = np.asarray(counts)
         payload["scf_spin_history"] = np.asarray(
             [
                 [
@@ -979,6 +1006,7 @@ def load_restart_start(translation, system, log, directory: Path, *, k_sampling=
         check_fixed_state_count(
             fields.stored_states,
             planned_state_count(translation.problem, system.electron_count),
+            stored_kpoints=fields.stored_kpoints,
         )
     return warm_start
 
@@ -1470,6 +1498,68 @@ def _gamma_spin_on_kpoint_driver(translation, is_periodic: bool, has_soc_species
     ):
         return False
     return parallel_backend_uses_device()
+
+
+SPIN_IONIC_KPOINT_ENV = "PARSEC_SPIN_IONIC_KPOINT"
+
+
+def spin_ionic_kpoint_setting() -> str:
+    """``PARSEC_SPIN_IONIC_KPOINT``: ``auto`` (the default since 2026-11-21) or ``off``.
+
+    ``auto``: the forces, relaxation and molecular dynamics of a collinear spin-polarized bulk cell at the Gamma point
+    that run on the Fortran-derived routines of this CLI (the default for the forces of a spin-polarized PBE cell and
+    of ``Cubic_Spline`` inputs, ``Use_Fortran_Routines: .true.``; the command line of ``main.py`` hands them here)
+    take the 1x1x1 k-point run, whose eigenproblems the device k-point solver holds, as the single point of such a
+    cell does (:func:`_gamma_spin_on_kpoint_driver`); :func:`spin_ionic_kpoint_sampling` says for which inputs.
+    ``off``: the Gamma-point loop ``run_spin_scf`` with the eigensolvers of the host, as before (on A100 nodes 5 s
+    per SCF iteration of a 63-atom diamond vacancy against 0.15 s).
+    """
+
+    value = os.environ.get(SPIN_IONIC_KPOINT_ENV, "auto").strip().lower() or "auto"
+    if value not in ("auto", "off"):
+        raise ValueError(f"{SPIN_IONIC_KPOINT_ENV} must be auto or off, got {value!r}")
+    return value
+
+
+def spin_ionic_kpoint_sampling(translation, k_sampling, is_periodic: bool, has_soc_species: bool, *, restart=None):
+    """The k-point sampling of the ionic loop of the Fortran-derived periodic backend (``fortran_periodic_backend``).
+
+    ``k_sampling`` where the input has one.  Under ``PARSEC_SPIN_IONIC_KPOINT=auto`` a collinear spin-polarized bulk
+    cell at the Gamma point with a semilocal functional (no hybrid, meta-GGA, LDA+U, TS, ``occup.in``,
+    ``Symmetrize_Charge_Density``, spin-orbit species or spinors) runs as the 1x1x1 k-point mesh where the single
+    point of the cell takes the device k-point driver (:func:`_gamma_spin_on_kpoint_driver`): the loop of
+    :func:`parsec_python.SCF.kpoints.run_scf_kpoints_spin_polarized` keeps its Bloch orbitals of ``k = 0`` for the
+    forces of :mod:`parsec_python.Forces.periodic` (and ``parsec.dat``, which then holds them as the complex
+    wavefunctions of one k-point, with the mixed potentials), and a moved structure starts from the two channel
+    potentials of the one before.  ``None`` (the Gamma-point loop) otherwise.  The ``restart`` and
+    ``Energy_Refinement`` checks are defensive: the parser refuses a self-consistent ``Restart_Run`` of a periodic
+    spin cell and ``Energy_Refinement`` of a periodic input before this is asked.
+    """
+
+    if k_sampling is not None:
+        return k_sampling
+    if spin_ionic_kpoint_setting() == "off" or restart is not None:
+        return None
+    if getattr(translation, "energy_refinement", None) is not None:
+        return None
+    problem = translation.problem
+    scf = problem.scf
+    if not (scf.spin_polarized and is_periodic) or getattr(problem.grid, "periodicity", 3) != 3:
+        return None
+    if (
+        scf.is_hybrid
+        or getattr(scf, "is_meta_gga", False)
+        or scf.self_consistent_spin_orbit
+        or scf.noncollinear
+        or getattr(scf, "van_der_waals", False)
+        or getattr(scf, "symmetrize_density", False)
+        or scf.fixed_occupations is not None
+        or any(getattr(item, "has_hubbard", False) for item in problem.pseudopotentials.values())
+    ):
+        return None
+    if not _gamma_spin_on_kpoint_driver(translation, is_periodic, has_soc_species):
+        return None
+    return (np.zeros((1, 3)), np.ones(1))
 
 
 def _gamma_hybrid_on_kpoint_driver(translation, is_periodic: bool) -> bool:
@@ -2276,6 +2366,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         except ValueError as error:
             print(f"Input error: {error}", file=sys.stderr)
             return 2
+    if translation.problem.scf.spin_polarized:
+        # PARSEC_SPIN_START: the start of the spin-polarized k-point loop and of run_scf_spin_polarized
+        from parsec_python.SCF.spin_polarized import spin_start_setting
+
+        try:
+            spin_start_setting()
+            # PARSEC_SPIN_IONIC_KPOINT: the ionic loops of a spin cell at the Gamma point on the k-point solver
+            spin_ionic_kpoint_setting()
+        except ValueError as error:
+            print(f"Input error: {error}", file=sys.stderr)
+            return 2
     if (
         getattr(translation, "polarizability_field", None) is not None
         and getattr(translation, "energy_refinement", None) is not None
@@ -2667,9 +2768,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     # its seconds belong to the calculation.  None for an input with a radius.
     start = time.perf_counter() - translation.domain_rule_seconds
     run_log = _RunLog(log_path, quiet=arguments.quiet)
+    setup_notes = None
     try:
         with run_log as log:
             reporter = ParsecTextReporter(log.write, translation)
+            # the cell group of the k-point sectors and its tolerance, or why there are none, as each k-point solver
+            # is made, before its first solve (SCF/kpoint_solver.py; the K-point solver detail block repeats it)
+            setup_notes = start_kpoint_setup_notes(log.write)
             reporter.header()
             # What usrinputfile.F90 prints about the output keywords the input gives.
             for line in output_header_lines(
@@ -2820,7 +2925,21 @@ def main(argv: Sequence[str] | None = None) -> int:
                     # Before the bulk branch: a wire or slab has periodic_cell too.
                     backend = wire_slab_backend(k_sampling, extrapolation)
                 elif is_periodic:
-                    backend = fortran_periodic_backend(k_sampling, extrapolation)
+                    # a spin-polarized cell at the Gamma point: the 1x1x1 k-point run of the device k-point solver,
+                    # as its single point (PARSEC_SPIN_IONIC_KPOINT)
+                    ionic_k_sampling = spin_ionic_kpoint_sampling(
+                        translation, k_sampling, is_periodic, has_soc_species, restart=restart
+                    )
+                    if k_sampling is None and ionic_k_sampling is not None:
+                        # parsec.dat then holds the complex Bloch orbitals of k = 0 that the loop keeps for the
+                        # forces: the limit of its default wavefunctions counts them so
+                        files.plan_wavefunctions(
+                            system.grid.size,
+                            planned_state_count(translation.problem, system.electron_count),
+                            2,
+                            complex_values=True,
+                        )
+                    backend = fortran_periodic_backend(ionic_k_sampling, extrapolation)
                 else:
                     backend = reference_backend(extrapolation)
                 if scf_keywords:
@@ -2994,6 +3113,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         elif not getattr(run_log, "failure_reported", False):
             print(message, file=sys.stderr)
         return 1
+    finally:
+        if setup_notes is not None:
+            stop_kpoint_setup_notes(setup_notes)
 
 
 def _mpi_rank() -> int | None:

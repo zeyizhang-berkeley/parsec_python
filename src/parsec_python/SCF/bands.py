@@ -10,8 +10,11 @@ diagonalization in the converged self-consistent potential:
   Bloch-phase nonlocal and spin-orbit projectors) is built from the SCF
   potential and diagonalized from scratch by the SCF's *first* eigensolver,
   CHEBFF (``solver%eig_init = .false.`` in ``calc_bands``), i.e.
-  ``FF_MaxIter`` Chebyshev filter cycles of degree ``Chebdav_Degree``.  CHEBFF
-  has no convergence test; raise ``FF_MaxIter`` for tighter bands.  The largest
+  ``FF_MaxIter`` Chebyshev filter cycles of degree ``Chebdav_Degree``.  PARSEC's
+  CHEBFF has no convergence test there (its ``Diag_Tolerance`` default -1 for
+  CHEBFF); here ``PARSEC_BAND_CONVERGENCE=auto`` (the default since 2026-11-21,
+  :func:`band_convergence_setting`) continues the cycles to CHEBDAV's residual
+  test, and ``off`` keeps PARSEC's fixed cycles.  The largest
   residual ``|H v - e v|`` is reported for every k-point as a diagnostic.
 
 Extension beyond Fortran: CHEBDAV adds ``Matvec_Blocksize`` vectors per Davidson
@@ -47,6 +50,56 @@ from .kpoint_solver import device_solver_supports, map_tasks
 from .kpoints_soc import _eigval_settings, _k_point_operators, _spinor_hamiltonian
 
 MODES = ("scalar", "spin_polarized", "soc", "soc_spin_polarized", "noncollinear")
+
+BAND_CONVERGENCE_SWITCH = "PARSEC_BAND_CONVERGENCE"
+
+
+def band_convergence_setting() -> str:
+    """``PARSEC_BAND_CONVERGENCE``: ``auto`` (the default since 2026-11-21) makes the CHEBFF first solve of every
+    band and ``nscf`` k-point (``Eigensolver: chebff``) a converged one: after the ``Bands_FF_MaxIter`` cycles
+    (``FF_MaxIter``), CHEBFF cycles go on until the residuals of the reported bands pass CHEBDAV's relative test
+    with the input's ``Diag_Tolerance`` (times their largest ``|e|``; ``1e-4`` where the input gives none or
+    PARSEC's CHEBFF default ``-1``) or ``PARSEC_KPOINT_EXTRA_CYCLES`` (24) more cycles were made, as the
+    device-resident first solve of ``Eigensolver: chebdav`` does
+    (:class:`parsec_python.Eigensolvers.eigval.ConvergedFirstSolveSettings`).  A k-point converged after the fixed
+    cycles keeps its levels bit for bit.  ``off``: the fixed cycles, PARSEC 1.5's ``calc_bands`` with its CHEBFF
+    default ``Diag_Tolerance -1``, as before (1000 diamond atoms: largest residual 0.10 Ry at the 3 cycles)."""
+
+    import os
+
+    value = os.environ.get(BAND_CONVERGENCE_SWITCH, "auto").strip().lower() or "auto"
+    if value not in ("auto", "off"):
+        raise ValueError(f"{BAND_CONVERGENCE_SWITCH} must be auto or off, not {value!r}")
+    return value
+
+
+def validate_band_settings() -> None:
+    """Read the switches of the first solve of the band and ``nscf`` k-points (``PARSEC_BAND_CONVERGENCE``,
+    ``PARSEC_KPOINT_EXTRA_CYCLES``), so that a value they do not know is refused before the SCF."""
+
+    from ..Eigensolvers.eigval import first_solve_extra_cycles
+
+    band_convergence_setting()
+    first_solve_extra_cycles()
+
+
+def converged_band_settings(eigval_settings, converge: bool | None = None, tolerance: float | None = None):
+    """``eigval_settings`` of the band k-points: :class:`ConvergedFirstSolveSettings` for a CHEBFF first solve
+    under ``converge`` (``None``: ``PARSEC_BAND_CONVERGENCE=auto``), else unchanged.  ``tolerance`` (the
+    input's ``Diag_Tolerance``) is the relative residual its cycles go on to; ``None`` keeps that of
+    ``eigval_settings.chebdav``."""
+
+    from ..Eigensolvers.eigval import ConvergedFirstSolveSettings, EigvalSettings
+
+    if converge is None:
+        converge = band_convergence_setting() == "auto"
+    if not converge or eigval_settings.initial_method != "chebff":
+        return eigval_settings
+    values = {item.name: getattr(eigval_settings, item.name) for item in dataclasses.fields(EigvalSettings)}
+    if tolerance is not None and float(tolerance) > 0.0:
+        # the settings of a CHEBFF SCF carry CHEBDAV's defaults: the test takes the tolerance of the input
+        values["chebdav"] = dataclasses.replace(values["chebdav"], convergence_tolerance=float(tolerance))
+    return ConvergedFirstSolveSettings(**values)
 
 
 def band_mode(problem) -> str:
@@ -153,6 +206,9 @@ def load_scf_for_bands(archive_path, problem, system, mode: str):
         eigenvalue_key = "eigenvalues_up_ry" if mode == "spin_polarized" else "eigenvalues_ry"
         k_count = int(archive["n_kpoints"]) if "n_kpoints" in files else 1
         number_of_states = int(np.asarray(archive[eigenvalue_key]).size // k_count)
+        if "run_states_per_kpoint" in files:
+            # the states of a k-point of the run (a mesh solved as its supercell lists fewer levels at some)
+            number_of_states = int(archive["run_states_per_kpoint"])
         return potentials, float(archive["fermi_level_ry"]), number_of_states
 
 
@@ -210,7 +266,8 @@ def run_band_structure(
     device and, unless ``PARSEC_KPOINT_SOLVER=host`` (the host eigensolver with
     only the Chebyshev filter on the device), the device-resident first solve
     (CHEBFF, with more CHEBFF cycles to CHEBDAV's residual test for
-    ``Eigensolver: chebdav``).
+    ``Eigensolver: chebdav``, and for ``Eigensolver: chebff`` under
+    ``PARSEC_BAND_CONVERGENCE=auto``).
     Each k-point is the same computation whatever the worker count or device,
     so the bands do not depend on them (to round-off); the host and the
     device-resident eigensolvers are different algorithms and agree to the
@@ -289,6 +346,7 @@ def solve_kpoint_bands(
     keep_vectors: bool = False,
     filter_cycles: int | None = None,
     symmetry=None,
+    converge: bool | None = None,
 ) -> KPointBands:
     """Diagonalize the Hamiltonian of ``potentials`` at every row of ``k_points``.
 
@@ -306,7 +364,9 @@ def solve_kpoint_bands(
     (:class:`parsec_python.acceleration.SCF.band_sectors.BandSymmetry`); a
     scalar path then solves its k-points in the sectors of their little
     groups where they split (``PARSEC_BAND_KPOINT_SECTORS``).  ``None`` (the
-    reference CLI) keeps every k-point whole.
+    reference CLI) keeps every k-point whole.  ``converge``: whether a CHEBFF
+    first solve continues to CHEBDAV's residual test (:func:`converged_band_settings`;
+    ``None``: ``PARSEC_BAND_CONVERGENCE``).
     """
 
     if mode not in MODES:
@@ -322,6 +382,10 @@ def solve_kpoint_bands(
             eigval_settings,
             chebff=dataclasses.replace(eigval_settings.chebff, filter_cycles=int(filter_cycles)),
         )
+    # PARSEC_BAND_CONVERGENCE=auto: a CHEBFF first solve continues to CHEBDAV's residual test with Diag_Tolerance
+    eigval_settings = converged_band_settings(
+        eigval_settings, converge, tolerance=getattr(system.input.eigensolver, "tolerance", None)
+    )
     spinor = mode in ("soc", "soc_spin_polarized", "noncollinear")
     channels = ("up", "down") if mode == "spin_polarized" else ("all",)
     n_k = k_points.shape[0]

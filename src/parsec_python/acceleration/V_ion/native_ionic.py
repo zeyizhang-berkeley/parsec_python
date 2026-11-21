@@ -271,6 +271,17 @@ class NativeIonicBuilders:
         column = 0
         square_root_volume = float(np.sqrt(grid.volume_element))
         tables = {}
+        # The native kernel divides the harmonics by min(rs(2), 1e-6 bohr) near the atom; under
+        # PARSEC_PROJECTOR_CENTER=auto the few points within the first radial sample are evaluated again here with
+        # the reference's rule (nonloc.F90's rnorm = rs(2)).
+        from parsec_python.V_ion.ionic_potential import (
+            projector_center_radius,
+            projector_center_setting,
+            real_spherical_harmonics,
+        )
+
+        recentre = projector_center_setting() == "auto"
+        splines = {}
 
         for atom_index, atom in enumerate(atoms):
             potential = potentials[atom.symbol]
@@ -307,6 +318,26 @@ class NativeIonicBuilders:
                 if box_rows is not None:
                     support_rows = box_rows[support_rows]
                 channel_values = np.asarray(payload["values"], dtype=np.float64)
+                if recentre and support_rows.size:
+                    centre = projector_center_radius(potential, "auto")
+                    relative = np.asarray(grid.coordinates[support_rows], dtype=np.float64) - np.asarray(
+                        atom.position, dtype=np.float64
+                    )
+                    distance = np.linalg.norm(relative, axis=1)
+                    near = np.flatnonzero((distance > 0.0) & (distance < centre))
+                    if near.size:
+                        if spline[0].size:
+                            if key not in splines:
+                                splines[key] = ParsecRadialSpline.from_positive_grid(
+                                    potential.radii, radial, grid.settings.stencil_half_width
+                                )
+                            value = float(splines[key](np.array([float(potential.radii[0])]))[0])
+                        else:
+                            value = float(radial[0])
+                        channel_values = channel_values.copy()
+                        channel_values[near] = (square_root_volume * value) * real_spherical_harmonics(
+                            int(angular_momentum), relative[near], center_radius=centre
+                        )
                 for harmonic_index in range(channel_values.shape[1]):
                     projector = channel_values[:, harmonic_index]
                     keep = np.abs(projector) > 1.0e-16

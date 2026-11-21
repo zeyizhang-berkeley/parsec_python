@@ -11,9 +11,11 @@ by itself, with the reason in a warning and in parsec.out.
 
 from __future__ import annotations
 
+import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import numpy as np
 
@@ -28,8 +30,11 @@ from parsec_python.Input.parsec_input import parse_parsec_input
 from parsec_python.Input.routines import (
     GAMMA_FORCES_FEATURE,
     SYMMETRIC_GRID_FEATURE,
+    SYMMETRY_KEYWORD_ROUTINES_ENV,
+    SYMMETRY_KEYWORDS,
     bulk_default_features,
     routines_report_line,
+    symmetry_keyword_routines_setting,
 )
 from parsec_python.models import PeriodicCell, PeriodicGridSettings, SpeciesPotential
 from parsec_python.V_ion.ewald import local_potential_uses_spline
@@ -741,6 +746,53 @@ class DefectFixTests(_ParserCase):
         self.assertEqual(cell.dimensions, 2)
         grid = build_periodic_grid(cell, translation.problem.grid)
         self.assertIsInstance(grid, SlabRealSpaceGrid)
+
+
+class SymmetryKeywordTests(_ParserCase):
+    """``Spin_Symmetry_Sectors``, the keyword of the accelerated spin sectors, chooses no routines
+    (``PARSEC_SYMMETRY_KEYWORD_ROUTINES=neutral``, the default since 2026-11-21); ``fortran`` restores the former
+    choice, the Fortran-derived routines for any written value."""
+
+    _SPIN = "Spin_Polarization: .true.\n"
+
+    def test_the_keyword_keeps_the_routines_grid_and_potential_conventions(self) -> None:
+        base = self.parse(_bulk(self._SPIN))
+        self.assertFalse(base.routines.fortran)
+        for value in ("off", "auto"):
+            with self.subTest(value=value):
+                translation = self.parse(_bulk(self._SPIN + f"Spin_Symmetry_Sectors: {value}"))
+                self.assertFalse(translation.routines.fortran)
+                self.assertEqual(repr(translation.problem.grid), repr(base.problem.grid))
+                self.assertEqual(
+                    [tuple(atom.position) for atom in translation.problem.atoms],
+                    [tuple(atom.position) for atom in base.problem.atoms],
+                )
+                self.assertFalse(any("Fortran-derived" in warning for warning in translation.warnings))
+                self.assertEqual(translation.problem.scf.spin_symmetry_sector_mode, value)
+
+    def test_fortran_restores_the_former_choice(self) -> None:
+        with mock.patch.dict(os.environ, {SYMMETRY_KEYWORD_ROUTINES_ENV: "fortran"}):
+            translation = self.parse(_bulk(self._SPIN + "Spin_Symmetry_Sectors: off"))
+            plain = self.parse(_bulk(self._SPIN))
+        self.assertTrue(translation.routines.fortran)
+        self.assertTrue(translation.problem.grid.fortran_routines)
+        self.assertIn("spin_symmetry_sectors", "; ".join(translation.routines.reasons))
+        self.assertFalse(plain.routines.fortran)
+
+    def test_a_wrong_value_stops_every_parse(self) -> None:
+        text = (_DATA / "H2_parsec.in").read_text(encoding="utf-8")
+        with mock.patch.dict(os.environ, {SYMMETRY_KEYWORD_ROUTINES_ENV: "bogus"}):
+            for source in (_bulk(self._SPIN), text):
+                with self.subTest(periodic=source is not text), self.assertRaisesRegex(
+                    Exception, SYMMETRY_KEYWORD_ROUTINES_ENV
+                ):
+                    self.parse(source)
+
+    def test_the_setting_reads_its_values(self) -> None:
+        for value, expected in (("", "neutral"), ("neutral", "neutral"), (" Fortran ", "fortran")):
+            with mock.patch.dict(os.environ, {SYMMETRY_KEYWORD_ROUTINES_ENV: value}):
+                self.assertEqual(symmetry_keyword_routines_setting(), expected)
+        self.assertIn("spin_symmetry_sectors", SYMMETRY_KEYWORDS)
 
 
 if __name__ == "__main__":

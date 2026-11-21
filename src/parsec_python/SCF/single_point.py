@@ -793,7 +793,7 @@ def warm_start_for_moved_atoms(
         from .hybrid import exchange_start_orbitals
 
         warm_start = replace(
-            warm_start, exchange_orbitals=exchange_start_orbitals(previous_result)
+            warm_start, exchange_orbitals=exchange_start_orbitals(previous_result, previous_system)
         )
     if getattr(system, "embedding", None) is not None:
         # FDET of PARSEC 1.5: translation by whole grid steps, or the tip sphere

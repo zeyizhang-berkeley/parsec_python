@@ -136,11 +136,37 @@ RADIAL_SLOPES = ("interpolant", "tabulated")
 SLOPES_ENV = "PARSEC_PERIODIC_FORCE_SLOPES"
 
 
-#: The distance below which ``1/|d|`` of a projector gradient is clamped (bohr), and at most the first radial knot:
-#: an atom within round-off of a grid point (ideal positions on the grid) gets the gradient of this distance instead
-#: of ``1/1e-15`` (found when both sets of routines were compared).  Far below any physical displacement, far above round-off.
-#: The projectors take the same rule for their harmonics (``V_ion.ionic_potential.PROJECTOR_CENTER_ROUND_OFF``).
+#: The round-off distance (bohr): under ``PARSEC_PROJECTOR_CENTER=off`` the distance below which ``1/|d|`` of a
+#: projector gradient is clamped, at most the first radial knot (an atom within round-off of a grid point got the
+#: gradient of this distance instead of ``1/1e-15``, found when both sets of routines were compared), and the radius
+#: within which ``PARSEC_SPLINE_FORCE_CENTER=auto`` drops the spline slopes.  Far below any physical displacement,
+#: far above round-off.  The projectors take the same rule for their harmonics under ``off``
+#: (``V_ion.ionic_potential.PROJECTOR_CENTER_ROUND_OFF``); ``auto`` clamps at the first radial knot.
 ROUND_OFF_DISTANCE = _ionic_potential.PROJECTOR_CENTER_ROUND_OFF
+
+
+def _projector_inverse_radius(radius: np.ndarray, potential: ParsecPseudopotential, setting: str):
+    """``(1/|d|, inside)`` of the projector gradients with the slopes of the interpolant.
+
+    ``PARSEC_PROJECTOR_CENTER=auto`` (:func:`parsec_python.V_ion.ionic_potential.projector_center_setting`): the
+    distance clamped below to the first radial sample ``rs(2)`` (``nonloc.F90``'s ``rnorm``), for a point on the
+    atom too, and ``inside`` the points closer than ``rs(2)``: their projector is ``w(rs(2)) P(d/rs(2))``, whose
+    gradient ``w(rs(2)) dP/du / rs(2)`` (:func:`real_harmonics_with_gradients` with ``inside``) is the exact
+    derivative of the projector the energy uses.  ``off``: ``min(rs(2), ROUND_OFF_DISTANCE)``, zero on the atom, as
+    before (``inside`` ``None``).  The 1/|d| of a round-off distance (an atom within round-off of a grid point) was
+    first clamped to ``ROUND_OFF_DISTANCE`` because ``1/1e-15`` made ``w(r0) grad Y`` 1e15 (Si64, h 0.513: nonlocal
+    forces of 82 Ry/bohr); with the true direction of the harmonics down to 1e-6 bohr that left ``w(rs(2))/1e-6``
+    at such a point, 13 (carbon POTRE) to 1000 (FHI tables) times the slope of a p projector.
+    """
+
+    if setting == "auto":
+        center = float(potential.radii[0])
+        inside = radius < center
+        return 1.0 / np.maximum(radius, center), (inside if np.any(inside) else None)
+    inverse = np.zeros_like(radius)
+    nonzero = radius > 0.0
+    inverse[nonzero] = 1.0 / np.maximum(radius[nonzero], min(potential.radii[0], ROUND_OFF_DISTANCE))
+    return inverse, None
 
 
 def radial_slope_setting() -> str:
@@ -152,6 +178,63 @@ def radial_slope_setting() -> str:
     if value not in RADIAL_SLOPES:
         raise ValueError(f"{SLOPES_ENV} must be one of " + ", ".join(RADIAL_SLOPES))
     return value
+
+
+#: The switch of the centre of the spline slopes in the local forces of a cell (:func:`spline_force_center_setting`).
+SPLINE_CENTER_ENV = "PARSEC_SPLINE_FORCE_CENTER"
+
+
+def spline_force_center_setting() -> str:
+    """``PARSEC_SPLINE_FORCE_CENTER``: the spline slopes of the local forces of a cell at grid points next to an atom.
+
+    The padded cubic spline of a ``Cubic_Spline`` local potential (or core density) has a slope of its own at
+    ``r = 0+``, so the potential (and the energy) is a cone at the atom.  The slope at the tip, per table: carbon
+    POTRE 3.6e-3 Ry/bohr (first radial sample 1.3e-5 bohr), silicon POTRE 5.5e-6 (2.2e-6 bohr); FHI tables Si 0.035
+    (4.5e-4 bohr), Mg 3.4e-3 (5.2e-4), O 0.73 (7.8e-4), C 0.42 (1.04e-3).  A grid point within round-off of an atom
+    (an atom placed on the grid, whose distance comes out as 1e-11 bohr instead of 0) took that slope along the
+    direction of the round-off: a random vector in the forces that changed when the atom moved by 1e-11 bohr (up to
+    1.5e-5 Ry/bohr on the POTRE diamond cubes, 5.6e-3 on an O FHI table).
+
+    * ``auto`` (default since 2026-11-21): the points within ``min(rs(2), 1e-6 bohr)`` of the atom
+      (:data:`ROUND_OFF_DISTANCE`) take the symmetric value at the tip, zero, the central difference of the energy
+      there.  Every other point keeps the slope of the spline, the exact derivative of the energy, bit for bit as
+      under ``off``.
+    * ``fortran``: the rule of ``forcloc.f90`` (``if (r1 < rs(2)) cycle``, also the rule of this port's cluster,
+      wire and slab forces and of the default routines of a cell,
+      :func:`parsec_python.Pseudopotential.radial_derivatives.evaluate_local_potential_derivative`): every point
+      closer than the first radial sample leaves the slope out.  Between 1e-6 bohr and ``rs(2)`` the force is then
+      not the derivative of the energy (whose cone stays): 2.9e-3 to 5.2e-3 Ry/bohr off on an O FHI table at h 0.3
+      at 3e-4 to 6e-4 bohr from a grid point.
+    * ``off``: the spline slope at every positive distance, as before 2026-11-21.
+
+    The Fortran-derived routines of a cell read it (:func:`periodic_local_forces` and
+    :mod:`parsec_python.acceleration.Forces.periodic_spline`); the linear tables already have no slope there.
+    """
+
+    import os
+
+    value = os.environ.get(SPLINE_CENTER_ENV, "auto").strip().lower() or "auto"
+    if value not in ("auto", "fortran", "off"):
+        raise ValueError(f"{SPLINE_CENTER_ENV} must be auto, fortran or off, not {value!r}")
+    return value
+
+
+def spline_center_radius(potential: ParsecPseudopotential, setting: str) -> float:
+    """The radius below which :func:`without_spline_center` drops a spline slope (0 under ``off``)."""
+
+    if setting == "off":
+        return 0.0
+    first = float(potential.radii[0])
+    return first if setting == "fortran" else min(first, ROUND_OFF_DISTANCE)
+
+
+def without_spline_center(slope, distances, potential: ParsecPseudopotential, setting: str):
+    """``slope`` with the values closer to the atom than :func:`spline_center_radius` set to zero (for a spline
+    slope; the caller decides), unchanged under ``off`` of :func:`spline_force_center_setting`."""
+
+    if setting == "off":
+        return slope
+    return np.where(np.asarray(distances) < spline_center_radius(potential, setting), 0.0, slope)
 
 
 
@@ -450,6 +533,7 @@ def periodic_local_forces(
     xc_present = bool(np.any(xc != 0.0))
     valence_tables: dict[str, np.ndarray] = {}
     core_splines: dict[str, ParsecRadialSpline | None] = {}
+    center = spline_force_center_setting()
     g_space = getattr(grid.settings, "local_potential", "real_space") == "g_space"
     if g_space:
         # Fortran's G-space potential has no real-space piece (its force is
@@ -471,13 +555,17 @@ def periodic_local_forces(
             radius = np.sqrt(np.einsum("ij,ij->i", relative, relative))
             slope_over_r = np.zeros_like(radius)
             nonzero = radius > 0.0
-            slope_over_r[nonzero] = local_potential_slope(
+            slope = local_potential_slope(
                 potential,
                 radius[nonzero],
                 specification.local_angular_momentum,
                 use_spline=specification.use_spline,
                 spline_padding_width=padding,
-            ) / radius[nonzero]
+            )
+            if specification.use_spline:
+                # the cone at the atom (spline_force_center_setting)
+                slope = without_spline_center(slope, radius[nonzero], potential, center)
+            slope_over_r[nonzero] = slope / radius[nonzero]
             slope_over_r += _erf_over_r_slope_over_r(charge, radius, eta) * nonzero
             ionic[index] += (density * slope_over_r) @ relative
 
@@ -535,6 +623,8 @@ def periodic_local_forces(
                 slope = _density_slope(
                     potential, radius, potential.core_density, spline=spline
                 )
+                if spline is not None:
+                    slope = without_spline_center(slope, radius, potential, center)
                 nonzero = radius > 0.0
                 weight = np.zeros_like(radius)
                 weight[nonzero] = xc[nonzero] * slope[nonzero] / radius[nonzero]
@@ -597,6 +687,7 @@ def build_periodic_projector_gradients(
         raise ValueError("radial_slopes must be one of " + ", ".join(RADIAL_SLOPES))
     tabulated = radial_slopes == "tabulated"
     wanted = _selected_atoms(len(atoms), atom_indices)
+    center_setting = _ionic_potential.projector_center_setting()
 
     order = int(getattr(grid.settings, "double_grid_order", 1))
     if order > 1:
@@ -681,6 +772,7 @@ def build_periodic_projector_gradients(
                         radial = np.interp(clamped, potential.radii, radial_grid, right=0.0)
                         slope = np.interp(clamped, potential.radii, slope_table, right=0.0)
                     inverse = 1.0 / clamped
+                    inside = None
                 else:
                     if spline is not None:
                         clamped = np.maximum(radius, potential.radii[0])
@@ -693,16 +785,11 @@ def build_periodic_projector_gradients(
                             radius, potential.radii, radial_grid, left=radial_grid[0], right=0.0
                         )
                         slope = interpolant_slope(radius, potential.radii, radial_grid)
-                    nonzero = radius > 0.0
-                    inverse = np.zeros_like(radius)
-                    # A round-off distance (an atom within round-off of a grid point) is clamped, as the tabulated
-                    # slopes and nonloc.F90 clamp to the first radial knot: its 1/|d| made w(r0) grad Y 1e6 (Si64,
-                    # h 0.513: nonlocal forces of 82 Ry/bohr).  ROUND_OFF_DISTANCE keeps the exact slope of a
-                    # table whose first knot is far out.  A grid point exactly on the atom keeps 1/|d| = 0.
-                    inverse[nonzero] = 1.0 / np.maximum(radius[nonzero], min(potential.radii[0], ROUND_OFF_DISTANCE))
+                    # the centre radius of the harmonics (PARSEC_PROJECTOR_CENTER, _projector_inverse_radius)
+                    inverse, inside = _projector_inverse_radius(radius, potential, center_setting)
                 unit = relative * inverse[:, None]
                 harmonics, harmonic_gradients = real_harmonics_with_gradients(
-                    angular_momentum, unit, inverse
+                    angular_momentum, unit, inverse, inside=inside
                 )
                 for harmonic_index, target in enumerate(channel_columns):
                     gradient = sqrt_dv * (
@@ -776,6 +863,7 @@ def _double_grid_periodic_gradients(
 
     from ..V_ion.double_grid import double_grid_support
 
+    center_setting = _ionic_potential.projector_center_setting()
     k_vector = None if k_point is None else np.asarray(k_point, dtype=float)
     value_dtype = complex if k_vector is not None else float
     spacing = float(grid.spacing)
@@ -844,6 +932,7 @@ def _double_grid_periodic_gradients(
                         radial = np.interp(clamped, potential.radii, radial_grid, right=0.0)
                         slope = np.interp(clamped, potential.radii, slope_table, right=0.0)
                     inverse = 1.0 / clamped
+                    inside = None
                 else:
                     if spline is not None:
                         radial = spline(clamped)
@@ -855,16 +944,11 @@ def _double_grid_periodic_gradients(
                             radius, potential.radii, radial_grid, left=radial_grid[0], right=0.0
                         )
                         slope = interpolant_slope(radius, potential.radii, radial_grid)
-                    inverse = np.zeros_like(radius)
-                    nonzero = radius > 0.0
-                    # A round-off distance (an atom within round-off of a grid point) is clamped, as the tabulated
-                    # slopes and nonloc.F90 clamp to the first radial knot: its 1/|d| made w(r0) grad Y 1e6 (Si64,
-                    # h 0.513: nonlocal forces of 82 Ry/bohr).  ROUND_OFF_DISTANCE keeps the exact slope of a
-                    # table whose first knot is far out.  A grid point exactly on the atom keeps 1/|d| = 0.
-                    inverse[nonzero] = 1.0 / np.maximum(radius[nonzero], min(potential.radii[0], ROUND_OFF_DISTANCE))
+                    # the centre radius of the harmonics (PARSEC_PROJECTOR_CENTER, _projector_inverse_radius)
+                    inverse, inside = _projector_inverse_radius(radius, potential, center_setting)
                 unit = relative * inverse[:, None]
                 harmonics, harmonic_gradients = real_harmonics_with_gradients(
-                    angular_momentum, unit, inverse
+                    angular_momentum, unit, inverse, inside=inside
                 )
                 for harmonic_index, target in enumerate(channel_columns):
                     gradient = sqrt_dv * (
@@ -1185,10 +1269,15 @@ def periodic_force_operations(system, k_points: np.ndarray | None = None):
     see :func:`parsec_python.Input.parse_parsec_input`), its operations,
     non-symmorphic ones included, as ``symm_forces.f90`` with ``symm``;
     otherwise the point operations of :func:`periodic_symmetry_operations`
-    (lattice, grid, atoms and k-points), as before.
+    (lattice, grid, atoms and k-points), as before.  Where the problem carries a
+    larger ``force_space_group`` (a wedge of the default routines that keeps
+    the grid's finite-difference operators, ``PARSEC_KPOINT_FORCE_GROUP=crystal``),
+    its operations: those that map the grid and the mesh onto themselves; the
+    k-point sum is completed over the wedge's group
+    (:func:`reduced_kpoint_operations`).
     """
 
-    group = _space_group(system)
+    group = getattr(system.input, "force_space_group", None) or _space_group(system)
     lattice = system.input.periodic_cell.lattice_vectors
     if group is not None:
         return space_group_symmetry_operations(system.atoms, lattice, group)
@@ -1460,6 +1549,7 @@ def compute_periodic_forces(
 __all__ = [
     "RADIAL_SLOPES",
     "SLOPES_ENV",
+    "SPLINE_CENTER_ENV",
     "PeriodicAtomSymmetryOperation",
     "build_periodic_projector_gradients",
     "compute_periodic_forces",
@@ -1473,4 +1563,7 @@ __all__ = [
     "radial_slope_setting",
     "reduced_kpoint_operations",
     "space_group_symmetry_operations",
+    "spline_center_radius",
+    "spline_force_center_setting",
+    "without_spline_center",
 ]

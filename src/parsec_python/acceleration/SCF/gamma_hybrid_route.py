@@ -16,7 +16,10 @@ values:
   there, ``PARSEC_CUPY_EXCHANGE_POOL``), folded back to every sector, whose compressed operator
   ``-a_x xi_G xi_G^T`` joins its Hamiltonian (``Hamiltonian/exchange_device.py``).  Its energies are those of the
   full grid to the SCF convergence.  A cell whose
-  basis (grid points times states) is below ``2^24`` entries (:func:`sector_basis_reached`) keeps the full grid.
+  basis (grid points times states) is below ``2^24`` entries (:func:`sector_basis_reached`) keeps the full grid;
+  with forces or a relaxation by an optimizer its forces and moved positions are averaged there over the operations
+  of the cell (``PARSEC_GAMMA_HYBRID_SECTOR_FORCES=auto``; ``sectors`` takes the sectors instead:
+  :func:`gamma_hybrid_sector_forces_setting`).
   The MPI runner keeps refusing a periodic hybrid.
 * ``kpoint``: a cell this module finds large enough (:func:`gamma_hybrid_sector_route`) runs as the 1x1x1 k-point
   mesh of the reference solver, whose k-point sectors split the Gamma point into the sectors of the abelian subgroup
@@ -60,6 +63,54 @@ def gamma_hybrid_sectors_setting() -> str:
     if value not in {"auto", "kpoint", "off"}:
         raise ValueError(f"{_SWITCH} must be auto, kpoint or off, not {value!r}")
     return value
+
+
+_FORCES_SWITCH = "PARSEC_GAMMA_HYBRID_SECTOR_FORCES"
+
+
+def gamma_hybrid_sector_forces_setting() -> str:
+    """``PARSEC_GAMMA_HYBRID_SECTOR_FORCES``: ``auto`` (default, since 2026-11-21), ``sectors`` or ``off``.
+
+    What an unpolarized Gamma-point hybrid below the floor of :func:`sector_basis_reached` does when its caller counts
+    its forces or moved atoms as forces of the sectors (``sector_forces`` of ``driver.prepare_single_point``: the
+    command line under ``PARSEC_PERIODIC_SECTOR_FORCES=auto``).  Such a cell keeps the full grid, and on the default
+    (Grieder) routines nothing averaged its forces and moved positions over a group (until 2026-11-21); the
+    Fortran-derived routines average them over their own operations on that full grid
+    (:func:`parsec_python.Forces.periodic.periodic_force_operations`).
+
+    * ``auto``: the full grid, as before; on the default routines its forces and the moved positions of a relaxation
+      by an optimizer are averaged over the operations of the cell that the Fortran-derived routines take there (the
+      space group the problem carries, else the point operations about the origin that keep the lattice, the grid and
+      the atoms), the SCF unchanged (:func:`full_grid_forces_averaged`).  The Fortran-derived routines run as before.
+    * ``sectors``: the cell takes the sectors of ``PARSEC_GAMMA_HYBRID_SECTORS=auto`` whatever the size of its basis,
+      as a semilocal cell keeps them below ``PARSEC_PERIODIC_SECTOR_FLOOR`` (the same forces within the SCF noise,
+      averaged over the abelian group of the sectors; a first run of an 8-atom cell is 1.1-1.6 times slower on one
+      node of 4 A100, a 64-atom cell about as fast).
+    * ``off``: the full grid without the average, bit for bit as before.
+
+    Read by the preparation of every run.
+    """
+
+    value = os.environ.get(_FORCES_SWITCH, "auto").strip().lower() or "auto"
+    if value not in {"auto", "sectors", "off"}:
+        raise ValueError(f"{_FORCES_SWITCH} must be auto, sectors or off, not {value!r}")
+    return value
+
+
+#: The detail of the backend information that marks a Gamma-point hybrid kept on the full grid below the floor whose
+#: forces and moves are averaged over the operations of the cell (``PARSEC_GAMMA_HYBRID_SECTOR_FORCES=auto``).
+FULL_GRID_FORCES_DETAIL = "gamma_hybrid_sector_forces"
+#: How its value starts.
+FULL_GRID_FORCES_VALUE = "auto: the full grid below the floor of the sectors"
+
+
+def full_grid_forces_averaged(system) -> bool:
+    """Whether ``system`` is a Gamma-point hybrid on the full grid below the floor whose forces and moved positions are
+    averaged over the operations of the cell (the detail the driver records under
+    ``PARSEC_GAMMA_HYBRID_SECTOR_FORCES=auto``; moved structures keep it)."""
+
+    details = dict(getattr(getattr(system, "backend_info", None), "details", ()) or ())
+    return str(details.get(FULL_GRID_FORCES_DETAIL, "")).startswith(FULL_GRID_FORCES_VALUE)
 
 
 @dataclass(frozen=True)
@@ -169,7 +220,9 @@ def periodic_grid_points(problem) -> int:
 
 def sector_basis_reached(problem) -> bool:
     """Whether the basis of ``problem`` (grid points of its cell times its states) reaches the floor of the k-point
-    sectors (``kpoint_sectors._MINIMUM_ENTRIES``, ``2^24``): below it the ``auto`` route keeps the full grid.
+    sectors (``kpoint_sectors._MINIMUM_ENTRIES``, ``2^24``): below it the ``auto`` route keeps the full grid (where
+    forces and moves are averaged over the operations of the cell, or the sectors take them under
+    ``PARSEC_GAMMA_HYBRID_SECTOR_FORCES=sectors``: :func:`gamma_hybrid_sector_forces_setting`).
 
     ``False`` where the grid or the states cannot be found here (the driver then keeps the full grid as well).
     """
@@ -261,4 +314,13 @@ def gamma_hybrid_sector_route(translation) -> GammaHybridSectorRoute | None:
     )
 
 
-__all__ = ["GammaHybridSectorRoute", "gamma_hybrid_sector_route", "gamma_hybrid_sectors_setting", "sector_basis_reached"]
+__all__ = [
+    "FULL_GRID_FORCES_DETAIL",
+    "FULL_GRID_FORCES_VALUE",
+    "GammaHybridSectorRoute",
+    "full_grid_forces_averaged",
+    "gamma_hybrid_sector_forces_setting",
+    "gamma_hybrid_sector_route",
+    "gamma_hybrid_sectors_setting",
+    "sector_basis_reached",
+]

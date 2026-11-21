@@ -106,10 +106,24 @@ def symmetrize_scalar(values: np.ndarray, group: GridPointGroup) -> np.ndarray:
     values = np.asarray(values, dtype=np.float64)
     if group.order <= 1:
         return values.copy()
+    image_sum = getattr(group, "image_sum", None)
+    if image_sum is not None:
+        # a periodic group (Grid.space_group.PeriodicGridSymmetry): the same sum, also where it holds no table
+        return image_sum(values) / float(group.order)
     total = np.zeros_like(values)
     for images in group.images:
         total += values[images]
     return total / float(group.order)
+
+
+def gathered_images(values: np.ndarray, group: GridPointGroup, operation: int) -> np.ndarray:
+    """``values[..., images[operation]]`` of an array ``(..., points)``: through the group's own gather where it
+    has one (a periodic group that holds no table), the same values."""
+
+    gather = getattr(group, "gather", None)
+    if gather is not None:
+        return gather(values, operation)
+    return np.asarray(values)[..., group.images[operation]]
 
 
 def symmetrize_vector(values: np.ndarray, group: GridPointGroup) -> np.ndarray:
@@ -126,8 +140,8 @@ def symmetrize_vector(values: np.ndarray, group: GridPointGroup) -> np.ndarray:
     if group.order <= 1:
         return values.copy()
     total = np.zeros_like(values)
-    for matrix, images in zip(group.matrices, group.images):
-        total += np.asarray(matrix, dtype=np.float64).T @ values[:, images]
+    for operation, matrix in enumerate(group.matrices):
+        total += np.asarray(matrix, dtype=np.float64).T @ gathered_images(values, group, operation)
     return total / float(group.order)
 
 
@@ -151,6 +165,7 @@ def symmetrize_density(
 __all__ = [
     "GridPointGroup",
     "ScalarSymmetrization",
+    "gathered_images",
     "grid_point_group",
     "symmetrize_density",
     "symmetrize_scalar",

@@ -139,11 +139,15 @@ def supercell_kpoints_setting() -> str:
 
 def validate_settings() -> None:
     """Read every switch of this module, so that a value it does not know is refused before the SCF."""
+    from .supercell_levels import supercell_levels_setting
+
     kpoint_supercell_setting()
     kpoint_supercell_tolerance()
     kpoint_supercell_minimum()
     kpoint_supercell_gpus()
     supercell_kpoints_setting()
+    # the levels of the cell's files (read when they are written, after the SCF)
+    supercell_levels_setting()
 
 
 def _bloch_kinetic_applies(problem) -> bool:
@@ -724,12 +728,16 @@ def describe(route: str, repeats, *, estimate: float | None = None, per_cell: bo
     m = tuple(int(value) for value in repeats)
     count = int(np.prod(m))
     if route == "supercell" and per_cell:
+        from .supercell_levels import supercell_levels_setting
+
         text = (
             f"NOTE: the Gamma-centred k-point mesh {m[0]} x {m[1]} x {m[2]} of the cell is solved as the Gamma point "
             f"of its supercell of {count} cells (PARSEC_KPOINT_SUPERCELL={kpoint_supercell_setting()}; the Bloch "
             f"kinetic term): the energies reported are those of the input cell (1/{count} of the supercell's, whose "
             "total closes the output), the levels those of the supercell (the union of the mesh's); parsec.dat and "
             "the result archive are the cell's"
+            # PARSEC_KPOINT_SUPERCELL_LEVELS=off keeps the sentence of before (its levels dealt in turn)
+            + (", the levels of each k-point by their Bloch phases" if supercell_levels_setting() == "auto" else "")
         )
         if estimate is not None:
             text += (
@@ -794,40 +802,38 @@ def cell_parsec_dat_view(cell_problem, repeats):
     """The transform of ``parsec.dat`` of a mesh solved as its supercell: ``(result, grid, problem)`` of the
     supercell to those of the cell of the input, as the k-points would write them.
 
-    The potential and the density are those of the first cell of the supercell (they repeat with the cell), the
-    k-points the whole mesh with equal weights, and the levels those of the supercell, dealt to the k-points in turn
-    from the lowest: their union is the mesh's, so the Fermi level of a later non-self-consistent run is the same;
-    the file holds no orbitals, as that of the k-points.  ``Restart_Run`` of the cell reads it on either route.
+    The potential and the density are those of the first cell of the supercell (they repeat with the cell); the
+    k-points, their weights and levels those of the k-point route (:func:`parsec_python.SCF.supercell_levels.
+    cell_levels`: every state of the supercell at the k-point of its Bloch phases, the irreducible wedge of the
+    cell; under ``PARSEC_KPOINT_SUPERCELL_LEVELS=off``, or where the orbitals do not tell, the whole mesh with the
+    levels dealt to the k-points in turn, whose union is the mesh's); the file holds no orbitals, as that of the
+    k-points.  ``Restart_Run`` of the cell reads it on either route.
     """
     from types import SimpleNamespace
 
     from parsec_python.Grid.pbc import build_periodic_grid
 
     repeats = tuple(int(value) for value in repeats)
-    count = int(np.prod(repeats))
     cell_grid = build_periodic_grid(cell_problem.periodic_cell, cell_problem.grid)
     counts = np.asarray(cell_grid.points_per_axis, dtype=np.int64)
-    k_points = mesh_kpoints(cell_problem, repeats)
-
-    def host(values):
-        return values.get() if hasattr(values, "get") and not isinstance(values, np.ndarray) else values
 
     def view(result, grid, problem):
+        from .supercell_levels import cell_levels
+
         for name in ("eigenvalues", "occupations", "next_effective_potential", "density"):
             if getattr(result, name, None) is None:
                 raise ValueError(f"this result keeps no {name}, which parsec.dat needs")
-        eigenvalues = np.asarray(host(result.eigenvalues), dtype=np.float64).reshape(-1)
-        occupations = np.asarray(host(result.occupations), dtype=np.float64).reshape(-1)
-        # level i of the sorted list to k-point i mod M: the blocks of the k-points one after another
-        dealt = _dealt_levels(eigenvalues, count)
+        # every level at the k-point of its Bloch phases (the blocks of the k-points one after another)
+        levels = cell_levels(result, cell_problem, repeats)
         stand_in = SimpleNamespace(
-            eigenvalues=eigenvalues[dealt],
-            occupations=occupations[dealt],
+            eigenvalues=levels.eigenvalues,
+            occupations=levels.occupations,
             next_effective_potential=cell_block(result.next_effective_potential, counts, repeats),
             density=cell_block(result.density, counts, repeats),
-            k_points=k_points,
-            k_weights=np.full(count, 1.0 / count),
+            k_points=levels.k_points,
+            k_weights=levels.weights,
             wavefunctions=None,
+            parsec_dat_notes=() if levels.note is None else (levels.note,),
         )
         return stand_in, cell_grid, cell_problem
 
@@ -872,17 +878,17 @@ class _CellResult:
 
 def _dealt_levels(eigenvalues, count: int) -> np.ndarray:
     """The order that deals the levels of the supercell to the ``count`` k-points of the mesh in turn from the lowest
-    (the union is the mesh's, the assignment to each k-point not)."""
-    order = np.argsort(eigenvalues, kind="stable")
-    per_k = eigenvalues.size // count
-    return np.concatenate([order[k::count][:per_k] for k in range(count)])
+    (the union is the mesh's, the assignment to each k-point not): :func:`.supercell_levels.dealt_levels`."""
+    from .supercell_levels import dealt_levels
+
+    return dealt_levels(eigenvalues, count)
 
 
 def cell_result_view(result, cell_problem, repeats):
     """The result of a mesh solved as its supercell as the k-points of the cell of ``cell_problem`` would give it,
     for the result archive (``parsec_python_results.npz``) under ``auto``: the atoms and the grid of the cell, the
-    fields of its first cell, the levels dealt to the k-points of the mesh in turn (as :func:`cell_parsec_dat_view`),
-    the energies and the electrons of one cell, no orbitals.  ``--bands-from`` of that input reads it."""
+    fields of its first cell, the k-points, weights and levels of :func:`cell_parsec_dat_view`, the energies and the
+    electrons of one cell, no orbitals.  ``--bands-from`` of that input reads it."""
     from parsec_python.Grid.pbc import build_periodic_grid
 
     repeats = tuple(int(value) for value in repeats)
@@ -902,16 +908,20 @@ def cell_result_view(result, cell_problem, repeats):
             return array
         return cell_block(array, counts, repeats)
 
-    eigenvalues = np.asarray(host(result.eigenvalues), dtype=np.float64).reshape(-1)
-    dealt = _dealt_levels(eigenvalues, count)
+    from .supercell_levels import cell_levels, supercell_levels_setting
+
+    levels = cell_levels(result, cell_problem, repeats)
     overrides = {
         "atoms": tuple(cell_problem.atoms),
         "grid": cell_grid,
         "electron_count": float(result.electron_count) / count,
-        "eigenvalues": eigenvalues[dealt],
-        "occupations": np.asarray(host(result.occupations), dtype=np.float64).reshape(-1)[dealt],
-        "k_points": mesh_kpoints(cell_problem, repeats),
-        "k_weights": np.full(count, 1.0 / count),
+        "eigenvalues": levels.eigenvalues,
+        "occupations": levels.occupations,
+        "k_points": levels.k_points,
+        "k_weights": levels.weights,
+        # the states of a k-point of the run, which --bands-from of the cell's input solves (off: the archive of
+        # before, whose equal blocks give that count)
+        "run_states_per_kpoint": levels.states if supercell_levels_setting() == "auto" else None,
         "energies": energies_per_cell(result.energies, count),
         "history": [
             replace(item, energies=energies_per_cell(item.energies, count))
@@ -923,10 +933,16 @@ def cell_result_view(result, cell_problem, repeats):
         "wavefunctions": None,
     }
     representations = getattr(result, "representations", None)
-    if representations is not None and np.asarray(representations).size == eigenvalues.size:
-        overrides["representations"] = np.asarray(representations)[dealt]
+    if supercell_levels_setting() == "off" and representations is not None and (
+        np.asarray(representations).size == np.asarray(host(result.eigenvalues)).size
+    ):
+        # PARSEC_KPOINT_SUPERCELL_LEVELS=off: the sectors of the supercell's levels, dealt with them, as before
+        overrides["representations"] = np.asarray(representations)[
+            _dealt_levels(np.asarray(host(result.eigenvalues), dtype=np.float64).reshape(-1), count)
+        ]
     else:
-        overrides["representations"] = np.ones(eigenvalues.size, dtype=np.int32)
+        # the levels of a k-point carry no sector of the supercell (those of the k-points: one representation)
+        overrides["representations"] = np.ones(levels.eigenvalues.size, dtype=np.int32)
     for name in ("density", "core_density", "ionic_potential", "hartree_potential", "xc_potential",
                  "input_effective_potential", "output_effective_potential", "next_effective_potential"):
         overrides[name] = block(getattr(result, name, None))

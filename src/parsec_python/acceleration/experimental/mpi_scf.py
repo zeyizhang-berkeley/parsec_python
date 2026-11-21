@@ -245,8 +245,65 @@ def _rank_device_groups(owned, costs, devices, pool=True):
     return {sector: disjoint[sector] for sector in owned}
 
 
+def _pool_floor_groups(owned, costs, devices, groups, notes=None):
+    """``groups`` of one rank, or its disjoint groups where the device pool gives its GPUs too little basis each.
+
+    The floor of one process (``Eigensolvers/symmetry.process_pool_min_bytes``, ``PARSEC_CUPY_SECTOR_POOL_MIN_BYTES``,
+    24 MiB): where ``groups`` spread every sector ``owned`` over all ``devices`` (the device pool,
+    :func:`_rank_device_groups`), the mean sector of the rank must give every GPU at least that many bytes of basis
+    (``Eigensolvers/symmetry.process_pool_share_bytes`` of the rank's ``costs``, the rows times the first state count
+    of each sector, ``sector_placement_costs`` with a filter plan); below it the sectors keep the disjoint groups,
+    whose bases lie whole on single GPUs: the exchanges and synchronizations of a shared basis cost more than the
+    imbalance there (one process, diamond: slower at 9.4 and 12.5 MiB per GPU, not slower from 25.7 MiB).  ``notes``
+    (a list) receives the reason of a pool decision.  The value ``0`` takes the pool by the memory rule alone, as the
+    MPI runner did before 2026-11-21 and still does under the code defaults of the start vectors and the filter
+    (:func:`runner_pool_floor_applies`).
+    """
+    owned = tuple(owned)
+    devices = tuple(devices)
+    if len(owned) < 2 or len(devices) < 2 or not all(tuple(groups[sector]) == devices for sector in owned):
+        return groups
+    from ..Eigensolvers.symmetry import process_pool_min_bytes, process_pool_share_bytes
+
+    floor = process_pool_min_bytes()
+    share = process_pool_share_bytes(tuple(costs[sector] for sector in owned), len(devices))
+    if share < floor:
+        groups = _rank_device_groups(owned, costs, devices, pool=False)
+        reason = 'disjoint groups: the device pool would give'
+    else:
+        reason = 'device pool:'
+    if notes is not None:
+        notes.append(f"{reason} {share / 2**20:.1f} MiB of basis per GPU per sector, "
+                     f"{'below' if share < floor else 'at least'} PARSEC_CUPY_SECTOR_POOL_MIN_BYTES = "
+                     f"{floor / 2**20:g} MiB")
+    return groups
+
+
+def runner_pool_floor_applies() -> bool:
+    """Whether the MPI full-SCF runner applies the pool floor of one process to the GPUs of its ranks.
+
+    Since 2026-11-21: where the first solve draws its start vectors on the GPU
+    (``PARSEC_CUPY_DEVICE_RANDOM=1``) or the sectors are filtered by the distributed filter
+    (``PARSEC_CUPY_DISTRIBUTED_FILTER=1``), both set by the launch settings of ``scripts/run_multi_gpu_scf.sh``.
+    There the device pool of small sectors measured slower than disjoint groups (one rank of four A100, the launch
+    settings, the SCF time of the pool: diamond 6^3 at 9.4 MiB per GPU 2.9x, 5^3 at 12.5 MiB 2.4x, silicon 5^3 at
+    17.2 MiB 2.3x, fcc silver 5^3 at 6.6 MiB 2.8x, rocksalt LiF 5^3 at 9.3 MiB 2.6x, the same energies; with one of
+    the two switches alone 1.0-3.0x).  Under the code defaults of both switches (start vectors drawn on the host, one
+    filter per GPU) the first solve of the disjoint groups took longer than the pool saved in the later iterations
+    (diamond 5^3 10 % more SCF time, 6^3 and silicon the same), at 21-53 % more memory on the fullest GPU: the
+    ranks keep the pool by the memory rule alone there, as before.  The tests are those of
+    ``Eigensolvers/chebff.py`` and ``Eigensolvers/chebyshev.py``, which take those routes for exactly these
+    values; every rank reads the same environment.  The floor itself (``PARSEC_CUPY_SECTOR_POOL_MIN_BYTES``, ``0``
+    for none) is :func:`_pool_floor_groups`.
+    """
+    import os
+
+    return (os.environ.get('PARSEC_CUPY_DEVICE_RANDOM', '0').lower() in {'1', 'true', 'on'}
+            or os.environ.get('PARSEC_CUPY_DISTRIBUTED_FILTER', '0') == '1')
+
+
 def sector_device_groups(representations, size, rank, devices, shared=False, exchange=False, costs=None,
-                         divided=False, divisible=None, nested=False):
+                         divided=False, divisible=None, nested=False, pool_floor=False, notes=None):
     """The devices of every sector that rank ``rank`` solves (``{sector: devices}``).
 
     ``PARSEC_SECTOR_PLACEMENT=cyclic`` assigns sectors cyclically to ranks and disjoint GPU groups when possible,
@@ -265,6 +322,10 @@ def sector_device_groups(representations, size, rank, devices, shared=False, exc
     functional, ``SCF/hybrid_mpi.py``) every sector basis lies on one device
     of its rank, which the exchange operator needs, and a rank may own no
     sector: every device of every rank solves pair densities of the exchange.
+    ``pool_floor`` (the MPI runner since 2026-11-21 under the launch settings, ``MPISectorContext.pool_floor``,
+    :func:`runner_pool_floor_applies`) applies the floor of one process to the device pool of a rank that places
+    its sectors by size (:func:`_pool_floor_groups`; ``costs`` are then those of a filter plan), whose reason goes
+    to ``notes``.
     """
     representations, size, rank = int(representations), int(size), int(rank)
     devices = tuple(int(device) for device in devices)
@@ -292,7 +353,11 @@ def sector_device_groups(representations, size, rank, devices, shared=False, exc
         # After a CHEBDAV first solve, or for sectors below the generalized-Ritz threshold, every basis lies whole
         # on the first device of its group: the pool would solve all of them there (review of 2026-11-19).
         pool = bool(divided) and (divisible is None or all(bool(divisible[sector]) for sector in owned))
-        return _rank_device_groups(owned, _placement_costs(representations, costs), devices, pool=pool)
+        placement_costs = _placement_costs(representations, costs)
+        groups = _rank_device_groups(owned, placement_costs, devices, pool=pool)
+        if pool_floor and costs is not None:
+            groups = _pool_floor_groups(owned, placement_costs, devices, groups, notes)
+        return groups
     owned = tuple(range(rank, representations, size))
     if len(devices) < len(owned):
         return {sector: (devices[index % len(devices)],)
@@ -522,6 +587,12 @@ class MPISectorContext:
         # Whether configure gave this rank shares of shared bases over all its devices
         # (Eigensolvers/mpi_nested_basis.py).
         self.nested = False
+        # Whether a rank that places its sectors on its GPUs by size takes the device pool only above the floor of one
+        # process (PARSEC_CUPY_SECTOR_POOL_MIN_BYTES, _pool_floor_groups; the full-SCF runner sets it since
+        # 2026-11-21 under PARSEC_CUPY_DEVICE_RANDOM=1 or PARSEC_CUPY_DISTRIBUTED_FILTER=1, runner_pool_floor_applies),
+        # and the reason of that decision of the last configure on this rank (None without one).
+        self.pool_floor = False
+        self.pool_note = None
         # The sector count and costs of the last configure (nested_groups_hint).
         self.representation_count = 0
         self.sector_costs = None
@@ -569,7 +640,7 @@ class MPISectorContext:
         return sector_device_groups(representations, self.size, self.rank, devices,
                                     shared=shared, exchange=self.exchange,
                                     costs=costs, divided=self.divided_bases, divisible=divisible,
-                                    nested=shared and self.nested_sharing)
+                                    nested=shared and self.nested_sharing, pool_floor=self.pool_floor)
 
     def divides(self, representations, costs=None):
         """Whether :meth:`configure` can give ``representations`` sectors to the ranks (no MPI call).
@@ -694,9 +765,12 @@ class MPISectorContext:
             if refusal is not None:
                 raise ValueError(refusal)
             nested = bool(shared and self.nested_sharing)
+            notes = []
             groups = sector_device_groups(representations, self.size, self.rank, devices, shared=shared,
                                           exchange=self.exchange, costs=costs, divided=self.divided_bases,
-                                          divisible=divisible, nested=nested)
+                                          divisible=divisible, nested=nested, pool_floor=self.pool_floor,
+                                          notes=notes)
+            self.pool_note = '; '.join(notes) or None
             rank_groups = sector_rank_plan(representations, self.size, shared=shared, exchange=self.exchange,
                                            costs=costs, divided=self.divided_bases)
         except Exception as exc:
@@ -773,13 +847,18 @@ class MPISectorContext:
         ``payload``: ``problem``, ``backend`` and ``symmetry_cache_directory`` of a spin-polarized run whose guard
         fired, prepared as one sector of the identity whose basis the ranks share (``prepare_single_point`` with
         ``symmetry='off'``, ``spin_identity_sector`` and this context, whose ``configure`` every rank then calls
-        again).  The subspaces of the sectors of before were reset (the ``reset`` command) first.
+        again).  The subspaces of the sectors of before were reset (the ``reset`` command) first.  With
+        ``abelian_reason`` (a run that left the weighted sectors of a subgroup, ``driver._SpinSectorFallback.
+        replace_with_abelian``): the same input in the sectors of the abelian group, prepared with that reason
+        (:func:`..Symmetry.weighted_inputs.abelian_orbitals`) and the other keywords of the payload (``symmetry``,
+        ``symmetry_fixed_atoms``, ``symmetry_constraints``, ``sector_forces``), as the root prepares it next.
         """
         if self.rank != self.root:
             raise MPISCFError('only root may dispatch SCF commands')
         if self.failed or self.stopped:
             raise MPISCFError('MPI sector context is no longer active')
-        self.spin_fallback_layout = True
+        if payload.get('abelian_reason') is None:
+            self.spin_fallback_layout = True
         self.comm.bcast(('reprepare', payload, None), root=self.root)
         self.command_counts['reprepare'] = self.command_counts.get('reprepare', 0) + 1
 
@@ -793,7 +872,9 @@ class MPISectorContext:
         from ..driver import prepare_single_point
 
         self.command_counts['reprepare'] = self.command_counts.get('reprepare', 0) + 1
-        self.spin_fallback_layout = True
+        abelian_reason = payload.get('abelian_reason')
+        if abelian_reason is None:
+            self.spin_fallback_layout = True
         solver.restore_memory_allocator()
         solver._mpi_latest_results = {}
         solver._mpi_retained_results = {}
@@ -801,9 +882,21 @@ class MPISectorContext:
         import gc
 
         gc.collect()
-        system = prepare_single_point(payload['problem'], backend=payload['backend'], symmetry='off',
-                                      symmetry_cache_directory=payload.get('symmetry_cache_directory'),
-                                      mpi_context=self, spin_identity_sector=True)
+        if abelian_reason is None:
+            system = prepare_single_point(payload['problem'], backend=payload['backend'], symmetry='off',
+                                          symmetry_cache_directory=payload.get('symmetry_cache_directory'),
+                                          mpi_context=self, spin_identity_sector=True)
+        else:
+            # The sectors of the abelian group of a run that left the weighted ones, as the root prepares them.
+            from ..Symmetry.weighted_inputs import abelian_orbitals
+
+            options = {key: payload[key] for key in ('symmetry_fixed_atoms', 'symmetry_constraints', 'sector_forces')
+                       if key in payload}
+            with abelian_orbitals(abelian_reason):
+                system = prepare_single_point(payload['problem'], backend=payload['backend'],
+                                              symmetry=payload.get('symmetry', 'auto'),
+                                              symmetry_cache_directory=payload.get('symmetry_cache_directory'),
+                                              mpi_context=self, **options)
         self.reprepared_system = system
         return system.backend.symmetry_eigensolver, system.orbital_density_builder
 

@@ -42,6 +42,8 @@ def real_harmonics_with_gradients(
     angular_momentum: int,
     directions: np.ndarray,
     inverse_radius: np.ndarray,
+    *,
+    inside: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Real harmonics and their Cartesian gradients through ``l = 3``.
 
@@ -56,6 +58,10 @@ def real_harmonics_with_gradients(
     ``grad P = (dP/du - u*(u . dP/du))/|d|``,
 
     which is what ``ylm_real`` of ``nonloc.F90`` writes out term by term.
+
+    ``inside`` (optional mask): points whose ``directions`` are ``d/c`` with a
+    fixed centre radius ``c`` (``inverse_radius`` ``1/c``) take the gradient
+    of ``P(d/c)`` itself, ``dP/du / c``, without the radial projection.
     """
 
     unit = np.asarray(directions, dtype=np.float64)
@@ -124,6 +130,8 @@ def real_harmonics_with_gradients(
     for column, slope in enumerate(slopes):
         polynomial_gradient = np.column_stack(slope)
         radial_part = np.einsum("ij,ij->i", unit, polynomial_gradient)
+        if inside is not None:
+            radial_part = np.where(inside, 0.0, radial_part)
         gradients[:, column, :] = (
             polynomial_gradient - radial_part[:, None] * unit
         ) * inverse[:, None]
@@ -434,18 +442,27 @@ def build_periodic_projector_gradients(
 
     The images, support radius, radial interpolation (spline or PARSEC's table) and column order are those of the
     projector builder; with ``k_point=None`` the columns are real (the Gamma point).  Within
-    ``_PROJECTOR_GRADIENT_FLOOR`` of an atom the gradient is evaluated at that distance (see there).
+    ``_PROJECTOR_GRADIENT_FLOOR`` of an atom the gradient is evaluated at that distance (see there), except within the
+    first radial sample ``rs(2)`` under ``PARSEC_PROJECTOR_CENTER=auto`` (the default since 2026-11-21), where the
+    projector is ``w(rs(2)) P(d/rs(2))`` and its gradient ``w(rs(2)) dP/du / rs(2)``, the exact derivative of the
+    projector of the energy, as on the Fortran-derived routines (``off``: the floor there too, as before).
     ``atom_indices`` builds the columns of those atoms only, in the order given and labelled with their index in
     ``atoms``: the columns of the whole build with these labels, bit for bit (the representative atoms of the
     symmetry sectors of a cell).  ``None`` builds every atom.
 
-    Known limitation: the projector of an atom that sits exactly on a grid point has no defined value at that point
-    (the direction of a zero displacement; the harmonics of ``l >= 2`` evaluate to nonzero constants there), so the
-    nonlocal energy has a small jump as the atom crosses the grid point.  The force is the derivative of the energy at
-    the point, not of its smooth neighbours: for a hydrogen pair on a 0.7 bohr grid they differ by about 3 %.
+    Known limitation under ``PARSEC_PROJECTOR_CENTER=off``: the projector of an atom that sits exactly on a grid point
+    has no defined value at that point (the direction of a zero displacement; the harmonics of ``l >= 2`` evaluate to
+    nonzero constants there), so the nonlocal energy has a small jump as the atom crosses the grid point.  The force
+    is the derivative of the energy at the point, not of its smooth neighbours: for a hydrogen pair on a 0.7 bohr grid
+    they differ by about 3 %.  Under ``auto`` the projector is continuous there (``w(rs(2)) P(d/rs(2))``) and the force
+    of such an atom is the central difference of the energy (a 64-atom diamond cell: within 3e-8 Ry/bohr, the same as
+    the Fortran-derived routines within 6e-11).
     """
 
     complex_valued = k_point is not None
+    # PARSEC_PROJECTOR_CENTER (V_ion.ionic_potential.projector_center_setting): under auto the points within the
+    # first radial sample rs(2) of an atom take the exact gradient of the projector the energy uses there
+    center_setting = _ionic.projector_center_setting()
     value_dtype = complex if complex_valued else float
     k_point = None if k_point is None else np.asarray(k_point, dtype=float)
     lattice_vectors = np.asarray(lattice_vectors, dtype=float)
@@ -477,8 +494,21 @@ def build_periodic_projector_gradients(
                 else np.exp(-1j * ((grid.coordinates[support_rows] - translation) @ k_point))
             )
             clamped = np.maximum(radius, max(potential.radii[0], _PROJECTOR_GRADIENT_FLOOR))
+            inside = None
+            if center_setting == "auto":
+                # Within rs(2) the projector is w(rs(2)) P(d/rs(2)) (nonloc.F90's rnorm, the projector builders under
+                # PARSEC_PROJECTOR_CENTER=auto): its gradient there is w(rs(2)) dP/du / rs(2), with no radial slope,
+                # as on the Fortran-derived routines (Forces.periodic._projector_inverse_radius).  The floor above
+                # evaluated such a point at 1e-3 bohr instead, which is not the derivative of that projector: an atom
+                # on a grid point of a carbon POTRE cell (rs(2) 1.3e-5 bohr) got nonlocal forces 1.3e-3 Ry/bohr off the
+                # central difference of the energy.  Points from rs(2) on keep the floor, as before.
+                center = float(potential.radii[0])
+                near = radius < center
+                if np.any(near):
+                    clamped = np.where(near, center, clamped)
+                    inside = near
             inverse = 1.0 / clamped
-            images.append((support_rows, relative * inverse[:, None], clamped, inverse, phase))
+            images.append((support_rows, relative * inverse[:, None], clamped, inverse, phase, inside))
         if not images:
             continue
 
@@ -505,14 +535,18 @@ def build_periodic_projector_gradients(
                 signs.append(sign)
                 labels.append((atom_index, angular_momentum, harmonic_index))
 
-            for support_rows, unit, clamped, inverse, phase in images:
+            for support_rows, unit, clamped, inverse, phase, inside in images:
                 if spline is not None:
                     radial = spline(clamped)
                     slope = spline_derivative(spline, clamped)
                 else:
                     radial = np.interp(clamped, potential.radii, radial_grid, right=0.0)
                     slope = np.interp(clamped, potential.radii, radial_slope, right=0.0)
-                harmonics, harmonic_gradients = real_harmonics_with_gradients(angular_momentum, unit, inverse)
+                if inside is not None:
+                    slope = np.where(inside, 0.0, slope)
+                harmonics, harmonic_gradients = real_harmonics_with_gradients(
+                    angular_momentum, unit, inverse, inside=inside
+                )
                 for harmonic_index, target in enumerate(channel_columns):
                     scale = sqrt_dv if k_point is None else (phase * sqrt_dv)[:, None]
                     gradient = scale * (

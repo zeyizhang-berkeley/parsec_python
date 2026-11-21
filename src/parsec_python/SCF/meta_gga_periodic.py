@@ -134,18 +134,23 @@ def symmetrized_gradient(gradient, density_symmetry, lattice_vectors):
 
     if density_symmetry is None:
         return gradient
+    from ..Grid.point_group import gathered_images
+
     values = np.asarray(gradient, dtype=np.float64)
     lattice = np.asarray(lattice_vectors, dtype=np.float64)
     inverse = np.linalg.inv(lattice)
     total = np.zeros_like(values)
-    for matrix, images in zip(np.asarray(density_symmetry.matrices, dtype=np.float64), density_symmetry.images):
+    matrices = np.asarray(density_symmetry.matrices, dtype=np.float64)
+    for operation, matrix in enumerate(matrices):
         cartesian = inverse @ matrix.T @ lattice
         if not np.allclose(cartesian @ cartesian.T, np.eye(3), atol=1.0e-8):
             raise NotImplementedError(
                 "an operation of the symmetrized density is not a Cartesian rotation of this cell; the orbital "
                 "density gradient of a meta-GGA cannot be symmetrized with it"
             )
-        total += cartesian @ values[:, images]
+        # (the field at the images of the operation: a row of the table, or formed from the affine map of a
+        # PeriodicGridSymmetry that holds none)
+        total += cartesian @ gathered_images(values, density_symmetry, operation)
     return total / float(len(density_symmetry.images))
 
 

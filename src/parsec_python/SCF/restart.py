@@ -83,7 +83,7 @@ class RestartFields:
     ``file_operations`` the points and symmetry operations of the file.
     ``stored_states`` is the smallest number of levels the file holds for a
     channel and k-point (``nec`` of ``restart_run.F90``), ``None`` where it
-    is not known.
+    is not known; ``stored_kpoints`` the k-points of the file.
     """
 
     date_label: str
@@ -96,6 +96,7 @@ class RestartFields:
     file_points: int
     file_operations: int
     stored_states: int | None = None
+    stored_kpoints: int | None = None
 
     @property
     def total_density(self) -> np.ndarray:
@@ -273,10 +274,13 @@ def restart_fields(
             (int(block.energies.size) for channel in data.levels for block in channel),
             default=None,
         ),
+        stored_kpoints=len(data.levels[0]) if data.levels else None,
     )
 
 
-def check_fixed_state_count(stored_states: int | None, number_of_states: int) -> None:
+def check_fixed_state_count(
+    stored_states: int | None, number_of_states: int, *, stored_kpoints: int | None = None
+) -> None:
     """``Fix_Number_Eigenvalues``: the restart file must hold ``States_Num`` levels.
 
     PARSEC then keeps the stored number of eigenpairs (``restart_run.F90``
@@ -284,15 +288,27 @@ def check_fixed_state_count(stored_states: int | None, number_of_states: int) ->
     solve.  With fewer than ``States_Num`` the final test of ``eigval.F90``
     (l.700-716, ierr 404) is meant to stop the run; the Fortran binary
     instead repeats its diagonalization loop without work and crashes.
+    The message of a file of several k-points (``stored_kpoints``) also names
+    the remedy for one written after a k-point mesh solved as its supercell,
+    whose k-points can hold fewer levels than ``States_Num``
+    (:mod:`parsec_python.SCF.supercell_levels`).
     """
 
     if stored_states is None or stored_states >= int(number_of_states):
         return
+    supercell = (
+        "; a parsec.dat written after a k-point mesh solved as its supercell "
+        "(PARSEC_KPOINT_SUPERCELL) holds at each k-point only the levels its "
+        f"Bloch phases give it: take States_Num {int(stored_states)} or fewer, or "
+        "write the file with PARSEC_KPOINT_SUPERCELL=off"
+        if stored_kpoints is not None and int(stored_kpoints) > 1
+        else ""
+    )
     raise RestartError(
         "Fix_Number_Eigenvalues: not enough eigenstates are computed! "
         f"{int(number_of_states)} eigenstates requested but only {int(stored_states)} "
         "found in the restart file (keep States_Num of the run that wrote it, "
-        "or remove Fix_Number_Eigenvalues)",
+        f"or remove Fix_Number_Eigenvalues{supercell})",
         404,
     )
 

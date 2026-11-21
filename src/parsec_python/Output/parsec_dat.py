@@ -813,6 +813,27 @@ class ResultChannels:
     wavefunction_kind: int | None = None
 
 
+def _single_kpoint_orbitals(kept, spin: int, k_points, rows: int, host_orbitals):
+    """The kept Bloch orbitals of channel ``spin`` of a run of one k-point, else ``None``.
+
+    ``kept`` is ``k_wavefunctions[spin][k]`` of a k-point loop; only a run of a
+    single k-point gives them (``parsec_dat_from_result`` writes one set of
+    columns for every k-point), and only full-grid host arrays (``rows``
+    points; not a sector or row block of an MPI solver).
+    """
+
+    if kept is None or int(np.asarray(k_points).reshape(-1, 3).shape[0]) != 1:
+        return None
+    try:
+        vectors = kept[spin][0]
+    except (IndexError, TypeError):
+        return None
+    vectors = host_orbitals(vectors)
+    if vectors is None or vectors.shape[0] != int(rows):
+        return None
+    return vectors
+
+
 def result_channels(result) -> ResultChannels:
     """The fields of ``parsec.dat`` from a Python SCF result.
 
@@ -874,27 +895,54 @@ def result_channels(result) -> ResultChannels:
         )
     if hasattr(result, "eigenvalues_up"):
         potentials = getattr(result, "scf_potentials", None) or {}
-        if "potential_up" not in potentials or "potential_down" not in potentials:
+        mixed = getattr(result, "next_potentials", None)
+        if mixed is None and (
+            "potential_up" not in potentials or "potential_down" not in potentials
+        ):
             raise ValueError(
                 "this spin-polarized result keeps no potentials of its channels, "
                 "which parsec.dat needs"
             )
-        has_k = getattr(result, "k_points", None) is not None
+        k_points = getattr(result, "k_points", None)
+        has_k = k_points is not None
+        if has_k:
+            # A k-point loop that kept its Bloch orbitals (keep_wavefunctions:
+            # the forces of the Fortran-derived routines, the ionic loops of a
+            # spin cell at the Gamma point) writes those of a single k-point
+            # (the columns follow the states of the first k-point).
+            kept = getattr(result, "k_wavefunctions", None)
+            rows = np.asarray(result.density_up).size
+            orbitals = tuple(
+                _single_kpoint_orbitals(kept, spin, k_points, rows, host_orbitals)
+                for spin in range(2)
+            )
+        else:
+            orbitals = (
+                host_orbitals(result.wavefunctions_up),
+                host_orbitals(result.wavefunctions_down),
+            )
         return ResultChannels(
             eigenvalues=(np.asarray(result.eigenvalues_up, dtype=float), np.asarray(result.eigenvalues_down, dtype=float)),
             occupations=(np.asarray(result.occupations_up, dtype=float), np.asarray(result.occupations_down, dtype=float)),
-            wavefunctions=(
-                None if has_k else host_orbitals(result.wavefunctions_up),
-                None if has_k else host_orbitals(result.wavefunctions_down),
-            ),
+            wavefunctions=orbitals,
+            # vnew of the file: the mixed potentials where the loop kept them,
+            # else the output potentials of its last iteration
             potentials=(
-                np.asarray(potentials["potential_up"], dtype=float),
-                np.asarray(potentials["potential_down"], dtype=float),
+                tuple(np.asarray(value, dtype=float) for value in mixed)
+                if mixed is not None
+                else (
+                    np.asarray(potentials["potential_up"], dtype=float),
+                    np.asarray(potentials["potential_down"], dtype=float),
+                )
             ),
             densities=(np.asarray(result.density_up, dtype=float), np.asarray(result.density_down, dtype=float)),
             notes=(
-                "the potentials of parsec.dat are the output potentials of the last "
-                "SCF iteration (this driver keeps no mixed potential)",
+                ()
+                if mixed is not None
+                else (
+                    "the potentials of parsec.dat are the output potentials of the last "
+                    "SCF iteration (this driver keeps no mixed potential)",
+                )
             ),
         )
     require(result, ("eigenvalues", "occupations", "next_effective_potential", "density"))

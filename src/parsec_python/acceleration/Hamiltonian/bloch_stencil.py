@@ -152,18 +152,183 @@ extern "C" __global__ void bloch_stencil_march(
 }
 """
 
+# The same march on a real block (k = 0, PARSEC_KPOINT_REAL_GAMMA): no gradient term, the Laplacian of the real
+# Gamma-point Hamiltonian; the sums in the order of the complex kernel's real part.
+_REAL_SOURCE = r"""
+extern "C" __global__ void bloch_stencil_march_real(
+    const double* __restrict__ u,
+    double* __restrict__ out,
+    const double* __restrict__ diagonal,
+    const double* __restrict__ laplacian,
+    const int n0, const int n1, const int n2,
+    const long long columns,
+    const long long lanes,
+    const double* __restrict__ nonlocal,
+    const int has_nonlocal,
+    const double* __restrict__ previous,
+    const int has_previous,
+    const double center,
+    const double scale,
+    const double* __restrict__ before,
+    const double* __restrict__ after,
+    const int has_after)
+{
+    const long long lane = (long long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (lane >= lanes) return;
+    const long long column = lane % columns;
+    const long long yz = lane / columns;
+    const int z = (int)(yz % n2);
+    const int y = (int)(yz / n2);
+    const long long plane = (long long)n1 * n2;
+    double c0[HALF_WIDTH], c1[HALF_WIDTH], c2[HALF_WIDTH];
+    long long dy_plus[HALF_WIDTH], dy_minus[HALF_WIDTH], dz_plus[HALF_WIDTH], dz_minus[HALF_WIDTH];
+#pragma unroll
+    for (int s = 1; s <= HALF_WIDTH; ++s) {
+        c0[s - 1] = laplacian[s - 1];
+        c1[s - 1] = laplacian[HALF_WIDTH + s - 1];
+        c2[s - 1] = laplacian[2 * HALF_WIDTH + s - 1];
+        int yp = y + s; if (yp >= n1) yp -= n1;
+        int ym = y - s; if (ym < 0) ym += n1;
+        int zp = z + s; if (zp >= n2) zp -= n2;
+        int zm = z - s; if (zm < 0) zm += n2;
+        dy_plus[s - 1] = (long long)(yp - y) * n2 * columns;
+        dy_minus[s - 1] = (long long)(ym - y) * n2 * columns;
+        dz_plus[s - 1] = (long long)(zp - z) * columns;
+        dz_minus[s - 1] = (long long)(zm - z) * columns;
+    }
+    double window[2 * HALF_WIDTH + 1];
+#pragma unroll
+    for (int s = -HALF_WIDTH; s <= HALF_WIDTH; ++s) {
+        int xs = s < 0 ? s + n0 : s;
+        window[s + HALF_WIDTH] = u[((long long)xs * plane + yz) * columns + column];
+    }
+    for (int x = 0; x < n0; ++x) {
+        const long long point = (long long)x * plane + yz;
+        const long long index = point * columns + column;
+        const double centre = window[HALF_WIDTH];
+        double value = diagonal[point] * centre;
+#pragma unroll
+        for (int s = 1; s <= HALF_WIDTH; ++s) {
+            value += c0[s - 1] * (window[HALF_WIDTH + s] + window[HALF_WIDTH - s]);
+            value += c1[s - 1] * (u[index + dy_plus[s - 1]] + u[index + dy_minus[s - 1]]);
+            value += c2[s - 1] * (u[index + dz_plus[s - 1]] + u[index + dz_minus[s - 1]]);
+        }
+        if (has_nonlocal) value += nonlocal[index];
+        value = (value - center * centre) * scale;
+        if (has_previous) value -= before[column] * previous[index];
+        if (has_after) value *= after[column];
+        out[index] = value;
+#pragma unroll
+        for (int s = 0; s < 2 * HALF_WIDTH; ++s) {
+            window[s] = window[s + 1];
+        }
+        if (x + 1 < n0) {
+            int xn = x + 1 + HALF_WIDTH;
+            if (xn >= n0) xn -= n0;
+            window[2 * HALF_WIDTH] = u[((long long)xn * plane + yz) * columns + column];
+        }
+    }
+}
+"""
+
+# The real march of the psi gauge of a time-reversal invariant point (PARSEC_KPOINT_TRIM_REAL, ..SCF.kpoint_real):
+# the Laplacian with every neighbour across a face along axis a taken times twist[a] (+-1).
+_TWIST_SOURCE = r"""
+extern "C" __global__ void bloch_stencil_march_twisted(
+    const double* __restrict__ u,
+    double* __restrict__ out,
+    const double* __restrict__ diagonal,
+    const double* __restrict__ laplacian,
+    const int n0, const int n1, const int n2,
+    const long long columns,
+    const long long lanes,
+    const double* __restrict__ nonlocal,
+    const int has_nonlocal,
+    const double* __restrict__ previous,
+    const int has_previous,
+    const double center,
+    const double scale,
+    const double* __restrict__ before,
+    const double* __restrict__ after,
+    const int has_after,
+    const double t0, const double t1, const double t2)
+{
+    const long long lane = (long long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (lane >= lanes) return;
+    const long long column = lane % columns;
+    const long long yz = lane / columns;
+    const int z = (int)(yz % n2);
+    const int y = (int)(yz / n2);
+    const long long plane = (long long)n1 * n2;
+    double c0[HALF_WIDTH], c1[HALF_WIDTH], c2[HALF_WIDTH];
+    double fy_plus[HALF_WIDTH], fy_minus[HALF_WIDTH], fz_plus[HALF_WIDTH], fz_minus[HALF_WIDTH];
+    long long dy_plus[HALF_WIDTH], dy_minus[HALF_WIDTH], dz_plus[HALF_WIDTH], dz_minus[HALF_WIDTH];
+#pragma unroll
+    for (int s = 1; s <= HALF_WIDTH; ++s) {
+        c0[s - 1] = laplacian[s - 1];
+        c1[s - 1] = laplacian[HALF_WIDTH + s - 1];
+        c2[s - 1] = laplacian[2 * HALF_WIDTH + s - 1];
+        int yp = y + s; fy_plus[s - 1] = 1.0; if (yp >= n1) { yp -= n1; fy_plus[s - 1] = t1; }
+        int ym = y - s; fy_minus[s - 1] = 1.0; if (ym < 0) { ym += n1; fy_minus[s - 1] = t1; }
+        int zp = z + s; fz_plus[s - 1] = 1.0; if (zp >= n2) { zp -= n2; fz_plus[s - 1] = t2; }
+        int zm = z - s; fz_minus[s - 1] = 1.0; if (zm < 0) { zm += n2; fz_minus[s - 1] = t2; }
+        dy_plus[s - 1] = (long long)(yp - y) * n2 * columns;
+        dy_minus[s - 1] = (long long)(ym - y) * n2 * columns;
+        dz_plus[s - 1] = (long long)(zp - z) * columns;
+        dz_minus[s - 1] = (long long)(zm - z) * columns;
+    }
+    double window[2 * HALF_WIDTH + 1];
+#pragma unroll
+    for (int s = -HALF_WIDTH; s <= HALF_WIDTH; ++s) {
+        int xs = s < 0 ? s + n0 : s;
+        const double value = u[((long long)xs * plane + yz) * columns + column];
+        window[s + HALF_WIDTH] = s < 0 ? t0 * value : value;
+    }
+    for (int x = 0; x < n0; ++x) {
+        const long long point = (long long)x * plane + yz;
+        const long long index = point * columns + column;
+        const double centre = window[HALF_WIDTH];
+        double value = diagonal[point] * centre;
+#pragma unroll
+        for (int s = 1; s <= HALF_WIDTH; ++s) {
+            value += c0[s - 1] * (window[HALF_WIDTH + s] + window[HALF_WIDTH - s]);
+            value += c1[s - 1] * (fy_plus[s - 1] * u[index + dy_plus[s - 1]] + fy_minus[s - 1] * u[index + dy_minus[s - 1]]);
+            value += c2[s - 1] * (fz_plus[s - 1] * u[index + dz_plus[s - 1]] + fz_minus[s - 1] * u[index + dz_minus[s - 1]]);
+        }
+        if (has_nonlocal) value += nonlocal[index];
+        value = (value - center * centre) * scale;
+        if (has_previous) value -= before[column] * previous[index];
+        if (has_after) value *= after[column];
+        out[index] = value;
+#pragma unroll
+        for (int s = 0; s < 2 * HALF_WIDTH; ++s) {
+            window[s] = window[s + 1];
+        }
+        if (x + 1 < n0) {
+            int xn = x + 1 + HALF_WIDTH;
+            double factor = 1.0;
+            if (xn >= n0) { xn -= n0; factor = t0; }
+            window[2 * HALF_WIDTH] = factor * u[((long long)xn * plane + yz) * columns + column];
+        }
+    }
+}
+"""
+
 _THREADS = 256
-_KERNELS: dict[tuple[int, int], Any] = {}
+_KERNELS: dict[tuple[int, int, str], Any] = {}
 _LOCK = Lock()
+_NAMES = {"complex": "bloch_stencil_march", "real": "bloch_stencil_march_real", "twisted": "bloch_stencil_march_twisted"}
 
 
-def _kernel(cp, half_width: int):
-    key = (int(cp.cuda.Device().id), int(half_width))
+def _kernel(cp, half_width: int, real: bool = False, *, kind: str | None = None):
+    kind = kind or ("real" if real else "complex")
+    key = (int(cp.cuda.Device().id), int(half_width), kind)
     with _LOCK:
         kernel = _KERNELS.get(key)
         if kernel is None:
-            module = cp.RawModule(code=_SOURCE.replace("HALF_WIDTH", str(int(half_width))))
-            kernel = module.get_function("bloch_stencil_march")
+            source = {"complex": _SOURCE, "real": _REAL_SOURCE, "twisted": _TWIST_SOURCE}[kind]
+            module = cp.RawModule(code=source.replace("HALF_WIDTH", str(int(half_width))))
+            kernel = module.get_function(_NAMES[kind])
             _KERNELS[key] = kernel
         return kernel
 
@@ -385,9 +550,124 @@ class BlochStencil:
         kernel.kernel = _kernel(cp, width)
         return kernel
 
+    # the signs of the neighbours across the faces along each axis (the psi gauge of a time-reversal invariant point,
+    # from_psi), None for the stencils of the u gauge
+    twist = None
+
+    @classmethod
+    def from_psi(cls, cp, stencils: AxialStencils, psi_laplacian) -> "BlochStencil | None":
+        """The real kernel of the psi-gauge Laplacian of a time-reversal invariant point (``PARSEC_KPOINT_TRIM_REAL``:
+        the stencil with every neighbour across a face along axis ``a`` taken times ``+-1``), or ``None``.
+
+        The signs are read off row 0 (its neighbour one step back along each axis lies across the face) and the
+        matrix is checked against the twisted stencil on random vectors (to 1e-12 of the largest entry)."""
+        matrix = sp.csr_matrix(psi_laplacian)
+        if np.iscomplexobj(matrix.data):
+            if matrix.nnz and float(np.max(np.abs(matrix.data.imag))) > 0.0:
+                return None
+            matrix = sp.csr_matrix((matrix.data.real, matrix.indices, matrix.indptr), shape=matrix.shape)
+        shape = stencils.shape
+        width = stencils.half_width
+        strides = (shape[1] * shape[2], shape[2], 1)
+        row = slice(matrix.indptr[0], matrix.indptr[1])
+        values = dict(zip(matrix.indices[row].tolist(), matrix.data[row].tolist()))
+        twist = []
+        for axis in range(3):
+            behind = values.get((shape[axis] - 1) * strides[axis])
+            reference = float(stencils.laplacian[axis, 0])
+            if behind is None or reference == 0.0 or abs(abs(behind) - abs(reference)) > 1e-12 * abs(reference):
+                return None
+            twist.append(1.0 if behind / reference > 0.0 else -1.0)
+        rng = np.random.default_rng(20261121)
+        block = rng.standard_normal((matrix.shape[0], 2))
+        expected = matrix @ block
+        found = stencils.centre * block
+        grid = block.reshape(*shape, 2)
+        for axis in range(3):
+            for s in range(1, width + 1):
+                coefficient = float(stencils.laplacian[axis, s - 1])
+                if coefficient == 0.0:
+                    continue
+                for direction in (1, -1):
+                    moved = np.roll(grid, -direction * s, axis=axis)  # moved[i] = grid[i + direction s]
+                    index = np.arange(shape[axis])
+                    crossed = (index + direction * s >= shape[axis]) | (index + direction * s < 0)
+                    sign = np.where(crossed, twist[axis], 1.0).reshape([-1 if a == axis else 1 for a in range(3)] + [1])
+                    found = found + coefficient * (sign * moved).reshape(block.shape)
+        scale = float(np.max(np.abs(matrix.data))) if matrix.nnz else 1.0
+        if float(np.max(np.abs(found - expected))) > 1.0e-12 * scale * float(np.max(np.abs(block))) * 10.0:
+            return None
+        kernel = cls.__new__(cls)
+        kernel.cp = cp
+        kernel.stencils = stencils
+        kernel.laplacian = cp.asarray(np.ascontiguousarray(stencils.laplacian.reshape(-1)))
+        kernel.gradient = cp.zeros(stencils.laplacian.size, dtype=cp.float64)
+        kernel.kernel = _kernel(cp, width)
+        kernel.twist = tuple(twist)
+        kernel._real_capable = True
+        return kernel
+
     @property
     def device_bytes(self) -> int:
         return int(self.laplacian.nbytes + self.gradient.nbytes)
+
+    @property
+    def real_capable(self) -> bool:
+        """Whether the stencil has no odd (gradient) part: ``k = 0``, a real operator, whose real blocks take the real
+        kernel (``PARSEC_KPOINT_REAL_GAMMA``)."""
+        found = getattr(self, "_real_capable", None)
+        if found is None:
+            found = self._real_capable = not bool(self.cp.any(self.gradient != 0.0))
+        return found
+
+    def _apply_real(self, block, diagonal_with_centre, added, previous, center, scale, before, after):
+        """:meth:`apply` of a float64 block (:attr:`real_capable`): the march of the real kernel."""
+        cp = self.cp
+        kernel = getattr(self, "_real_kernel", None)
+        if kernel is None:
+            kind = "real" if self.twist is None else "twisted"
+            kernel = self._real_kernel = _kernel(cp, self.stencils.half_width, kind=kind)
+        if not block.flags.c_contiguous:
+            block = cp.ascontiguousarray(block)
+        out = cp.empty_like(block)
+        points, columns = int(block.shape[0]), int(block.shape[1])
+        if points * columns == 0:
+            return out
+        if previous is not None and before is None:
+            raise ValueError("a recurrence step with a previous block needs its coefficients")
+
+        def same_shape(array):
+            if array is None:
+                return block, np.int32(0)
+            array = cp.ascontiguousarray(array, dtype=cp.float64)
+            if tuple(array.shape) != tuple(block.shape):
+                raise ValueError("the arrays of a recurrence step must have the shape of the block")
+            return array, np.int32(1)
+
+        def per_column(values):
+            if values is None:
+                return self.laplacian, np.int32(0)
+            values = cp.ascontiguousarray(cp.asarray(values, dtype=cp.float64).reshape(-1))
+            if values.size != columns:
+                raise ValueError("one coefficient per column is needed")
+            return values, np.int32(1)
+
+        nonlocal_part, has_nonlocal = same_shape(added)
+        previous_part, has_previous = same_shape(previous)
+        before_part, _ = per_column(before if previous is not None else None)
+        after_part, has_after = per_column(after)
+        n0, n1, n2 = self.stencils.shape
+        work = n1 * n2 * columns
+        arguments = (
+            block, out, diagonal_with_centre, self.laplacian,
+            np.int32(n0), np.int32(n1), np.int32(n2), np.int64(columns), np.int64(work),
+            nonlocal_part, has_nonlocal, previous_part, has_previous,
+            np.float64(center), np.float64(scale), before_part, after_part, has_after,
+        )
+        if self.twist is not None:
+            arguments = arguments + tuple(np.float64(value) for value in self.twist)
+        kernel(((work + _THREADS - 1) // _THREADS,), (_THREADS,), arguments)
+        return out
 
     def diagonal(self, diagonal):
         """``c_0 + v``: the diagonal the kernel adds (``v = V + |k|^2`` of the operator)."""
@@ -410,9 +690,14 @@ class BlochStencil:
         With ``added`` (an array of the block's shape added to the local term), ``previous``,
         ``before`` and ``after`` (one value per column) the step of the Chebyshev recurrence
         ``(((L block + added) - center block) scale - before previous) after``; without them
-        ``center = 0`` and ``scale = 1`` leave the local term exactly.
+        ``center = 0`` and ``scale = 1`` leave the local term exactly.  A float64 block of a stencil without its odd
+        part (:attr:`real_capable`, ``k = 0``) takes the real kernel.
         """
         cp = self.cp
+        if block.dtype == cp.float64 and self.real_capable:
+            return self._apply_real(block, diagonal_with_centre, added, previous, center, scale, before, after)
+        if self.twist is not None:
+            raise TypeError("the twisted stencil of the psi gauge takes real blocks only")
         if block.dtype != cp.complex128 or not block.flags.c_contiguous:
             block = cp.ascontiguousarray(block, dtype=cp.complex128)
         out = cp.empty_like(block)

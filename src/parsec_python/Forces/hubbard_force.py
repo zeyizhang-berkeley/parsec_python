@@ -37,6 +37,7 @@ from ..Hamiltonian.hubbard import (
     HUBBARD_ORBITALS,
     HubbardProjectors,
     hubbard_support,
+    support_tree,
     hubbard_terms_from_orbitals,
     interpolate_hubbard_radial,
     periodic_replica_translations,
@@ -108,6 +109,8 @@ def build_hubbard_projector_gradients(
     columns: list[np.ndarray] = []
     values: tuple[list, list, list] = ([], [], [])
     order = int(getattr(getattr(grid, "settings", None), "double_grid_order", 1) or 1)
+    # (the support of each atom from the points a tree finds near its images: the same entries bit for bit)
+    tree = support_tree(coordinates) if order == 1 else None
     for block, index in enumerate(projectors.atom_indices):
         atom = atoms[index]
         potential = potentials[atom.symbol]
@@ -135,6 +138,7 @@ def build_hubbard_projector_gradients(
             atom.position,
             projectors.cutoff_radii[atom.symbol],
             translations,
+            tree=tree,
         )
         distance = np.linalg.norm(relative, axis=1)
         radial, slope = interpolate_hubbard_radial(potential, distance)
