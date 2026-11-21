@@ -113,6 +113,27 @@ repository takes the same input:
 scripts/run_multi_gpu_scf.sh calculation/parsec.in output_directory
 ```
 
+The structure of a restart (`Relax_Restart`, `--restart-from`, the
+`Restart_mode` of molecular dynamics) also decides the symmetry of a periodic
+cell, as in PARSEC 1.5, which reads `relax_restart.dat` and `mdinit.dat` in
+`initial.f90` before `symmetries.f90` and `irrbz.f90` look for the group: the
+input reader finds the space group, the irreducible k-point wedge and its
+weights, the density average and, on the Fortran-derived routines, the
+fractional translations of the grid again from the restarted atoms
+(`Input/restarted_symmetry.py`, on the routines of the input), and
+`parsec.out` says so in a NOTE where they differ from the input's. A restart
+whose atoms keep the group of the input runs exactly as before. Where the
+reader refuses the input with the restarted atoms (for example a `Move_Flag`
+that the wedge of their group cannot follow) or the default routines do not
+compute it, the run stops with the reason. Before 2026-11-20 a cell kept the
+group of the input's atoms: the 8-atom silicon cube with a 2x2x2 mesh and one
+atom moved 0.1 bohr came out 8.9 mRy per cell too low (13.0 mRy for the
+64-atom cube), on either set of routines, and its forces stopped (an
+operation without an image of an atom). Clusters were not affected: their
+point group is found from the atoms they solve, as are the sectors of a cell
+at the Gamma point and of its k-points. `Restart_Run` keeps the atoms of the
+input (`parsec.dat` stores none).
+
 The exit status is 0 for a finished run, 3 when an SCF loop did not converge
 and 4 when the structure is not relaxed (movements used up, or the optimizer
 stopped above `Force_Min`).  As in PARSEC 1.5, an SCF loop that does not

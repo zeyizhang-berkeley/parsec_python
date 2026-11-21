@@ -78,6 +78,20 @@ class SettingTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {"PARSEC_KPOINT_SECTORS": "on"}):
             with self.assertRaises(ValueError):
                 sectors.kpoint_sectors_setting()
+        # PARSEC_HYBRID_KPOINT_SECTORS: off (default) or on; on with the sectors switched off is refused, at the
+        # preparation of a run too
+        for value, expected in (("", "off"), ("OFF", "off"), ("on", "on")):
+            with mock.patch.dict(os.environ, {"PARSEC_HYBRID_KPOINT_SECTORS": value, "PARSEC_KPOINT_SECTORS": ""}):
+                self.assertEqual(sectors.hybrid_kpoint_sectors_setting(), expected)
+        for switches in (
+            {"PARSEC_HYBRID_KPOINT_SECTORS": "auto"},
+            {"PARSEC_HYBRID_KPOINT_SECTORS": "on", "PARSEC_KPOINT_SECTORS": "off"},
+        ):
+            with mock.patch.dict(os.environ, switches):
+                with self.assertRaises(ValueError):
+                    sectors.hybrid_kpoint_sectors_setting()
+                with self.assertRaises(ValueError):
+                    sectors.check_kpoint_sector_switches()
         with mock.patch.dict(os.environ, {"PARSEC_KPOINT_SECTOR_MARGIN": ""}):
             self.assertEqual(sectors.sector_margin(), 1.3)
         with mock.patch.dict(os.environ, {"PARSEC_KPOINT_SECTOR_MARGIN": "0.9"}):
@@ -386,6 +400,41 @@ class SectorDriverTests(unittest.TestCase):
         )
         self.assertGreater(auto.timings.detail["kpoint_sector_tasks"], 8.0)
 
+    def test_a_hybrid_in_the_sectors_at_any_size(self) -> None:
+        # PARSEC_HYBRID_KPOINT_SECTORS=on: the engine marks the cache its SCF loops share, so a cell below the floor of
+        # the sectors (2^24 entries) is split all the same (the start and every inner loop), with the energy of the
+        # loops without sectors; off leaves it whole, the run as before
+        from parsec_python.models import ExactExchangeSettings
+        from parsec_python.SCF import hybrid_periodic
+
+        problem = self._silicon(
+            xc_functional="pbe0", exact_exchange=ExactExchangeSettings(tolerance=1.0e-8), convergence_criterion=1.0e-8
+        )
+        k_points, weights = self._gamma_and_x(problem)
+        results, engines = {}, {}
+        original = hybrid_periodic.BlochExchange.__init__
+
+        def keep(engine, *arguments, **keywords):
+            original(engine, *arguments, **keywords)
+            engines[os.environ["PARSEC_HYBRID_KPOINT_SECTORS"]] = engine
+
+        from parsec_python.SCF.pbc import prepare_periodic_single_point
+
+        for setting in ("off", "on"):
+            with mock.patch.dict(os.environ, {"PARSEC_HYBRID_KPOINT_SECTORS": setting, "PARSEC_KPOINT_SECTORS": ""}),                     mock.patch.object(sectors, "_MINIMUM_ENTRIES", 1 << 24),                     mock.patch.object(hybrid_periodic.BlochExchange, "__init__", keep), warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                system = prepare_periodic_single_point(problem)
+                results[setting] = hybrid_periodic.run_periodic_hybrid_scf(system, k_points, weights)
+        off, on = results["off"], results["on"]
+        self.assertTrue(off.converged and on.converged)
+        self.assertNotIn("kpoint_sector_tasks", off.timings.detail)
+        self.assertGreater(on.timings.detail["kpoint_sector_tasks"], 2.0)
+        self.assertAlmostEqual(on.energies.total, off.energies.total, delta=5.0e-8)
+        self.assertNotIn(sectors.ANY_SIZE_KEY, engines["off"].projector_cache)
+        self.assertTrue(engines["on"].projector_cache[sectors.ANY_SIZE_KEY])
+        self.assertIn("PARSEC_HYBRID_KPOINT_SECTORS=on", engines["on"].description)
+        self.assertNotIn("PARSEC_HYBRID_KPOINT_SECTORS", engines["off"].description)
+
     def test_the_loops_of_one_structure_share_the_plans(self) -> None:
         # a caller's cache (the projector cache of the Fock loop): the next loop takes the plans and their static
         # operators; another layout of the job (other k-points) makes its own
@@ -579,6 +628,14 @@ class DeclineTests(unittest.TestCase):
             self.assertIsNone(sectors.sector_solver(job(), plain))
         with mock.patch.object(sectors, "_MINIMUM_ENTRIES", system.grid.size * 22):
             self.assertIsNotNone(sectors.sector_solver(job(), plain))
+        # the cache of the loops of a Fock loop under PARSEC_HYBRID_KPOINT_SECTORS=on: every k-point with sectors,
+        # whatever its basis and the work they save
+        with mock.patch.object(sectors, "_MINIMUM_ENTRIES", 1 << 24):
+            for states in (22, 1):
+                marked = job(number_of_states=states, geometry=dict(geometry, cache={sectors.ANY_SIZE_KEY: True}))
+                self.assertIsInstance(sectors.sector_solver(marked, plain), sectors.SectorKPointSolver)
+                unmarked = job(number_of_states=states, geometry=dict(geometry, cache={}))
+                self.assertIsNone(sectors.sector_solver(unmarked, plain))
 
 
 if __name__ == "__main__":

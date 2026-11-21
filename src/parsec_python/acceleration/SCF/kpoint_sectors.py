@@ -58,7 +58,9 @@ The density of a sector, ``|U v|^2``, is ``q_s / m_w`` on the rows of the orbit 
 
 The k-point SCF of a bulk orthorhombic cell takes it, scalar or spin-polarized, with the exchange of a hybrid, forces
 and kept orbitals, without meta-GGA, LDA+U or the fixed occupations of ``occup.in`` (the driver then gives the job its
-``geometry``); ``PARSEC_KPOINT_SECTORS=off`` keeps one task per k-point, bit for bit as before.  The loop with refined
+``geometry``); ``PARSEC_KPOINT_SECTORS=off`` keeps one task per k-point, bit for bit as before, and
+``PARSEC_HYBRID_KPOINT_SECTORS=on`` (opt-in) splits the k-points of the loops of a hybrid's Fock loop at any size
+(:func:`hybrid_kpoint_sectors_setting`, :data:`ANY_SIZE_KEY`).  The loop with refined
 levels (the last inner loop of the Fock loop of a hybrid with the adaptive inner criterion or the outer DIIS) takes it
 too since 2026-11-19 (``PARSEC_KPOINT_SECTOR_LEVELS=auto``: its level passes solve the sectors, started from the Ritz
 states of the loop before; ``off``: one task per k-point from fresh subspaces, as before).
@@ -128,6 +130,10 @@ _MARGIN_SWITCH = "PARSEC_KPOINT_SECTOR_MARGIN"
 _REFIT_SWITCH = "PARSEC_KPOINT_SECTOR_REFIT"
 _LEVELS_SWITCH = "PARSEC_KPOINT_SECTOR_LEVELS"
 _FOCK_GUARD_SWITCH = "PARSEC_KPOINT_SECTOR_GUARD_FOCK"
+_HYBRID_SWITCH = "PARSEC_HYBRID_KPOINT_SECTORS"
+# the key of a structure's cache (the projector cache the SCF loops of one Fock loop share) under which every k-point
+# with sectors is split, whatever the size of its basis and the work the sectors save (PARSEC_HYBRID_KPOINT_SECTORS=on)
+ANY_SIZE_KEY = "kpoint_sectors_any_size"
 # the buffer of a refitted sector over the levels it holds among those kept (at least _EXTRA_STATES states)
 _REFIT_BUFFER = 0.1
 _EXTRA_STATES = 6
@@ -187,6 +193,28 @@ def sector_guard_fock_setting() -> str:
     value = os.environ.get(_FOCK_GUARD_SWITCH, "auto").strip().lower() or "auto"
     if value not in {"auto", "off"}:
         raise ValueError(f"{_FOCK_GUARD_SWITCH} must be auto or off, not {value!r}")
+    return value
+
+
+def hybrid_kpoint_sectors_setting() -> str:
+    """``PARSEC_HYBRID_KPOINT_SECTORS``: ``off`` (default) splits the k-points of the SCF loops of a hybrid's Fock
+    loop as every k-point loop (``PARSEC_KPOINT_SECTORS``: bases of at least 2^24 entries whose sectors halve the
+    work); ``on`` splits every k-point whose little group has commuting involutions into their sectors, whatever its
+    size (:data:`ANY_SIZE_KEY` in the cache of the loops, :func:`plan_sectors`), so that the orbitals of the Fock loop
+    keep the operations of ``H_k``, the translations of a cell that repeats a smaller one among them: a metal's
+    exchange can no longer break them (the 4-atom cube of fcc Au, PBE0, 2x2x2, 1000 K: the plain loop breaks the
+    face-centring translations and creeps for hundreds of outer iterations; in the sectors both routes of
+    ``PARSEC_HYBRID_KPOINT_WEDGE`` converge, to dexx 1e-10 Ry in 26 outer iterations on the pairs and 12 on the
+    wedge).  ``on`` with ``PARSEC_KPOINT_SECTORS=off`` is refused: the two ask for opposite things."""
+
+    value = os.environ.get(_HYBRID_SWITCH, "off").strip().lower() or "off"
+    if value not in {"off", "on"}:
+        raise ValueError(f"{_HYBRID_SWITCH} must be off or on, not {value!r}")
+    if value == "on" and kpoint_sectors_setting() == "off":
+        raise ValueError(
+            f"{_HYBRID_SWITCH}=on splits the k-points of a Fock loop into their sectors, which {_SWITCH}=off keeps "
+            "whole: unset one of them"
+        )
     return value
 
 
@@ -1184,8 +1212,8 @@ def check_kpoint_sector_switches() -> None:
     """Read the switches of the k-point sectors and of the detection of their cell group, so that a value they do not
     know is refused at the preparation of a run (``ValueError``) and not first at the setup of its k-point solver:
     ``PARSEC_KPOINT_SECTORS``, ``PARSEC_KPOINT_SECTOR_TOLERANCE``, ``PARSEC_SYMMETRY_ATOM_TOLERANCE``,
-    ``PARSEC_PERIODIC_TRANSLATIONS``, ``PARSEC_PERIODIC_TRIVIAL_ORIGIN``, ``PARSEC_PERIODIC_SYMMETRY_CENTRE`` and
-    ``PARSEC_PERIODIC_DEFECT_CENTRE``.  Reading them changes nothing else."""
+    ``PARSEC_PERIODIC_TRANSLATIONS``, ``PARSEC_PERIODIC_TRIVIAL_ORIGIN``, ``PARSEC_PERIODIC_SYMMETRY_CENTRE``,
+    ``PARSEC_PERIODIC_DEFECT_CENTRE`` and ``PARSEC_HYBRID_KPOINT_SECTORS``.  Reading them changes nothing else."""
 
     from ..Symmetry.axis_reflection import (
         periodic_centre_setting,
@@ -1202,6 +1230,7 @@ def check_kpoint_sector_switches() -> None:
     periodic_trivial_origin_setting()
     periodic_centre_setting()
     periodic_defect_centre_setting()
+    hybrid_kpoint_sectors_setting()
 
 
 def plan_sectors(job: KPointJob) -> list[KPointSectors | None] | None:
@@ -1225,14 +1254,17 @@ def plan_sectors(job: KPointJob) -> list[KPointSectors | None] | None:
     if k_of_task.shape[0] != job.n_tasks or k_of_task.size == 0 or int(k_of_task.max()) >= k_points.shape[0]:
         return None
     states, rows = int(job.number_of_states), int(grid.size)
-    if rows * states < _MINIMUM_ENTRIES:  # before any search of the group: a small cell stays as it was
+    cache = geometry.get("cache")
+    # PARSEC_HYBRID_KPOINT_SECTORS=on (the loops of a Fock loop): every k-point with sectors, whatever its size and the
+    # work they save
+    any_size = isinstance(cache, dict) and bool(cache.get(ANY_SIZE_KEY))
+    if not any_size and rows * states < _MINIMUM_ENTRIES:  # before any search of the group: a small cell stays as it was
         return None
     tolerance = kpoint_sector_atom_tolerance(forces=job.extras is not None)
     margin = sector_margin()
-    cache = geometry.get("cache")
     signature = (
         int(job.n_tasks), states, rows, margin, _EXTRA_STATES, tuple(int(value) for value in k_of_task),
-        tuple(np.round(k_points, 12).ravel().tolist()), tolerance,
+        tuple(np.round(k_points, 12).ravel().tolist()), tolerance, any_size,
     )
     # The plans the loops before kept for this structure (the cache of its projectors), before the group is searched
     # again: they were made from the same atoms and grid.
@@ -1275,7 +1307,9 @@ def plan_sectors(job: KPointJob) -> list[KPointSectors | None] | None:
             continue
         sizes = decomposition.sector_sizes
         counts = [min(size, math.ceil(margin * states * size / rows) + _EXTRA_STATES) for size in sizes]
-        if sum(size * count * count for size, count in zip(sizes, counts)) > _WORK_FRACTION * rows * states * states:
+        if not any_size and (
+            sum(size * count * count for size, count in zip(sizes, counts)) > _WORK_FRACTION * rows * states * states
+        ):
             plans.append(None)
             continue
         plan = KPointSectors(index, k_point, decomposition, counts)
@@ -2000,6 +2034,8 @@ __all__ = [
     "kpoint_sector_atom_tolerance",
     "kpoint_sector_tolerance_setting",
     "kpoint_sectors_setting",
+    "hybrid_kpoint_sectors_setting",
+    "ANY_SIZE_KEY",
     "kpoint_force_orbits_setting",
     "generated_subgroup",
     "largest_commuting_involutions",

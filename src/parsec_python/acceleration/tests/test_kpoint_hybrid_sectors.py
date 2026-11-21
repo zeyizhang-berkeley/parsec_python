@@ -1067,6 +1067,27 @@ class AfterStartTests(unittest.TestCase):
         self.assertIs(same, moved)
         self.assertEqual(len(records), 1)
 
+    def test_the_sectors_at_any_size_go_with_the_wedge(self) -> None:
+        # PARSEC_HYBRID_KPOINT_SECTORS=on: the key of the loops' cache stays through the move to the wedge (which drops
+        # the projectors and plans of the pairs), and the engine's description names it before and after
+        from parsec_python.acceleration.SCF.kpoint_sectors import ANY_SIZE_KEY
+
+        with mock.patch.dict(os.environ, {"PARSEC_HYBRID_KPOINT_SECTORS": "on", "PARSEC_KPOINT_SECTORS": ""}):
+            engine = self.engine()
+        self.assertTrue(engine.projector_cache[ANY_SIZE_KEY])
+        self.assertIn("PARSEC_HYBRID_KPOINT_SECTORS=on", engine.description)
+        engine.projector_cache["projectors of the pairs"] = object()
+        engine.after_start(self.system, self.start([1.0, 1.0, 0.0]))
+        self.assertIsNotNone(engine.stars)
+        self.assertEqual(set(engine.projector_cache), {ANY_SIZE_KEY})
+        self.assertIn("irreducible wedge", engine.description)
+        self.assertIn("PARSEC_HYBRID_KPOINT_SECTORS=on", engine.description)
+        # off (the default): no key, the description as before
+        with mock.patch.dict(os.environ, {"PARSEC_HYBRID_KPOINT_SECTORS": ""}):
+            plain = self.engine()
+        self.assertNotIn(ANY_SIZE_KEY, plain.projector_cache)
+        self.assertNotIn("PARSEC_HYBRID_KPOINT_SECTORS", plain.description)
+
     def test_the_states_of_the_sectors_and_of_two_channels(self) -> None:
         engine = self.engine()
         sectors_state = {"kpoint_sectors": {"layout": [], "counts": [], "states": {}}}
@@ -1173,6 +1194,42 @@ class AutoRouteTests(unittest.TestCase):
         np.testing.assert_allclose(
             np.asarray(auto.eigenvalues)[occupied], np.asarray(off.eigenvalues)[occupied], rtol=0.0, atol=1.0e-5
         )
+
+
+class AnySizeSectorTests(unittest.TestCase):
+    """PARSEC_HYBRID_KPOINT_SECTORS=on: the silicon cube (12^3 points, 22 states: below the floor of the k-point
+    sectors) solves the start on the pairs and, insulating, the Fock loop on the wedge (auto) in the sectors of its
+    k-points, with the energy of the run without them; off keeps every k-point whole, the run as before."""
+
+    def test_the_wedge_of_auto_in_the_sectors(self) -> None:
+        from parsec_python.Grid.kpoints import kpoint_sampling
+        from parsec_python.models import HybridMeshRouteRecord
+
+        results, routes = {}, {}
+        for setting in ("off", "on"):
+            directory, translation = _silicon_mesh("pbe0", "auto")
+            self.addCleanup(shutil.rmtree, directory, True)
+            problem = translation.problem
+            k_points, weights = kpoint_sampling(problem)
+            records: list = []
+            # the floor of the sectors as in a run (this module lowers it to split its small cells)
+            with mock.patch.object(sectors, "_MINIMUM_ENTRIES", 1 << 24):
+                results[setting] = _run(
+                    problem, k_points, weights,
+                    {"PARSEC_HYBRID_KPOINT_WEDGE": "auto", "PARSEC_HYBRID_KPOINT_SECTORS": setting,
+                     "PARSEC_KPOINT_SECTORS": ""},
+                    records.append,
+                )
+            routes[setting] = [record.route for record in records if isinstance(record, HybridMeshRouteRecord)]
+        off, on = results["off"], results["on"]
+        self.assertTrue(off.converged and on.converged)
+        self.assertEqual(routes, {"off": ["wedge"], "on": ["wedge"]})
+        self.assertEqual(len(on.k_points), 4)
+        self.assertNotIn("kpoint_sector_tasks", off.timings.detail)
+        self.assertGreater(on.timings.detail["kpoint_sector_tasks"], 4.0)
+        self.assertIn("PARSEC_HYBRID_KPOINT_SECTORS=on", on.exact_exchange.pair_solver)
+        self.assertNotIn("PARSEC_HYBRID_KPOINT_SECTORS", off.exact_exchange.pair_solver)
+        self.assertAlmostEqual(on.energies.total, off.energies.total, delta=5.0e-8)
 
 
 class MeshNoteTests(unittest.TestCase):

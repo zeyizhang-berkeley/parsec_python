@@ -1036,8 +1036,10 @@ filled at the Fermi level at equivalent k-points can be filled unequally by the 
 favours integer occupations), a state that breaks the crystal symmetry and lies below the symmetric one, which is all
 the wedge can hold (hcp Au2 PBE0 4x4x2: the electron of the doublet at the two L points gathers at one of them, 9.7e-4
 Ry lower at 0.3 and 0.2 bohr; primitive fcc Au 4x4x4: one of the three X points, 6.9e-4 Ry; the conventional cubic fcc
-Au cell on its orthogonal grid, 2x2x2: 5.8e-3 Ry, where neither route converges its Fock loop in 100 outer iterations,
-a behaviour of metal hybrids at low smearing as before). Insulators take the wedge to the discretization on any grid
+Au cell on its orthogonal grid, 2x2x2: 5.8e-3 Ry, where neither route converges its Fock loop at `Exx_Tolerance`
+1e-8: the exchange then breaks the face-centring translations of the cube as well and creeps on through nearly
+degenerate states of that kind; `PARSEC_HYBRID_KPOINT_SECTORS=on` keeps them and converges both routes, see
+[src/parsec_python/README.md](src/parsec_python/README.md), "Diagnostics of the Fock loop"). Insulators take the wedge to the discretization on any grid
 (primitive Si 1e-10 Ry, hexagonal Si 5.4e-8 Ry, the 8-atom Si cube 1e-10 Ry; A100). `PARSEC_HYBRID_KPOINT_WEDGE=on`
 runs the wedge always, its start too: the symmetric state, also for a metal. The wedge and the images take only the
 operations that map the mesh onto itself, also on the Fortran-derived routines, whose density average keeps the whole

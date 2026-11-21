@@ -1162,6 +1162,41 @@ saddle; the fractional-occupation warning says so. The symmetry sectors of
 every orbital, so they cannot reach a state that breaks it; `--symmetry off`
 can.
 
+A metal's cell that repeats a smaller one can break its translations the
+same way. The conventional cubic cell of fcc Au (4 atoms, a = 7.7 bohr,
+PBE0, 2x2x2, `Fermi_Temp` 1000 K, 0.3 bohr; A100, 2026-11-20) has at its
+three points (0, 1/2, 1/2) a 4-fold level at the Fermi level (f 0.42 after
+the PBE start): the four Sigma points of the primitive zone that the cube
+folds onto each, one per character of the face-centring translations. The
+Fock loop of either route of `PARSEC_HYBRID_KPOINT_WEDGE` first fills that
+level unequally, then mixes its states, so that the density loses the
+face-centring translations (its asymmetry under them grows 2.5 times per
+outer iteration to 6e-3: the four atoms become inequivalent), and then
+creeps through a family of nearly degenerate states of that kind: the
+occupations stay fixed, successive steps of the density matrix are parallel
+(1e-3 to 2.5e-2 per outer iteration, cosine 0.999 to 1.000), dexx waves
+between 1e-7 and 7e-6 Ry and the energy falls by 1e-7 to 1e-5 Ry per outer
+iteration, for 300 outer iterations (-265.91021 Ry and still falling; the
+wedge -265.90427 Ry). The inner loops converge in 2 to 11 iterations each,
+and nothing oscillates. Neither a fixed inner criterion (it crosses 1e-8
+once, by chance, and at 1e-10 creeps on) nor an outer DIIS opened to
+fractional occupations (most of its steps rejected) converges it; the
+default `Exx_Tolerance` (1e-6 Ry) stops on such a state after 17 (pairs) or
+9 (wedge) outer iterations. `PARSEC_HYBRID_KPOINT_SECTORS=on` (opt-in)
+solves every k-point of the loop in the sectors of its little group, whose
+operations include the face-centring translations
+([acceleration/README.md](acceleration/README.md)), so the orbitals keep
+them: at `Exx_Tolerance` 1e-10 the pairs converge in 26 outer iterations
+(dexx 3.9e-11, -265.90957 Ry, 231 s on one A100 node) and the wedge in 12
+(-265.89715 Ry, 67 s); at 1e-8 the pairs stop after 10 on a stationary
+point symmetric across the three points (-265.89702 Ry), which a tighter
+tolerance leaves. Without the switch these converge: a denser mesh (3x3x3,
+4 outer iterations, no level near half filling at the Fermi level), a higher
+`Fermi_Temp` (4000 K, 4 outer iterations, the symmetric state), HSE06 (4),
+and the primitive cell, whose orbitals cannot break the translations
+(primitive fcc Au 4x4x4 converges); a finer grid does not (0.25 bohr
+behaves as 0.3).
+
 ### Comparison with Quantum ESPRESSO
 
 For H2, H2O, CH4, CO, N2, O2 (triplet) and benzene with PBE0, HSE06, HSE03,

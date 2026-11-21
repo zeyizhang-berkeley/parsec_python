@@ -132,6 +132,13 @@ def restart_structure(translation, directory: Path, source: Path | None = None):
         problem=replace(problem, atoms=atoms, recenter_geometry=recenter),
         slab_shift=slab_shift,
     )
+    # The space group of a cell, its k-point wedge and its density average are those of these atoms, as PARSEC 1.5
+    # reads relax_restart.dat before it finds them (Input.restarted_symmetry; before 2026-11-20 they stayed those
+    # of the input's atoms).
+    from ..Input.restarted_symmetry import restarted_symmetry
+
+    translation, symmetry_notes = restarted_symmetry(translation, source.name)
+    notes.extend(symmetry_notes)
     return translation, restart, notes
 
 

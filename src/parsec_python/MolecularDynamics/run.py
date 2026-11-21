@@ -125,8 +125,14 @@ def restart_structure(translation, input_directory: Path):
         ),
         slab_shift=0.0,
     )
+    # The symmetry the reader found from the input's atoms is found again from these (Input.restarted_symmetry;
+    # dynamics uses no group, as PARSEC, so this changes nothing there unless the reader's choice depends on it).
+    from ..Input.restarted_symmetry import restarted_symmetry
+
+    translation, symmetry_notes = restarted_symmetry(translation, MD_RESTART)
     return translation, restart, [
-        f" Molecular dynamics restarted from {MD_RESTART}, step {restart.frame}"
+        f" Molecular dynamics restarted from {MD_RESTART}, step {restart.frame}",
+        *symmetry_notes,
     ]
 
 

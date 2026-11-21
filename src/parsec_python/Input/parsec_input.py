@@ -283,6 +283,12 @@ class ParsecInputTranslation:
     # driver may keep a group these inputs do not break
     # (acceleration/SCF/symmetry_off_inputs.py).
     symmetry_off_reasons: tuple[str, ...] = ()
+    # What parse_parsec_input was given beside the path (the directory of
+    # the pseudopotentials, --esdf-lenient): a restart whose structure
+    # replaces the atoms of the input reads the input again with them for
+    # its symmetry (parsec_python.Input.restarted_symmetry).
+    pseudopotential_directory: Path | None = None
+    esdf_lenient: bool = False
 
 
 @dataclass(frozen=True)
@@ -2518,6 +2524,7 @@ def _parse_parsec_input(
     pseudopotential_directory: str | Path | None = None,
     routines: RoutineChoice | None = None,
     esdf_lenient: bool = False,
+    symmetry_positions=None,
 ) -> ParsecInputTranslation:
     source = Path(path).expanduser().resolve()
     pp_directory = (
@@ -5005,6 +5012,21 @@ def _parse_parsec_input(
     if standard_orientation is not None:
         atoms = list(standard_orientation[1])
         standard_orientation = standard_orientation[0]
+    # The atoms the space group of a cell, its k-point wedge and its density average are found from: those of the
+    # input, or a structure that replaces them (symmetry_positions: Relax_Restart, --restart-from, the restart of a
+    # dynamics run; parsec_python.Input.restarted_symmetry).  PARSEC 1.5 reads relax_restart.dat and mdinit.dat
+    # in initial.f90 (l.103-130, l.294-305), folds the atoms into the cell there (l.322-326, the Fortran-derived
+    # routines here), and finds the group of those atoms afterwards (parsec.F90:391 calls initial, :493
+    # symmetries, :508 inipbc, irrbz from init_var.F90:289).  Everything else of this reading keeps the input's.
+    symmetry_atoms = atoms
+    if symmetry_positions is not None:
+        symmetry_atoms = _atoms_for_symmetry(
+            atoms,
+            symmetry_positions,
+            lattice_vectors=periodic_cell.lattice_vectors if is_periodic else None,
+            periodicity=periodicity,
+            fold=bool(is_periodic and routines.fortran and recenter_aperiodic),
+        )
     symmetrize_density = optional_bool("symmetrize_charge_density")
     space_group = None
     kpoint_time_reversal = False
@@ -5060,7 +5082,7 @@ def _parse_parsec_input(
             and kpoint_force_wedge_setting() == "auto"
         ):
             moving_wedge = _default_routines_force_wedge(
-                atoms,
+                symmetry_atoms,
                 periodic_cell,
                 grid,
                 default_routines_mesh,
@@ -5087,7 +5109,7 @@ def _parse_parsec_input(
         ):
             wedge_notes: list[str] = []
             found = _default_routines_wedge(
-                atoms,
+                symmetry_atoms,
                 periodic_cell,
                 grid,
                 default_routines_mesh,
@@ -5179,7 +5201,7 @@ def _parse_parsec_input(
                 warnings.extend(wedge_notes)
             else:
                 symmetrize_density, space_group = _default_routines_wedge(
-                    atoms,
+                    symmetry_atoms,
                     periodic_cell,
                     grid,
                     default_routines_mesh,
@@ -5197,7 +5219,7 @@ def _parse_parsec_input(
             # the operations that map the grid onto itself (an irreducible wedge; scalar orbitals, no hybrid: any
             # other request went to the Fortran-derived routines above).
             symmetrize_density, space_group = _default_routines_list_symmetry(
-                atoms,
+                symmetry_atoms,
                 periodic_cell,
                 grid,
                 ignore_symmetry=ignore_symmetry,
@@ -5235,7 +5257,7 @@ def _parse_parsec_input(
             """_periodic_symmetry with the k-point shift ``shift``, and the movements its wedge cannot follow."""
 
             symmetrized, group, symmetric_grid = _periodic_symmetry(
-                atoms,
+                symmetry_atoms,
                 periodic_cell,
                 unsymmetrized_grid,
                 general_periodic_grid=general_periodic_grid,
@@ -5264,7 +5286,7 @@ def _parse_parsec_input(
             )
             if forces_requested:
                 _check_reduced_kpoint_movements(
-                    atoms,
+                    symmetry_atoms,
                     periodic_cell,
                     group,
                     movable=movable,
@@ -5774,7 +5796,7 @@ def _parse_parsec_input(
             restart_notes: list[str] = []
             try:
                 rebuilt = _periodic_symmetry(
-                    atoms,
+                    symmetry_atoms,
                     periodic_cell,
                     grid,
                     general_periodic_grid=general_periodic_grid,
@@ -5805,7 +5827,7 @@ def _parse_parsec_input(
                 )
                 if forces_requested:
                     _check_reduced_kpoint_movements(
-                        atoms,
+                        symmetry_atoms,
                         periodic_cell,
                         rebuilt[1],
                         movable=movable,
@@ -5865,7 +5887,7 @@ def _parse_parsec_input(
         # of a DOS_MP_Grid without DOS_MP_Shift (implied_zero_shift is then that of the DOS shift)
         try:
             trial = _wire_slab_symmetry(
-                atoms,
+                symmetry_atoms,
                 periodic_cell,
                 grid,
                 periodicity=periodicity,
@@ -5896,7 +5918,7 @@ def _parse_parsec_input(
             )
             if compute_forces:
                 _check_wire_slab_kpoint_movements(
-                    atoms,
+                    symmetry_atoms,
                     periodic_cell,
                     trial[2],
                     trial[1],
@@ -5929,7 +5951,7 @@ def _parse_parsec_input(
             )
     if wire_or_slab:
         symmetrize_density, space_group, grid = _wire_slab_symmetry(
-            atoms,
+            symmetry_atoms,
             periodic_cell,
             grid,
             periodicity=periodicity,
@@ -5970,7 +5992,7 @@ def _parse_parsec_input(
             # Forces.wire_slab, which the ionic loop restricts to the
             # operations Move_Flag respects and molecular dynamics drops).
             _check_wire_slab_kpoint_movements(
-                atoms,
+                symmetry_atoms,
                 periodic_cell,
                 grid,
                 space_group,
@@ -6020,7 +6042,7 @@ def _parse_parsec_input(
     if output_gw:
         gw = _gw_settings(
             post_processing,
-            atoms=atoms,
+            atoms=symmetry_atoms,
             periodic_cell=periodic_cell,
             is_periodic=is_periodic,
             wire_or_slab=wire_or_slab,
@@ -6362,6 +6384,8 @@ def _parse_parsec_input(
         atoms_outside_cell=atoms_outside_cell,
         recenter_aperiodic=recenter_aperiodic,
         **({} if standard_orientation is None else {"standard_orientation": standard_orientation}),
+        pseudopotential_directory=pp_directory,
+        esdf_lenient=bool(esdf_lenient),
     )
     if input15.complete_input:
         # PARSEC 1.5's Generate_Complete_Parsec_In: the effective input (bak_complete_parsec.in)
@@ -6385,6 +6409,60 @@ def _parse_parsec_input(
             ),
         )
     return translation
+
+
+class StructureCountMismatch(ParsecInputError):
+    """A structure given for the symmetry search (:func:`read_symmetry_of_structure`) holds another number of
+    atoms than the input: the problem it replaces the atoms of is not the input's (a supercell)."""
+
+
+def _atoms_for_symmetry(atoms, positions, *, lattice_vectors, periodicity: int, fold: bool) -> list:
+    """The atoms of the input at ``positions`` (one row per atom, bohr), for the symmetry search of the reader.
+
+    ``fold``: each translated into the cell as ``initial.f90:322-326`` does after it read the coordinates of a
+    restart (:func:`parsec_python.Grid.cell.back_to_cell`; the Fortran-derived routines).
+    """
+
+    rows = np.asarray(positions, dtype=np.float64).reshape(-1, 3)
+    if rows.shape[0] != len(atoms):
+        raise StructureCountMismatch(
+            f"the structure holds {rows.shape[0]} atoms, the input {len(atoms)}"
+        )
+    placed = []
+    for atom, row in zip(atoms, rows):
+        position = row.copy()
+        if fold and lattice_vectors is not None:
+            from ..Grid.cell import back_to_cell
+
+            position = back_to_cell(position, lattice_vectors, periodicity)
+        placed.append(replace(atom, position=position))
+    return placed
+
+
+def read_symmetry_of_structure(translation: ParsecInputTranslation, positions) -> ParsecInputTranslation:
+    """The input of ``translation`` read again with the space group, its k-point wedge and its density average
+    found from the atoms at ``positions`` (bohr, in the order of the input's atoms) instead of the input's.
+
+    The reading is that of :func:`parse_parsec_input` on the routines ``translation`` runs on
+    (``translation.routines``), with its directory of pseudopotentials and ``--esdf-lenient``; every other
+    quantity, the atoms of the problem included, is the input's.  Raises :class:`StructureCountMismatch` where
+    ``positions`` hold another number of atoms, :class:`~parsec_python.Input.routines.UseFortranRoutines` where the
+    default routines do not compute the input with that symmetry, and :class:`ParsecInputError` where the reader
+    refuses it.
+    """
+
+    try:
+        return _parse_parsec_input(
+            translation.source,
+            pseudopotential_directory=translation.pseudopotential_directory,
+            routines=translation.routines,
+            esdf_lenient=translation.esdf_lenient,
+            symmetry_positions=positions,
+        )
+    except (ParsecInputError, UseFortranRoutines):
+        raise
+    except ValueError as error:
+        raise ParsecInputError(str(error)) from error
 
 
 def _periodic_symmetry(

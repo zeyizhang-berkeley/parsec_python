@@ -565,11 +565,20 @@ class BlochExchange:
         self.potentials = (
             periodic_pair_potentials(system, definition, k_mesh=self.mesh) if potentials is None else potentials
         )
+        # PARSEC_HYBRID_KPOINT_SECTORS=on: every SCF loop of this Fock loop splits its k-points into the sectors of
+        # their little groups at any size (acceleration/SCF/kpoint_sectors.py, plan_sectors); off: the size rule of
+        # PARSEC_KPOINT_SECTORS, as before
+        any_size_key = _any_size_key()
+        self.any_size_sectors = any_size_key is not None
         self.description = self._describe()
         self.batch_size = int(system.input.scf.exact_exchange.batch_size)
         self.spin_polarized = bool(system.input.scf.spin_polarized)
         # The Bloch-phase projectors of the k-points of this structure, kept for every SCF loop.
         self.projector_cache: dict = {}
+        # the marks of the cache that every loop of this engine reads (kept through the move to the wedge)
+        self._cache_marks: tuple = () if any_size_key is None else (any_size_key,)
+        for key in self._cache_marks:
+            self.projector_cache[key] = True
 
     def _describe(self) -> str:
         reduction = (
@@ -580,9 +589,15 @@ class BlochExchange:
                 f"by {len(self.stars.gathers)} operation(s) of the grid) of the mesh"
             )
         )
+        sectors = (
+            "; the k-points of every SCF loop in the sectors of their little groups at any size "
+            "(PARSEC_HYBRID_KPOINT_SECTORS=on)"
+            if getattr(self, "any_size_sectors", False)
+            else ""
+        )
         return (
             f"{self.potentials.description}; {self.k_points.shape[0]} k-points of the {reduction} "
-            f"{'x'.join(str(n) for n in self.mesh)}"
+            f"{'x'.join(str(n) for n in self.mesh)}{sectors}"
         )
 
     # -- PARSEC_HYBRID_KPOINT_WEDGE=auto ---------------------------------------
@@ -668,10 +683,10 @@ class BlochExchange:
             self.stars,
         )
         # the projectors and sector plans of the pairs' tasks go (other tasks, other workers); what the guard of the
-        # Fock loop keeps stays
+        # Fock loop keeps stays, and so do the engine's own marks (PARSEC_HYBRID_KPOINT_SECTORS=on)
         kept = {
             key: self.projector_cache[key]
-            for key in (_SECTORS_ABANDONED_KEY, _FOCK_GUARD_KEY)
+            for key in (_SECTORS_ABANDONED_KEY, _FOCK_GUARD_KEY, *self._cache_marks)
             if key in self.projector_cache
         }
         self.projector_cache.clear()
@@ -954,20 +969,38 @@ def set_device_engine(factory=None) -> None:
     _device_engine = factory
 
 
+def _any_size_key() -> str | None:
+    """The key of the projector cache under which the SCF loops of a Fock loop split every k-point into its sectors
+    (``PARSEC_HYBRID_KPOINT_SECTORS=on``), ``None`` under ``off`` and without the acceleration package (which solves
+    the sectors)."""
+
+    try:
+        from ..acceleration.SCF.kpoint_sectors import ANY_SIZE_KEY, hybrid_kpoint_sectors_setting
+    except ImportError:  # an installation without the acceleration package solves no sectors
+        return None
+    return ANY_SIZE_KEY if hybrid_kpoint_sectors_setting() == "on" else None
+
+
 def _check_kpoint_hybrid_switches() -> None:
     """Read the switches that only the k-point loops of a hybrid read (``PARSEC_KPOINT_SECTOR_LEVELS``,
-    ``PARSEC_KPOINT_SECTOR_GUARD_FOCK``; ``PARSEC_HYBRID_KPOINT_WEDGE``, which the input reader reads for a single
-    point with a Monkhorst-Pack mesh only) before its first loop, so that a bad value is an error before any SCF."""
+    ``PARSEC_KPOINT_SECTOR_GUARD_FOCK``, ``PARSEC_HYBRID_KPOINT_SECTORS``; ``PARSEC_HYBRID_KPOINT_WEDGE``, which the
+    input reader reads for a single point with a Monkhorst-Pack mesh only) before its first loop, so that a bad value
+    is an error before any SCF."""
 
     from ..Grid.kpoints import hybrid_kpoint_wedge_setting
 
     hybrid_kpoint_wedge_setting()
     try:
-        from ..acceleration.SCF.kpoint_sectors import sector_guard_fock_setting, sector_levels_setting
+        from ..acceleration.SCF.kpoint_sectors import (
+            hybrid_kpoint_sectors_setting,
+            sector_guard_fock_setting,
+            sector_levels_setting,
+        )
     except ImportError:  # an installation without the acceleration package solves no sectors
         return
     sector_levels_setting()
     sector_guard_fock_setting()
+    hybrid_kpoint_sectors_setting()
 
 
 def _fock_guard_detail(guarded: dict) -> dict[str, float]:
