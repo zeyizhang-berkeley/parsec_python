@@ -164,6 +164,16 @@ def _local_rows(operator, dimension: int) -> int:
     return int(getattr(operator, "local_dimension", dimension))
 
 
+def _real_arithmetic(operator) -> bool:
+    """Whether ``operator`` is a real symmetric operator on real blocks (``real_arithmetic``: the real sectors of
+    :mod:`parsec_python.acceleration.SCF.soc_sectors`); every other operator is complex Hermitian."""
+    return bool(getattr(operator, "real_arithmetic", False))
+
+
+def _basis_dtype(xp, operator):
+    return xp.float64 if _real_arithmetic(operator) else xp.complex128
+
+
 def _vdot(operator, cp, left, right) -> float:
     value = np.array([float(cp.real(cp.vdot(left, right)))])
     return float(_sum_host(operator, value)[0])
@@ -249,12 +259,15 @@ def _lanczos_upper_bound(
     :func:`parsec_python.Eigensolvers.spectral_bounds.lanczos_bound_from_ritz` (``parsec`` or ``lanczos``)."""
 
     target_steps = lanczos_bound_steps(rule, int(steps), dimension)
-    host_start = rng.random(dimension) + 1j * rng.random(dimension)
+    if _real_arithmetic(operator):
+        host_start = rng.random(dimension)
+    else:
+        host_start = rng.random(dimension) + 1j * rng.random(dimension)
     local_start = host_start
     take_local = getattr(operator, "local_vector", None)
     if take_local is not None:
         local_start = take_local(host_start)  # this rank's rows of the same global start vector
-    vector = cp.asarray(local_start, dtype=cp.complex128)
+    vector = cp.asarray(local_start, dtype=_basis_dtype(cp, operator))
     vector = vector / np.sqrt(_vdot(operator, cp, vector, vector))
 
     projected = np.zeros((target_steps, target_steps), dtype=float)
@@ -385,7 +398,7 @@ def _rayleigh_ritz_in_place(xp, operator, basis, chunk: int):
     rotation written over ``basis``.  Returns the Ritz values (host)."""
 
     dimension, count = basis.shape  # dimension: the rows held here
-    projection = xp.empty((count, count), dtype=xp.complex128)
+    projection = xp.empty((count, count), dtype=_basis_dtype(xp, operator))
     for c0 in range(0, count, chunk):
         c1 = min(c0 + chunk, count)
         applied = operator.apply(xp.ascontiguousarray(basis[:, c0:c1]))
@@ -413,7 +426,10 @@ def _residual_norms(xp, operator, vectors, eigenvalues: np.ndarray, chunk: int) 
         block = xp.ascontiguousarray(vectors[:, c0:c1])
         applied = operator.apply(block)
         applied -= block * xp.asarray(np.asarray(eigenvalues[c0:c1], dtype=np.float64))[None, :]
-        squares = applied.real * applied.real + applied.imag * applied.imag
+        if applied.dtype == xp.complex128:
+            squares = applied.real * applied.real + applied.imag * applied.imag
+        else:
+            squares = applied * applied
         partial = np.ascontiguousarray(np.asarray(_to_host(xp, squares.sum(axis=0)), dtype=np.float64))
         norms[c0:c1] = np.sqrt(_sum_host(operator, partial))
     return norms
@@ -442,6 +458,37 @@ def _chain(sigma_one: float, initial: float, degree: int):
     return entering, produced, sigma
 
 
+def _filter_group_fused(
+    xp, operator, source, out, columns: slice, degree: int, center, half_span, sigma_one, entering, produced, chunk, stats=None
+):
+    """:func:`_filter_group` with every step of the recurrence in the stencil kernel of the operator
+    (:meth:`..Hamiltonian.device_bloch.DeviceBlochOperator.chebyshev_step`): the same steps and coefficients, the
+    elementwise passes inside the kernel; the applications are counted in ``stats`` (where given)."""
+    add = (lambda name, amount: None) if stats is None else stats.add
+    start, stop = columns.start, columns.stop
+    for c0 in range(start, stop, chunk):
+        c1 = min(c0 + chunk, stop)
+        local = slice(c0 - start, c1 - start)
+        width = c1 - c0
+        previous = xp.ascontiguousarray(source[:, c0:c1])
+        current = operator.chebyshev_step(previous, None, center, sigma_one / half_span)
+        add("applications", 1)
+        add("application_columns", width)
+        if degree >= 2:
+            sigma_before = xp.asarray(np.ascontiguousarray(entering[:, local]))
+            sigma_after = xp.asarray(np.ascontiguousarray(produced[:, local]))
+            for step in range(degree - 1):
+                following = operator.chebyshev_step(
+                    current, previous, center, 2.0 / half_span, sigma_before[step], sigma_after[step]
+                )
+                add("applications", 1)
+                add("application_columns", width)
+                previous, current = current, following
+        del previous
+        out[:, c0:c1] = current
+        del current
+
+
 def _filter_group(
     xp,
     operator,
@@ -463,6 +510,12 @@ def _filter_group(
     columns of several blocks are filtered together (one wide application per
     step) with the very coefficients the block-by-block reference uses.
     """
+    if getattr(operator, "fused_sector_recurrence", False):
+        # a sector of a k-point with its gathered stencil (..Hamiltonian.sector_bloch_stencil): the steps in its kernel
+        return _filter_group_fused(
+            xp, operator, source, out, columns, degree, center, half_span, sigma_one, entering, produced, chunk,
+            getattr(operator, "_stats", None),
+        )
     start, stop = columns.start, columns.stop
     for c0 in range(start, stop, chunk):
         c1 = min(c0 + chunk, stop)
@@ -515,9 +568,13 @@ def _first_solve(
     context = _mpi(operator)
     # each rank draws its own rows: the start of a distributed basis depends on the number of ranks
     rng = xp.random.default_rng(settings.random_seed + (0 if context is None else 7919 * context.rank))
-    vectors = xp.empty((rows, working), dtype=xp.complex128)
+    real = _real_arithmetic(operator)
+    vectors = xp.empty((rows, working), dtype=_basis_dtype(xp, operator))
     for c0 in range(0, working, START_COLUMNS):
         c1 = min(c0 + START_COLUMNS, working)
+        if real:
+            vectors[:, c0:c1] = rng.uniform(-1.0, 1.0, (rows, c1 - c0))
+            continue
         vectors[:, c0:c1] = rng.uniform(-1.0, 1.0, (rows, c1 - c0)) + 1j * rng.uniform(
             -1.0, 1.0, (rows, c1 - c0)
         )

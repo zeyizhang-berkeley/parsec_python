@@ -4,7 +4,7 @@
   PARSEC-PYTHON - Modular real-space DFT program
   PARSEC-like report; Python real-space implementation
 
- starting run on 08-Nov-2026 04:12:45 -0800
+ starting run on 20-Nov-2026 14:46:39 -0800
  input file: examples/0d_meta_gga/N2/tpssh/parsec.in
 
  =================================================================
@@ -180,17 +180,19 @@
 
  Setup timings [sec]
  --------------------------------------------------
- Pseudopotential loading       :     0.009531
- Grid-domain construction      :     0.034098
- Finite-difference construction:     0.009193
- Local ionic potential setup   :     0.029973
- Nonlocal ionic projector setup:     0.013968
- Initial valence-density setup :     0.009976
- Core-density setup            :     0.000630
- Ion-ion energy setup           :     0.000107
- Hartree boundary estimate/tail :     0.062523
- Preparation wall time          :     0.170158
+ Pseudopotential loading       :     0.009983
+ Grid-domain construction      :     0.033280
+ Finite-difference construction:     0.008914
+ Local ionic potential setup   :     0.612951
+ Nonlocal ionic projector setup:     0.008687
+ Initial valence-density setup :     0.014643
+ Core-density setup            :     0.000899
+ Ion-ion energy setup           :     0.000092
+ Hartree boundary estimate/tail :     0.061485
+ Preparation wall time          :     0.122530
  --------------------------------------------------
+
+ The local ionic, density and ion-ion setups above ran on a thread beside the symmetry and sector setup and are not part of the preparation wall time.  Thread [sec] = 0.628595, wait at its join [sec] = 0.000022.
 
  The reference setup above describes the constructed full grid.  The GPU orbital solve is decomposed into the exact symmetry representations reported below.
 
@@ -202,6 +204,7 @@
  Device            = CUDA:0 (NVIDIA A100-SXM4-80GB)
  gpu_stencil_kernel = deferred_to_symmetry_sector_operators
  gpu_later_subspace_filter_precision = deferred_to_symmetry_sector_operators
+ symmetry_detection = exact Cartesian axis-reflection subgroup detected
  symmetry_cache_directory = disabled
  orbital_symmetry = CuPy real one-dimensional reflection representations
  finite_difference_builder = C++17 compressed-grid CSR builder (exact stencil parity)
@@ -213,18 +216,18 @@
  hartree_symmetry = normalized Cartesian axis-reflection wedge
  native_openmp_max_threads = 16
  Detailed backend settings: set Output_Level: 2
- Backend initialization [sec] =     0.058320
+ Backend initialization [sec] =     0.050112
 
  Execution resources:
  --------------------
  Device            = GPU (gpu, --gpus)
  GPUs              = 1 of 1 visible, index 0; --gpus 1
- CPU threads       = 16 of 128 CPUs allowed (affinity of the process); OMP_NUM_THREADS=16
+ CPU threads       = 16 of 32 CPUs allowed (affinity of the process); OMP_NUM_THREADS=16
 
  SCF iter #   1
 
- Diagonalization time [sec] :       3.02,      tdiag_sum =        3.02
- Iteration time [sec]       :       3.06
+ Diagonalization time [sec] :       1.91,      tdiag_sum =        1.91
+ Iteration time [sec]       :       1.94
 
  Eigensolver residual max [Ry] :   2.4201e-05
 
@@ -260,8 +263,8 @@
 
  SCF iter #   2
 
- Diagonalization time [sec] :       0.18,      tdiag_sum =        3.21
- Iteration time [sec]       :       0.22
+ Diagonalization time [sec] :       0.09,      tdiag_sum =        1.99
+ Iteration time [sec]       :       0.12
 
  Fermi level at    -0.4741 [Ry]
 
@@ -296,15 +299,15 @@
 
  SCF iter #   3
 
- Diagonalization time [sec] :       0.07,      tdiag_sum =        3.27
- Iteration time [sec]       :       0.10
+ Diagonalization time [sec] :       0.09,      tdiag_sum =        2.08
+ Iteration time [sec]       :       0.12
 
  Fermi level at    -0.4371 [Ry]
 
    State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
     1        -2.0667023888       -28.1191393618    1.0000        1
-    2        -0.9808192485       -13.3448305316    1.0000        8
+    2        -0.9808192485       -13.3448305317    1.0000        8
     3        -0.8403730889       -11.4339481732    1.0000        7
     4        -0.8403727642       -11.4339437550    1.0000        6
     5        -0.7507556240       -10.2146308686    1.0000        1
@@ -332,8 +335,8 @@
 
  SCF iter #   4
 
- Diagonalization time [sec] :       0.07,      tdiag_sum =        3.34
- Iteration time [sec]       :       0.10
+ Diagonalization time [sec] :       0.09,      tdiag_sum =        2.17
+ Iteration time [sec]       :       0.12
 
  Fermi level at    -0.4373 [Ry]
 
@@ -368,8 +371,8 @@
 
  SCF iter #   5
 
- Diagonalization time [sec] :       0.07,      tdiag_sum =        3.41
- Iteration time [sec]       :       0.10
+ Diagonalization time [sec] :       0.09,      tdiag_sum =        2.25
+ Iteration time [sec]       :       0.12
 
  Fermi level at    -0.4379 [Ry]
 
@@ -404,8 +407,8 @@
 
  SCF iter #   6
 
- Diagonalization time [sec] :       0.07,      tdiag_sum =        3.48
- Iteration time [sec]       :       0.10
+ Diagonalization time [sec] :       0.08,      tdiag_sum =        2.33
+ Iteration time [sec]       :       0.12
 
  Fermi level at    -0.4382 [Ry]
 
@@ -440,8 +443,8 @@
 
  SCF iter #   7
 
- Diagonalization time [sec] :       0.07,      tdiag_sum =        3.54
- Iteration time [sec]       :       0.10
+ Diagonalization time [sec] :       0.08,      tdiag_sum =        2.41
+ Iteration time [sec]       :       0.12
 
  Fermi level at    -0.4391 [Ry]
 
@@ -476,8 +479,8 @@
 
  SCF iter #   8
 
- Diagonalization time [sec] :       0.07,      tdiag_sum =        3.61
- Iteration time [sec]       :       0.10
+ Diagonalization time [sec] :       0.09,      tdiag_sum =        2.50
+ Iteration time [sec]       :       0.13
 
  Fermi level at    -0.4390 [Ry]
 
@@ -512,8 +515,8 @@
 
  SCF iter #   9
 
- Diagonalization time [sec] :       0.07,      tdiag_sum =        3.69
- Iteration time [sec]       :       0.11
+ Diagonalization time [sec] :       0.07,      tdiag_sum =        2.57
+ Iteration time [sec]       :       0.10
 
  Fermi level at    -0.4393 [Ry]
 
@@ -548,8 +551,8 @@
 
  SCF iter #  10
 
- Diagonalization time [sec] :       0.07,      tdiag_sum =        3.76
- Iteration time [sec]       :       0.11
+ Diagonalization time [sec] :       0.07,      tdiag_sum =        2.64
+ Iteration time [sec]       :       0.10
 
  Fermi level at    -0.4401 [Ry]
 
@@ -584,8 +587,8 @@
 
  SCF iter #  11
 
- Diagonalization time [sec] :       0.07,      tdiag_sum =        3.83
- Iteration time [sec]       :       0.11
+ Diagonalization time [sec] :       0.07,      tdiag_sum =        2.71
+ Iteration time [sec]       :       0.10
 
  Fermi level at    -0.4399 [Ry]
 
@@ -620,8 +623,8 @@
 
  SCF iter #  12
 
- Diagonalization time [sec] :       0.06,      tdiag_sum =        3.89
- Iteration time [sec]       :       0.10
+ Diagonalization time [sec] :       0.07,      tdiag_sum =        2.78
+ Iteration time [sec]       :       0.11
 
  Fermi level at    -0.4396 [Ry]
 
@@ -656,8 +659,8 @@
 
  SCF iter #  13
 
- Diagonalization time [sec] :       0.06,      tdiag_sum =        3.95
- Iteration time [sec]       :       0.10
+ Diagonalization time [sec] :       0.08,      tdiag_sum =        2.85
+ Iteration time [sec]       :       0.12
 
  Fermi level at    -0.4395 [Ry]
 
@@ -692,7 +695,7 @@
 
  SCF iter #  14
 
- Diagonalization time [sec] :       0.06,      tdiag_sum =        4.01
+ Diagonalization time [sec] :       0.07,      tdiag_sum =        2.92
  Iteration time [sec]       :       0.10
 
  Fermi level at    -0.4394 [Ry]
@@ -732,12 +735,12 @@
    E_x (start orbitals)          =          -8.96367953 [Ry]
    The start stopped below a residual of 1.00E-04 Ry (adaptive criterion): its energy is that of a start, not a converged semilocal energy
    ACE operator: 9 orbitals, max|M - M^T|/max|M| = 1.3E-12
-   Exact exchange: 35 pair-density Poisson solves, 0.05 s of 0.68 s (FP64 CUDA Kronecker-product FD Poisson solve (order 12) on the 138x138x138 box, multipole boundary of order 9, 1/r kernel; devices take tiles of 32-column orbital blocks; the pair densities of symmetry-sector orbitals in reflection-parity classes on the 69x69x69 octant)
+   Exact exchange: 35 pair-density Poisson solves, 0.04 s of 1.98 s (FP64 CUDA Kronecker-product FD Poisson solve (order 12) on the 138x138x138 box, multipole boundary of order 9, 1/r kernel; devices take tiles of 32-column orbital blocks; the pair densities of symmetry-sector orbitals in reflection-parity classes on the 69x69x69 octant)
 
  SCF iter #   1
 
- Diagonalization time [sec] :       0.16,      tdiag_sum =        4.17
- Iteration time [sec]       :       0.56
+ Diagonalization time [sec] :       0.11,      tdiag_sum =        3.03
+ Iteration time [sec]       :       1.00
 
  Fermi level at    -0.4997 [Ry]
 
@@ -775,8 +778,8 @@
 
  SCF iter #   2
 
- Diagonalization time [sec] :       0.19,      tdiag_sum =        4.36
- Iteration time [sec]       :       0.26
+ Diagonalization time [sec] :       0.18,      tdiag_sum =        3.21
+ Iteration time [sec]       :       0.25
 
  Fermi level at    -0.4798 [Ry]
 
@@ -814,8 +817,8 @@
 
  SCF iter #   3
 
- Diagonalization time [sec] :       0.18,      tdiag_sum =        4.54
- Iteration time [sec]       :       0.25
+ Diagonalization time [sec] :       0.26,      tdiag_sum =        3.48
+ Iteration time [sec]       :       0.33
 
  Fermi level at    -0.4544 [Ry]
 
@@ -853,7 +856,7 @@
 
  SCF iter #   4
 
- Diagonalization time [sec] :       0.18,      tdiag_sum =        4.72
+ Diagonalization time [sec] :       0.18,      tdiag_sum =        3.65
  Iteration time [sec]       :       0.25
 
  Fermi level at    -0.4755 [Ry]
@@ -862,8 +865,8 @@
 
     1        -2.2473353004       -30.5767946308    1.0000        1
     2        -1.1094846896       -15.0954267895    1.0000        8
-    3        -0.9406697404       -12.7985643535    1.0000        7
-    4        -0.9406654357       -12.7985057857    1.0000        6
+    3        -0.9406697404       -12.7985643536    1.0000        7
+    4        -0.9406654358       -12.7985057857    1.0000        6
     5        -0.8605775399       -11.7088458926    1.0000        1
     6        -0.1268692579        -1.7261577492    0.0000        2
     7        -0.1268652742        -1.7261035482    0.0000        3
@@ -892,7 +895,7 @@
 
  SCF iter #   5
 
- Diagonalization time [sec] :       0.18,      tdiag_sum =        4.90
+ Diagonalization time [sec] :       0.18,      tdiag_sum =        3.83
  Iteration time [sec]       :       0.25
 
  Fermi level at    -0.4588 [Ry]
@@ -902,8 +905,8 @@
     1        -2.1961906334       -29.8809305205    1.0000        1
     2        -1.0737878328       -14.6097424950    1.0000        8
     3        -0.9012696996       -12.2624952793    1.0000        7
-    4        -0.9012684902       -12.2624788237    1.0000        6
-    5        -0.8217678626       -11.1808091851    1.0000        1
+    4        -0.9012684902       -12.2624788238    1.0000        6
+    5        -0.8217678626       -11.1808091852    1.0000        1
     6        -0.0924769987        -1.2582235492    0.0000        2
     7        -0.0924758856        -1.2582084043    0.0000        3
     8         0.0454784867         0.6187711943    0.0000        1
@@ -931,7 +934,7 @@
 
  SCF iter #   6
 
- Diagonalization time [sec] :       0.18,      tdiag_sum =        5.08
+ Diagonalization time [sec] :       0.18,      tdiag_sum =        4.01
  Iteration time [sec]       :       0.25
 
  Fermi level at    -0.4588 [Ry]
@@ -978,11 +981,11 @@
    Total Energy (libxc HYB_MGGA_XC_TPSSH)=         -39.81194752 [Ry]
    Inner SCF: stopped below a residual of 1.66E-03 Ry (adaptive criterion)
    ACE operator: 9 orbitals, max|M - M^T|/max|M| = 1.5E-12
-   Exact exchange: 35 pair-density Poisson solves, 0.02 s of 0.06 s (FP64 CUDA Kronecker-product FD Poisson solve (order 12) on the 138x138x138 box, multipole boundary of order 9, 1/r kernel; devices take tiles of 32-column orbital blocks; the pair densities of symmetry-sector orbitals in reflection-parity classes on the 69x69x69 octant)
+   Exact exchange: 35 pair-density Poisson solves, 0.02 s of 0.05 s (FP64 CUDA Kronecker-product FD Poisson solve (order 12) on the 138x138x138 box, multipole boundary of order 9, 1/r kernel; devices take tiles of 32-column orbital blocks; the pair densities of symmetry-sector orbitals in reflection-parity classes on the 69x69x69 octant)
 
  SCF iter #   1
 
- Diagonalization time [sec] :       0.18,      tdiag_sum =        5.26
+ Diagonalization time [sec] :       0.18,      tdiag_sum =        4.19
  Iteration time [sec]       :       0.24
 
  Fermi level at    -0.4586 [Ry]
@@ -1021,8 +1024,8 @@
 
  SCF iter #   2
 
- Diagonalization time [sec] :       0.18,      tdiag_sum =        5.44
- Iteration time [sec]       :       0.25
+ Diagonalization time [sec] :       0.22,      tdiag_sum =        4.41
+ Iteration time [sec]       :       0.28
 
  Fermi level at    -0.4588 [Ry]
 
@@ -1060,8 +1063,8 @@
 
  SCF iter #   3
 
- Diagonalization time [sec] :       0.18,      tdiag_sum =        5.62
- Iteration time [sec]       :       0.25
+ Diagonalization time [sec] :       0.18,      tdiag_sum =        4.58
+ Iteration time [sec]       :       0.24
 
  Fermi level at    -0.4592 [Ry]
 
@@ -1073,7 +1076,7 @@
     4        -0.9035029907       -12.2928809905    1.0000        7
     5        -0.8241237746       -11.2128632523    1.0000        1
     6        -0.0939836813        -1.2787231708    0.0000        3
-    7        -0.0939835952        -1.2787220002    0.0000        2
+    7        -0.0939835952        -1.2787220003    0.0000        2
     8         0.0462327882         0.6290340695    0.0000        1
     9         0.1088326206         1.4807548699    0.0000        7
 
@@ -1099,7 +1102,7 @@
 
  SCF iter #   4
 
- Diagonalization time [sec] :       0.18,      tdiag_sum =        5.80
+ Diagonalization time [sec] :       0.18,      tdiag_sum =        4.76
  Iteration time [sec]       :       0.25
 
  Fermi level at    -0.4590 [Ry]
@@ -1138,7 +1141,7 @@
 
  SCF iter #   5
 
- Diagonalization time [sec] :       0.18,      tdiag_sum =        5.98
+ Diagonalization time [sec] :       0.18,      tdiag_sum =        4.94
  Iteration time [sec]       :       0.25
 
  Fermi level at    -0.4590 [Ry]
@@ -1177,8 +1180,8 @@
 
  SCF iter #   6
 
- Diagonalization time [sec] :       0.18,      tdiag_sum =        6.16
- Iteration time [sec]       :       0.25
+ Diagonalization time [sec] :       0.26,      tdiag_sum =        5.20
+ Iteration time [sec]       :       0.34
 
  Fermi level at    -0.4589 [Ry]
 
@@ -1224,11 +1227,11 @@
    Total Energy (libxc HYB_MGGA_XC_TPSSH)=         -39.81198017 [Ry]
    Inner SCF: stopped below a residual of 2.91E-05 Ry (adaptive criterion)
    ACE operator: 9 orbitals, max|M - M^T|/max|M| = 1.2E-12
-   Exact exchange: 35 pair-density Poisson solves, 0.02 s of 0.05 s (FP64 CUDA Kronecker-product FD Poisson solve (order 12) on the 138x138x138 box, multipole boundary of order 9, 1/r kernel; devices take tiles of 32-column orbital blocks; the pair densities of symmetry-sector orbitals in reflection-parity classes on the 69x69x69 octant)
+   Exact exchange: 35 pair-density Poisson solves, 0.02 s of 0.06 s (FP64 CUDA Kronecker-product FD Poisson solve (order 12) on the 138x138x138 box, multipole boundary of order 9, 1/r kernel; devices take tiles of 32-column orbital blocks; the pair densities of symmetry-sector orbitals in reflection-parity classes on the 69x69x69 octant)
 
  SCF iter #   1
 
- Diagonalization time [sec] :       0.18,      tdiag_sum =        6.33
+ Diagonalization time [sec] :       0.18,      tdiag_sum =        5.38
  Iteration time [sec]       :       0.24
 
  Fermi level at    -0.4589 [Ry]
@@ -1267,8 +1270,8 @@
 
  SCF iter #   2
 
- Diagonalization time [sec] :       0.18,      tdiag_sum =        6.51
- Iteration time [sec]       :       0.25
+ Diagonalization time [sec] :       0.23,      tdiag_sum =        5.61
+ Iteration time [sec]       :       0.29
 
  Fermi level at    -0.4589 [Ry]
 
@@ -1306,7 +1309,7 @@
 
  SCF iter #   3
 
- Diagonalization time [sec] :       0.18,      tdiag_sum =        6.69
+ Diagonalization time [sec] :       0.18,      tdiag_sum =        5.78
  Iteration time [sec]       :       0.24
 
  Fermi level at    -0.4589 [Ry]
@@ -1345,8 +1348,8 @@
 
  SCF iter #   4
 
- Diagonalization time [sec] :       0.18,      tdiag_sum =        6.87
- Iteration time [sec]       :       0.25
+ Diagonalization time [sec] :       0.18,      tdiag_sum =        5.96
+ Iteration time [sec]       :       0.24
 
  Fermi level at    -0.4589 [Ry]
 
@@ -1384,8 +1387,8 @@
 
  SCF iter #   5
 
- Diagonalization time [sec] :       0.18,      tdiag_sum =        7.06
- Iteration time [sec]       :       0.25
+ Diagonalization time [sec] :       0.17,      tdiag_sum =        6.13
+ Iteration time [sec]       :       0.24
 
  Fermi level at    -0.4589 [Ry]
 
@@ -1423,7 +1426,7 @@
 
  SCF iter #   6
 
- Diagonalization time [sec] :       0.17,      tdiag_sum =        7.23
+ Diagonalization time [sec] :       0.17,      tdiag_sum =        6.30
  Iteration time [sec]       :       0.24
 
  Fermi level at    -0.4589 [Ry]
@@ -1462,8 +1465,8 @@
 
  SCF iter #   7
 
- Diagonalization time [sec] :       0.16,      tdiag_sum =        7.39
- Iteration time [sec]       :       0.23
+ Diagonalization time [sec] :       0.16,      tdiag_sum =        6.46
+ Iteration time [sec]       :       0.22
 
  Fermi level at    -0.4589 [Ry]
 
@@ -1501,7 +1504,7 @@
 
  SCF iter #   8
 
- Diagonalization time [sec] :       0.15,      tdiag_sum =        7.54
+ Diagonalization time [sec] :       0.15,      tdiag_sum =        6.61
  Iteration time [sec]       :       0.22
 
  Fermi level at    -0.4589 [Ry]
@@ -1540,8 +1543,8 @@
 
  SCF iter #   9
 
- Diagonalization time [sec] :       0.59,      tdiag_sum =        8.12
- Iteration time [sec]       :       0.66
+ Diagonalization time [sec] :       0.57,      tdiag_sum =        7.18
+ Iteration time [sec]       :       0.64
 
  Fermi level at    -0.4589 [Ry]
 
@@ -1586,7 +1589,7 @@
    Estimated exchange error      =            5.313E-09 [Ry]   (tolerance 1.0E-08): converged
    Total Energy (libxc HYB_MGGA_XC_TPSSH)=         -39.81198033 [Ry]
    Inner SCF: levels converged by 4 eigensolver passes at its last Hamiltonian (last move 9.0E-09 Ry)
-   Exact exchange: 15 pair-density Poisson solves, 0.01 s of 0.04 s (FP64 CUDA Kronecker-product FD Poisson solve (order 12) on the 138x138x138 box, multipole boundary of order 9, 1/r kernel; devices take tiles of 32-column orbital blocks; the pair densities of symmetry-sector orbitals in reflection-parity classes on the 69x69x69 octant)
+   Exact exchange: 15 pair-density Poisson solves, 0.01 s of 0.03 s (FP64 CUDA Kronecker-product FD Poisson solve (order 12) on the 138x138x138 box, multipole boundary of order 9, 1/r kernel; devices take tiles of 32-column orbital blocks; the pair densities of symmetry-sector orbitals in reflection-parity classes on the 69x69x69 octant)
 
 
  Hybrid functional libxc HYB_MGGA_XC_TPSSH: generalized Kohn-Sham energies
@@ -1604,18 +1607,18 @@
    Total Energy (libxc HYB_MGGA_XC_TPSSH) =           -39.81198033 [Ry]
 
  Fock loop converged after 3 outer iterations (estimated exchange error 5.31E-09 Ry < 1.0E-08 Ry).
- Exact exchange: 120 pair-density Poisson solves in 0.83 s (0.11 s in the solver); Fock loop 12.64 s, 14 SCF iterations of the PBE start
+ Exact exchange: 120 pair-density Poisson solves in 2.12 s (0.10 s in the solver); Fock loop 13.02 s, 14 SCF iterations of the PBE start
  Pair-density Poisson solver: FP64 CUDA Kronecker-product FD Poisson solve (order 12) on the 138x138x138 box, multipole boundary of order 9, 1/r kernel; devices take tiles of 32-column orbital blocks; the pair densities of symmetry-sector orbitals in reflection-parity classes on the 69x69x69 octant
 
 Self-consistency convergence achieved.
 
-Time for self-consistent field [sec] :      12.73,    tdiag_sum =        8.12
+Time for self-consistent field [sec] :      13.11,    tdiag_sum =        7.18
 Time spent on Hartree potential [sec] :        0.79
 
  Tot. charge (user input) [e] =   0.00000000
  Tot. charge (computed) [e] =   0.00000000
  Dipole components [Debye]:
- x-component =  -0.00000000
+ x-component =   0.00000000
  y-component =   0.00000000
  z-component =  -0.00000000
 
@@ -1628,24 +1631,24 @@ Time spent on Hartree potential [sec] :        0.79
 
  Initial Hamiltonian component timings [sec]
  --------------------------------------------------
- Finite-difference (-nabla^2) :     0.009193
- V_ion diagonal/local         :     0.029973
- V_ion nonlocal projectors    :     0.013968
- Initial V_xc (LIBXC:HYB_MGGA_XC_TPSSH)             :     0.039636
- Component subtotal             :     0.092769
+ Finite-difference (-nabla^2) :     0.008914
+ V_ion diagonal/local         :     0.612951
+ V_ion nonlocal projectors    :     0.008687
+ Initial V_xc (LIBXC:HYB_MGGA_XC_TPSSH)             :     0.017607
+ Component subtotal             :     0.648160
  --------------------------------------------------
 
  SCF timing analysis [sec]
  --------------------------------------------------
- Initial Hartree potential      :     0.436655
- Initial exchange-correlation   :     0.039636
- Hamiltonian binding subtotal  :     0.118359
- Diagonalization subtotal       :     8.124025
- Occupation/density subtotal   :     0.677784
- Hartree potential subtotal     :     0.793051
- Exchange-correlation subtotal  :     0.403720
- Mixing/energy subtotal         :     0.279755
- SCF wall time                   :    12.635156
+ Initial Hartree potential      :     0.254808
+ Initial exchange-correlation   :     0.017607
+ Hamiltonian binding subtotal  :     0.113165
+ Diagonalization subtotal       :     7.179185
+ Occupation/density subtotal   :     0.621209
+ Hartree potential subtotal     :     0.793697
+ Exchange-correlation subtotal  :     0.943076
+ Mixing/energy subtotal         :     0.273346
+ SCF wall time                   :    13.023891
  --------------------------------------------------
 
 Forces and MPI statistics
@@ -1661,28 +1664,28 @@ are not calculated by this Python single-point implementation.
  Total H application time [sec] =     0.000000
  Average H application [sec] =     0.000000
  Local-potential updates =           35
- Local update time [sec] =     0.004468
+ Local update time [sec] =     0.004939
  Per-H device timing = disabled (would synchronize every recurrence)
  GPU initial-eigensolver calls =            8
- GPU initial-eigensolver synchronized time [sec] =     3.013885
+ GPU initial-eigensolver synchronized time [sec] =     1.902058
  GPU SUBSPACE calls =          296
- GPU SUBSPACE synchronized time [sec] =     5.000673
+ GPU SUBSPACE synchronized time [sec] =     5.179152
  GPU representation scheduler batches =           38
- GPU representation scheduler wall time [sec] =     8.044675
+ GPU representation scheduler wall time [sec] =     7.110723
  Final active states by representation = 7 7 7 6 6 7 7 7
- Requested-eigenpair download [sec] =     0.013622
+ Requested-eigenpair download [sec] =     0.013886
  GPU density builds =          210
- GPU density build/download [sec] =     0.049542
- Final wavefunction download [sec] =     0.093042
+ GPU density build/download [sec] =     0.052035
+ Final wavefunction download [sec] =     0.080746
  Accelerated Hartree solves =           36
- Accelerated Hartree total [sec] =     1.228580
- Hartree boundary/RHS [sec] =     0.406693
- Hartree linear solve [sec] =     0.814773
+ Accelerated Hartree total [sec] =     1.047624
+ Hartree boundary/RHS [sec] =     0.250008
+ Hartree linear solve [sec] =     0.790416
  Host-to-device time [sec] =     0.000000
- Device kernel time [sec] =     8.014558
- Device-to-host time [sec] =     0.013622
- Pre-SCF setup/reporting wall time [sec] :    8.861762
- Post-SCF finalization/reporting [sec] :    0.039775
- Total accelerated Python wall time [sec] :       21.63
+ Device kernel time [sec] =     7.081210
+ Device-to-host time [sec] =     0.013886
+ Pre-SCF setup/reporting wall time [sec] :    9.062910
+ Post-SCF finalization/reporting [sec] :    0.027807
+ Total accelerated Python wall time [sec] :       22.20
  parsec.dat: examples/0d_meta_gga/N2/tpssh/parsec.dat (potential and density of 1 spin channel(s) on 1376312 points, 5 wavefunction(s))
 Text log: examples/0d_meta_gga/N2/tpssh/parsec.out

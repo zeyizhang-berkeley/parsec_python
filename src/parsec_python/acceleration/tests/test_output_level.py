@@ -116,6 +116,33 @@ class BackendOutputLevelTests(unittest.TestCase):
         self.assertNotIn(line, report(1, shared, 'none recorded'))
         self.assertNotIn(line, report(2, None, None))
 
+    def test_level_one_names_the_group_of_every_route(self):
+        # Since 2026-11-19 symmetry_detection is in the short report whatever group it names (before: only the
+        # weighted sectors of a point group without translations), so that a group lost or reduced can be seen.
+        sentence = 'the orbitals use the weighted sectors that symmetry_detection names below'
+        for text, weighted in (
+            ('exact point group of 24 signed permutations detected; the orbitals use the one-dimensional sectors '
+             'of a subgroup of 8 (weights 1, 1, 3, 3)', True),
+            ('exact group of 192 operations detected (signed permutations, 144 of them with a translation, by half '
+             'the cell or, non-symmorphic, a fraction of it, or about a symmetric site off the origin; '
+             'PARSEC_PERIODIC_TRANSLATIONS, PARSEC_PERIODIC_SYMMETRY_CENTRE); the orbitals use the one-dimensional '
+             'sectors of a subgroup of 32 (weights 1, 1, 2, 3)', True),
+            ('exact commuting group of 16 operations detected (signed permutations, 8 of them with a translation; '
+             'PARSEC_PERIODIC_ABELIAN_TRANSLATIONS)', False),
+            ('exact commuting signed-permutation subgroup detected', False),
+            ('identity only; no nontrivial supported symmetry detected; one sector of the identity '
+             '(PARSEC_CUPY_SINGLE_SECTOR=auto)', False),
+            ('skipped: periodic cell (PARSEC_PERIODIC_SYMMETRY=off; the full grid is used)', False),
+        ):
+            with self.subTest(text=text[:40]):
+                reporter, messages = self.reporter(1)
+                system = self.system()
+                system.backend_info.details += (('symmetry_detection', text),)
+                reporter.setup(system)
+                report = '\n'.join(messages)
+                self.assertEqual(report.count(f' symmetry_detection = {text}'), 1)
+                self.assertEqual(sentence in report, weighted)
+
     def test_scf_iterations_delegate_unchanged_at_both_levels(self):
         for level in (1, 2):
             reporter, _ = self.reporter(level)

@@ -552,7 +552,18 @@ def _solve(name, mode, *, extra=(), drop=(), records=None, symmetry="auto"):
     cupy_available() and native_available(), "CUDA runtime or native extension is unavailable"
 )
 class SectorRunTests(unittest.TestCase):
-    """Complete runs in the sectors against the full grid."""
+    """Complete runs in the sectors against the full grid.
+
+    The abelian sectors of these molecules (``PARSEC_ORBITAL_GROUP_SPIN=off``): O2 and the O atom take the weighted
+    sectors of D4h by default since 2026-11-19, whose runs and fallbacks ``test_weighted_inputs.py`` checks.
+    """
+
+    def setUp(self) -> None:
+        import os
+
+        patcher = mock.patch.dict(os.environ, {"PARSEC_ORBITAL_GROUP_SPIN": "off"})
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def solve(self, *arguments, **options):
         directory, system, result = _solve(*arguments, **options)

@@ -140,6 +140,22 @@ directory):
 | `relaxation.xyz` | Extended XYZ: every structure in Angstrom with its energy (eV and Ry) and forces (eV/Angstrom). |
 | `parsec_python_results.npz` | Unless `--no-archive`: the result of the last structure and, under `relaxation_*`, positions, energies and forces of all of them. |
 
+With `PARSEC_STANDARD_ORIENTATION=on` (opt-in; acceleration README, "Standard
+orientation of a cluster") a cluster whose axes are not along the coordinate
+axes is calculated in the frame of its largest group of signed permutations.
+`parsec.out`, `atom.cor`, `relaxation.xyz` and the forces and final positions
+of the MPI runner's JSON report then give the coordinates and forces in the
+frame of the input (as PARSEC places it), so that they compare with a run
+without the switch; `relax_restart.dat` and the archive stay in the
+calculation frame, which parsec.out prints (`x_calc = Q^T (x - d)`).
+`relax_restart.dat` records that frame after all that PARSEC reads: a
+`Relax_Restart` from it reports in the frame of the run that wrote it (also
+with `Restart_Run`, which does not recentre) and needs the switch on, and a
+file written without the switch is continued in the frame of the input. In a
+relaxation with `Move_Flag` the search takes only frames whose group the
+relaxation can use (no operation of the species exchanges a fixed atom with a
+moving one).
+
 Molecular dynamics writes PARSEC's `md_nrg.dat`, `md_mech.dat`, `mdinit.dat`,
 `atom.cor` and `movie.xyz`, in the formats of PARSEC 1.5: integer fields `i6`
 for the steps and `i7` for the atom count, and the velocities of
@@ -170,7 +186,10 @@ result)` and `compute_reference_forces(system, result)` give the forces of a
 converged single point. A system prepared with symmetry holds for structures
 of its point group: moving the atoms off it stops with an error, so a
 relaxation whose movable flags break the symmetry is prepared with
-`symmetry="off"`, as the command line does.
+`symmetry_fixed_atoms=symmetry_fixed_atoms(translation)` (the fixed atoms a
+species of their own for the detection: the subgroup the relaxation keeps),
+as the command line does under `PARSEC_MOVE_FLAG_SUBGROUP=auto`, or with
+`symmetry="off"` (under `off`).
 
 ## Forces
 
@@ -293,7 +312,13 @@ Ry/bohr (SCAN): the meta-GGA adds nothing to what those routines show for PBE.
 A periodic cell has forces, relaxation and molecular dynamics through the periodic backend
 (`Relaxation.periodic_backend`) of the readable solver. `main.py` hands such an input to `parsec_python.cli`
 (`NOTE: ... running the reference parsec_python.cli solver instead`) when it has k-points or spin; a spin-unpolarized
-Gamma-point cell stays on the accelerated path.
+Gamma-point cell stays on the accelerated path, and so do the forces and relaxations (`bfgs`, `simple`) of a
+spin-polarized bulk cell at the Gamma point in the sectors of its group on the default routines
+(`PARSEC_SPIN_SECTOR_FORCES=auto`, `acceleration/SCF/gamma_spin.py`), and its molecular dynamics, manual movements and
+relaxations with fixed atoms on the full grid of the accelerated driver (one device, or one sector of the identity
+shared by the GPUs of the process where one would not hold both channels, `PARSEC_SPIN_FALLBACK_SHARED`; the
+k-point driver where neither does); the Fortran-derived routines (the default of
+the forces of a spin-polarized PBE cell) keep the 1x1x1 k-point driver.
 
 Forces (`Forces.compute_periodic_forces`; the Fortran routines are `forpbc.f90`, `force_loc_pb.f90`, `ewald_sum.f90` and
 `forcnloc.f90`):
@@ -315,7 +340,7 @@ Forces (`Forces.compute_periodic_forces`; the Fortran routines are `forpbc.f90`,
    forces are **not symmetrized**. A Monkhorst-Pack mesh (with or without a `Monkhorst_Pack_Shift` block, which since
    2026-11-18 is PARSEC 1.5's Gamma-centred mesh, `PARSEC_MP_UNSHIFTED_MESH`) of the forces of a single point or of a
    `bfgs`/`simple` relaxation runs its irreducible wedge since 2026-11-18 (`PARSEC_KPOINT_FORCE_WEDGE`, `auto` by
-   default), as a single point without forces and Fortran's routines do: the operations of the space group that map the
+   default; also for non-magnetic spin-orbit coupling since 2026-11-19, `PARSEC_SOC_KPOINT_WEDGE`), as a single point without forces and Fortran's routines do: the operations of the space group that map the
    grid of `Grid_Spacing` onto itself reduce the mesh and symmetrize the density, the nonlocal force of the wedge is
    completed over them (its points stand for their stars) and the total averaged over them (`symm_forces.f90`), so the
    structure keeps the group. Molecular dynamics and `manual` movements (PARSEC uses no symmetry for them), a `Move_Flag`
@@ -421,7 +446,17 @@ case:
 
 Isolated runs use `compute_spinor_forces`; a periodic run uses `compute_periodic_forces` on a result whose nonlocal force
 the k-point job accumulated from the orbitals of every k-point in a last pass (`compute_forces=True`, as for the scalar
-k-point driver), with the Bloch phases of the projectors and their gradients and the atoms folded into the cell. Moved
+k-point driver), with the Bloch phases of the projectors and their gradients and the atoms folded into the cell, each
+k-point at its own weight. On the default routines the Monkhorst-Pack mesh of plain spin-orbit coupling (no spin
+polarization, no non-collinear magnetism) runs its irreducible wedge since 2026-11-19 (`PARSEC_SOC_KPOINT_WEDGE`), as for
+scalar orbitals but by the operations that also keep the grid's finite-difference operators (all of them on an
+orthogonal grid, a subgroup on an oblique one): the nonlocal force of the wedge is completed over its group and the
+forces averaged over it; molecular dynamics, `manual` movements and the other runs that keep the whole mesh run its
+time-reversal pairs (the Kramers partner of a spinor at `-k` has the same density and forces). Bcc Au2 with an atom
+moved along (1, 1, 1), 4x4x4 on one A100 node: the forces of the 13-point wedge within 6e-6 Ry/bohr of the 64 points
+(22.5 against 77.6 s), two relaxation steps 62.2 against 251.6 s with every energy within 1.2e-6 Ry (the SCF criterion
+is 1e-6 Ry). hcp Au2 with an atom moved along c (4x4x2): 2 operations kept, the forces of the 14-point wedge within
+1e-7 Ry/bohr of the 20 time-reversal pairs. Collinear spin and non-collinear magnetism keep the whole mesh. Moved
 atoms keep the direction of their initial moment (`Initial_NCL_Moment`). The SCF loop of a moved structure continues from the
 previous one, for plain spin-orbit coupling, collinear spin and non-collinear magnetism alike (isolated or periodic, Gamma
 point or k-points): the last mixed potential with the new ionic potential (for spin the pair `V_up`, `V_down`; for
@@ -570,7 +605,26 @@ Symmetry: the point-group operations of the input structure that respect the
 movable flags are found once. Forces are averaged over them and so are the
 positions the mover returns, which keeps a symmetric structure symmetric to
 round-off. When `Move_Flag` fixes an atom that an operation exchanges with a
-movable one, the run uses no symmetry and says so.
+movable one, the run keeps the subgroup of the operations that map the fixed
+atoms onto fixed atoms and says so (`PARSEC_MOVE_FLAG_SUBGROUP=auto`, since
+2026-11-19; the accelerated driver solves the sectors of that subgroup, found
+with the fixed atoms as a species of their own, and a periodic cell at the Gamma
+point does the same whenever atoms are fixed); under `off`, or where only the
+identity respects the flags, the run uses no symmetry, as before.
+`PARSEC_SYMMETRIZE_POSITIONS=on` averages the input positions over the group
+found within `PARSEC_SYMMETRY_ATOM_TOLERANCE` first, so that a rounded input
+gets its group exactly (`Forces/position_symmetry.py`; a bulk cell is then
+shifted as a whole so that the operations whose translations map its grid
+onto itself to within the tolerance do so exactly, as the sectors need).
+The test of the whole group of the atoms also decides whether a relaxation
+with point charges or `Foldblock_Side_Length 2` keeps the sectors of the group
+the charges or the fold-block domain leave intact on the accelerated path
+(`PARSEC_POINT_CHARGE_SYMMETRY`, `PARSEC_FOLDBLOCK_SYMMETRY`,
+`acceleration/README.md`): where an operation exchanges a fixed atom with a
+movable one the run takes the full grid, as without those switches, whatever
+`PARSEC_MOVE_FLAG_SUBGROUP` says (the subgroup is not combined with the kept
+group of a constraint). Such a relaxation keeps its forces unsymmetrized, as
+PARSEC does without a group: the sector density holds the group to round-off.
 
 ## Molecular dynamics
 
@@ -795,7 +849,10 @@ as inaccurate: forces, relaxation and dynamics are refused with it. With
 double-grid spin-orbit projectors (the fine-point sum of `nonloc.F90`, each
 fine sample with the slope of its radial interpolant). With `Polarizability`
 and `Skip_Force: false` the forces are those of the last of the seven field
-loops (field along -z), as `parsec.F90` computes them after `polar.f90`.
+loops (field along -z), as `parsec.F90` computes them after `polar.f90`
+(the accelerated driver always solves that loop, since 2026-11-19 in the
+sectors of the operations of the atoms that keep the z axis:
+`PARSEC_POLARIZABILITY_SYMMETRY`, `acceleration/README.md`).
 Refused: forces with LDA+U and k-points (scalar or spinor; PARSEC's LDA+U
 forces are zero).
 
@@ -815,8 +872,16 @@ Symmetrization (`symm_forces.f90`): over the space group the input reader
 finds for the wire or slab (`symmetries.f90` with `alatt` = `latt_vec` and
 `4 rmax` along the confined directions), non-symmorphic operations included;
 operations whose translation moves the cylinder or slab off itself are dropped
-(PARSEC applies them). A slab has no group unless bandstruc, spin-orbit or an
-NSCF run turns PARSEC's symmetry on; molecular dynamics, manual movements and
+(PARSEC applies them). A slab has no group in PARSEC unless bandstruc,
+spin-orbit or an NSCF run turns its symmetry on; here a slab with a
+Monkhorst-Pack mesh of scalar or collinear-spin orbitals and a native LDA or
+GGA also takes the operations of its group that keep its grid and its mesh
+and are signed permutations of the lattice directions
+(`PARSEC_SLAB_MESH_SYMMETRY=auto`, since 2026-11-19; `full` also the three-
+and six-fold rotations of a hexagonal slab: the mesh reduced to their wedge,
+the forces averaged over them; a `Move_Flag` that breaks the group keeps the
+former route, charged sheets that are not symmetric about z = 0 drop the
+operations that reverse z); molecular dynamics, manual movements and
 Polarizability have none. The averaged forces also complete a k-point set
 reduced to the irreducible wedge; as for a bulk cell, the movements such a
 wedge cannot follow are refused: molecular dynamics and manual movements with
@@ -850,6 +915,11 @@ Nothing leaves the devices that a single point keeps there.
   replaced in place on the device operators, with their replicas on the other
   devices of a shared sector basis. Stencils, potential buffers, recorded
   filter graphs and the sector subspaces stay.
+  The local ionic potential and the atomic densities of a moved cluster are
+  summed on the GPU (the default `PARSEC_IONIC_BACKEND=auto` since
+  2026-11-19), at one point per orbit of the full point group where the moved
+  atoms are its images to 1e-10 bohr (`PARSEC_IONIC_MOVED_SUMS=orbits`;
+  `moved_ionic_sum_grid` of the backend says what ran).
 - **Warm start**: each sector solver keeps its subspace and marks it as the
   start of a new SCF loop.
 - **Forces**: the nonlocal term is contracted where the orbitals are, sector
@@ -860,7 +930,17 @@ Nothing leaves the devices that a single point keeps there.
   sectors are solved the sums run over the symmetry wedge of the grid and the
   group operations complete them, which costs as many times less as the group
   has operations and changes the forces by round-off only;
-  `PARSEC_LOCAL_FORCE_SUMS=full` sums over the whole grid as before.
+  `PARSEC_LOCAL_FORCE_SUMS=full` sums over the whole grid as before. Weighted
+  sectors (a Td or Oh cluster solved in the sectors of D2d or D4h) can sum over
+  one point per orbit of the full group instead of the wedge of the solved
+  subgroup, with the fields averaged over the full group, which their
+  symmetrized total does in any case (`PARSEC_LOCAL_FORCE_SUMS=orbits`,
+  opt-in since 2026-11-19: three times fewer points for Td in D2d, the same
+  forces within 4e-14 Ry/bohr, but no faster, since the average of the fields
+  on the host costs what the points save: on one node of 4 A100 the local
+  forces of the nanodiamonds k06 and k08 took 0.070 and 0.118 s against 0.058
+  and 0.090 s on the wedge, warm; the default `wedge` keeps the wedge of the
+  subgroup).
 - **Projector gradients**: once the atoms of a structure are in place, a host
   thread samples the gradients of its projectors and reduces them to the
   sectors of the process while the devices solve its SCF loop; the forces
@@ -883,7 +963,13 @@ Nothing leaves the devices that a single point keeps there.
   with projectors formed such orbits stopped in the contraction (a Td cluster
   with forces in its sectors, a regression of the compression of 2026-11-16);
   Ge5 in Td against the full grid: within 2e-6 Ry/bohr
-  (`test_forces_geometry.TetrahedralSectorForceTests`).
+  (`test_forces_geometry.TetrahedralSectorForceTests`). Since 2026-11-19 the
+  two channels of a spin-polarized run take the weighted sectors too
+  (`PARSEC_ORBITAL_GROUP_SPIN`): each channel contracts the states its sectors
+  solved with their occupations times their weights
+  (`SpinChannelResult.sector_states`), and the same average completes them
+  (GeH4 and its anion in Td, O2 in D4h: the forces of the full grid within
+  2e-5 and 1e-7 Ry/bohr, `test_weighted_inputs.py`).
 - **Periodic cells in sectors** (a bulk cell at the Gamma point on the default
   routines, solved in the sectors of its point group, `PARSEC_PERIODIC_SYMMETRY`):
   - *Forces*: the nonlocal term as above, the Ewald and local terms from the
@@ -919,7 +1005,10 @@ Nothing leaves the devices that a single point keeps there.
     `run_relaxation`): `check_sector_atoms`
     (`acceleration/Forces/sector_symmetry.py`) requires the moved atoms to keep G
     and the orbits of H to 1e-6 bohr (a move off the group raises `ValueError`
-    naming the operation), every route then shares one tail: device operator,
+    naming the operation; a group that `PARSEC_SYMMETRY_ATOM_TOLERANCE` took for
+    atoms off it by more than that is refused before the SCF of a run with
+    forces, since 2026-11-19, `sector_force_tolerance_refusal`, of clusters too),
+    every route then shares one tail: device operator,
     sector operators (compressed as at the preparation), the rebound reference,
     the prefetch of the gradients. An orbital-only system of an MPI sector rank
     takes the projectors of the moved atoms alone (`SCF/pbc.py`,
@@ -934,12 +1023,20 @@ Nothing leaves the devices that a single point keeps there.
     single-point forces (`Skip_Force: .false.`) and relaxations by `bfgs` or
     `simple` (with `Relax_Restart`, `Potential_Extrapolation`,
     `Relaxation_SCF_Upscale`) keep the sectors, and `--symmetry on` is accepted for
-    them; `parsec.out` says `Forces of the periodic cell in the sectors of its
+    them; they keep them below the size floor of an SCF alone too
+    (`PARSEC_PERIODIC_SECTOR_FLOOR`, since 2026-11-19: the full grid would not
+    average forces and moves over the group); `parsec.out` says `Forces of the periodic cell in the sectors of its
     point group: averaged over |G| operations; projectors of n of N atoms ...`.
-    Molecular dynamics, manual movements, a `Move_Flag` fixing atoms,
-    `Use_Fortran_Routines`, point charges, `Polarizability`, nscf,
+    A `Move_Flag` fixing atoms keeps the sectors of the subgroup that maps the
+    fixed atoms onto fixed atoms (`PARSEC_MOVE_FLAG_SUBGROUP=auto`), except in
+    the relaxation of a spin-polarized cell (the full grid of both channels,
+    `PARSEC_SPIN_SECTOR_FORCES`) and on the Fortran-derived routines (their
+    full grid: their forces are symmetrized with their own group).
+    Molecular dynamics, manual movements, a `Move_Flag` fixing atoms under
+    `PARSEC_MOVE_FLAG_SUBGROUP=off`, point charges, `Polarizability`, nscf,
     `Restart_From_Wfndat`, k-points beyond Gamma and the TRIM supercell keep the
-    full grid, and so do bands under `PARSEC_PERIODIC_SECTOR_BANDS=off` (under
+    full grid (the Fortran-derived routines only under
+    `PARSEC_FORTRAN_SECTOR_FORCES=off`, below), and so do bands under `PARSEC_PERIODIC_SECTOR_BANDS=off` (under
     `auto`, the default since 2026-11-18, a band structure keeps the sectors of
     its SCF); `Ignore_Symmetry` too unless `--symmetry on` is given; `off` puts
     every forces, relaxation or MD run of a cell on the full grid, bit for bit as
@@ -959,13 +1056,32 @@ Nothing leaves the devices that a single point keeps there.
     identity. Displaced Si8 and Si 2 x 2 x 2, two BFGS moves on 1 x 1, 1 x 4
     (`--rank-per-gpu`) and 2 x 1 ranks: the trajectory of `main.py` within 1e-13
     bohr. Inputs whose species use `Cubic_Spline` (all of `make_diamond.py`) put the
-    forces of a Gamma cell on the Fortran-derived routines by default, which the
-    sectors refuse: give them `Use_Fortran_Routines: .false.`.
+    forces of a Gamma cell on the Fortran-derived routines by default, which keep
+    the sectors too since 2026-11-19 (below); `Use_Fortran_Routines: .false.` gives
+    them the default routines.
   - Diamond on 16 A100 (one rank per node, perfect crystals, one relaxation step =
     SCF + forces): 6^3 9.6 s, 10^3 14.6 s, 20^3 (64,000 atoms) 164.7 s (SCF 118.5 s,
     forces 14.8 s), 22^3 (85,184 atoms; `PARSEC_CUPY_SECTOR_MARGIN=fixed` and
     `PARSEC_CUPY_FORCE_PREFETCH=off`) 304.1 s at 79.1 GiB on the fullest GPU.
-  - The Fortran-derived routines in sectors are refused (forces and moves).
+  - *The Fortran-derived routines* (`PARSEC_FORTRAN_SECTOR_FORCES=auto`, since
+    2026-11-19): a Gamma cell whose forces or relaxation land on those routines
+    (`Use_Fortran_Routines: .true.`, or the parser's choice: `Cubic_Spline` forces,
+    `Pseudopotential_Format: fhipp`, a core correction, `Restart_Run`, another
+    mixer or eigensolver, a double grid, `Dynamic_Diag_Tol`) keeps the sectors of its
+    point group, on the command line and in the runner (which reads no `parsec.dat`:
+    it leaves a `Restart_Run`, and spin-polarized cells, to `main.py`). The terms are those of the
+    routines (`Forces/periodic_device.compute_device_periodic_forces`): the Ewald
+    sum, the local ionic, self-consistency and core-correction terms of their
+    tables on the fields the sectors expand to the full grid (one atom per orbit of
+    the group of the sectors, turned onto the others), the nonlocal term contracted
+    in the sectors with the gradients of their projectors with lattice images and
+    completed over G; the total and the moved positions are averaged over the group
+    that the operations of the routines and of the sectors generate
+    (`sector_symmetry.fortran_force_operations`). Displaced Si8 (Td and C2v),
+    `Use_Fortran_Routines`, `Cubic_Spline`, `Restart_Run` (also with a relaxation),
+    Broyden mixing, a double grid, MgO with the FHI pseudopotentials and the core
+    correction of Mg, two BFGS moves: the full grid within 2e-6 Ry/bohr and 1e-6
+    bohr. `off` keeps them on the full grid, bit for bit as before.
 - **Spin-orbit coupling and non-collinear magnetism**: the accelerated entry point runs these inputs, when they ask for
   forces, with the reference solver and says so. Its pooled k-point solver (periodic and non-collinear inputs) hands the
   orbitals of a k-point to the force pass on the device that solved it: the overlaps with the projectors, the spin-orbit
@@ -1004,13 +1120,21 @@ whose movable flags break the symmetry, a `manual` run and molecular
 dynamics have one sector, the identity. Launched with one rank, the runner
 solves it on the GPUs of one node, which share its basis column by column
 (`PARSEC_CUPY_SINGLE_SECTOR=auto`, the default; `on` gives `main.py` the one
-sector of the identity too, but without a sector context its basis stays on
-the first GPU there; `off` never). The numbers are those of the full grid; each
+sector of the identity too, whose basis the GPUs of the process share after a
+CHEBFF first solve under `PARSEC_CUPY_SECTOR_PLACEMENT=size`, the default since
+2026-11-19, and the first GPU holds under `cyclic`; `off` never). The numbers are those of the full grid; each
 GPU holds a quarter of the orbitals. `--serial-control` keeps the former
 route, on which the first GPU holds them all.
 
 On several nodes such a run starts one rank per GPU
-(`scripts/run_multi_gpu_scf.sh --nodes N --rank-per-gpu`), and the ranks
+(`scripts/run_multi_gpu_scf.sh --nodes N --rank-per-gpu`), or one rank per
+node with `Eigensolver: chebff`, each rank spreading its share over the GPUs of
+its node (`acceleration/Eigensolvers/mpi_nested_basis.py`,
+`PARSEC_MPI_NESTED_SHARING`; one rank per node without it, after a CHEBDAV
+first solve or under `PARSEC_MPI_NESTED_SHARING=off`, is refused, since
+2026-11-19 also where the detection finds no group: each rank would hold its
+share on the first GPU of its node, `PARSEC_SINGLE_SECTOR_NODE_LAYOUT=allow`
+runs it so as before), and the ranks
 share the basis of the one sector (`acceleration/Eigensolvers/mpi_shared_basis.py`):
 each holds all grid rows of its columns with a replica of the operator and
 filters them alone; the Ritz step moves the filtered columns and `H` times
@@ -1047,7 +1171,7 @@ those exchanges was measured slower and left out (see the module).
 | Positions of a periodic run | Wrapped into the cell (`back_to_cell`) | Continuous; the builders fold them | The optimizer needs continuous coordinates. |
 | SCF-correction force with `Cubic_Spline` | Uses the derivative table together with the spline coefficients of the density | Interpolates the atomic valence density linearly in that term | The combination in `forcloc.f90` mixes two tables; the term vanishes at SCF convergence. |
 | `atom.cor` of a restarted run | "Step # 0" shows the coordinates of the input file | Shows the restart structure, which is the one computed | The file then describes the run. |
-| Movable flags that break the symmetry | Symmetrizes regardless | Runs without symmetry | The relaxation would leave the group it started in. |
+| Movable flags that break the symmetry | Symmetrizes regardless | Keeps the subgroup that maps the fixed atoms onto fixed atoms (`PARSEC_MOVE_FLAG_SUBGROUP=auto`; `off`: runs without symmetry) | The relaxation would leave the group it started in, but not that subgroup. |
 | Positions after a movement | As the optimizer returns them | Averaged over the symmetry operations | Removes round-off drift; no change at print precision. |
 | Energy that is not finite | L-BFGS-B reports a converged minimum | The run stops with an error | The Fortran outcome is wrong. |
 | Hartree boundary of larger clusters | Multipoles at `Solver_Lpole` | Higher order and atomic tail by default | See "Physical scope" in the package README; `Hartree_Boundary_Tolerance: off` restores PARSEC's boundary for a comparison. |

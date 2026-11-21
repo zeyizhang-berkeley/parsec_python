@@ -45,16 +45,13 @@ in `../python_pbe`, and `analyze.py` reads it where the first is absent:
 | log of a run | kept copy | run |
 |---|---|---|
 | `parsec_gpu_hartree.out` | `parsec_gpu_hartree_python.out` | the command below with `PARSEC_HARTREE_LINEAR_BACKEND=cupy` (Poisson solves on the GPU, the default since 2026-11-07); all four cases |
-| `parsec.out` | `parsec_python.out` | the command below with the default settings of then (Poisson solves on the CPU, now `PARSEC_HARTREE_LINEAR_BACKEND=native`); CH4 IS, CH4 FS_1s and CF4 IS |
+| `parsec.out` | `parsec_python.out` | the command below with `PARSEC_HARTREE_LINEAR_BACKEND=native` (Poisson solves on the CPU, the default before 2026-11-07); all four cases |
 
-The default-settings run of CF4 FS_1s was stopped during its refinement,
-when other jobs on the machine had slowed its CPU Poisson solves to more
-than a minute each; its SCF had converged to the total of the GPU run
-(-852.72970772 Ry all-electron). The kept logs of the first two rows, CF4
-IS `parsec_python.out` excepted, were written before the refinement gained
-its start and progress lines and while its "before" memory mark was still
-taken after the download of the orbitals; their energies, blocks and
-timings are those of the final code.
+The kept logs are of 20 November 2026, one NVIDIA A100 per run ("Time and
+memory" below). Until then CF4 FS_1s had no CPU-solver log: its run of
+11 October 2026 on a laptop was stopped during its refinement, when other
+jobs on the machine had slowed its CPU Poisson solves to more than a minute
+each.
 
 ## Running
 
@@ -68,10 +65,10 @@ From one of the four case directories:
 ```
 
 On a GPU the Poisson solves of the SCF and of the refinement run there, the
-default since 2026-11-07, which is six times faster per pair for CF4 than
-the CPU (`--log parsec_gpu_hartree.out` for that log); set
-`$env:PARSEC_HARTREE_LINEAR_BACKEND = "native"` before the command to solve
-them on the CPU, as for `parsec_python.out`.
+default since 2026-11-07, which is 23 times faster per pair for CF4 than
+the 28 CPU threads of the runs below (`--log parsec_gpu_hartree.out` for
+that log); set `$env:PARSEC_HARTREE_LINEAR_BACKEND = "native"` before the
+command to solve them on the CPU, as for `parsec_python.out`.
 After the four jobs:
 
 ```powershell
@@ -141,7 +138,7 @@ CH4, 136 for CF4.
 ## Results
 
 All runs converged. The energies below are those of the four runs with the
-GPU Poisson solver; the three default-settings runs give the same numbers
+GPU Poisson solver; the four runs with the CPU solver give the same numbers
 to the eight printed decimals in Rydberg. Energies in eV:
 
 | case | quantity | Python | ARES | Python - ARES |
@@ -186,9 +183,10 @@ PBE gives -0.50 eV and -0.48 eV.
 
 ## Time and memory
 
-First calculations (no symmetry cache, no restart) in double precision on
-the tested laptop: 32 logical cores, RTX 5070 Laptop GPU with 8 GB, 32 GB
-of memory. "Refinement" is `Time for energy refinement` of the log, "host
+First calculations (no symmetry cache, no restart) in double precision with
+the code of 20 November 2026 on one NVIDIA A100 (80 GB) per run, each run with
+32 CPUs of a Perlmutter GPU node (28 threads) and four runs side by side on
+the node. "Refinement" is `Time for energy refinement` of the log, "host
 memory" the high-water mark of the process at the end of the run.
 
 With `PARSEC_HARTREE_LINEAR_BACKEND=cupy` (conjugate gradients in double
@@ -197,46 +195,46 @@ densities; the default since 2026-11-07):
 
 | case | grid points | SCF steps | SCF [s] | occupied orbitals | pair solves | refinement [s] | s per pair | whole run [s] | host memory [GiB] |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| CH4 IS | 539,152 | 28 | 28.6 | 4 | 10 | 1.6 | 0.139 | 32.3 | 2.22 |
-| CH4 FS_1s | 539,152 | 21 | 22.0 | 4 | 10 | 1.6 | 0.134 | 25.5 | 2.22 |
-| CF4 IS | 3,103,688 | 40 | 456.6 | 16 | 136 | 210.3 | 1.526 | 680.2 | 11.22 |
-| CF4 FS_1s | 3,103,688 | 37 | 397.5 | 16 | 136 | 212.7 | 1.543 | 618.7 | 12.36 |
+| CH4 IS | 539,152 | 28 | 3.9 | 5 | 15 | 1.2 | 0.067 | 7.8 | 2.24 |
+| CH4 FS_1s | 539,152 | 21 | 3.2 | 4 | 10 | 0.8 | 0.060 | 6.5 | 2.23 |
+| CF4 IS | 3,103,688 | 40 | 33.4 | 16 | 136 | 59.1 | 0.418 | 101.8 | 9.28 |
+| CF4 FS_1s | 3,103,688 | 37 | 31.8 | 16 | 136 | 62.0 | 0.439 | 103.5 | 9.26 |
 
-The default settings of then, now `PARSEC_HARTREE_LINEAR_BACKEND=native`
-(the same conjugate gradients in C++/OpenMP on 28 threads):
+The default settings before 2026-11-07, now
+`PARSEC_HARTREE_LINEAR_BACKEND=native` (the same conjugate gradients in
+C++/OpenMP on 28 threads):
 
 | case | grid points | SCF steps | SCF [s] | occupied orbitals | pair solves | refinement [s] | s per pair | whole run [s] | host memory [GiB] |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| CH4 IS | 539,152 | 28 | 47.0 | 4 | 10 | 5.1 | 0.487 | 54.0 | 2.14 |
-| CH4 FS_1s | 539,152 | 21 | 32.5 | 4 | 10 | 7.2 | 0.694 | 41.2 | 2.13 |
-| CF4 IS | 3,103,688 | 40 | 847.8 | 16 | 136 | 2128.2 (disturbed) | 15.621 (9.5 undisturbed) | 2982.2 | 11.48 |
-| CF4 FS_1s | 3,103,688 | 37 | 885.4 (disturbed) | 16 | 136 | stopped | | | |
+| CH4 IS | 539,152 | 28 | 18.6 | 5 | 15 | 6.9 | 0.447 | 27.4 | 2.11 |
+| CH4 FS_1s | 539,152 | 21 | 13.2 | 4 | 10 | 4.1 | 0.389 | 19.4 | 2.14 |
+| CF4 IS | 3,103,688 | 40 | 472.4 | 16 | 136 | 1337.2 | 9.815 | 1816.5 | 8.69 |
+| CF4 FS_1s | 3,103,688 | 37 | 445.6 | 16 | 136 | 1328.9 | 9.752 | 1781.8 | 8.66 |
 
-The two CF4 rows of the second table are not clean measurements. Other
-jobs took the CPUs of the machine from the 70th pair of CF4 IS on: its
-first 69 pair solves took 655 s (9.5 s each, which makes 1290 s for all
-136), the remaining 67 took 1470 s. CF4 FS_1s ran entirely beside those
-jobs; its SCF time is what the table gives and its refinement was stopped
-at 21 of 136 pairs after 498 s. In a separate measurement before those
-jobs started, one CPU solve of a density on the CF4 grid took 8.5 to 8.8 s
-and one GPU solve 1.3 s, with the same iteration counts and the same
-integrals to twelve digits.
+CH4 IS counts five occupied orbitals: the first empty level has an
+occupation just above 1e-12, the threshold of the exact exchange, at the
+Fermi temperature of the input; its pairs change no printed digit of the
+energies. On the GPU a pair solve on the CF4 grid takes 0.42 to 0.44 s, on
+the CPU 9.8 s. The logs of 11 October 2026 came from a laptop (32 logical
+cores, RTX 5070 Laptop GPU with 8 GB, 32 GB of memory): CF4 IS took 680 s
+with the GPU solver (1.5 s per pair) and a CPU solve 8.5 to 8.8 s there,
+with the same iteration counts and the same energies.
 
 The exact exchange is the refinement: the four density functionals take
-0.2 s (CH4) and 1.2 s (CF4). Its cost is the number of occupied pairs times
-one Poisson solve from a zero start, about 560 conjugate-gradient
+0.1 to 0.2 s (CH4) and 0.9 s (CF4). Its cost is the number of occupied pairs
+times one Poisson solve from a zero start, about 565 conjugate-gradient
 iterations on the 3.1 million points of CF4. ARES needed 22 s (CH4) and
 1850 s (CF4) for the same step with 64 processes (total minus SCF time of
 its logs).
 
 What the refinement adds to the host memory is the orbitals: for CF4 the 65
 states come to the host once (1.5 GiB) and the 16 occupied ones are copied
-(0.4 GiB). In the runs of the final code, which print the high-water mark
-of the process before that download and after the refinement, it rose by
-0.10 GiB for CH4 IS (2.03 to 2.13) and not at all for CF4 IS (11.48, set
-during the SCF). GPU memory peaked at 2.2 to 2.3 GiB (CH4) and at 7.7 of the
-8.0 GiB of the card (CF4, mostly the memory pool of the eigensolver); the
-GPU pair solver holds 0.5 GiB of it for CF4.
+(0.4 GiB). The logs print the high-water mark of the process before that
+download and after the refinement: it rose by 0.65 to 0.8 GiB for CF4 (GPU
+solver 8.59 to 9.28 GiB, CPU solver 7.89 to 8.69 GiB for CF4 IS) and by
+0.04 GiB at most for CH4. On the laptop GPU memory peaked at 2.2 to 2.3 GiB
+(CH4) and at 7.7 of the 8.0 GiB of the card (CF4, mostly the memory pool of
+the eigensolver); the GPU pair solver holds 0.5 GiB of it for CF4.
 
 ## Limits
 

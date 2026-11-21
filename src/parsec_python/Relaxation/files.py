@@ -148,6 +148,15 @@ def _coordinates(record: str) -> list[float] | None:
     return values[:3] if len(values) >= 3 else None
 
 
+#: The header of the block ``PARSEC_STANDARD_ORIENTATION`` adds at the end of
+#: ``relax_restart.dat``, after all that PARSEC reads: the frame the coordinates
+#: and the optimizer state are in
+#: (:meth:`parsec_python.Input.standard_orientation.StandardOrientation.restart_records`).
+ORIENTATION_HEADER = " Standard orientation follows (PARSEC_STANDARD_ORIENTATION)"
+#: the records of that block
+ORIENTATION_RECORDS = 7
+
+
 @dataclass(frozen=True)
 class RelaxRestart:
     """Content of ``relax_restart.dat``.
@@ -158,7 +167,10 @@ class RelaxRestart:
     state of the optimizer (``lbfgsb``, see
     :class:`parsec_python.Relaxation.lbfgsb.LBFGSBState`), the bounds of its
     variables and ``bound_step``, the ``move%stepmax`` written beside the
-    number of corrections (``-1`` for an unrestricted run).
+    number of corrections (``-1`` for an unrestricted run).  ``orientation``
+    holds the records of the calculation frame of a run with
+    ``PARSEC_STANDARD_ORIENTATION=on`` (:data:`ORIENTATION_HEADER`), ``None``
+    in a file without them.
     """
 
     positions: np.ndarray
@@ -168,6 +180,7 @@ class RelaxRestart:
     lower: np.ndarray | None = None
     upper: np.ndarray | None = None
     bound_step: float | None = None
+    orientation: tuple[str, ...] | None = None
 
 
 def format_relax_restart(restart: RelaxRestart, block=format_restart_block) -> str:
@@ -192,6 +205,8 @@ def format_relax_restart(restart: RelaxRestart, block=format_restart_block) -> s
             restart.upper,
             -1.0 if restart.bound_step is None else restart.bound_step,
         )
+    if restart.orientation is not None:
+        text += ORIENTATION_HEADER + "\n" + "".join(f"{record}\n" for record in restart.orientation)
     return text
 
 
@@ -199,12 +214,27 @@ def parse_relax_restart(text: str, atoms: int) -> RelaxRestart:
     """Read ``relax_restart.dat`` written by PARSEC or by this package.
 
     ``atoms`` is the number of atoms of the calculation; the file itself
-    does not hold it.  The BFGS block is read when present.
+    does not hold it.  The BFGS block is read when present, and so is the
+    frame of ``PARSEC_STANDARD_ORIENTATION`` at the end of the file.
     """
 
     records = text.splitlines()
     if len(records) < atoms + 3:
         raise ValueError("relax_restart.dat is too short for this structure")
+    orientation = None
+    header = next(
+        (
+            index
+            for index in range(atoms + 3, len(records))
+            if records[index].strip() == ORIENTATION_HEADER.strip()
+        ),
+        None,
+    )
+    if header is not None:
+        orientation = tuple(records[header + 1 : header + 1 + ORIENTATION_RECORDS])
+        if len(orientation) != ORIENTATION_RECORDS:
+            raise ValueError("relax_restart.dat ends inside its standard orientation block")
+        records = records[:header]
     # The file does not say for how many atoms it was written.  It fits when
     # the records of the atoms hold coordinates and the one after them does
     # not: that is the header of the counters.
@@ -221,7 +251,7 @@ def parse_relax_restart(text: str, atoms: int) -> RelaxRestart:
     iteration, movable = int(counters[0]), int(counters[1])
     cursor = atoms + 3
     if cursor >= len(records) or "LBFGS" not in records[cursor].upper():
-        return RelaxRestart(positions, iteration, movable)
+        return RelaxRestart(positions, iteration, movable, orientation=orientation)
     state, lower, upper, bound_step = parse_restart_block(
         "\n".join(records[cursor + 1 :]), 3 * movable
     )
@@ -233,6 +263,7 @@ def parse_relax_restart(text: str, atoms: int) -> RelaxRestart:
         lower=lower,
         upper=upper,
         bound_step=bound_step,
+        orientation=orientation,
     )
 
 
@@ -318,6 +349,8 @@ def join_lines(lines: Iterable[str]) -> str:
 
 __all__ = [
     "BOHR_TO_ANGSTROM",
+    "ORIENTATION_HEADER",
+    "ORIENTATION_RECORDS",
     "RYDBERG_TO_EV",
     "RelaxRestart",
     "format_atom_cor_energy",

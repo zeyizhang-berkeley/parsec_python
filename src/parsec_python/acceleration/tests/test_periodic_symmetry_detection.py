@@ -347,7 +347,10 @@ class PeriodicDetectionSCFTests(unittest.TestCase):
             context = MPISectorContext(thread.comm)
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")
-                system = driver.prepare_single_point(problem, backend="cupy", mpi_context=context)
+                try:
+                    system = driver.prepare_single_point(problem, backend="cupy", mpi_context=context)
+                except ValueError as error:
+                    return str(error)
             solver = system.backend.symmetry_eigensolver
             return (
                 solver.decomposition.representation_count,
@@ -355,7 +358,21 @@ class PeriodicDetectionSCFTests(unittest.TestCase):
                 dict(system.backend_info.details)["symmetry_detection"],
             )
 
-        for count, shared, detection in run_ranks(4, rank_main):
+        # That one sector would lie on the first GPU of each rank (each rank holds the GPUs of a node): since
+        # 2026-11-19 every rank refuses it with advice (PARSEC_SINGLE_SECTOR_NODE_LAYOUT), right after the detection,
+        # where a rank has more than one GPU.
+        import cupy
+
+        from parsec_python.acceleration.Eigensolvers.symmetry import selected_device_ids
+
+        if len(selected_device_ids(int(cupy.cuda.Device().id))) > 1:
+            refusals = run_ranks(4, rank_main)
+            self.assertEqual(len(set(refusals)), 1)
+            self.assertIn("on the first GPU of each rank only", refusals[0])
+            self.assertIn("--rank-per-gpu", refusals[0])
+        with mock.patch.dict(os.environ, {"PARSEC_SINGLE_SECTOR_NODE_LAYOUT": "allow"}):
+            outcomes = run_ranks(4, rank_main)
+        for count, shared, detection in outcomes:
             self.assertEqual((count, shared), (1, True))
             self.assertIn("are fewer than the 4 MPI ranks", detection)
             self.assertIn("one sector of the identity", detection)

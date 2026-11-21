@@ -306,6 +306,11 @@ class CuPySymmetryDensityBuilder:
                 perf_counter() - sectors_started
             )
         point_group = getattr(wavefunctions, "point_group", None)
+        fields = None if self.reducer is None else self.reducer.reduction
+        if point_group is not None and getattr(fields, "subgroup", None) is point_group:
+            # The fields keep one value per orbit of the full group (PARSEC_SECTOR_FIELD_GROUP=full,
+            # Symmetry/field_orbits.py): the average over each of them is the average over that group.
+            return self.reducer.field(fields.from_subgroup(wedge_density))
         if point_group is not None:
             # The one-dimensional sectors of a subgroup hold one partner of some degenerate levels, counted
             # with their weights in the occupations: the average over the full group is the density of all.

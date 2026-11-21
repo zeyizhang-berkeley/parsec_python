@@ -410,7 +410,11 @@ The first form uses every node of the allocation with four GPUs each. A run
 without point-group symmetry, such as molecular dynamics, has a single
 symmetry sector; on several nodes add `--rank-per-gpu`, which starts one rank
 per GPU that share its orbitals (C1653H508 MD: 40.5 s per step on one node,
-23.0 s on four).
+23.0 s on four), or name `Eigensolver: chebff`, with which the first form
+shares them too, every rank over the GPUs of its node
+(`PARSEC_MPI_NESTED_SHARING`; its exchanges between nodes pass GPU arrays to
+MPI where mpi4py links Cray MPICH's `libmpi_gtl_cuda`, built with
+`craype-accel-nvidia80` loaded, and go through the host otherwise).
 
 A bulk cell (`Boundary_Conditions: bulk`) runs at the Gamma point with real
 orbitals, an orthorhombic cell, no spin and a native LDA or GGA, as one
@@ -421,8 +425,10 @@ sector whose orbitals all ranks share; on several nodes launch it with
 and nodes for one large eigenproblem (MPI)" below); spin, hybrids,
 meta-GGAs, oblique cells, wires, slabs and the forces of a cell go to
 `main.py`, and the runner refuses them by name. A spin-polarized cluster
-runs its single point on several ranks; its forces, relaxation and
-molecular dynamics need one rank (`--serial-control`) or `main.py`.
+or bulk cell at the Gamma point runs its single point, and its forces and
+relaxations that keep the symmetry sectors (`PARSEC_SPIN_SECTOR_FORCES`), on
+several ranks; its molecular dynamics needs one rank (`--serial-control`)
+or `main.py`.
 `src/parsec_python/acceleration/MULTI_GPU.md` ("Several nodes", "Periodic
 cells at the Gamma point on several nodes") lists the settings and says
 which ones the solver chooses for itself.
@@ -982,9 +988,12 @@ parameter `Use_Fortran_Routines` chooses:
 
 ### Irreducible k-points on the default routines
 
-With `Use_Fortran_Routines: .false.` the `Monkhorst_Pack_Shift` mesh of a bulk single point (more than one point,
-scalar orbitals with or without spin polarization, no hybrid functional, no forces or moving atoms) is reduced to
-its irreducible wedge, as on the Fortran-derived routines, but on the grid of `Grid_Spacing`. The Fortran-derived
+With `Use_Fortran_Routines: .false.` the `Monkhorst_Pack_Shift` mesh of a bulk cell (more than one point; scalar
+orbitals with or without spin polarization and, since 19 November 2026, self-consistent spin-orbit coupling without
+spin polarization or non-collinear magnetism, `PARSEC_SOC_KPOINT_WEDGE`, and the single point of a hybrid functional,
+`PARSEC_HYBRID_KPOINT_WEDGE`; forces and `bfgs`/`simple` relaxations since 18 November 2026,
+`PARSEC_KPOINT_FORCE_WEDGE`) is reduced to its irreducible wedge, as on the Fortran-derived routines, but on the grid
+of `Grid_Spacing`. The Fortran-derived
 routines make their grid commensurate with the fractional translations of the space group (`adjust_step`), which
 for diamond's quarter translations means 16 points per cubic edge where `Grid_Spacing` asks for 18. The default
 routines keep their grid and use the operations of the crystal that map that grid, and the k-point mesh, onto
@@ -996,19 +1005,61 @@ step off it, these are the 24 operations of Td about the atom: with time reversa
 operations that were dropped (`24 of the 48 operations ...`). Since the operations map the mesh onto itself, the
 wedge with the averaged density is the full mesh: the 8-atom cube at 18 points per edge (PBE, `Convergence_Criterion`
 1e-8 Ry) gives the energy of the full mesh within 1e-10 Ry for 2x2x2, 3x3x3 and 4x4x4 (-91.1711622940,
--91.2224516198, -91.2250126608 Ry; 4x4x4 in 59 s against 263 s for the 64 points on a laptop CPU).
-`Ignore_Symmetry` or `Symmetrize_Charge_Density: .false.` reduce by time reversal alone (`k` and `-k` have the same
-density). Hybrids (their exchange sums over the full mesh), spinors and moving atoms keep the full mesh of equal
-weights, as before 8 November 2026, when every input with `.false.` did. Without `Use_Fortran_Routines` a shifted
-mesh still selects the Fortran-derived routines (above).
+-91.2224516198, -91.2250126608 Ry; 4x4x4 in 59 s against 263 s for the 64 points on a laptop CPU). That holds where
+the axes of the grid are orthogonal. On an oblique cell the gradient of these routines differentiates along the grid
+axes, and an operation that turns an axis onto another direction of the Laplacian's stencil (the six- and three-fold
+axes of a hexagonal cell, the three-fold axes of the primitive fcc cell off its body diagonal) changes the discrete
+Hamiltonian at the order of the discretization: scalar orbitals, which keep every operation that maps the grid onto
+itself, give the wedge of fcc Au (one atom, 0.3 bohr, 4x4x4) 1.1e-4 Ry and that of hcp Au2 (0.3 bohr, 4x4x2) 7.7e-3 Ry
+away from time reversal alone on the same points. The whole mesh of these routines also takes its points folded into
+(-1/2, 1/2] in lattice coordinates rather than `irrbz`'s shortest ones, which the Bloch operator of an oblique grid
+does not treat alike (spin-orbit coupling: fcc 1.8e-3 Ry, hcp 2.2e-3 Ry from the wedge). A spinor turned by an
+operation with its SU(2) matrix has the turned density, and its Kramers partner at `-k` the same density, so
+non-magnetic spin-orbit coupling is reduced as PARSEC 1.5 does, by the operations that also keep the grid's
+finite-difference operators (`Grid.kpoints.stencil_preserving_operations`: all of them on an orthogonal grid, hcp 8 of
+24, the primitive fcc cell 12 of 48; time reversal alone where only the identity is left;
+`PARSEC_SOC_KPOINT_WEDGE=grid` takes those of scalar orbitals). Its wedge gives the energy of time reversal alone on
+the same points within 1e-10 Ry for hcp Au2 (14 points against 20, 21.3 against 30.9 s on one A100 node; the whole
+mesh, 32 points, 46.7 s) and 2e-9 Ry for fcc Au (13 points against 36, 19.9 against 32.5 s), and on a cube that of the
+whole mesh (bcc Au2 with an atom moved along (1, 1, 1), 4x4x4: 13 of 64 points, 77.6 -> 22.5 s with forces, the energy
+within 4e-8 Ry and the forces within 6e-6 Ry/bohr of the whole mesh). `Ignore_Symmetry` or
+`Symmetrize_Charge_Density: .false.` reduce by time reversal alone (`k` and `-k` have the same density). A hybrid
+single point takes the wedge of the operations that also keep the grid's finite-difference operators, on any grid and
+either set of routines (`PARSEC_HYBRID_KPOINT_WEDGE`): its exchange sums over the whole mesh, and the points outside
+the wedge are the images of the wedge's Bloch factors under the operations (their grid points permuted, as Quantum
+ESPRESSO's `exxinit` rotates the wavefunctions of its irreducible points). Under `auto` (since 20 November 2026) its
+semilocal start runs on the time-reversal pairs, bit for bit as `off`; where that start fills every state to 0 or 1
+(an insulator: no occupation within 1e-6 of the inside of [0, 1]) the Fock loop moves to the wedge from the
+representatives' orbitals of the start, and a start with a partly filled state keeps the pairs for the whole run,
+bit for bit as `off` (a NOTE in `parsec.out` names the route). The reason is the metal, not the grid: a level partly
+filled at the Fermi level at equivalent k-points can be filled unequally by the Fock loop of the pairs (exact exchange
+favours integer occupations), a state that breaks the crystal symmetry and lies below the symmetric one, which is all
+the wedge can hold (hcp Au2 PBE0 4x4x2: the electron of the doublet at the two L points gathers at one of them, 9.7e-4
+Ry lower at 0.3 and 0.2 bohr; primitive fcc Au 4x4x4: one of the three X points, 6.9e-4 Ry; the conventional cubic fcc
+Au cell on its orthogonal grid, 2x2x2: 5.8e-3 Ry, where neither route converges its Fock loop in 100 outer iterations,
+a behaviour of metal hybrids at low smearing as before). Insulators take the wedge to the discretization on any grid
+(primitive Si 1e-10 Ry, hexagonal Si 5.4e-8 Ry, the 8-atom Si cube 1e-10 Ry; A100). `PARSEC_HYBRID_KPOINT_WEDGE=on`
+runs the wedge always, its start too: the symmetric state, also for a metal. The wedge and the images take only the
+operations that map the mesh onto itself, also on the Fortran-derived routines, whose density average keeps the whole
+space group (the exchange of the mesh commutes with those operations alone: the 8-atom cube with a 2x2x1 or 2x2x4 mesh
+keeps 16 of its 48); `PARSEC_HYBRID_KPOINT_WEDGE=off`, forces, moving atoms and a mesh that time reversal does not keep
+(a shift other than 0 or 1/2) keep its time-reversal pairs. Molecular dynamics, `manual` movements and
+moving atoms whose `Move_Flag` an operation does not respect run the full mesh as its pairs `k`, `-k`
+(`PARSEC_KPOINT_TIME_REVERSAL`); non-collinear magnetism and spin-polarized spin-orbit coupling keep the full mesh of
+equal weights (time reversal flips their moments, and the group found from the atoms ignores them), as every input
+with `.false.` did before 8 November 2026. Without `Use_Fortran_Routines` a shifted mesh still selects the
+Fortran-derived routines (above).
 
 A `Monkhorst_Pack_Grid` without a `Monkhorst_Pack_Shift` block (more than one point) is, since 18 November 2026,
 PARSEC 1.5's mesh: PARSEC reads `mpshift` from the block only, so without it the shift is zero, and it reduces
 every Monkhorst-Pack grid with `irrbz` (`init_var.F90:281-289`; the PARSEC 1.5 binary prints `shift = 0.0000 0.0000
 0.0000` and the same table as with a zero block). On either set of routines the input now runs exactly as with a
-zero `Monkhorst_Pack_Shift` block, the Gamma-centred mesh `(i-1)/n` reduced to its irreducible wedge with the
-density symmetrized (diamond and Si cubes: 4, 4 and 10 points for 2x2x2, 3x3x3 and 4x4x4), except that the missing
-block does not select the Fortran-derived routines. Before, such an input ran this port's own unreduced mesh
+zero `Monkhorst_Pack_Shift` block, the Gamma-centred mesh `(i-1)/n` reduced as the paragraph above says (the
+irreducible wedge with the density symmetrized for scalar orbitals and non-magnetic spin-orbit coupling: diamond and Si
+cubes 4, 4 and 10 points for 2x2x2, 3x3x3 and 4x4x4, cubic Au2 with spin-orbit coupling 10 of 64 for 4x4x4), except
+that the missing block does not select the Fortran-derived routines. The note in parsec.out says what the run makes
+of the mesh: its wedge, its time-reversal pairs or all of it, and why (until 19 November 2026 it called every such mesh
+a wedge, spin-orbit and hybrid meshes included). Before, such an input ran this port's own unreduced mesh
 `(2i-n-1)/(2n)` (points at +-1/4 and +-3/4 of a step for even `n`, no time reversal, no symmetrization), which
 `PARSEC_MP_UNSHIFTED_MESH=port` keeps; a mesh of one point is the Gamma point under both.
 
@@ -1064,8 +1115,11 @@ PARSEC 1.5 does (printed coordinates and trajectories; no number of the run chan
 PARSEC 1.5's `Grid_Shift` block (one line of three numbers in grid steps, their absolute values; zero along an
 oblique periodic direction) sets the shift of every grid, clusters included, whatever `Ignore_Symmetry` says.
 `Foldblock_Side_Length 2` fills a cluster domain up to whole blocks of 2 x 2 x 2 points and switches the symmetry
-off, as 1.5 does (TierI/0d_H2: 25600 points instead of 22575); for a bulk cell it changes no grid point (the
-symmetry is still switched off). Other sides, wires and slabs are refused.
+off, as 1.5 does (TierI/0d_H2: 25600 points instead of 22575), which also takes the grid without shift; for a bulk
+cell it changes no grid point (the symmetry is still switched off). Other sides, wires and slabs are refused. The
+accelerated driver keeps that grid and solves a cluster in the sectors of the operations that map its domain of
+whole blocks onto itself (the permutations of the axes the atoms allow; `PARSEC_FOLDBLOCK_SYMMETRY=off`: no group,
+as before).
 
 ## Modular Python API
 

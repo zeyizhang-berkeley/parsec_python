@@ -3072,8 +3072,9 @@ class DriverHelperTests(_ScratchCase):
             ),
             "single point": (_water_lines(), True, False),
         }
+        # PARSEC_MOVE_FLAG_SUBGROUP=off: no symmetry where a flag breaks the group, as before 2026-11-19.
         for label, (lines, expected, remark) in decisions.items():
-            with self.subTest(case=label):
+            with self.subTest(case=label), patch.dict(os.environ, {"PARSEC_MOVE_FLAG_SUBGROUP": "off"}):
                 use, note = symmetry_decision(self.parse(lines))
                 self.assertEqual(use, expected)
                 if remark:
@@ -3081,6 +3082,40 @@ class DriverHelperTests(_ScratchCase):
                     self.assertIn("uses no symmetry", note)
                 else:
                     self.assertIsNone(note)
+        # auto (the default): such a relaxation keeps the subgroup that maps the fixed hydrogen onto itself, the
+        # mirror plane of the molecule, and says so.
+        for label, (lines, expected, remark) in decisions.items():
+            with self.subTest(case=label, switch="auto"):
+                use, note = symmetry_decision(self.parse(lines))
+                self.assertEqual(use, expected or remark)
+                if remark:
+                    self.assertIn("Move_Flag fixes atoms that 2 of the 4 symmetry operations", note)
+                    self.assertIn("keeps the subgroup of the 2 operations", note)
+                    self.assertIn("PARSEC_MOVE_FLAG_SUBGROUP=auto", note)
+                else:
+                    self.assertIsNone(note)
+        with patch.dict(os.environ, {"PARSEC_MOVE_FLAG_SUBGROUP": "sometimes"}):
+            with self.assertRaisesRegex(ValueError, "PARSEC_MOVE_FLAG_SUBGROUP must be auto or off"):
+                symmetry_decision(self.parse(decisions["one hydrogen fixed"][0]))
+
+    def test_the_fixed_atoms_are_a_species_of_their_own_where_the_subgroup_is_kept(self) -> None:
+        """``symmetry_fixed_atoms``: which atoms the detection of the accelerated driver tags, and when."""
+
+        from parsec_python.Relaxation.run import symmetry_fixed_atoms
+
+        one_fixed = self.parse(_water_lines("Minimization: BFGS", oxygen_flag="0", hydrogen_flag="1"))
+        self.assertEqual(symmetry_fixed_atoms(one_fixed), (False, False, True))
+        # the flags respect the group (the oxygen on both mirror planes): the whole group, found as before
+        oxygen_fixed = self.parse(
+            _water_lines("Minimization: BFGS", oxygen_flag="-1", oxygen=("0.0 0.0 0.0  0",))
+        )
+        self.assertIsNone(symmetry_fixed_atoms(oxygen_fixed))
+        self.assertIsNone(symmetry_fixed_atoms(self.parse(_water_lines("Minimization: BFGS"))))
+        self.assertIsNone(symmetry_fixed_atoms(self.parse(_water_lines())))
+        manual = self.parse(_water_lines("Minimization: manual\nMovement_Num: 0"))
+        self.assertIsNone(symmetry_fixed_atoms(manual))
+        with patch.dict(os.environ, {"PARSEC_MOVE_FLAG_SUBGROUP": "off"}):
+            self.assertIsNone(symmetry_fixed_atoms(one_fixed))
 
     def test_symmetry_is_judged_on_the_structure_the_run_starts_from(self) -> None:
         """A structure without symmetry has nothing a fixed atom could break.
@@ -3099,9 +3134,14 @@ class DriverHelperTests(_ScratchCase):
             oxygen=("3.0 3.0 3.0",),
             hydrogen=("4.6 3.4 3.0", "1.4 3.4 3.0"),
         )
-        use, note = symmetry_decision(self.parse(shifted))
+        with patch.dict(os.environ, {"PARSEC_MOVE_FLAG_SUBGROUP": "off"}):
+            use, note = symmetry_decision(self.parse(shifted))
         self.assertFalse(use)
         self.assertIsNotNone(note)
+        # (auto: the mirror plane that keeps the fixed hydrogen, found on the centred structure)
+        use, note = symmetry_decision(self.parse(shifted))
+        self.assertTrue(use)
+        self.assertIn("keeps the subgroup of the 2 operations", note)
 
     def test_manual_structures_are_read_beside_the_input(self) -> None:
         """``manual.dat`` is required exactly when a manual run moves the atoms."""
@@ -3816,10 +3856,14 @@ class CommandLineTests(_ScratchCase):
             )),
         )
         one_fixed = _water_lines("Minimization: BFGS", oxygen_flag="0", hydrogen_flag="1")
-        self.assertIn(
-            "--symmetry on cannot be used here: Move_Flag fixes atoms",
-            refused(one_fixed, "--symmetry", "on"),
-        )
+        # (under PARSEC_MOVE_FLAG_SUBGROUP=auto, the default, the relaxation keeps the subgroup of the flags)
+        with patch.dict(os.environ, {"PARSEC_MOVE_FLAG_SUBGROUP": "off"}):
+            self.assertIn(
+                "--symmetry on cannot be used here: Move_Flag fixes atoms",
+                refused(one_fixed, "--symmetry", "on"),
+            )
+        with patch.dict(os.environ, {"PARSEC_MOVE_FLAG_SUBGROUP": "never"}):
+            self.assertIn("PARSEC_MOVE_FLAG_SUBGROUP must be auto or off", refused(one_fixed))
         manual = _water_lines("Minimization: manual\nMovement_Num: 0")
         self.assertIn(
             "--symmetry on cannot be used here: manual movements",
@@ -4102,7 +4146,8 @@ class DriverOnTheSpringsTests(_ScratchCase):
         _, surface = self.run_driver(control + "\nIgnore_Symmetry: .true.")
         self.assertEqual(surface.force_calls[0], (False, None))
 
-        _, surface = self.run_driver(control, oxygen_flag="0", hydrogen_flag="1")
+        with patch.dict(os.environ, {"PARSEC_MOVE_FLAG_SUBGROUP": "off"}):
+            _, surface = self.run_driver(control, oxygen_flag="0", hydrogen_flag="1")
         self.assertEqual(surface.force_calls[0], (False, None))
         log = self.log()
         self.assertIn("WARNING: Move_Flag fixes atoms that a symmetry operation", log)
@@ -4112,6 +4157,22 @@ class DriverOnTheSpringsTests(_ScratchCase):
         for positions, _ in surface.scf_calls:
             np.testing.assert_array_equal(positions[2], first[2])
         self.assertTrue(np.all(np.max(np.abs(last[:2] - first[:2]), axis=1) > 0.01))
+
+        # PARSEC_MOVE_FLAG_SUBGROUP=auto (the default): the forces and moved positions keep the two operations that
+        # map the fixed hydrogen onto itself (the identity and the mirror plane of the molecule).
+        _, surface = self.run_driver(control, oxygen_flag="0", hydrogen_flag="1")
+        symmetrize, operations = surface.force_calls[0]
+        self.assertTrue(symmetrize)
+        self.assertEqual(len(operations), 2)
+        for operation in operations:
+            np.testing.assert_array_equal(operation.image, [0, 1, 2])
+        log = self.log()
+        self.assertIn("keeps the subgroup of the 2 operations that map the fixed atoms onto fixed atoms", log)
+        first = surface.scf_calls[0][0]
+        for positions, _ in surface.scf_calls:
+            np.testing.assert_array_equal(positions[2], first[2])
+            # on the mirror plane of the molecule throughout
+            np.testing.assert_array_equal(positions[:, 2], first[:, 2])
 
     def test_run_continued_with_relax_restart(self) -> None:
         """Stop after two movements, continue with ``Relax_Restart``.

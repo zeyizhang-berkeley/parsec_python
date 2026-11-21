@@ -374,7 +374,9 @@ class SectorDriverTests(unittest.TestCase):
         k_points = np.array([np.array(bits, dtype=float) * np.pi / side for bits in np.ndindex(2, 2, 2)])
         weights = np.full(8, 0.125)
         off, auto = self._both(lambda system: run_periodic_hybrid_scf(system, k_points, weights), problem)
-        self.assertAlmostEqual(auto.energies.total, off.energies.total, delta=2.0e-8)
+        # (since 2026-11-19 the last loop's level passes are solved in the sectors as well, PARSEC_KPOINT_SECTOR_LEVELS:
+        # 3.0e-8 Ry from the loops without sectors on A100, 2e-8 before)
+        self.assertAlmostEqual(auto.energies.total, off.energies.total, delta=5.0e-8)
         # The estimate the Fock loop stops on is an energy, second order in the orbitals: E_x, first order, is
         # converged to about its square root, and the two loops take other paths (without sectors, on the host, E_x
         # still moved by 3.8e-6 Ry between the outer steps with estimates 2e-10 and 4e-12; stopped at 1e-10 the
@@ -501,7 +503,9 @@ class DeviceSectorTests(unittest.TestCase):
             self.assertIsInstance(device, cp.ndarray)
             np.testing.assert_allclose(cp.asnumpy(device), split.reduce(sector, whole), rtol=0, atol=1.0e-12)
 
+    @mock.patch.dict(os.environ, {"PARSEC_KPOINT_SECTOR_STENCIL": "off"})
     def test_the_device_operator_of_a_sector(self) -> None:
+        # the reduced complex CSR (the gathered stencil of PARSEC_KPOINT_SECTOR_STENCIL=auto: test_sector_bloch_stencil)
         import cupy as cp
 
         from parsec_python.acceleration.Hamiltonian.device_bloch import CupyArrayBackend, DeviceBlochConverter

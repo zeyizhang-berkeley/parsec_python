@@ -20,9 +20,17 @@ loop (field along ``-z``) are the accelerated forces of that loop, without
 symmetrization and without a force of the field on the nuclei, as in
 PARSEC.
 
-``Polarizability`` uses no point group (``parsec.F90``; the parser sets no
-symmetry), so the loops run on the full grid, or on the one sector of the
-identity that several devices share (``PARSEC_CUPY_SINGLE_SECTOR``).
+``Polarizability`` uses no point group in PARSEC (``parsec.F90``; the parser
+sets no symmetry).  Under ``PARSEC_POLARIZABILITY_SYMMETRY=auto`` (the
+default since 2026-11-19) the accelerated CLI runs the loops with
+:func:`.symmetry_off_inputs.symmetric_field_loop`: the zero field in the
+sectors of the group of the atoms, each field axis in those of the
+operations that keep it, the loops that are images of a later one not
+solved.  Under ``off`` the loops run on the full grid of one GPU, or on the
+one sector of the identity (``PARSEC_CUPY_SINGLE_SECTOR=on``), whose basis
+the GPUs of ``main.py`` share after a CHEBFF first solve
+(``PARSEC_CUPY_SECTOR_PLACEMENT=size``; ``cyclic`` keeps it on the first
+device); the MPI runner refuses ``Polarizability``.
 """
 
 from __future__ import annotations

@@ -23,6 +23,11 @@ half the cell), divided into its symmetry sectors; with k-points the ranks form 
   (`Use_Fortran_Routines: .false.` with a zero `Monkhorst_Pack_Shift`). At 18 points per edge the 24 symmorphic
   operations (Td about an atom) map the grid onto itself; with time reversal they give the same wedge as the full
   group: 4, 4 and 10 points for 2x2x2, 3x3x3 and 4x4x4 on a cubic supercell. The density is symmetrized with them.
+  Since 2026-11-19 a single point with a 2x2x2 mesh in a process of one GPU (`run_case.py`, whose default is
+  `--gpus 1`) runs instead as the Gamma point of the cell doubled along each axis where the size floor and the
+  estimated difference of the two kinetic forms allow it (`PARSEC_KPOINT_SUPERCELL=auto`, with a NOTE; n = 2: an
+  estimated 2.2e-3 eV per atom from the k-points); `--mpi` (`run_mpi_kpoints.py`, the tables below) and several GPUs
+  in one process keep the k-points.
 
 The defaults that matter for bulk cells (since November 2026): the later-SCF filter takes PARSEC 1.5's smart lower
 bound, and the local potential has PARSEC 1.5's zero average (with the energy's `E_alpha`) and the
@@ -202,9 +207,12 @@ Each k-point of the wedge is split into the sectors of the commuting involutions
 translations by half the cell (all seven for an even n, the three face-centring ones for an odd n), the twofold
 axes and mirrors of Td that fix k (`PARSEC_KPOINT_SECTORS=auto`, the default; `src/parsec_python/acceleration/README.md`,
 "The sectors of a k-point"). The sectors of all k-points are the tasks of the k-point pools, which are planned by
-the size of each task (`PARSEC_KPOINT_POOL_ASSIGN=auto`); their complex matrices run in a CSR kernel of their own on
-the device. The same inputs and launch as the table above (the default routines, 18 points per cubic edge, the mesh
-reduced by Td and time reversal, the density symmetrized), first runs; "before" is the code before the sectors (the
+the size of each task (`PARSEC_KPOINT_POOL_ASSIGN=auto`); their complex matrices ran in a CSR kernel of their own on
+the device in these runs (since 2026-11-19 the kinetic term of a sector is a stencil gathered from the grid, with the
+step of the Chebyshev recurrence in its kernel, `PARSEC_KPOINT_SECTOR_STENCIL=auto`; `off` keeps the CSR: n = 6 with
+the 3x3x3 mesh on 4 ranks 50.3 -> 38.7 s, the same energies). The same inputs and launch as the table above (the
+default routines, 18 points per cubic edge, the mesh reduced by Td and time reversal, the density symmetrized),
+first runs; "before" is the code before the sectors (the
 path of `PARSEC_KPOINT_SECTORS=off`):
 
 | n | atoms | mesh (k) | sectors | pools | SCF iterations | program (s) | first step (s) | later step (s) | GPU (GiB) | before (s) | before, GPU (GiB) | E/atom (Ry) |
@@ -307,11 +315,17 @@ Since 2026-11-18 the default margin converges there (the SCF loop no longer hold
 The forces and the `bfgs` relaxations of a cell keep the sectors of its point group (`PARSEC_PERIODIC_SECTOR_FORCES`,
 README of `acceleration`): the projector gradients of one atom per orbit, the local terms of one atom per orbit of the
 full group, the total averaged over that group. The inputs of `make_diamond.py` name `Cubic_Spline`, which puts the
-forces of a Gamma cell on the Fortran-derived routines by default; a forces run adds
+forces of a Gamma cell on the Fortran-derived routines by default; the runs below add
 
 ```bash
 --set 'Skip_Force: false' --set 'Use_Fortran_Routines: .false.'   # and for a relaxation: --set 'Minimization: bfgs'
 ```
+
+Since 2026-11-19 the forces and relaxations of the Fortran-derived routines keep the sectors as well
+(`PARSEC_FORTRAN_SECTOR_FORCES=auto`, README of `acceleration`), so `--set 'Skip_Force: false'` alone runs in them too
+(with the force terms of those routines); measured on one node with `main.py` there, first runs with an empty kernel
+cache (warm reruns in brackets): forces of 4^3 34.1 -> 23.6 s (27.0 -> 14.4 s), of 6^3 (which did not fit one A100 on
+the full grid) 37.2 s (18.9 s), one relaxation step of 10^3 88.0 s (69.2 s).
 
 One relaxation step (the SCF and the forces of the perfect cubes, whose forces vanish by symmetry: the largest is
 1.5-3.7e-4 Ry/bohr at the SCF criterion of 2e-4 Ry) on 16 A100, one rank per node:

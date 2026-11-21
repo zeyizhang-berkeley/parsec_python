@@ -759,6 +759,11 @@ class MPIShardGroup:
                 result = workspace.apply(
                     block, tuple(local), lower, upper, reference, reset, initial_sigma=starts, out=block
                 )
+                # A unit of irreducible representations: this rank's columns projected onto them
+                # (irrep_projection.project_filtered).
+                projection = getattr(operator, "irrep_projection", None)
+                if projection is not None:
+                    result = projection.apply(result)
                 cp.cuda.get_current_stream().synchronize()
         self.seconds["filter"] += perf_counter() - started
         return SharedBasis(self, result, layout)
@@ -1238,6 +1243,13 @@ class MPIShardGroup:
             else:
                 columns = self.to_columns(row_basis, layout, rows, target=columns)
             del row_basis
+            # A unit of irreducible representations (PARSEC_ORBITAL_IRREPS): the QR combines the filtered columns
+            # and draws none, but divides by what remains of nearly dependent ones; this rank's columns go back
+            # into the range of its projector before the generalized Ritz step (irrep_projection).
+            projection = getattr(operator, "irrep_projection", None)
+            if projection is not None:
+                projection.apply(columns, filtered=False)
+                projection.record(repair=True)
         return self.ritz(operator, SharedBasis(self, columns, layout), stages=False)
 
     # ----- collectives ----------------------------------------------------

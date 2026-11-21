@@ -317,8 +317,34 @@ def build_confined_periodic_grid(
     )
 
 
+def slab_grid_layout(cell: PeriodicCell, settings: PeriodicGridSettings) -> tuple[np.ndarray, np.ndarray]:
+    """``(periodic_counts, planes)`` of the slab grid :func:`build_confined_periodic_grid` builds, without building it.
+
+    ``periodic_counts`` are the points along the two periodic directions (``adjust_step`` with the fractional
+    translations of ``settings``), ``planes`` the ``z`` of the planes inside the slab (``|z| <= R``), by the
+    builder's own arithmetic.
+    """
+
+    if int(settings.periodicity) != 2:
+        raise ValueError("slab_grid_layout needs a slab (periodicity 2)")
+    radius = float(settings.confinement_radius)
+    lattice = np.asarray(cell.lattice_vectors, dtype=np.float64)
+    lengths = np.sqrt(np.sum(lattice**2, axis=1))
+    spacing = float(settings.spacing)
+    confined_points = int(np.floor(2.0 * radius / spacing)) + 2
+    translations = getattr(settings, "fractional_translations", ()) or ((), (), ())
+    periodic_points, _ = adjusted_steps(lengths[:2], spacing, translations[:2])
+    shift = np.asarray(settings.shift, dtype=np.float64)
+    index_min = -(confined_points // 2)
+    index_max = confined_points + index_min - 1
+    planes = (np.arange(index_max, index_min - 1, -1, dtype=np.int64).astype(np.float64) + shift[2]) * spacing
+    planes = planes[~(planes * planes > radius * radius)]
+    return np.asarray(periodic_points, dtype=np.int64), planes
+
+
 __all__ = [
     "ConfinedPeriodicGrid",
     "build_confined_periodic_grid",
     "confined_lattice_vectors",
+    "slab_grid_layout",
 ]

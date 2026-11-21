@@ -1979,9 +1979,15 @@ def run_exchange_tiles(
                 deliver(blocks[first_index], folded(blocks[first_index], first_acc))
 
     if parity is not None:
+        # The translation classes of a periodic cell's sector orbitals bring their own loop
+        # (exchange_translations.TranslationContext.run_tiles); the parity classes of a cluster's take this module's.
+        runner = getattr(parity, "run_tiles", None)
 
         def run(device: int) -> None:  # noqa: F811 -- the parity path replaces the full-grid loop
             if assigned[device]:
+                if callable(runner):
+                    runner(cp, orbitals, solvers, blocks, assigned[device], device, deliver, timing, ready)
+                    return
                 _run_parity_tiles(
                     cp, parity, orbitals, solvers, blocks, assigned[device], device, deliver, timing, ready
                 )
@@ -2044,7 +2050,10 @@ def apply_device_exchange(
     :func:`_apply_pooled_exchange` is freed).  Sector orbitals of a periodic
     cell go through one full-grid block (:func:`pooled_exchange_applies`)
     where it fits the free memory of the devices now
-    (:func:`pooled_exchange_fits`), else through the tiles of their sectors.
+    (:func:`pooled_exchange_fits`), else through the tiles of their sectors;
+    where their sectors carry half-cell translations, through the coset
+    blocks of those translations before (:mod:`.exchange_translations`,
+    ``PARSEC_CUPY_EXCHANGE_TRANSLATIONS``), where those fit.
     """
 
     from ..backends.cupy import require_cupy
@@ -2054,13 +2063,40 @@ def apply_device_exchange(
     if not callable(record):
         record = None
     # The pooled block of sector orbitals (PARSEC_CUPY_EXCHANGE_POOL): where it fits the devices now, else the
-    # tiles of the sectors.  A build that completes a known application takes the path that application took.
-    # Every build of such orbitals is counted as "pool" or "pool-fallback" (the solver's description).
+    # tiles of the sectors; before it, the coset blocks of their half-cell translations where the sectors carry
+    # such translations (PARSEC_CUPY_EXCHANGE_TRANSLATIONS, exchange_translations.py) and they fit.  A build that
+    # completes a known application takes the path that application took.  Every build of such orbitals is counted
+    # as "translations", "pool" or "pool-fallback" (the solver's description); one whose coset blocks did not fit
+    # also as "translations-unfit".
     if known is not None and known.pooled is not None:
+        from .exchange_translations import TranslationChannel, apply_translation_exchange
+
+        if isinstance(known.pooled.orbitals, TranslationChannel):
+            if record is not None:
+                record("translations")
+            return apply_translation_exchange(orbitals, solvers, devices, columns=columns, known=known)
         if record is not None:
             record("pool")
         return _apply_pooled_exchange(orbitals, solvers, devices, columns=columns, known=known)
     if pooled_exchange_applies(orbitals, solvers):
+        if known is None:
+            from .exchange_translations import (
+                apply_translation_exchange,
+                translation_context,
+                translation_exchange_fits,
+            )
+
+            context = translation_context(orbitals, solvers)
+            if context is not None:
+                if translation_exchange_fits(orbitals, context, solvers, devices, columns=columns):
+                    if record is not None:
+                        record("translations")
+                    return apply_translation_exchange(
+                        orbitals, solvers, devices, columns=columns, known=None, context=context
+                    )
+                if record is not None:
+                    # not a path of its own: the build takes the pooled block or the tiles below
+                    record("translations-unfit")
         if known is None and pooled_exchange_fits(orbitals, solvers, devices, columns=columns):
             if record is not None:
                 record("pool")
@@ -2115,8 +2151,10 @@ def exchange_pool_setting() -> str:
     cell takes the full grid) are unfolded once into one full-grid block, whose ``W`` the tiles of the full grid
     form, folded back to every sector once (:func:`_apply_pooled_exchange`), where the block fits the free memory
     of its device (:func:`pooled_exchange_fits`; else the tiles of ``off`` for that build and its completion).
-    ``off``: the tiles pair the blocks of every sector, each unfolded where a tile reads it (a few columns per
-    sector: small transforms), as before.  A wrong value is refused when the device exchange is set up
+    Where the sectors carry half-cell translations, their coset blocks in the classes of those translations come
+    first (:mod:`.exchange_translations`, ``PARSEC_CUPY_EXCHANGE_TRANSLATIONS``).  ``off``: the tiles pair the blocks
+    of every sector, each unfolded where a tile reads it (a few columns per sector: small transforms), as before
+    (also without the translation classes).  A wrong value is refused when the device exchange is set up
     (:func:`parsec_python.acceleration.SCF.hybrid.device_exchange_for`).
     """
 

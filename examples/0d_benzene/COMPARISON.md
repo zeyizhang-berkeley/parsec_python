@@ -3,7 +3,7 @@
 Both calculations use the same geometry, grid, order-12 finite differences,
 CA/PZ LDA functional, 20 states, order-one double grid, and canonical PARSEC
 C/H pseudopotentials. The Python values come from `parsec_python.out`, run
-with the code of 5 November 2026 on a laptop GPU (RTX 5070).
+with the code of 20 November 2026 on one NVIDIA A100.
 
 ## Final energies
 
@@ -46,14 +46,14 @@ the three highest.
 | SCF iterations | 10 | 17 |
 | Final plain SRE | 0.0065269999 | 0.0026821908 |
 | Final charge-weighted SRE | 0.0001034149 | 0.0001465128 |
-| Diagonalization time | 3.61 s | 4.89 s |
-| Hartree time | 1.12 s | 5.29 s |
-| SCF time | 5.43 s | 9.92 s |
-| Program wall time | 15.12 s | 10.63 s |
+| Diagonalization time | 0.90 s | 4.89 s |
+| Hartree time | 0.07 s | 5.29 s |
+| SCF time | 1.16 s | 9.92 s |
+| Program wall time | 2.41 s | 10.63 s |
 
-The timing comparison is not like-for-like. Python ran as one process on a
-laptop GPU and solved the eight `D_2h` representations there; its program
-time includes about 10 s of CUDA initialization and set-up. PARSEC used eight
+The timing comparison is not like-for-like. Python ran as one process on an
+A100 GPU and solved the eight `D_2h` representations there; its program
+time includes about 1.2 s of set-up before the SCF. PARSEC used eight
 MPI ranks on the CPU, separated the same eight representations, and worked
 with a 33,512-point reduced domain. PARSEC also reports forces and MPI
 statistics that the current Python single-point path does not calculate.

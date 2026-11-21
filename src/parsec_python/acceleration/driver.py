@@ -115,7 +115,14 @@ def _reference_cache_key(
     digest = sha256()
     digest.update(f"resident-reference-v{_REFERENCE_CACHE_FORMAT}".encode("ascii"))
     digest.update(selection.finite_difference_builder.encode("ascii"))
-    digest.update(os.environ.get("PARSEC_IONIC_BACKEND", "native").lower().encode("ascii"))
+    digest.update(
+        (
+            "cupy"
+            if getattr(selection, "selected", None) == "cupy"
+            and _gpu_ionic_requested(periodic=getattr(problem, "periodic_cell", None) is not None)
+            else "native"
+        ).encode("ascii")
+    )
     digest.update(os.environ.get("PARSEC_NATIVE_PROJECTOR_LOOKUP", "1").encode("ascii"))
     # The physical reach of the periodic radial sums (the default since 2026-10-30) changes their
     # last bits: its key differs from that of the table reach, which adds nothing (the key of a cell
@@ -443,12 +450,15 @@ def single_sector_setting() -> str:
     of the identity; ``auto`` does so in the sector context of the full-SCF
     runner (molecular dynamics, structures without symmetry), and leaves the
     other routes as they were.  ``off`` never does.  The numbers are those
-    of the full grid.  The basis of that sector is shared where a sector
-    context gives it a group: by the MPI ranks of the runner, or by the GPUs
-    of its node where it runs one rank.  ``main.py`` has no such context
-    (``Eigensolvers/symmetry.py`` sets ``distributed_filter_devices`` from
-    the context alone), so there the basis lies on the first GPU of the
-    process, as the full grid did (measured on four A100, 2026-11-18).
+    of the full grid.  The basis of that sector is shared where it is given
+    a group: by the MPI ranks of the runner, or by the GPUs of its node
+    where it runs one rank, and in ``main.py`` by the GPUs of the process
+    (``PARSEC_CUPY_SECTOR_PLACEMENT=size``, the default since 2026-11-19,
+    ``Eigensolvers/symmetry.process_sector_device_groups``) where a CHEBFF
+    first solve shares it (``distributed_state.shared_basis_devices``).
+    With ``PARSEC_CUPY_SECTOR_PLACEMENT=cyclic`` the basis lies on the first
+    GPU of the process, as the full grid did (measured on four A100,
+    2026-11-18).
     """
 
     value = os.environ.get("PARSEC_CUPY_SINGLE_SECTOR", "auto").strip().lower() or "auto"
@@ -461,21 +471,43 @@ def single_sector_setting() -> str:
     return value
 
 
-def periodic_sector_refusal(problem, *, hybrid_sectors: bool = False) -> str | None:
+def spin_cell_group_refusal(reason: str) -> str:
+    """The refusal of a spin-polarized periodic cell that would reach an MPI SCF without a sector group.
+
+    The ranks of the MPI runner solve both channels of a spin cell only in the abelian sectors of its group
+    (``PARSEC_GAMMA_SPIN_SECTORS=auto``): the one sector of the identity, whose basis the ranks share, takes no spin
+    channels (``single_sector`` below needs an unpolarized run).  ``reason`` says why this cell has no such group.
+    The runner asks this before its preparation where it knows (no symmetry, ``PARSEC_PERIODIC_SYMMETRY=off``), the
+    driver before the reference preparation in the same cases and after the detection otherwise (since
+    2026-11-19; before, the message named ``PARSEC_CUPY_SINGLE_SECTOR``, which cannot help).
+    """
+
+    return (
+        "a spin-polarized periodic cell runs as an MPI SCF only in the abelian sectors of its group, both channels "
+        "divided among the ranks (the shared sector of the identity takes no spin channels), and this cell has "
+        f"none: {reason}. Run it with parsec_python/main.py, whose one process solves both channels on the full "
+        "grid of one device, or with --serial-control"
+    )
+
+
+def periodic_sector_refusal(problem, *, hybrid_sectors: bool = False, features: bool = False) -> str | None:
     """Why a periodic cell cannot be solved in the sectors of the Gamma route, or ``None``.
 
     The route of the sectors takes a bulk cell at the Gamma point with real
     orbitals: an orthorhombic cell, unpolarized or with collinear spin
     (``PARSEC_GAMMA_SPIN_SECTORS=auto``: both channels in the abelian
-    sectors, :mod:`.SCF.gamma_spin`), with a native LDA or GGA.
+    sectors, :mod:`.SCF.gamma_spin`), with a native LDA or GGA, or in one
+    process a meta-GGA, a libxc functional, LDA+U (unpolarized) or the TS
+    correction under their switches (``features`` below).
     Its orbitals are solved in the sectors of the point group of the cell
     about its origin (``PARSEC_PERIODIC_SYMMETRY=auto``, the default), whose
     density, potentials and mixer keep one value per orbit, the Hartree
     potential solved on the full grid of the cell and reduced again; or, for
     a cell without a group or with ``PARSEC_PERIODIC_SYMMETRY=off``, as one
     sector of the identity, whose basis the MPI ranks of the full-SCF runner
-    share (in one process, ``PARSEC_CUPY_SINGLE_SECTOR=on``: one GPU holds
-    it), every field on the full grid.  The route has not been built or
+    share (in one process, ``PARSEC_CUPY_SINGLE_SECTOR=on``: the GPUs of the
+    process share it under ``PARSEC_CUPY_SECTOR_PLACEMENT=size``), every
+    field on the full grid.  The route has not been built or
     validated for the other periodic calculations named here; a calculation
     that names one keeps the full grid of one device in ``main.py`` (a
     spin-polarized cell goes to the k-point driver, whose k-point sectors may
@@ -489,14 +521,21 @@ def periodic_sector_refusal(problem, *, hybrid_sectors: bool = False) -> str | N
     ``PARSEC_GAMMA_HYBRID_SECTORS=auto``, :func:`_gamma_hybrid_in_sectors`):
     a hybrid is then no reason.  The other callers (the k-point mesh folded
     into a supercell, the MPI runner) keep refusing it.
+
+    ``features``: the caller runs the cell of the input in one process (the
+    driver without an MPI context, the spin route of the command line), where
+    the Tkatchenko-Scheffler correction, LDA+U (unpolarized), a meta-GGA and a
+    libxc functional take the sectors under their switches
+    (``PARSEC_GAMMA_TS_SECTORS``, ``PARSEC_GAMMA_LDAU_SECTORS``,
+    ``PARSEC_GAMMA_META_GGA_SECTORS``, ``PARSEC_GAMMA_LIBXC_SECTORS``:
+    :mod:`.SCF.gamma_features`); not with a hybrid.  The other callers keep
+    refusing them.
     """
 
     from parsec_python.Grid import kpoint_sampling
-    from parsec_python.V_xc.libxc import is_libxc_functional
 
     scf = problem.scf
     lattice = np.asarray(problem.periodic_cell.lattice_vectors, dtype=np.float64)
-    species = getattr(problem, "pseudopotentials", {}).values()
     if int(getattr(problem.grid, "periodicity", 3)) != 3:
         return "a wire or slab (Boundary_Conditions: wire or slab)"
     if problem.has_kpoint_sampling:
@@ -513,17 +552,16 @@ def periodic_sector_refusal(problem, *, hybrid_sectors: bool = False) -> str | N
             return spin_refusal
     if scf.is_hybrid and not hybrid_sectors:
         return "a hybrid functional"
-    if scf.is_meta_gga:
-        return "a meta-GGA functional"
-    if is_libxc_functional(scf.xc_functional):
-        return "a libxc functional"
+    # TS, LDA+U, meta-GGA and libxc: the sectors where the caller runs one process on the cell of the input
+    # (``features``) and the switch of each takes the cell (SCF/gamma_features.py); refused as before otherwise.
+    from .SCF.gamma_features import correction_refusal, meta_gga_or_libxc_refusal
+
+    functional_refusal = meta_gga_or_libxc_refusal(problem, features=features)
+    if functional_refusal is not None:
+        return functional_refusal
     if not np.allclose(lattice, np.diag(np.diag(lattice)), atol=1.0e-10):
         return "an oblique cell (lattice vectors not along the Cartesian axes)"
-    if any(getattr(item, "has_hubbard", False) for item in species):
-        return "LDA+U"
-    if getattr(scf, "van_der_waals", False):
-        return "the Tkatchenko-Scheffler dispersion correction"
-    return None
+    return correction_refusal(problem, features=features)
 
 
 def _gamma_hybrid_in_sectors(problem, mpi_context) -> bool:
@@ -536,7 +574,9 @@ def _gamma_hybrid_in_sectors(problem, mpi_context) -> bool:
     densities, and its compressed operator folded to every sector (``Hamiltonian/exchange_device.py``).  A cell
     whose basis (grid points times states) is below the floor of the k-point sectors (``2^24`` entries,
     ``gamma_hybrid_route.sector_basis_reached``) keeps the full grid, where the sectors gain nothing (an 8-atom
-    cube took 1.8 times longer in them).  ``off``, ``kpoint`` and the MPI runner keep the former routes.
+    cube took 1.8 times longer in them).  ``off`` and ``kpoint`` keep the former routes; with an MPI context it is
+    ``False``, and :func:`periodic_sector_refusal` then names the hybrid, which the MPI runner refuses (run it with
+    main.py), as before.
     """
 
     from .SCF.gamma_hybrid_route import gamma_hybrid_sectors_setting, sector_basis_reached
@@ -549,35 +589,147 @@ def _gamma_hybrid_in_sectors(problem, mpi_context) -> bool:
     )
 
 
+_PERIODIC_FLOOR_SWITCH = "PARSEC_PERIODIC_SECTOR_FLOOR"
+
+
+def periodic_sector_floor_setting() -> int:
+    """``PARSEC_PERIODIC_SECTOR_FLOOR``: the smallest basis (grid points of the cell times states) whose Gamma-point
+    SCF takes the sectors of the point group of the cell in one process.
+
+    ``auto`` (the default): ``2^24`` entries, the floor of the k-point sectors and of the Gamma hybrids
+    (``SCF/kpoint_sectors._MINIMUM_ENTRIES``); a smaller cell keeps the full grid of one device, where its SCF is
+    faster (the sectors build their orbit maps, stencils and kernels for a few seconds of work).  ``off``: no floor,
+    every cell with a group takes the sectors, as before (to 2026-11-19); an integer: that floor.  An MPI run keeps
+    its sectors whatever the size (its ranks share no full grid).
+    """
+
+    raw = os.environ.get(_PERIODIC_FLOOR_SWITCH, "auto").strip().lower() or "auto"
+    if raw == "auto":
+        from .SCF.kpoint_sectors import _MINIMUM_ENTRIES
+
+        return int(_MINIMUM_ENTRIES)
+    if raw == "off":
+        return 0
+    try:
+        value = int(raw)
+    except ValueError:
+        value = -1
+    if value < 0:
+        raise ValueError(f"{_PERIODIC_FLOOR_SWITCH} must be auto, off or a number of entries >= 0, not {raw!r}")
+    return value
+
+
+def _periodic_basis_below_floor(
+    problem, mpi_context, floor: int, *, sector_forces: bool = False
+) -> tuple[int, int] | None:
+    """``(rows, states)`` of a Gamma cell whose basis is below ``floor`` in one process, else ``None``.
+
+    ``sector_forces``: the run computes forces or moves atoms averaged over the group of the sectors
+    (``PARSEC_PERIODIC_SECTOR_FORCES=auto``, :func:`prepare_single_point`), which the full grid would not average:
+    such a cell keeps its sectors whatever its size (``None``).  The rows are counted without building the grid
+    (:func:`.SCF.gamma_hybrid_route.periodic_grid_points`).
+    """
+
+    if mpi_context is not None or floor <= 0 or sector_forces:
+        return None
+    from .SCF.gamma_hybrid_route import _states, periodic_grid_points
+
+    try:
+        rows = int(periodic_grid_points(problem))
+        states = int(_states(problem))
+    except (AttributeError, OSError, TypeError, ValueError):
+        return None
+    return (rows, states) if rows * states < floor else None
+
+
 def _orbital_group_refusal(problem, spin_polarized: bool, mpi_context) -> str | None:
     """Why the orbitals keep the abelian group of before, or ``None`` where the weighted sectors serve.
 
     The sectors of a subgroup with weights (:class:`.Symmetry.PointGroupReduction`) solve one partner of a
     degenerate level where others exist: what reads every partner of every occupied state is refused here
-    (exact exchange, LDA+U, the meta-GGA kinetic density, the spin sectors), as is ``occup.in``, whose list
-    names states one by one, and a functional whose device kernels have not been built for it (libxc).
+    (exact exchange, LDA+U, the meta-GGA kinetic density), as is spin-orbit coupling.  Since 2026-11-19 four
+    inputs take the weighted sectors where their switch is ``auto`` (``Symmetry/weighted_inputs.py``):
+    ``Fix_Number_Eigenvalues``, a libxc LDA or GGA, ``occup.in`` (equal occupations of partners, else the run
+    starts again in the abelian sectors) and collinear spin in the symmetry sectors (``Spin_Symmetry_Sectors``;
+    a channel pair whose guard fires starts again in the abelian sectors).  ``off`` refuses that input as before.
+    A calculation prepared again after it left the weighted sectors keeps the abelian group
+    (:func:`.Symmetry.weighted_inputs.abelian_orbitals`).
     """
 
     from parsec_python.V_xc.libxc import is_libxc_functional
 
+    from .Symmetry.weighted_inputs import forced_abelian_reason, weighted_input_setting
+
     scf = getattr(problem, "scf", None)
     if scf is None:
         return "no SCF settings"
-    if spin_polarized or getattr(scf, "noncollinear", False) or getattr(scf, "self_consistent_spin_orbit", False):
+    forced = forced_abelian_reason()
+    if forced is not None:
+        return forced
+    if getattr(scf, "noncollinear", False) or getattr(scf, "self_consistent_spin_orbit", False):
         return "spin polarization or spin-orbit coupling"
+    if spin_polarized:
+        if weighted_input_setting("spin") == "off":
+            return "spin polarization or spin-orbit coupling"
+        spin_refusal = _weighted_spin_refusal(problem, mpi_context)
+        if spin_refusal is not None:
+            return spin_refusal
     if getattr(scf, "is_hybrid", False) or bool(getattr(mpi_context, "exchange", False)):
         return "a hybrid functional"
     if getattr(scf, "is_meta_gga", False):
         return "a meta-GGA functional"
-    if is_libxc_functional(getattr(scf, "xc_functional", "ca")):
+    if is_libxc_functional(getattr(scf, "xc_functional", "ca")) and weighted_input_setting("libxc") == "off":
         return "a libxc functional"
-    if getattr(scf, "fixed_occupations", None) is not None:
+    if getattr(scf, "fixed_occupations", None) is not None and (
+        weighted_input_setting("occupations") == "off" or mpi_context is not None
+    ):
+        # (on several ranks a file that fills partners unequally could not start again in the abelian sectors)
         return "occupations from occup.in"
     if any(getattr(item, "has_hubbard", False) for item in getattr(problem, "pseudopotentials", {}).values()):
         return "LDA+U"
-    if getattr(getattr(problem, "eigensolver", None), "fixed_state_count", False):
+    if (
+        getattr(getattr(problem, "eigensolver", None), "fixed_state_count", False)
+        and weighted_input_setting("fixed_count") == "off"
+    ):
         return "Fix_Number_Eigenvalues (the state counts of a restart file, sector by sector)"
     return None
+
+
+def _weighted_spin_refusal(problem, mpi_context) -> str | None:
+    """Why a collinear spin-polarized input keeps the abelian group with ``PARSEC_ORBITAL_GROUP_SPIN=auto``.
+
+    The weighted sectors serve two channels that the symmetry sectors solve: a cluster whose
+    ``Spin_Symmetry_Sectors`` takes them (:func:`_spin_sector_refusal`), or a bulk cell at the Gamma point on the
+    route of its sectors (``SCF/gamma_spin.py``, which :func:`periodic_sector_refusal` has admitted), in one process
+    (an MPI run that left the sectors would be prepared again on its root alone; it keeps the abelian group of
+    before).  Two channels on the full grid read no group of the orbitals; they keep the detection of before.
+    """
+
+    if mpi_context is not None:
+        return "spin polarization on several MPI ranks"
+    if _spin_sector_refusal(problem) is not None:
+        return "spin polarization on the full grid"
+    return None
+
+
+def _without_atom_orbits(reduction):
+    """``reduction`` without the orbits of its atoms (the projectors of every atom in its sectors).
+
+    LDA+U appends fifteen columns per LDA+U atom to the KB factor, whose coefficients every SCF iteration writes
+    atom by atom (``Hamiltonian/hubbard_device.py``); the sectors keep the columns of every atom.  The reductions
+    of a cell with translations (``SCF/kpoint_sectors.LittleGroupReduction``) know their atom orbits from the
+    start (one atom per orbit, :func:`.Symmetry.axis_reflection.compress_projectors_for_sectors`): a copy without
+    them.  ``reduction`` itself where it knows none.
+    """
+
+    import dataclasses
+
+    if all(getattr(reduction, name, None) is None for name in ("atom_representatives", "atom_orbit_sizes")):
+        return reduction
+    names = {field.name for field in dataclasses.fields(reduction)} if dataclasses.is_dataclass(reduction) else set()
+    if not {"atom_representatives", "atom_orbit_sizes"} <= names:
+        raise RuntimeError(f"the atom orbits of a {type(reduction).__name__} cannot be dropped for LDA+U")
+    return dataclasses.replace(reduction, atom_representatives=None, atom_orbit_sizes=None)
 
 
 def _sector_count(reduction) -> int:
@@ -683,8 +835,11 @@ def _orbital_reduction(symmetry_reduction, stabilizer_disabled: bool):
 def sector_palette_ladder_setting() -> str:
     """``PARSEC_SECTOR_PALETTE_LADDER``: ``auto`` (default) or ``off``.
 
-    The sector stencils of a periodic cell code their coefficients in one byte (256 values,
-    :func:`_sector_palette_check`).  Where those of the group detected need more, ``auto`` steps down to a group whose
+    The sector stencils of a periodic cell code their coefficients in one byte (256 values) where they have at most
+    256, in two (65536) where they have more (``PARSEC_SECTOR_PALETTE_CODES=auto``, the default since 2026-11-19), or
+    in one byte alone (``PARSEC_SECTOR_PALETTE_CODES=off``; :func:`_sector_palette_check`).  Where those of the group
+    detected need more than their codes hold (under ``off``: an even repeat of a cubic cell on ``n = 2 mod 4`` points
+    per edge, a cell of unequal steps at a high order), ``auto`` steps down to a group whose
     stencils fit, the same on every MPI rank: the weighted sectors of a subgroup of the point group, then the
     commuting involutions with their translations (:func:`.Symmetry.axis_reflection.periodic_abelian_reduction`), then
     the commuting signed permutations about the origin (D2 for a cubic crystal), then the full grid (the identity
@@ -716,6 +871,12 @@ def _symmetry_detection_text(candidate) -> str:
         )
         + f"; the orbitals use the one-dimensional sectors of a subgroup of {candidate.group_order} "
         f"(weights {', '.join(str(int(w)) for w in candidate.sector_weights)})"
+        + (
+            f", as {len(candidate.sector_weights)} units of the irreducible representations of the point group, "
+            f"{int(np.count_nonzero(candidate.sector_projected))} of them projected (PARSEC_ORBITAL_IRREPS)"
+            if getattr(candidate, "sector_projected", None) is not None
+            else ""
+        )
         if isinstance(candidate, PointGroupReduction)
         else (
             f"exact commuting group of {candidate.group_order} operations detected (signed "
@@ -746,18 +907,22 @@ def _palette_group_label(reduction) -> str:
 def _sector_palette_check(grid, reduction, build_decomposition, count=None, bound=None, *, label=None):
     """``(checked, refusal)`` of the sector stencils of a periodic cell.
 
-    A packed stencil codes its coefficients in one byte (``PALETTE_CAPACITY``, 256 values).  Those of a sector are its
+    A packed stencil codes its coefficients in one byte (``PALETTE_CAPACITY``, 256 values), a sector stencil of more
+    in two (65536, ``PARSEC_SECTOR_PALETTE_CODES=auto``; ``off``: one byte alone, a capacity of 256).  Those of a sector are its
     stencil values (``1 + M`` on a cube, up to ``1 + 3M`` where the grid steps differ between the axes) times the
     phases ``+-1`` and the multiplicity ratios ``sqrt(m_row / m_column)`` of its orbits, and the sums of the rows
     whose stencil holds two points of one orbit.  A cube whose orbits differ in size (an even repeat of a smaller
     cell on ``n = 2 mod 4`` points per edge: Si 2x2x2 at Grid_Spacing 0.6, 34^3 points, 295 values at the default
-    order 12), a tetragonal 2x2x2 perovskite at the default order or Si at order 18 need more than 256, where the
-    build of the stencils would stop the run.  Checked here on every grid, the same on every rank: first a bound
+    order 12), a tetragonal 2x2x2 perovskite at the default order or Si at order 18 need more than 256: their sector
+    stencils take two-byte codes, or under ``PARSEC_SECTOR_PALETTE_CODES=off`` the build of the stencils would stop
+    the run.  Checked here on every grid, the same on every rank: first a bound
     (``bound``, by default ``sector_palette_bounds``: the whole table of values and the exact sums of the rows near
     a symmetry element, 1/|H| of the grid and a few percent of its rows; nothing more for the 18 points per edge of
     the diamond benchmarks), then the count of the builder itself (``count``, by default ``sector_palette_sizes``)
-    for the sectors whose bound exceeds the palette.  ``refusal`` says why the stencils of ``reduction`` (``label``)
-    do not fit; ``checked`` is ``(orbital reduction, decomposition)`` where they do, for the stage of the orbitals.
+    for the sectors whose bound exceeds 256 values.  ``refusal`` says why the stencils of ``reduction`` (``label``)
+    do not fit; ``checked`` is ``(orbital reduction, decomposition, largest count)`` where they do, for the stage of
+    the orbitals (the largest count is 0 where the bound proves 256 values or fewer, and above 256 where two-byte
+    codes hold them).
     ``build_decomposition(orbital reduction)`` gives what that stage would; nothing is checked where it fails (the
     stage of the orbitals goes on as before).
     """
@@ -775,22 +940,27 @@ def _sector_palette_check(grid, reduction, build_decomposition, count=None, boun
         PALETTE_CAPACITY,
         SectorStencilUnavailable,
         sector_palette_bounds,
+        sector_palette_capacity,
         sector_palette_sizes,
     )
 
+    capacity = sector_palette_capacity()
     try:
         built = build_decomposition(orbital)
         bounds = (sector_palette_bounds if bound is None else bound)(grid, built[0], wrap=True)
+        # (counted above 256 under every setting: the count says whether two-byte codes are needed)
         over = [index for index, size in enumerate(bounds) if size is not None and size > PALETTE_CAPACITY]
         sizes = (sector_palette_sizes if count is None else count)(grid, built[0], over, wrap=True) if over else ()
     except (SectorStencilUnavailable, ValueError, RuntimeError):
         return None, None
     largest = max((size for size in sizes if size is not None), default=0)
-    if largest <= PALETTE_CAPACITY:
-        return (orbital, built), None
+    if largest <= capacity:
+        return (orbital, built, largest), None
     return None, (
         f"the sector stencils of {label or _palette_group_label(orbital)} need {largest} distinct coefficients, more "
-        f"than the {PALETTE_CAPACITY} of their palette (Expansion_Order {int(grid.settings.expansion_order)})"
+        f"than the {capacity} of their palette (Expansion_Order {int(grid.settings.expansion_order)}"
+        + (", PARSEC_SECTOR_PALETTE_CODES=off" if capacity == PALETTE_CAPACITY else "")
+        + ")"
     )
 
 
@@ -827,9 +997,15 @@ def _spin_sector_refusal(problem) -> str | None:
     ``off`` keeps the full grid; ``auto`` takes the symmetry sectors of the
     point group where the run can use them (the driver still needs a group,
     the CuPy backend and symmetry on), except for what the spin loop of the
-    sectors does not carry: LDA+U, ``Symmetrize_Charge_Density``, the
-    triangular Ritz hand-over and a filter spread over several devices.
+    sectors does not carry: LDA+U, the triangular Ritz hand-over and a filter
+    spread over several devices.  ``Symmetrize_Charge_Density`` averages each
+    channel on the orbits of the sectors under
+    ``PARSEC_SYMMETRIZED_DENSITY_SECTORS=auto`` (since 2026-11-19,
+    :mod:`.SCF.density_symmetry`); ``off`` keeps the full grid with it, as
+    before.
     """
+
+    from .SCF.density_symmetry import SYMMETRIZED_DENSITY_SECTORS_SWITCH, symmetrized_density_sectors_setting
 
     scf = problem.scf
     mode = scf.spin_symmetry_sector_mode
@@ -838,7 +1014,10 @@ def _spin_sector_refusal(problem) -> str | None:
     species = getattr(problem, "pseudopotentials", {}).values()
     for condition, reason in (
         (any(getattr(item, "has_hubbard", False) for item in species), "LDA+U"),
-        (bool(getattr(scf, "symmetrize_density", False)), "Symmetrize_Charge_Density"),
+        (
+            bool(getattr(scf, "symmetrize_density", False)) and symmetrized_density_sectors_setting() == "off",
+            f"Symmetrize_Charge_Density ({SYMMETRIZED_DENSITY_SECTORS_SWITCH}=off)",
+        ),
         (
             os.environ.get("PARSEC_CUPY_RITZ_HANDOVER", "").strip().lower() == "triangular",
             "PARSEC_CUPY_RITZ_HANDOVER=triangular",
@@ -851,6 +1030,82 @@ def _spin_sector_refusal(problem) -> str | None:
         if condition:
             return f"Spin_Symmetry_Sectors: auto keeps the full grid with {reason}"
     return None
+
+
+#: Appended to the symbol of an atom that Move_Flag fixes, for the symmetry detection alone (:func:`_detection_atoms`).
+FIXED_ATOM_LABEL = "|fixed"
+
+
+def _detection_atoms(atoms, fixed_atoms):
+    """The atoms the symmetry detection reads: ``atoms`` itself, or with the fixed ones as a species of their own.
+
+    ``fixed_atoms`` (``True`` for an atom that ``Move_Flag`` holds, :func:`parsec_python.Relaxation.run.
+    symmetry_fixed_atoms`) makes every operation the detection finds map the fixed atoms onto fixed atoms of their
+    species, the subgroup a relaxation with those flags keeps (``PARSEC_MOVE_FLAG_SUBGROUP=auto``).  The labels are
+    read by the detection only: the operations found are symmetries of the atoms themselves, which every later stage
+    reads.  ``None`` returns ``atoms`` unchanged (the same object).
+    """
+
+    if fixed_atoms is None:
+        return atoms
+    atoms = tuple(atoms)
+    if len(fixed_atoms) != len(atoms):
+        raise ValueError(
+            f"one Move_Flag per atom is required for the symmetry detection: {len(fixed_atoms)} flags, "
+            f"{len(atoms)} atoms"
+        )
+    return tuple(
+        replace(atom, symbol=atom.symbol + FIXED_ATOM_LABEL) if fixed else atom
+        for atom, fixed in zip(atoms, fixed_atoms)
+    )
+
+
+def _spin_flip_route(problem, reference, *, reducer, decomposition):
+    """``(operation, reason)`` of ``PARSEC_SPIN_FLIP_SYMMETRY=auto`` for a prepared spin-polarized run.
+
+    The operation of :func:`.SCF.spin_flip.detect_spin_flip` on the grid and atoms of ``reference``, with the
+    orbits of the sector fields (``reducer``) and the sectors (``decomposition``) where the run has them, the
+    start densities of both channels and the local ionic potential (point charges included); ``None`` and why for
+    what the route does not take (a hybrid, a meta-GGA, LDA+U, ``Symmetrize_Charge_Density``, spin-orbit coupling)
+    and for a run without such an operation.  The spin loop checks the operation again for every loop it runs
+    (the atoms, the ionic potential with the field of a ``Polarizability`` loop, the potentials of a warm start).
+    """
+
+    from .SCF.spin_flip import detect_spin_flip
+
+    scf = problem.scf
+    species = dict(getattr(problem, "pseudopotentials", {}))
+    for condition, reason in (
+        (bool(getattr(scf, "is_hybrid", False)), "a hybrid functional"),
+        (bool(getattr(scf, "is_meta_gga", False)), "a meta-GGA"),
+        (any(getattr(item, "has_hubbard", False) for item in species.values()), "LDA+U"),
+        (bool(getattr(scf, "symmetrize_density", False)), "Symmetrize_Charge_Density"),
+        (
+            bool(getattr(scf, "noncollinear", False) or getattr(scf, "self_consistent_spin_orbit", False))
+            or any(getattr(item, "spin_orbit", False) for item in species.values()),
+            "spin-orbit coupling or non-collinear magnetism",
+        ),
+    ):
+        if condition:
+            return None, reason
+    densities = getattr(reference, "initial_spin_densities", None)
+    if densities is None:
+        return None, "the run has no start densities of the two channels"
+    fixed = getattr(scf, "fixed_occupations", None)
+    try:
+        return detect_spin_flip(
+            reference.grid,
+            reference.atoms,
+            species,
+            electron_count=float(reference.electron_count),
+            start_densities=densities,
+            field_reduction=None if reducer is None else reducer.reduction,
+            decomposition=decomposition,
+            fixed_occupations=None if fixed is None else (fixed, getattr(scf, "fixed_occupations_down", None)),
+            ionic_potential=getattr(reference, "ionic_potential", None),
+        )
+    except ValueError as error:
+        return None, f"{error}"
 
 
 def _same_atoms(left, right) -> bool:
@@ -905,6 +1160,11 @@ class _OverlappedSymmetryMaps:
         # Whether the MPI ranks can take the sectors of a reduction (_ranks_divide_sectors; None: one process).
         # Where they cannot take the weighted ones, the caller keeps the reduction of before, which is decomposed.
         self.ranks_divide = None
+        # The atoms Move_Flag fixes, a species of their own for the detection (_detection_atoms; None: none).
+        self.fixed_atoms = None
+        # PARSEC_IONIC_SUM_GROUP (set by the caller): ``full`` publishes the orbits of the full point group found
+        # after the reduction, ``first`` the reduction as soon as it is detected.
+        self.ionic_sum_group = "first"
         self.seconds = 0.0
         self.wait_seconds = 0.0
 
@@ -937,6 +1197,8 @@ class _OverlappedSymmetryMaps:
 
         # (the tolerance of the detection in line, PARSEC_SYMMETRY_ATOM_TOLERANCE)
         atom_tolerance = symmetry_atom_tolerance()
+        # (and its atoms: the fixed ones of a relaxation as a species of their own, PARSEC_MOVE_FLAG_SUBGROUP)
+        atoms = _detection_atoms(atoms, self.fixed_atoms)
         self._grid, self._atoms = grid, atoms
         stages, cache_directory = self._stages, self._cache_directory
 
@@ -954,7 +1216,13 @@ class _OverlappedSymmetryMaps:
                     stages.add("symmetry_reduction", started)
                 self._reduction.set_result(found)
                 candidate, cache_info = found
-                self._published.publish(candidate)
+                # PARSEC_IONIC_SUM_GROUP=full: the ionic sums wait for the point group below and sum on the orbits
+                # of its full group; ``first`` publishes this reduction at once, as before.
+                wait_for_group = (
+                    point_group and candidate.group_order > 1 and self.ionic_sum_group == "full"
+                )
+                if not wait_for_group:
+                    self._published.publish(candidate)
                 if point_group and candidate.group_order > 1:
                     from .Symmetry import detect_point_group_reduction
 
@@ -964,10 +1232,14 @@ class _OverlappedSymmetryMaps:
                             grid, atoms, candidate, atom_tolerance=atom_tolerance
                         )
                     except BaseException as error:
+                        self._published.publish(found[0])
                         self._point_group.set_exception(error)
                         return
                     finally:
                         stages.add("orbital_group", mark)
+                    if wait_for_group:
+                        # (the orbits of the full group, then those of H and of the abelian group found first)
+                        self._published.publish(_ionic_sum_candidates(candidate, stages, first=found[0]))
                     self._point_group.set_result(candidate)
                     if (
                         candidate is not found[0]
@@ -1127,7 +1399,57 @@ class _Preparation:
                 pass
 
 
-def _ionic_overlap_requested() -> bool:
+_IONIC_BACKEND_DEFAULT = "auto"
+
+
+def ionic_backend_setting() -> str:
+    """``PARSEC_IONIC_BACKEND``: ``native``, ``cupy`` or ``auto`` (unset: :data:`_IONIC_BACKEND_DEFAULT`, ``auto`` since
+    2026-11-19; ``native`` before).
+
+    ``native`` sums the local ionic potential and the atomic densities of a cluster with the C++/OpenMP builders on
+    the host, in line, over every grid point.  ``cupy`` sums them on the GPU (``V_ion/cupy_ionic.py``), on a thread
+    beside the sector set-up where ``PARSEC_OVERLAP_IONIC_SETUP`` allows, and there at one point per symmetry orbit
+    where the images are exact (``PARSEC_IONIC_SUM_GRID``, ``PARSEC_IONIC_SUM_GROUP``).  ``auto`` takes ``cupy`` for
+    a cluster where CuPy and a CUDA device are usable and the run is not a CPU run, ``native`` otherwise (a periodic
+    cell builds its fields on its own routes either way).  Any other value is refused.  Measured on one A100 node
+    (first runs, nanodiamond clusters, code defaults otherwise): the preparation of k06 took 3.8 s instead of
+    16.0 s, k10 6.3 s instead of 196.5 s and k12 8.7 s instead of 434.0 s, the host sums of every grid point having
+    taken 11.6, 189 and 420 s; the energies moved by 2e-9, 8e-8 and 1e-8 Ry (the round-off of the sums, through
+    SCF loops to the criterion of those inputs).
+    """
+
+    value = os.environ.get("PARSEC_IONIC_BACKEND", "").strip().lower() or _IONIC_BACKEND_DEFAULT
+    if value not in {"native", "cupy", "auto"}:
+        raise ValueError("PARSEC_IONIC_BACKEND must be native, cupy or auto")
+    return value
+
+
+def _gpu_ionic_requested(*, periodic: bool = False, backend=None) -> bool:
+    """Whether the ionic sums of a calculation go to the GPU builders (:func:`ionic_backend_setting`).
+
+    ``backend`` is the execution backend asked for, where it is known: ``auto`` takes the GPU builders under
+    ``auto`` and ``cupy`` alone (the builders are used where the CuPy backend is selected in any case).  The same
+    answer on every MPI rank of a run: it reads the switch, the device policy and whether CuPy finds a device, not
+    the rank.
+    """
+
+    value = ionic_backend_setting()
+    if value != "auto":
+        return value == "cupy"
+    if periodic:
+        return False
+    if backend is not None and str(backend).strip().lower() not in {"auto", "cupy"}:
+        return False
+    from .resources import device_policy
+
+    if device_policy() == "cpu" or not _cupy_installed():
+        return False
+    from .backends.cupy import cupy_available
+
+    return bool(cupy_available())
+
+
+def _ionic_overlap_requested(*, periodic: bool = False, backend=None) -> bool:
     """Whether the root-only ionic fields may leave the preparing thread.
 
     ``PARSEC_OVERLAP_IONIC_SETUP`` is on by default; ``0`` keeps the stages
@@ -1139,9 +1461,7 @@ def _ionic_overlap_requested() -> bool:
 
     return os.environ.get(
         "PARSEC_OVERLAP_IONIC_SETUP", "1"
-    ).strip().lower() not in {"0", "false", "no", "off"} and (
-        os.environ.get("PARSEC_IONIC_BACKEND", "native").lower() == "cupy"
-    )
+    ).strip().lower() not in {"0", "false", "no", "off"} and _gpu_ionic_requested(periodic=periodic, backend=backend)
 
 
 def _ion_ion_overlap_requested() -> bool:
@@ -1405,6 +1725,103 @@ class _OverlappedIonicFields:
         )
 
 
+def ionic_sum_group_setting() -> str:
+    """``PARSEC_IONIC_SUM_GROUP``: ``full`` (the default since 2026-11-19) or ``first``.
+
+    The GPU ionic sums on their thread run at one point per orbit of the reduction the preparation publishes
+    (``PARSEC_IONIC_SUM_GRID=auto``, :func:`_choose_ionic_sum_grid`).  ``full``: where the weighted sectors find
+    the point group of the structure (a :class:`.Symmetry.PointGroupReduction`), the orbits of that full group
+    (:mod:`.Symmetry.field_orbits`; Td: N/24 points instead of the N/4 of the abelian D2), published once the group
+    is found; any group that maps the atoms and the grid points onto themselves in every bit may stand for its
+    orbits, whichever group the orbitals take.  Where the atoms are images under that group only within the
+    detection tolerance, the sums try the orbits of the sectors' group ``H`` and then those of the abelian group
+    detected first (:func:`_ionic_sum_candidates`) before every grid point.  ``first``: the reduction detected first
+    (the abelian group of the thread of the maps), published at once, as before.
+    """
+
+    value = os.environ.get("PARSEC_IONIC_SUM_GROUP", "full").strip().lower() or "full"
+    if value not in {"full", "first"}:
+        raise ValueError("PARSEC_IONIC_SUM_GROUP must be full or first")
+    return value
+
+
+def _ionic_sum_reduction(reduction, stages=None):
+    """The reduction whose orbits the ionic sums take for ``reduction``: the orbits of the full group of a point-group
+    reduction (:func:`.Symmetry.field_orbits.field_orbit_reduction`, built once and kept for the SCF fields), else
+    ``reduction`` itself."""
+
+    if reduction is None or not hasattr(reduction, "coset_images"):
+        return reduction
+    from .Symmetry.field_orbits import field_orbit_reduction
+
+    started = perf_counter()
+    try:
+        field = field_orbit_reduction(reduction)
+    except (ValueError, RuntimeError):
+        return reduction
+    finally:
+        if stages is not None:
+            stages.add("field_orbits", started)
+    return reduction if field is None else field
+
+
+def _ionic_sum_candidates(reduction, stages=None, first=None):
+    """What the preparation publishes for the ionic sums of ``reduction`` (``PARSEC_IONIC_SUM_GROUP=full``).
+
+    The reductions whose orbits the sums try, largest group first: the orbits of the full group of a point-group
+    reduction (:func:`_ionic_sum_reduction`), the reduction itself (its subgroup ``H``) and ``first``, the abelian
+    group detected first, where it is another.  A structure may map onto itself exactly under the sign flips of the
+    abelian group but only within the detection tolerance under the axis permutations of the full group
+    (coordinates with last-bit differences between the axes): its sums then keep the orbits they took before
+    instead of every grid point (:func:`_choose_ionic_sum_grid`).  One reduction alone is published as itself, two or
+    more as a tuple; ``None`` without any.
+    """
+
+    chain: list = []
+    for item in (_ionic_sum_reduction(reduction, stages), reduction, first):
+        if item is not None and all(item is not other for other in chain):
+            chain.append(item)
+    if not chain:
+        return None
+    return chain[0] if len(chain) == 1 else tuple(chain)
+
+
+def _orbit_sum_choice(grid, atoms, candidates, *, atom_tolerance: float = 0.0):
+    """The first of ``candidates`` (a reduction, a tuple of them, or ``None``) whose images of ``atoms`` and of the
+    grid points are exact (:func:`.Symmetry.exact_images.orbit_sum_points`, ``atom_tolerance`` for moved atoms).
+
+    Returns ``(reduction, points, obstacles)``: the reduction and its representative points, or ``(None, None,
+    obstacles)`` where none passes, with why each failed, in their order.
+    """
+
+    from .Symmetry.exact_images import orbit_sum_points
+
+    if candidates is None:
+        return None, None, []
+    if not isinstance(candidates, tuple):
+        candidates = (candidates,)
+    # (the tolerance named only for moved atoms: the test of a first structure is called as it always was)
+    tolerance = {"atom_tolerance": atom_tolerance} if atom_tolerance > 0.0 else {}
+    obstacles = []
+    for reduction in candidates:
+        if reduction is None:
+            continue
+        points, obstacle = orbit_sum_points(grid, atoms, reduction, **tolerance)
+        if points is not None:
+            return reduction, points, obstacles
+        obstacles.append(obstacle)
+    return None, None, obstacles
+
+
+def _orbit_sum_wedge_text(reduction, obstacles) -> str:
+    """The backend report of sums on the orbits of ``reduction`` after the larger groups whose ``obstacles`` failed."""
+
+    text = f"symmetry wedge ({int(reduction.wedge_size)} of {int(reduction.full_size)} points)"
+    if obstacles:
+        text += f"; a group of {int(reduction.group_order)} operations, the larger one failed: {obstacles[0]}"
+    return text
+
+
 def _choose_ionic_sum_grid(builders, reference, preparation) -> str:
     """Let the ionic sums of ``builders`` run on the symmetry wedge where that is exact.
 
@@ -1425,7 +1842,10 @@ def _choose_ionic_sum_grid(builders, reference, preparation) -> str:
     The thread waits here until the reduction of the preparation is known:
     the thread of the symmetry maps publishes it when it is detected, the
     thread that prepares where it detects in line, and a preparation that
-    looks for no symmetry, or fails, publishes that there is none.
+    looks for no symmetry, or fails, publishes that there is none.  With
+    ``PARSEC_IONIC_SUM_GROUP=full`` the published value may be a tuple of
+    reductions (:func:`_ionic_sum_candidates`): the sums take the first
+    whose images are exact.
     """
 
     if ionic_sum_grid_setting() == "full":
@@ -1435,21 +1855,17 @@ def _choose_ionic_sum_grid(builders, reference, preparation) -> str:
         return "full grid (these builders sum every point)"
     stages = preparation.stages
     started = perf_counter()
-    reduction = preparation.symmetry_reduction.wait()
+    published = preparation.symmetry_reduction.wait()
     stages.add("ionic_symmetry_wait", started)
-    if reduction is None:
+    if published is None or (isinstance(published, tuple) and all(item is None for item in published)):
         return "full grid (no symmetry reduction)"
-    from .Symmetry.exact_images import orbit_sum_points
 
     started = perf_counter()
     try:
-        points, obstacle = orbit_sum_points(reference.grid, reference.atoms, reduction)
+        reduction, points, obstacles = _orbit_sum_choice(reference.grid, reference.atoms, published)
         if points is None:
-            return f"full grid ({obstacle})"
-        wedge = (
-            f"symmetry wedge ({int(reduction.wedge_size)} of "
-            f"{int(reduction.full_size)} points)"
-        )
+            return f"full grid ({obstacles[0] if obstacles else 'no symmetry reduction'})"
+        wedge = _orbit_sum_wedge_text(reduction, obstacles)
         restrict(reference.grid, reduction, points)
         return wedge
     except Exception as error:
@@ -1464,7 +1880,7 @@ def _choose_ionic_sum_grid(builders, reference, preparation) -> str:
         stages.add("ionic_sum_grid_test", started)
 
 
-def _ionic_field_overlap(mpi_context) -> _OverlappedIonicFields | None:
+def _ionic_field_overlap(mpi_context, *, periodic: bool = False, backend=None) -> _OverlappedIonicFields | None:
     """Return the overlap of the ionic fields for a rank that may use one.
 
     The root rank of an MPI run and a process without one build the fields.
@@ -1474,7 +1890,7 @@ def _ionic_field_overlap(mpi_context) -> _OverlappedIonicFields | None:
     """
 
     builds_fields = mpi_context is None or mpi_context.rank == mpi_context.root
-    if builds_fields and _ionic_overlap_requested():
+    if builds_fields and _ionic_overlap_requested(periodic=periodic, backend=backend):
         return _OverlappedIonicFields()
     return None
 
@@ -1663,7 +2079,7 @@ def _prepare_reference_physics(
         )
         gpu_ionic_fields = False
         if (ionic_builders is not None and selection.selected == "cupy"
-                and os.environ.get("PARSEC_IONIC_BACKEND", "native").lower() == "cupy"):
+                and _gpu_ionic_requested()):
             from .V_ion.cupy_ionic import CupyIonicBuilders
 
             ionic_builders = CupyIonicBuilders(sector_rank=ionic_sector_rank)
@@ -2210,6 +2626,7 @@ def _planned_sector_device_groups(
     mpi_context,
     costs=None,
     divisible=None,
+    unit_devices=None,
 ) -> dict[int, tuple[int, ...]]:
     """Return the device group of every sector this process will own.
 
@@ -2220,7 +2637,9 @@ def _planned_sector_device_groups(
     constructor passes; ``PARSEC_SECTOR_PLACEMENT``) and by whether a CHEBFF
     first solve divides each basis over the devices of a group
     (``divisible``, ``Eigensolvers.symmetry.sector_bases_divisible``); one
-    process spreads all sectors over its devices in turn.
+    process spreads all sectors over its devices in turn, or places the units
+    of irreducible representations by cost (``unit_devices``,
+    ``Eigensolvers.symmetry.unit_device_ids``; ``PARSEC_ORBITAL_IRREPS``).
     """
 
     if mpi_context is not None:
@@ -2239,10 +2658,70 @@ def _planned_sector_device_groups(
             # The one sector of a run without symmetry, which the ranks share.
             shared=int(representation_count) == 1 and mpi_context.size > 1,
         )
+    if unit_devices is not None:
+        return {index: (int(unit_devices[index]),) for index in range(representation_count)}
     return {
         index: (device_ids[index % len(device_ids)],)
         for index in range(representation_count)
     }
+
+
+def _process_placement_refusal(reference) -> str | None:
+    """Why one process keeps the cyclic deal of its sectors although it places them by size, or ``None``.
+
+    A hybrid functional's exchange needs every sector basis on one device
+    (``Hamiltonian/exchange_device.py``; an MPI rank deals the sectors of a
+    hybrid in turn as well), a meta-GGA's kinetic-energy density refuses
+    sector groups (``Hamiltonian/meta_gga_device.py``), and the LDA+U
+    occupations read the sector bases as single arrays
+    (``Hamiltonian/hubbard_device.py``): those keep the placement of before.
+    """
+
+    problem = getattr(reference, "input", None)
+    scf = getattr(problem, "scf", None)
+    if scf is None:
+        return None
+    if getattr(scf, "is_hybrid", False):
+        return "a hybrid functional"
+    if getattr(scf, "is_meta_gga", False):
+        return "a meta-GGA functional"
+    if any(getattr(item, "has_hubbard", False) for item in getattr(problem, "pseudopotentials", {}).values()):
+        return "LDA+U"
+    return None
+
+
+def _process_sector_placement(reference, decomposition, device_ids, filter_plan=None):
+    """The device groups of the sectors of one process (``None``: the cyclic deal), whether the first solve
+    divides their bases, and why the cyclic deal stays (``None`` where it does not or is asked for).
+
+    ``Eigensolvers.symmetry.process_sector_device_groups`` under ``PARSEC_CUPY_SECTOR_PLACEMENT=size``, with
+    the costs and the divisible bases of ``filter_plan`` (the filter plan of ``reference``,
+    :func:`_filter_plan`, which the driver hands the sector eigensolver too) and ``Eigensolver: chebff`` as
+    the first solve that divides them, as the MPI runner asks of the sectors of one rank.
+    """
+
+    from .Eigensolvers.symmetry import (
+        process_placement_record,
+        process_sector_device_groups,
+        process_sector_placement_setting,
+    )
+
+    setting = process_sector_placement_setting()
+    if setting == "cyclic" or len(tuple(device_ids)) < 2:
+        return None, None, None
+    refusal = _process_placement_refusal(reference)
+    if refusal is not None:
+        return None, None, f"cyclic with {refusal} (PARSEC_CUPY_SECTOR_PLACEMENT=size)"
+    method = getattr(getattr(getattr(reference, "input", None), "eigensolver", None), "method", "chebff")
+    divided = str(method).strip().lower() == "chebff"
+    notes: list[str] = []
+    groups = process_sector_device_groups(decomposition, device_ids, filter_plan, divided=divided, notes=notes)
+    # The record of the placement with the reason of a pool decision (PARSEC_CUPY_SECTOR_POOL_MIN_BYTES).
+    note = None
+    if groups and notes:
+        record = process_placement_record(groups, device_ids, int(decomposition.representation_count))
+        note = f"{record}; {'; '.join(notes)}"
+    return groups, divided, note
 
 
 def _sector_placement_costs(decomposition, filter_plan):
@@ -2253,12 +2732,22 @@ def _sector_placement_costs(decomposition, filter_plan):
     return sector_placement_costs(decomposition, filter_plan)
 
 
-def _sector_bases_divisible(decomposition, filter_plan):
-    """Which sector bases a CHEBFF first solve divides over a group of devices, as the sector eigensolver asks."""
+def _unit_device_ids(decomposition, filter_plan, device_ids):
+    """The GPU of every unit of irreducible representations in one process, as the sector eigensolver places them."""
 
-    from .Eigensolvers.symmetry import sector_bases_divisible
+    from .Eigensolvers.symmetry import unit_device_ids
 
-    return sector_bases_divisible(decomposition, filter_plan)
+    return unit_device_ids(decomposition, filter_plan, device_ids)
+
+
+def _sector_bases_divisible(decomposition, filter_plan, device_ids=None, mpi_context=None, costs=None):
+    """Which sector bases a CHEBFF first solve divides over a group of devices, as the sector eigensolver asks
+    (units of irreducible representations: by the units of this rank, ``planned_owned_units``)."""
+
+    from .Eigensolvers.symmetry import planned_owned_units, sector_bases_divisible
+
+    owned = None if device_ids is None else planned_owned_units(decomposition, mpi_context, device_ids, costs)
+    return sector_bases_divisible(decomposition, filter_plan, device_ids, owned=owned)
 
 
 def _select_hartree_device(
@@ -2446,12 +2935,43 @@ def _hartree_boundary_tail(reference, *, on_device: bool, device_id: int | None)
     return replace(tail, values_from="device kernel") if on_device else tail
 
 
-def _geometry_builder_hooks(selection, *, ionic_sector_rank: bool) -> dict:
+#: How far (bohr) an image of a moved atom may lie from its atom for the ionic sums of the moved structure to run on
+#: the orbits (:func:`moved_ionic_sum_setting`): positions averaged over the group by a relaxation step are images to
+#: their last bits (about 1e-14 bohr), and the sums at the representatives then differ from those at every point by a
+#: relative 1e-11 at most, which the orbit average of the SCF loop takes as well.
+MOVED_IMAGE_TOLERANCE = 1.0e-10
+
+
+def moved_ionic_sum_setting() -> str:
+    """``PARSEC_IONIC_MOVED_SUMS``: ``orbits`` (the default since 2026-11-19) or ``full``.
+
+    ``orbits``: the GPU ionic sums of a moved structure (a relaxation step, an MD step) run at one point per orbit of
+    the full point group of weighted sectors, or of the group of the sectors, where the images of the moved atoms
+    under it lie within :data:`MOVED_IMAGE_TOLERANCE` of their atoms and those of the grid points are exact
+    (:func:`.Symmetry.exact_images.orbit_sum_points`; positions averaged over the group by a relaxation differ from
+    exact images in their last bits), on every grid point otherwise.  ``full``: every grid point, as before.
+    ``PARSEC_IONIC_SUM_GRID=full`` sums every point in any case.
+    """
+
+    value = os.environ.get("PARSEC_IONIC_MOVED_SUMS", "orbits").strip().lower() or "orbits"
+    if value not in {"orbits", "full"}:
+        raise ValueError("PARSEC_IONIC_MOVED_SUMS must be orbits or full")
+    return value
+
+
+def _geometry_builder_hooks(selection, *, ionic_sector_rank: bool, orbits=None, report=None) -> dict:
     """Builders of the ionic fields of moved atoms.
 
     They are the ones :func:`_prepare_reference_physics` gives the preparation
     of the same backend selection, so that a moved structure is built by the
-    kernels that built the first one.
+    kernels that built the first one.  ``orbits`` (``(grid, atoms,
+    reduction)``, the moved atoms; ``reduction`` may be a tuple of reductions
+    tried in order, :func:`_ionic_sum_candidates`): GPU builders sum at one
+    point per orbit of the first reduction whose images of those atoms and of
+    the grid points are exact (``PARSEC_IONIC_MOVED_SUMS``,
+    :func:`moved_ionic_sum_setting`).
+    ``report`` (a dict) receives under ``ionic_sum_grid`` the points those
+    sums run on, or why every point.
     """
 
     if selection.finite_difference_builder != "native":
@@ -2466,13 +2986,33 @@ def _geometry_builder_hooks(selection, *, ionic_sector_rank: bool) -> dict:
     if not hasattr(native_module, "RadialGridEvaluator"):
         return {}
     builders = NativeIonicBuilders()
-    if (
-        selection.selected == "cupy"
-        and os.environ.get("PARSEC_IONIC_BACKEND", "native").lower() == "cupy"
-    ):
+    if selection.selected == "cupy" and _gpu_ionic_requested():
         from .V_ion.cupy_ionic import CupyIonicBuilders
 
         builders = CupyIonicBuilders(sector_rank=ionic_sector_rank)
+        decision = "full grid (PARSEC_IONIC_MOVED_SUMS=full or PARSEC_IONIC_SUM_GRID=full)"
+        if (
+            orbits is not None
+            and orbits[2] is not None
+            and moved_ionic_sum_setting() == "orbits"
+            and ionic_sum_grid_setting() == "auto"
+        ):
+            grid, atoms, candidates = orbits
+            try:
+                # (a reduction, or a tuple of them tried in order: _ionic_sum_candidates)
+                reduction, points, obstacles = _orbit_sum_choice(
+                    grid, atoms, candidates, atom_tolerance=MOVED_IMAGE_TOLERANCE
+                )
+            except Exception as error:
+                # As at preparation: a test that cannot be made sums every point.
+                points, obstacles = None, [f"the test of the images failed: {type(error).__name__}"]
+            if points is not None:
+                builders.sum_on_orbits(grid, reduction, points)
+                decision = _orbit_sum_wedge_text(reduction, obstacles)
+            else:
+                decision = f"full grid ({obstacles[0] if obstacles else 'no symmetry reduction'})"
+        if report is not None:
+            report["ionic_sum_grid"] = decision
     return dict(
         local_ionic_builder=builders.build_local_ionic_potential,
         nonlocal_projector_builder=builders.build_nonlocal_projectors,
@@ -3096,7 +3636,7 @@ def _resolve_and_prepare_reference(
     from .resources import device_policy
 
     normalized = str(backend).strip().lower()
-    gpu_ionic = os.environ.get("PARSEC_IONIC_BACKEND", "native").lower() == "cupy"
+    gpu_ionic = _gpu_ionic_requested(periodic=getattr(problem, "periodic_cell", None) is not None, backend=normalized)
     cpu_only = device_policy() == "cpu"
     if gpu_ionic and cpu_only:
         raise ValueError(
@@ -3256,6 +3796,10 @@ def prepare_single_point(
     symmetry: SymmetryMode | str = "auto",
     symmetry_cache_directory: os.PathLike[str] | str | None = None,
     mpi_context=None,
+    spin_identity_sector: bool = False,
+    symmetry_fixed_atoms=None,
+    symmetry_constraints: tuple = (),
+    sector_forces: bool = False,
 ) -> AcceleratedPreparedSinglePointSystem:
     """Prepare physics, automatically reducing exact symmetry when usable.
 
@@ -3263,6 +3807,12 @@ def prepare_single_point(
     that the selected backend supports and otherwise keeps the full-grid
     algorithm.  ``on`` turns an unusable/nontrivial symmetry into an error;
     ``off`` skips detection and is the reproducible full-grid comparison path.
+
+    ``sector_forces``: the caller averages the forces and moved positions of
+    a periodic cell over the group of its sectors (the command line and the
+    MPI runner under ``PARSEC_PERIODIC_SECTOR_FORCES=auto``), so the cell
+    keeps its sectors below the size floor of ``PARSEC_PERIODIC_SECTOR_FLOOR``
+    too: the full grid would leave its forces and moves unaveraged.
 
     ``symmetry_cache_directory`` names a persistent symmetry cache.  Without
     one, the default here and of the command-line entry points, nothing is
@@ -3273,12 +3823,35 @@ def prepare_single_point(
     Only the root rank also prepares what the SCF loop itself needs (ionic
     fields, densities, Hartree and XC); on the other ranks those hooks raise.
 
+    ``symmetry_constraints`` are points the operations of the detected group
+    of a cluster must also carry onto points of the same label (pseudo-atoms
+    that are no part of the physics): the group of the atoms that keeps an
+    electric field along an axis (``Polarizability``,
+    :mod:`.SCF.symmetry_off_inputs`).  The point charges of the problem join
+    them where ``PARSEC_POINT_CHARGE_SYMMETRY=auto``.
+
     Stages that are independent run on threads beside the calling one.
     Every one of them has ended when this function returns or raises.
     ``preparation_stages`` of the returned system says when each stage of
     every thread began and ended.
+
+    ``spin_identity_sector`` (a spin-polarized ``problem`` on CuPy, with
+    ``symmetry='off'``): both channels as one sector of the identity, whose
+    basis the GPUs of the process share, or the ranks of ``mpi_context``,
+    without a symmetry guard: the full grid that :class:`_SpinSectorFallback`
+    gives a run whose guard fired under ``PARSEC_SPIN_FALLBACK_SHARED``.
+    ``symmetry_fixed_atoms`` (one flag per atom, ``True`` for an atom that
+    ``Move_Flag`` fixes; :func:`parsec_python.Relaxation.run.symmetry_fixed_atoms`)
+    has the detection take the fixed atoms as a species of their own, so
+    that it finds the subgroup a relaxation with those flags keeps
+    (``PARSEC_MOVE_FLAG_SUBGROUP``).  ``None``, the default, detects the
+    group of the atoms as they are.
     """
 
+    if spin_identity_sector and not getattr(getattr(problem, "scf", None), "spin_polarized", False):
+        raise ValueError("spin_identity_sector is the full grid of the two channels of a spin-polarized run")
+    if spin_identity_sector and _normalize_symmetry_mode(symmetry) != "off":
+        raise ValueError("spin_identity_sector takes no point group: prepare it with symmetry='off'")
     if getattr(getattr(problem, "scf", None), "is_libxc", False):
         _refuse_libxc_routes(problem, mpi_context=mpi_context)
     if getattr(getattr(problem, "scf", None), "is_hybrid", False):
@@ -3294,6 +3867,10 @@ def prepare_single_point(
             symmetry_cache_directory=symmetry_cache_directory,
             mpi_context=mpi_context,
             preparation=preparation,
+            spin_identity_sector=spin_identity_sector,
+            symmetry_fixed_atoms=symmetry_fixed_atoms,
+            symmetry_constraints=tuple(symmetry_constraints),
+            sector_forces=bool(sector_forces),
         )
     finally:
         # A preparation that returns has joined its threads where it read
@@ -3572,6 +4149,10 @@ def _prepare_single_point(
     symmetry_cache_directory: os.PathLike[str] | str | None,
     mpi_context,
     preparation: _Preparation,
+    spin_identity_sector: bool = False,
+    symmetry_fixed_atoms=None,
+    symmetry_constraints: tuple = (),
+    sector_forces: bool = False,
 ) -> AcceleratedPreparedSinglePointSystem:
     """Run the stages of :func:`prepare_single_point`, which joins their threads."""
 
@@ -3587,6 +4168,10 @@ def _prepare_single_point(
     spin_polarized = bool(
         getattr(getattr(problem, "scf", None), "spin_polarized", False)
     )
+    # PARSEC_SPIN_FLIP_SYMMETRY: read (and refused if unknown) before anything is built.
+    from .SCF.spin_flip import spin_flip_setting
+
+    spin_flip_mode = spin_flip_setting()
     spin_sector_refusal = _spin_sector_refusal(problem) if spin_polarized else None
     if spin_polarized and mpi_context is not None and spin_sector_refusal is not None:
         # The ranks divide the symmetry sectors; two channels on the full grid
@@ -3607,14 +4192,21 @@ def _prepare_single_point(
             "point charges (Add_Point_Charges) and Symmetrize_Charge_Density do "
             "not run as an MPI SCF; run the input in one process (main.py)"
         )
-    if point_charges:
+    from .SCF.symmetry_off_inputs import point_charge_symmetry_setting
+
+    # (read in every run, so that a value it does not know is refused)
+    point_charge_group = point_charge_symmetry_setting() == "auto" and not is_periodic
+    if point_charges and not point_charge_group:
         # The potential of the point charges is in the ionic potential of the
         # reference preparation (ionpot.f90), which has no point group of the
         # atoms and charges: the sectors of the atoms alone would average it.
+        # (PARSEC_POINT_CHARGE_SYMMETRY=auto: the group of the atoms that
+        # carries every charge onto a charge of its value, below.)
         if _normalize_symmetry_mode(symmetry) == "on":
             raise ValueError(
                 "symmetry='on' cannot be used with point charges (Add_Point_Charges): "
                 "the calculation uses no point group"
+                + ("" if is_periodic else " (PARSEC_POINT_CHARGE_SYMMETRY=off)")
             )
         symmetry = "off"
     if getattr(problem, "embedding", None) is not None:
@@ -3637,18 +4229,27 @@ def _prepare_single_point(
     if not is_periodic:
         problem = boundary_switched
     # Read here so that a value they do not know is refused in every run.
+    from .SCF.density_symmetry import symmetrized_density_sectors_setting
+
+    symmetrized_density_sectors_setting()
     _hartree_boundary_kernel()
     _hartree_boundary_check_count()
     ionic_sum_grid_setting()
+    from .Forces.local_device import local_force_sums_setting
+
+    # (PARSEC_LOCAL_FORCE_SUMS, the local forces of a cluster in sectors, read only by the forces after the SCF)
+    local_force_sums_setting()
     tail_on_host = _hartree_tail_on_host()
-    ionic_fields = _ionic_field_overlap(mpi_context)
+    ionic_fields = _ionic_field_overlap(mpi_context, periodic=is_periodic, backend=backend)
     if ionic_fields is not None:
         preparation.join_on_exit(ionic_fields.close)
     symmetry_mode = _normalize_symmetry_mode(symmetry)
     from .Symmetry import periodic_symmetry_setting
     from .Symmetry.axis_reflection import (
+        orbital_irreps_setting,
         periodic_abelian_translation_setting,
         periodic_centre_setting,
+        periodic_defect_centre_setting,
         periodic_trivial_origin_setting,
         symmetry_atom_tolerance,
     )
@@ -3656,24 +4257,51 @@ def _prepare_single_point(
     # Read in every run, so that a value it does not know is refused.
     periodic_symmetry_mode = periodic_symmetry_setting()
     # (and so are the switches of the detection: PARSEC_SYMMETRY_ATOM_TOLERANCE, PARSEC_PERIODIC_TRIVIAL_ORIGIN,
-    # PARSEC_PERIODIC_SYMMETRY_CENTRE, PARSEC_PERIODIC_ABELIAN_TRANSLATIONS)
+    # PARSEC_PERIODIC_SYMMETRY_CENTRE, PARSEC_PERIODIC_DEFECT_CENTRE, PARSEC_PERIODIC_ABELIAN_TRANSLATIONS,
+    # PARSEC_ORBITAL_IRREPS)
     atom_tolerance = symmetry_atom_tolerance()
     trivial_origin_mode = periodic_trivial_origin_setting()
     periodic_centre_setting()
+    periodic_defect_centre_setting()
     periodic_abelian_translation_setting()
+    # (and the switches of the local forces of a cell, which are used after the first SCF:
+    # PARSEC_PERIODIC_LOCAL_ORBITS, PARSEC_PERIODIC_LOCAL_BALLS and their siblings)
+    from .Forces.periodic_local import validate_local_force_settings
+
+    validate_local_force_settings()
+    from .SCF.kpoint_sectors import kpoint_sector_tolerance_setting
+
+    # (and PARSEC_KPOINT_SECTOR_TOLERANCE, the tolerance of the cell group of the k-point sectors: the 1x1x1 driver)
+    kpoint_sector_tolerance_setting()
+    orbital_irreps_setting()
     from .SCF.gamma_spin import gamma_spin_sector_setting
 
     # (and PARSEC_GAMMA_SPIN_SECTORS, the route of a spin-polarized cell: SCF/gamma_spin.py, with the operations of
     # test 2 of its guard, PARSEC_SPIN_GUARD_CELL_GROUP: SCF/spin_sectors.py)
     gamma_spin_sector_setting()
-    from .SCF.spin_sectors import spin_guard_cell_group_setting
+    from .SCF.spin_sectors import spin_fallback_shared_setting, spin_guard_cell_group_setting
 
     spin_guard_cell_group_setting()
+    # (and PARSEC_SPIN_FALLBACK_SHARED, the layout of the full grid of a spin run whose guard fires)
+    spin_fallback_shared_setting()
+    from .Forces.sector_symmetry import fortran_sector_forces_setting
+
+    # (and PARSEC_FORTRAN_SECTOR_FORCES, which compute_forces and move_atoms read for a cell of the Fortran-derived
+    # routines in sectors: read here so that a value it does not know is refused before the SCF of a library caller)
+    fortran_sector_forces_setting()
+    from .SCF.gamma_features import gamma_feature_settings
+
+    # (and the switches of TS, LDA+U, meta-GGA and libxc in the Gamma sectors: SCF/gamma_features.py)
+    gamma_feature_settings()
     # A periodic cell in an MPI sector context: one sector of the identity
     # whose basis the ranks share (a bulk cell at Gamma; see
     # periodic_sector_refusal for what that route does not take).
     periodic_refusal = (
-        periodic_sector_refusal(problem, hybrid_sectors=_gamma_hybrid_in_sectors(problem, mpi_context))
+        periodic_sector_refusal(
+            problem,
+            hybrid_sectors=_gamma_hybrid_in_sectors(problem, mpi_context),
+            features=mpi_context is None,
+        )
         if is_periodic
         else None
     )
@@ -3686,12 +4314,40 @@ def _prepare_single_point(
         and symmetry_mode != "off"
         and periodic_symmetry_mode == "auto"
     )
+    # (read in every run, so that a value it does not know is refused)
+    periodic_floor = periodic_sector_floor_setting()
+    from .SCF.band_sectors import band_kpoint_sectors_setting
+    from .Symmetry.sector_shares import weighted_first_share_setting
+
+    weighted_first_share_setting()
+    # (PARSEC_BAND_KPOINT_SECTORS, read by the band stage after the SCF)
+    band_kpoint_sectors_setting()
+    # An unpolarized cell whose basis is below the floor keeps the full grid in one process
+    # (PARSEC_PERIODIC_SECTOR_FLOOR; --symmetry on and the spin channels, which this route alone takes, keep the
+    # sectors; a hybrid has the same floor in _gamma_hybrid_in_sectors).  Forces and moves averaged over the group
+    # of the sectors (sector_forces) keep the sectors too: the full grid would not average them.
+    below_floor = (
+        _periodic_basis_below_floor(problem, mpi_context, periodic_floor, sector_forces=sector_forces)
+        if periodic_symmetry and symmetry_mode != "on" and not spin_polarized
+        else None
+    )
+    if below_floor is not None:
+        periodic_symmetry = False
     if is_periodic and symmetry_mode == "on" and not periodic_symmetry:
         raise ValueError(
             "symmetry='on' needs a periodic cell whose point group the route of the sectors takes (a bulk "
-            "orthorhombic cell at the Gamma point, unpolarized or collinear spin, native LDA or GGA) and "
+            "orthorhombic cell at the Gamma point, unpolarized or collinear spin, native LDA or GGA, or TS, LDA+U, "
+            "meta-GGA or libxc under PARSEC_GAMMA_TS_SECTORS and the like) and "
             "PARSEC_PERIODIC_SYMMETRY=auto"
             + ("" if periodic_refusal is None else f"; this calculation has {periodic_refusal}")
+        )
+    if is_periodic and spin_polarized and mpi_context is not None and periodic_refusal is None and not periodic_symmetry:
+        # Without a detection the cell takes no group, and the identity sector of the ranks takes no spin channels:
+        # refused before the reference is prepared.
+        raise ValueError(
+            spin_cell_group_refusal(
+                "PARSEC_PERIODIC_SYMMETRY=off" if periodic_symmetry_mode == "off" else "it is prepared without symmetry"
+            )
         )
     if periodic_refusal is not None and mpi_context is not None:
         raise ValueError(
@@ -3706,6 +4362,12 @@ def _prepare_single_point(
     sector_worker = (
         mpi_context is not None and mpi_context.rank != mpi_context.root
     )
+    from .Eigensolvers.symmetry import process_pool_min_bytes, process_sector_placement_setting
+
+    # Read here whatever the run, so that a value they do not know is refused before the SCF; one process with
+    # several GPUs places its sectors by them below (_process_sector_placement).
+    process_sector_placement_setting()
+    process_pool_min_bytes()
     from .Symmetry.sector_stencil import sector_stencil_route
 
     # The symmetry sectors take their packed stencils from the grid, or from
@@ -3715,6 +4377,27 @@ def _prepare_single_point(
     # switch is read here whatever the symmetry mode, so that a value it does
     # not know is refused in every run.
     stencil_route = sector_stencil_route()
+    from .Symmetry.weighted_inputs import weighted_input_settings
+
+    # (and so are those of the weighted sectors of Fix_Number_Eigenvalues, libxc, occup.in and spin)
+    weighted_input_settings()
+    from .SCF.symmetry_fields import sector_input_group_average_setting
+
+    # PARSEC_SECTOR_INPUT_GROUP_AVERAGE (the full-grid inputs of weighted sectors averaged over the full group):
+    # read here for the same reason.
+    input_group_average = sector_input_group_average_setting()
+    from .Symmetry.field_orbits import sector_field_group_setting
+
+    # PARSEC_SECTOR_FIELD_GROUP (the SCF fields of weighted sectors on the orbits of the full group).
+    sector_field_group = sector_field_group_setting()
+    from .Hartree.cupy_boundary import boundary_rows_setting
+
+    # PARSEC_HARTREE_BOUNDARY_ROWS (read by the boundary builder on its thread).
+    boundary_rows_setting()
+    # PARSEC_IONIC_SUM_GROUP (the orbits of the GPU ionic sums on their thread).
+    ionic_sum_group = ionic_sum_group_setting()
+    # PARSEC_IONIC_MOVED_SUMS (the GPU ionic sums of moved structures), read for the same reason.
+    moved_ionic_sum_setting()
     from .Eigensolvers.filter_graph import graph_reuse_requested, graph_route_name
 
     # Read here for the same reason: the first filter that records a graph
@@ -3731,8 +4414,10 @@ def _prepare_single_point(
         # periodic cell detects its point group in line below; its ionic
         # fields keep the sums over the whole cell.)
         preparation.symmetry_reduction.publish(None)
-    elif _symmetry_overlap_requested():
-        # The reference stage starts it at the grid where it may.
+    elif _symmetry_overlap_requested() and not symmetry_constraints and not point_charges:
+        # The reference stage starts it at the grid where it may.  (A group
+        # with constraints, or with point charges, is detected in line below:
+        # the thread knows the atoms alone.)
         preparation.symmetry_maps = _OverlappedSymmetryMaps(
             cache_directory=symmetry_cache_directory,
             reduction_known=preparation.symmetry_reduction,
@@ -3741,8 +4426,10 @@ def _prepare_single_point(
         preparation.symmetry_maps.point_group_wanted = (
             _orbital_group_refusal(problem, spin_polarized, mpi_context) is None
         )
+        preparation.symmetry_maps.ionic_sum_group = ionic_sum_group
         if mpi_context is not None:
             preparation.symmetry_maps.ranks_divide = lambda reduction: _ranks_divide_sectors(reduction, mpi_context)
+        preparation.symmetry_maps.fixed_atoms = symmetry_fixed_atoms
         preparation.join_on_exit(preparation.symmetry_maps.close)
     selection, reference, preparation_overlap = _resolve_and_prepare_reference(
         problem,
@@ -3777,6 +4464,24 @@ def _prepare_single_point(
     origin_group = None
     symmetry_maps = preparation.symmetry_maps
     maps_beside = False
+    # The atoms of the detection: the fixed atoms of a relaxation with Move_Flag as a species of their own
+    # (PARSEC_MOVE_FLAG_SUBGROUP=auto), which gives the subgroup the relaxation keeps, and the points the operations
+    # must keep besides them (the point charges of PARSEC_POINT_CHARGE_SYMMETRY=auto, the axis of a field:
+    # symmetry_constraints), as pseudo-atoms of their own labels after the atoms.  The orbits of the atoms of a
+    # weighted plan are those of the atoms alone.
+    real_atoms = getattr(reference, "atoms", ())
+    detection_atoms = _detection_atoms(real_atoms, symmetry_fixed_atoms)
+    # (also the points the symmetry guard of a spin-polarized run in the sectors adds to the atoms: a field or
+    # charges break the group of the atoms alone, which the densities then do not keep)
+    detection_extra: tuple = ()
+    if symmetry_mode != "off" and not is_periodic:
+        from .SCF.symmetry_off_inputs import point_charge_constraints
+
+        detection_extra = tuple(symmetry_constraints) + (
+            point_charge_constraints(getattr(reference, "point_charges", ())) if point_charges else ()
+        )
+        if detection_extra:
+            detection_atoms = tuple(detection_atoms) + detection_extra
     periodic_on_host = periodic_symmetry and selection.selected != "cupy"
     if periodic_on_host:
         # The sectors of a point group are a route of the CuPy backend: the
@@ -3797,6 +4502,11 @@ def _prepare_single_point(
                 if symmetry_mode == "off"
                 else f"the sectors of its point group are a route of the CuPy backend, not of {selection.selected}"
                 if periodic_on_host
+                else (
+                    f"{below_floor[0]} grid points x {below_floor[1]} states are below the floor of the sectors, "
+                    f"{periodic_floor} entries (PARSEC_PERIODIC_SECTOR_FLOOR)"
+                )
+                if below_floor is not None
                 else f"the route of the sectors does not take {periodic_refusal}"
             )
             + "; the full grid is used)"
@@ -3807,7 +4517,7 @@ def _prepare_single_point(
         # The thread that works on the maps since the grid exists, where the
         # reference stage started one on this grid and these atoms.
         maps_beside = symmetry_maps is not None and symmetry_maps.serves(
-            reference.grid, getattr(reference, "atoms", ())
+            reference.grid, detection_atoms
         )
         try:
             if maps_beside:
@@ -3817,7 +4527,7 @@ def _prepare_single_point(
                     "symmetry_reduction", load_or_detect_reflection_reduction
                 )(
                     reference.grid,
-                    getattr(reference, "atoms", ()),
+                    detection_atoms,
                     cache_directory=symmetry_cache_directory,
                     atom_tolerance=atom_tolerance,
                 )
@@ -3853,8 +4563,12 @@ def _prepare_single_point(
                     from .Symmetry import detect_point_group_reduction
 
                     candidate = stages.timed("orbital_group", detect_point_group_reduction)(
-                        reference.grid, getattr(reference, "atoms", ()), candidate, atom_tolerance=atom_tolerance
+                        reference.grid, detection_atoms, candidate, atom_tolerance=atom_tolerance
                     )
+                    if detection_atoms is not real_atoms:
+                        from .SCF.symmetry_off_inputs import orbits_of_real_atoms
+
+                        orbits_of_real_atoms(candidate, len(real_atoms))
                 if candidate is not origin_group and not _ranks_divide_sectors(candidate, mpi_context):
                     candidate, undivided = origin_group, candidate
             from .Symmetry import PointGroupReduction
@@ -3867,7 +4581,7 @@ def _prepare_single_point(
                 from .Symmetry.axis_reflection import periodic_abelian_reduction
 
                 abelian_group = stages.timed("orbital_group", periodic_abelian_reduction)(
-                    reference.grid, getattr(reference, "atoms", ()), candidate, atom_tolerance=atom_tolerance
+                    reference.grid, detection_atoms, candidate, atom_tolerance=atom_tolerance
                 )
                 if abelian_group is candidate or _ranks_divide_sectors(abelian_group, mpi_context):
                     candidate = abelian_group
@@ -3880,13 +4594,17 @@ def _prepare_single_point(
                     f"per rank): the orbitals keep the group about the origin"
                 )
             if candidate.group_order > 1:
-                symmetry_reduction = candidate
                 if getattr(reference, "hubbard", None) is None:
                     # Abelian sectors take the projectors of one atom per orbit, as those of a point group do
                     # (PARSEC_SECTOR_PROJECTOR_ORBITS; the device LDA+U columns follow every KB column).
                     from .Symmetry.axis_reflection import attach_abelian_atom_orbits
 
-                    attach_abelian_atom_orbits(candidate, getattr(reference, "atoms", ()), reference.grid)
+                    attach_abelian_atom_orbits(candidate, detection_atoms, reference.grid)
+                else:
+                    # LDA+U: the projectors of every atom (the fifteen columns of every LDA+U atom that
+                    # Hamiltonian/hubbard_device.py writes), also where the group of a cell knows its atom orbits
+                    candidate = _without_atom_orbits(candidate)
+                symmetry_reduction = candidate
                 symmetry_detection = _symmetry_detection_text(candidate)
             else:
                 symmetry_detection = (
@@ -3904,7 +4622,7 @@ def _prepare_single_point(
             try:
                 lost_note = lost_operations_note(
                     reference.grid,
-                    getattr(reference, "atoms", ()),
+                    detection_atoms,
                     candidate,
                     atom_tolerance=atom_tolerance,
                 )
@@ -3912,15 +4630,44 @@ def _prepare_single_point(
                 lost_note = None
             if lost_note is not None:
                 symmetry_detection += "; " + lost_note
+            if (
+                is_periodic
+                and candidate.group_order > 1
+                and (
+                    getattr(candidate, "full_translations", None) is not None
+                    or getattr(candidate, "translations", None) is not None
+                )
+            ):
+                from .Symmetry.axis_reflection import defect_centre_note
+
+                # A group whose operations about a defect came from its rarest atom environment
+                # (PARSEC_PERIODIC_DEFECT_CENTRE): named with the site, since it is not the origin of the cell.
+                try:
+                    defect_note = defect_centre_note(
+                        reference.grid, getattr(reference, "atoms", ()), atom_tolerance=atom_tolerance
+                    )
+                except (ValueError, RuntimeError, AttributeError):
+                    defect_note = None
+                if defect_note is not None:
+                    symmetry_detection += "; " + defect_note
             if undivided_note is not None:
                 symmetry_detection += "; " + undivided_note
+            if symmetry_fixed_atoms is not None:
+                fixed_count = sum(bool(flag) for flag in symmetry_fixed_atoms)
+                symmetry_detection += (
+                    f"; the {fixed_count} atom{'s' if fixed_count != 1 else ''} that Move_Flag fixes count as a "
+                    "species of their own: the operations map them onto fixed atoms (PARSEC_MOVE_FLAG_SUBGROUP=auto)"
+                )
     # A cell whose sector stencils would need more coefficients than their palette holds (_sector_palette_check):
     # a smaller group whose stencils fit, or the full grid, decided before the identity sector of an MPI run is
     # chosen, from the same inputs on every rank (PARSEC_SECTOR_PALETTE_LADDER).
     palette_checked = None
     palette_note = None
-    # (read in every run, so that a value it does not know is refused)
+    # (read in every run, so that a value they do not know is refused)
     palette_ladder = sector_palette_ladder_setting()
+    from .backends.cupy_stencil_major import sector_palette_codes_setting
+
+    palette_codes = sector_palette_codes_setting()
     if (
         is_periodic
         and symmetry_reduction is not None
@@ -3962,7 +4709,7 @@ def _prepare_single_point(
 
                 try:
                     abelian = stages.timed("orbital_group", periodic_abelian_reduction)(
-                        reference.grid, getattr(reference, "atoms", ()), origin_group, atom_tolerance=atom_tolerance
+                        reference.grid, detection_atoms, origin_group, atom_tolerance=atom_tolerance
                     )
                 except (ValueError, RuntimeError):
                     abelian = None
@@ -3972,6 +4719,12 @@ def _prepare_single_point(
                 yield origin_group
 
         palette_checked, palette_refusal = palette_check(symmetry_reduction)
+        if palette_checked is not None and palette_checked[2] > 256:
+            # two-byte codes keep the group (PARSEC_SECTOR_PALETTE_CODES=auto; off steps down the ladder below)
+            symmetry_detection += (
+                f"; the sector stencils of {_palette_group_label(palette_checked[0])} need {palette_checked[2]} "
+                f"distinct coefficients and code them in two bytes (PARSEC_SECTOR_PALETTE_CODES={palette_codes})"
+            )
         if palette_refusal is not None:
             refusals = [palette_refusal]
             chosen = None
@@ -3988,7 +4741,9 @@ def _prepare_single_point(
                 if getattr(reference, "hubbard", None) is None:
                     from .Symmetry.axis_reflection import attach_abelian_atom_orbits
 
-                    attach_abelian_atom_orbits(chosen, getattr(reference, "atoms", ()), reference.grid)
+                    attach_abelian_atom_orbits(chosen, detection_atoms, reference.grid)
+                else:
+                    chosen = _without_atom_orbits(chosen)
                 palette_note = (
                     "; ".join(refusals)
                     + f": the orbitals take {_palette_group_label(chosen)}, whose stencils fit "
@@ -4019,7 +4774,8 @@ def _prepare_single_point(
     # sectors, as one sector of the identity, so that the devices of the
     # process share its basis (PARSEC_CUPY_SINGLE_SECTOR).
     single_sector_mode = single_sector_setting()
-    single_sector = (
+    # (the full grid of both spin channels of a fallback, shared: spin_identity_sector)
+    single_sector = (spin_identity_sector and symmetry_reduction is None and selection.selected == "cupy") or (
         (
             single_sector_mode == "on"
             or (single_sector_mode == "auto" and mpi_context is not None)
@@ -4037,6 +4793,23 @@ def _prepare_single_point(
         and not spin_polarized
         and selection.selected == "cupy"
     )
+    if (
+        is_periodic
+        and spin_polarized
+        and mpi_context is not None
+        and symmetry_reduction is None
+        and not getattr(reference.grid, "is_general_periodic", False)
+        # (not the one sector of the identity of both channels that the runner's ranks prepare together after a
+        # spin guard fired, PARSEC_SPIN_FALLBACK_SHARED: that preparation takes no group by design)
+        and not spin_identity_sector
+    ):
+        # The detection (or the palette ladder) left it no group: refused here, before the Hartree, the sectors and
+        # the CUDA work of the preparation, with the reason of a spin cell (single_sector takes no spin channels).
+        raise ValueError(
+            spin_cell_group_refusal(
+                f"it keeps no group of more than one operation here (symmetry_detection: {symmetry_detection})"
+            )
+        )
     if is_periodic and mpi_context is not None and not single_sector and symmetry_reduction is None:
         raise ValueError(
             "the MPI SCF of a periodic cell solves it in the sectors of its point group or as one sector "
@@ -4050,17 +4823,62 @@ def _prepare_single_point(
             )
             + ": run it with parsec_python/main.py"
         )
+    if single_sector and mpi_context is not None and not spin_identity_sector:
+        # One sector shared by ranks that hold the GPUs of a node each would lie on the first GPU of every rank
+        # (experimental/mpi_scf.single_sector_layout_refusal, PARSEC_SINGLE_SECTOR_NODE_LAYOUT): refused here, right
+        # after the detection that found no group, before the sectors are built.  Not the shared full grid of a
+        # spin guard fallback (spin_identity_sector, PARSEC_SPIN_FALLBACK_SHARED): its plan counts one GPU per rank
+        # already, it replaces the full grid of the root's one GPU of before, and refusing it would discard the
+        # sector SCF that ran first (MPISectorContext.spin_fallback_layout exempts it in configure as well).
+        layout_refusal = getattr(mpi_context, "single_sector_layout_refusal", None)
+        if callable(layout_refusal):
+            from .Eigensolvers.symmetry import selected_device_ids
+            from .backends.cupy import require_cupy
+
+            cp, _ = require_cupy()
+            refusal = layout_refusal(len(selected_device_ids(int(cp.cuda.Device().id))))
+            if refusal is not None:
+                raise ValueError(refusal)
     if single_sector:
         from .Symmetry import AxisReflectionReduction
 
         symmetry_reduction = AxisReflectionReduction.identity(reference.grid)
         symmetry_detection = (
             f"{symmetry_detection}; one sector of the identity "
-            f"(PARSEC_CUPY_SINGLE_SECTOR={single_sector_mode})"
+            + (
+                "for both spin channels, its basis shared by "
+                + ("the MPI ranks" if mpi_context is not None else "the GPUs of the process")
+                + " (the full grid of both spin channels where one device would not hold it, "
+                "PARSEC_SPIN_FALLBACK_SHARED)"
+                if spin_identity_sector
+                else f"(PARSEC_CUPY_SINGLE_SECTOR={single_sector_mode})"
+            )
         )
+    if is_periodic and symmetry_reduction is not None:
+        from .SCF.gamma_features import taken_features
+
+        # TS, LDA+U, a meta-GGA or libxc that their switches brought into the sectors (SCF/gamma_features.py)
+        taken = taken_features(problem)
+        if taken:
+            from .SCF.gamma_features import gamma_feature_setting
+
+            symmetry_detection = f"{symmetry_detection}; with " + ", ".join(
+                f"{name}={gamma_feature_setting(name)}" for name in taken
+            )
     # The reduction of this preparation is decided: a thread that waits for
-    # it goes on (the thread of the maps has published it where it ran).
-    preparation.symmetry_reduction.publish(symmetry_reduction)
+    # it goes on (the thread of the maps has published it where it ran).  The
+    # ionic sums take the orbits of the full point group of weighted sectors
+    # (PARSEC_IONIC_SUM_GROUP=full).
+    preparation.symmetry_reduction.publish(
+        # (the orbits of the full group, then those of H and of the abelian group detected first)
+        _ionic_sum_candidates(
+            symmetry_reduction,
+            stages,
+            first=origin_group if hasattr(symmetry_reduction, "coset_images") else None,
+        )
+        if ionic_sum_group == "full" and ionic_fields is not None
+        else symmetry_reduction
+    )
 
     # Establish whether the orbital problem can use exact representation
     # sectors before constructing the GPU backend.  This ordering matters:
@@ -4122,12 +4940,26 @@ def _prepare_single_point(
             )
         else:
             sector_sizes = orbital_decomposition.sector_sizes
+            # The first counts of weighted sectors from their shares of the valence orbitals of the atoms
+            # (PARSEC_WEIGHTED_FIRST_SHARE=orbitals, opt-in; even, the default: the even share with its margin).
+            from .Symmetry.axis_reflection import symmetry_atom_tolerance
+            from .Symmetry.sector_shares import attach_valence_orbital_counts
+
+            valence_counts = attach_valence_orbital_counts(
+                orbital_decomposition, tuple(getattr(reference, "atoms", ()) or ()),
+                getattr(reference, "pseudopotentials", None), reference.grid, tolerance=symmetry_atom_tolerance(),
+            )
             orbital_symmetry = (
                 "CuPy real one-dimensional representations with exact "
                 "orbit-stabilizer character selection"
                 if len(set(sector_sizes)) > 1
                 else "CuPy real one-dimensional reflection representations"
             )
+            if valence_counts is not None:
+                orbital_symmetry += (
+                    "; first state counts from the shares of the valence orbitals of the atoms per sector, "
+                    f"{', '.join(str(int(count)) for count in valence_counts)} (PARSEC_WEIGHTED_FIRST_SHARE=orbitals)"
+                )
     if symmetry_maps is not None:
         # The thread of the maps has ended here at the latest, whether its
         # decomposition was asked for or not: before the sector operators
@@ -4147,6 +4979,12 @@ def _prepare_single_point(
     # Spin_Symmetry_Sectors: both channels in the sectors of this
     # decomposition, with the symmetry guard of SCF/spin_sectors.py.
     spin_sectors = spin_polarized and orbital_decomposition is not None
+    if spin_identity_sector and not spin_sectors:
+        # (the shared layout was chosen because one device would not hold that full grid)
+        raise ValueError(
+            "the full grid of both spin channels as one sector of the identity shared by several GPUs "
+            f"(PARSEC_SPIN_FALLBACK_SHARED) cannot be prepared: its orbitals stay on the {orbital_symmetry}"
+        )
     if spin_polarized and mpi_context is not None and not spin_sectors:
         raise NotImplementedError(
             f"a spin-polarized calculation on the {orbital_symmetry} cannot run as an MPI SCF: "
@@ -4202,6 +5040,26 @@ def _prepare_single_point(
             )
         hartree_reduction = None
         hartree_full_grid_for_spin = True
+    # Weighted sectors of a subgroup H: the density and every potential are invariant under the full group G, and
+    # keep one value per orbit of G (PARSEC_SECTOR_FIELD_GROUP=full, Symmetry/field_orbits.py), [G:H] times fewer
+    # than per orbit of H; the Hartree solve of the sectors' wedge takes the same orbits.  The same decision on
+    # every MPI rank (the reduction and the switch are the same there).
+    field_reduction = None
+    if (
+        sector_field_group == "full"
+        and orbital_decomposition is not None
+        and not spin_polarized
+        and hasattr(orbital_reduction, "coset_images")
+    ):
+        from .Symmetry.field_orbits import field_orbit_reduction
+
+        try:
+            field_reduction = stages.timed("field_orbits", field_orbit_reduction)(orbital_reduction)
+        except (ValueError, RuntimeError):
+            # Orbits that do not form the full group: the fields keep those of the sectors.
+            field_reduction = None
+        if field_reduction is not None and hartree_reduction is orbital_reduction:
+            hartree_reduction = field_reduction
     # What of a cluster with a point group runs on the full grid only because the
     # native extension is not used (``symmetry_full_grid_note`` of the details,
     # a NOTE line of parsec.out and of the command line's stderr).
@@ -4214,6 +5072,15 @@ def _prepare_single_point(
     if palette_note is not None:
         # the group the palette of the sector stencils left the orbitals (_sector_palette_check), at every output level
         full_grid_notes.append(palette_note)
+    # A spin run in the sectors: where the full grid of both channels would go if its guard fired, and a NOTE where it
+    # would not fit one device (PARSEC_SPIN_FALLBACK_SHARED; the shared full grid of a fallback is that full grid).
+    spin_fallback = None
+    if spin_sectors and not spin_identity_sector and not sector_worker:
+        # (the root alone goes back to the full grid; the other ranks of the runner follow its reprepare command)
+        spin_fallback = spin_fallback_plan(reference, mpi_context=mpi_context)
+        fallback_note = spin_fallback.note()
+        if fallback_note is not None:
+            full_grid_notes.append(fallback_note)
     if (
         symmetry_mode == "on"
         and orbital_decomposition is None
@@ -4251,6 +5118,20 @@ def _prepare_single_point(
     # is fixed here because the boundary worker starts before the sector
     # eigensolver exists.  ``None`` leaves every object on its default device.
     # A sector worker builds none of them and has nothing to place.
+    # One process with several GPUs places its sectors by size (PARSEC_CUPY_SECTOR_PLACEMENT), as the MPI runner
+    # places those of one rank: decided here, before the Hartree device that follows from it and the eigensolver
+    # that takes it.  None keeps the cyclic deal of before.
+    process_sector_groups = process_divided_bases = process_placement_note = None
+    # What the input fixes of the filter work: asked once, for the placement and the sector eigensolver.
+    sector_filter_plan = None if orbital_decomposition is None else _filter_plan(reference)
+    if orbital_decomposition is not None and mpi_context is None and selection.selected == "cupy":
+        from .Eigensolvers.symmetry import selected_device_ids
+        from .backends.cupy import require_cupy
+
+        cp, _ = require_cupy()
+        process_sector_groups, process_divided_bases, process_placement_note = _process_sector_placement(
+            reference, orbital_decomposition, selected_device_ids(int(cp.cuda.Device().id)), sector_filter_plan
+        )
     hartree_device = None
     hartree_device_request = _hartree_device_request()
     # ``auto`` asks for a device only where one of the three is built on a
@@ -4279,6 +5160,9 @@ def _prepare_single_point(
                 # One full-grid operator on the current device.
                 {0: (current_device,)}
                 if orbital_decomposition is None
+                # The groups of one process placed by size.
+                else process_sector_groups
+                if process_sector_groups is not None
                 else _planned_sector_device_groups(
                     orbital_decomposition.representation_count,
                     process_devices,
@@ -4291,7 +5175,15 @@ def _prepare_single_point(
                     divisible=(
                         None
                         if mpi_context is None
-                        else _sector_bases_divisible(orbital_decomposition, _filter_plan(reference))
+                        else _sector_bases_divisible(
+                            orbital_decomposition, _filter_plan(reference), process_devices, mpi_context,
+                            _sector_placement_costs(orbital_decomposition, _filter_plan(reference)),
+                        )
+                    ),
+                    unit_devices=(
+                        _unit_device_ids(orbital_decomposition, _filter_plan(reference), process_devices)
+                        if mpi_context is None
+                        else None
                     ),
                 )
             ),
@@ -4339,7 +5231,8 @@ def _prepare_single_point(
         linear_backend=hartree_linear_backend,
         hartree_reduction=hartree_reduction,
         orbital_decomposition=orbital_decomposition,
-        orbital_reduction=orbital_reduction,
+        # (the wedge of the SCF fields: the orbits of the full group where they take them)
+        orbital_reduction=orbital_reduction if field_reduction is None else field_reduction,
         boundary_builder_planned=boundary_setup_eligible and selection.selected == "cupy",
     )
     resident_wedge = resident_wedge and not sector_worker
@@ -4440,7 +5333,18 @@ def _prepare_single_point(
     symmetry_eigensolver = None
     if orbital_decomposition is not None:
         from .Eigensolvers import CuPySymmetrySCFEigensolver
+        from .Eigensolvers.symmetry import irrep_units_refusal
 
+        # The units of irreducible representations (PARSEC_ORBITAL_IRREPS) need a CHEBFF first solve: refused here,
+        # before the SCF, for the first solver the input names.
+        input_eigensolver = getattr(getattr(reference, "input", None), "eigensolver", None)
+        if input_eigensolver is not None:
+            from types import SimpleNamespace
+
+            refusal = irrep_units_refusal(
+                orbital_decomposition, SimpleNamespace(initial_method=getattr(input_eigensolver, "method", "chebff")))
+            if refusal is not None:
+                raise ValueError(refusal)
         stage_started = perf_counter()
         symmetry_eigensolver = CuPySymmetrySCFEigensolver(
             implementation.eigensolver_operator,
@@ -4468,7 +5372,16 @@ def _prepare_single_point(
             **({"mpi_context": mpi_context} if mpi_context is not None else {}),
             # The filter work that the tiles of a sector stencil must repay
             # their packing with.
-            filter_plan=_filter_plan(reference),
+            filter_plan=sector_filter_plan,
+            # the shared full grid of a spin fallback: the GPUs of the process share the sector of the identity
+            **({"process_device_group": True} if spin_identity_sector and mpi_context is None else {}),
+            # One process placed by size (PARSEC_CUPY_SECTOR_PLACEMENT); none keeps the cyclic deal (the sector of
+            # the identity of a spin fallback then takes the GPUs of the process all the same, above).
+            **(
+                {"sector_device_groups": process_sector_groups, "divided_bases": process_divided_bases}
+                if process_sector_groups is not None
+                else {}
+            ),
         )
         implementation.symmetry_eigensolver = symmetry_eigensolver
         implementation.eigenproblem_solver = symmetry_eigensolver
@@ -4485,8 +5398,20 @@ def _prepare_single_point(
         # norms, and energy quadrature; expand only the mixed field required
         # by the existing Hamiltonian/Hartree interfaces.
         from .SCF import SymmetrySCFReducer
+        from .SCF.symmetry_fields import group_average_applies
 
-        scf_reducer = SymmetrySCFReducer(orbital_reduction)
+        # Weighted sectors of a subgroup H: the full-grid inputs (ionic, core and start fields) are averaged over
+        # the full group as well (PARSEC_SECTOR_INPUT_GROUP_AVERAGE, read at the start of the preparation).
+        # The orbits of the full group where the fields take them (field_reduction, above): there the orbit
+        # average of a full-grid input is its average over that group already.
+        scf_reducer = SymmetrySCFReducer(
+            orbital_reduction if field_reduction is None else field_reduction,
+            group_average_inputs=(
+                field_reduction is None
+                and input_group_average == "auto"
+                and group_average_applies(orbital_reduction)
+            ),
+        )
         from .Occupations import CuPySymmetryDensityBuilder
 
         implementation.orbital_density_builder = CuPySymmetryDensityBuilder(
@@ -4809,7 +5734,19 @@ def _prepare_single_point(
                     symmetry_eigensolver is not None
                     and orbital_reduction is reduction
                 )
-                if not reusable_reduced_operator:
+                if field_reduction is not None and reduction is field_reduction:
+                    # The orbits of the full group (PARSEC_SECTOR_FIELD_GROUP=full): their operator from the stencil
+                    # of the grid, without the full-grid matrix; the packed form for the GPU CG where its palette
+                    # holds the coefficients, CSR otherwise and for the host CG.
+                    from .Symmetry.field_orbits import field_negative_laplacian
+
+                    reduced_operator = stages.timed("field_laplacian", field_negative_laplacian)(
+                        reference.grid, reduction
+                    )
+                    if linear_backend != "cupy" and hasattr(reduced_operator, "to_csr"):
+                        reduced_operator = reduced_operator.to_csr()
+                    reusable_reduced_operator = True
+                elif not reusable_reduced_operator:
                     reduced_operator = concrete_negative_laplacian(
                         reference.negative_laplacian
                     )
@@ -5415,7 +6352,7 @@ def _prepare_single_point(
             (
                 ("FP64 CUDA atom-ordered local/density sums; C++ KB sampling"
                  if selection.selected == "cupy"
-                 and os.environ.get("PARSEC_IONIC_BACKEND", "native").lower() == "cupy"
+                 and _gpu_ionic_requested(periodic=is_periodic)
                  else "cached-grid C++/OpenMP radial interpolation and KB sampling")
                 if selection.finite_difference_builder == "native"
                 and "RadialGridEvaluator" in native_kernel_names
@@ -5795,6 +6732,20 @@ def _prepare_single_point(
                 "orbital_sector_cuda_devices",
                 " ".join(map(str, symmetry_eigensolver.device_ids)),
             ),
+            # The devices of every sector of one process with several GPUs (PARSEC_CUPY_SECTOR_PLACEMENT); an
+            # MPI rank's placement is recorded by the runner.
+            *(
+                (
+                    (
+                        "orbital_sector_placement",
+                        process_placement_note
+                        or getattr(symmetry_eigensolver, "placement_record", None)
+                        or "not recorded",
+                    ),
+                )
+                if mpi_context is None and len(symmetry_eigensolver.device_ids) > 1
+                else ()
+            ),
             (
                 "orbital_sector_lanczos_scheduler",
                 (
@@ -5808,6 +6759,12 @@ def _prepare_single_point(
             (
                 "orbital_sector_finite_difference_storage",
                 symmetry_eigensolver.finite_difference_storage,
+            ),
+            (
+                # one-byte or two-byte coefficient codes (PARSEC_SECTOR_PALETTE_CODES)
+                "orbital_sector_coefficient_codes",
+                # (a stand-in solver without stencils: none)
+                getattr(symmetry_eigensolver, "coefficient_codes", "none"),
             ),
             (
                 "orbital_sector_tile_pack_workers",
@@ -5920,6 +6877,26 @@ def _prepare_single_point(
             (
                 "scf_scalar_field_storage",
                 "one physical value per symmetry orbit with multiplicity weights",
+            ),
+            (
+                # PARSEC_SECTOR_FIELD_GROUP and PARSEC_SECTOR_INPUT_GROUP_AVERAGE: the orbits the fields keep.
+                "scf_scalar_field_orbits",
+                (
+                    f"full group ({field_reduction.group_order} operations): {field_reduction.wedge_size} "
+                    f"values, {orbital_reduction.wedge_size} on the orbits of the sectors' group "
+                    f"(PARSEC_SECTOR_FIELD_GROUP={sector_field_group})"
+                )
+                if field_reduction is not None
+                else (
+                    f"sectors' group ({getattr(orbital_reduction, 'group_order', '?')} operations): "
+                    f"{getattr(orbital_reduction, 'wedge_size', '?')} values"
+                    + (
+                        f"; full-grid inputs averaged over the {len(orbital_reduction.full_operations)} operations "
+                        "of the full group (PARSEC_SECTOR_INPUT_GROUP_AVERAGE=auto)"
+                        if getattr(scf_reducer, "group_average_inputs", False)
+                        else ""
+                    )
+                ),
             ),
             (
                 # PARSEC_SYMMETRY_SCF_BUFFERS as it is set now; the wedge sums
@@ -6096,8 +7073,8 @@ def _prepare_single_point(
         ``atom_indices`` (the representative atoms of the orbits of the
         symmetry sectors, :func:`.Symmetry.axis_reflection.sector_gradient_atoms`)
         samples those atoms only: the columns of the projectors of these
-        atoms, in the order of the projectors and with their atom indices.
-        The Fortran-derived routines of a cell sample every atom.
+        atoms, in the order of the projectors and with their atom indices
+        (on either set of routines of a cell).
         """
 
         from parsec_python.Forces import (
@@ -6132,10 +7109,12 @@ def _prepare_single_point(
         if is_periodic:
             if uses_fortran_routines(reference.grid):
                 # The Fortran-derived routines: the gradients of the projectors with their lattice images, of
-                # every atom.
+                # every atom or of the representatives of the orbits of the sectors.
                 from .Forces.periodic_device import periodic_projector_gradients
 
-                return _matching_columns(periodic_projector_gradients(reference), tuple(operator.labels))
+                return _matching_columns(
+                    periodic_projector_gradients(reference, atom_indices=selected), labels
+                )
             from parsec_python.Forces.nonlocal_force import (
                 build_periodic_projector_gradients,
             )
@@ -6171,7 +7150,10 @@ def _prepare_single_point(
         one solved in the sectors of its point group moves where the atoms
         keep that group (:func:`.Forces.sector_symmetry.check_sector_atoms`,
         which a relaxation with forces and positions averaged over it does),
-        on Andrew Grieder's routines.  Every route then installs the moved
+        on Andrew Grieder's routines and, under
+        ``PARSEC_FORTRAN_SECTOR_FORCES=auto``, on the Fortran-derived ones
+        (their fields rebuilt on the full grid as without sectors).  Every
+        route then installs the moved
         projectors in the full-grid operator and in the sector operators
         (compressed to one atom per orbit as at preparation), rebinds
         ``reference``, which every closure of the SCF loop reads (the local
@@ -6195,12 +7177,15 @@ def _prepare_single_point(
         if is_periodic:
             fortran_routines = uses_fortran_routines(reference.grid)
             if in_sectors and fortran_routines:
-                # Their forces are refused in the sectors (Forces/compute.py),
-                # and their moved fields have not been checked against them.
-                raise NotImplementedError(
-                    "the atoms of a periodic cell of the Fortran-derived routines solved in the sectors of its "
-                    "point group do not move here: prepare it with symmetry='off' or PARSEC_PERIODIC_SYMMETRY=off"
-                )
+                from .Forces.sector_symmetry import fortran_sector_forces_setting
+
+                if fortran_sector_forces_setting() == "off":
+                    # Their forces are refused in the sectors (Forces/compute.py).
+                    raise NotImplementedError(
+                        "the atoms of a periodic cell of the Fortran-derived routines solved in the sectors of its "
+                        "point group do not move under PARSEC_FORTRAN_SECTOR_FORCES=off: prepare it with "
+                        "symmetry='off' or PARSEC_PERIODIC_SYMMETRY=off"
+                    )
             if in_sectors:
                 # The sectors, their weights and the projectors of one atom
                 # per orbit hold for the group of the first structure only.
@@ -6233,14 +7218,22 @@ def _prepare_single_point(
                 from .Forces.local_device import sector_atom_images
 
                 sector_atom_images(symmetry_reduction, atoms)
+            moved_ionic_report: dict = {}
             moved = update_reference_geometry(
                 reference,
                 atoms,
                 **_geometry_builder_hooks(
-                    selection, ionic_sector_rank=mpi_context is not None
+                    selection,
+                    ionic_sector_rank=mpi_context is not None,
+                    # GPU sums on the orbits of the full group of the first structure, else of its sectors'
+                    # group, where the moved atoms are their images (PARSEC_IONIC_MOVED_SUMS).
+                    orbits=(reference.grid, atoms, _ionic_sum_candidates(symmetry_reduction)),
+                    report=moved_ionic_report,
                 ),
                 build_atomic_tail=False,
             )
+            # (where the sums of the latest moved structure ran, for its report and the tests)
+            implementation.moved_ionic_sum_grid = moved_ionic_report.get("ionic_sum_grid")
         moved_nonlocal = (
             moved.nonlocal_operator
             if hubbard_device is None
@@ -6403,15 +7396,78 @@ def _prepare_single_point(
             hybrid=bool(getattr(reference.input.scf, "is_hybrid", False)),
             fixed_occupations=getattr(reference.input.scf, "fixed_occupations", None) is not None,
             # The grid and atoms of the present structure (move_atoms rebinds
-            # ``reference``): the point group of the density test.
-            structure=lambda: (reference.grid, reference.atoms),
+            # ``reference``): the point group of the density test.  With the
+            # pseudo-atoms of a field axis or of point charges after them
+            # (symmetry_constraints, PARSEC_POINT_CHARGE_SYMMETRY=auto): the
+            # group of the Hamiltonian, which the densities keep.
+            structure=(
+                (lambda: (reference.grid, reference.atoms))
+                if not detection_extra
+                else (lambda: (reference.grid, tuple(reference.atoms) + detection_extra))
+            ),
+            # the one sector of the identity of a shared fallback holds every state of the full grid
+            guard=not spin_identity_sector,
         )
+        spin_sector_fallback = None if spin_identity_sector else _SpinSectorFallback(
+            given_problem,
+            tuple(reference.atoms),
+            backend=backend,
+            symmetry=symmetry,
+            symmetry_cache_directory=symmetry_cache_directory,
+            mpi_context=mpi_context,
+            plan=spin_fallback,
+            symmetry_fixed_atoms=symmetry_fixed_atoms,
+            symmetry_constraints=tuple(symmetry_constraints),
+        )
+    elif (
+        mpi_context is None
+        and getattr(getattr(getattr(reference, "input", None), "scf", None), "fixed_occupations", None) is not None
+        and _weighted_sectors(symmetry_eigensolver)
+    ):
+        # occup.in in the weighted sectors: a run whose file fills partners unequally starts again in the
+        # abelian sectors (PARSEC_ORBITAL_GROUP_OCCUPATIONS).
         spin_sector_fallback = _SpinSectorFallback(
             given_problem,
             tuple(reference.atoms),
             backend=backend,
             symmetry=symmetry,
             symmetry_cache_directory=symmetry_cache_directory,
+            symmetry_fixed_atoms=symmetry_fixed_atoms,
+            symmetry_constraints=tuple(symmetry_constraints),
+            spin=False,
+        )
+    # PARSEC_SPIN_FLIP_SYMMETRY=auto: the down channel as the image of the up
+    # channel under an operation that exchanges the partner labels.
+    spin_flip = None
+    if spin_polarized and spin_flip_mode == "auto" and not sector_worker:
+        stage_started = perf_counter()
+        spin_flip, spin_flip_reason = _spin_flip_route(
+            given_problem,
+            reference,
+            reducer=scf_reducer if spin_sectors else None,
+            decomposition=orbital_decomposition if spin_sectors else None,
+        )
+        stages.add("spin_flip_detection", stage_started)
+        implementation.info = replace(
+            implementation.info,
+            details=implementation.info.details
+            + (
+                (
+                    "spin_flip_symmetry",
+                    (
+                        f"auto: the up channel is solved, the down channel is its image under "
+                        f"{spin_flip.description} (labels "
+                        + ", ".join(
+                            f"{label}->{partner}"
+                            for label, partner in spin_flip.partners.items()
+                            if label != partner
+                        )
+                        + "); the state keeps this magnetic symmetry"
+                    )
+                    if spin_flip is not None
+                    else f"auto: both channels solved ({spin_flip_reason})",
+                ),
+            ),
         )
     if spin_polarized and (
         spin_sectors or problem.scf.is_hybrid or problem.scf.spin_symmetry_sectors is not None
@@ -6425,6 +7481,12 @@ def _prepare_single_point(
                 (
                     "spin_symmetry_sectors",
                     (
+                        "both channels in one sector of the identity, the full grid, its basis shared by "
+                        + ("the MPI ranks" if mpi_context is not None else "the GPUs of the process")
+                        + " (PARSEC_SPIN_FALLBACK_SHARED)"
+                    )
+                    if spin_identity_sector
+                    else (
                         f"{problem.scf.spin_symmetry_sector_mode}: both channels in the "
                         f"{orbital_decomposition.representation_count} sectors; the full grid where the "
                         "start has a partly filled multiplet, a channel density breaks the point group "
@@ -6452,6 +7514,10 @@ def _prepare_single_point(
         # update_periodic_geometry (move_atoms).
         geometry_updater=update_system,
         projector_gradients=projector_gradients,
+        # The group move_atoms checks the moved atoms against (a cluster keeps
+        # it where its orbitals take the full grid): read before the SCF by
+        # Forces/sector_symmetry.sector_force_tolerance_refusal.
+        move_symmetry_reduction=symmetry_reduction,
         orbital_density_builder=getattr(
             implementation, "orbital_density_builder", None
         ),
@@ -6478,6 +7544,7 @@ def _prepare_single_point(
         dispersion_device=dispersion_device,
         exchange_device=exchange_device,
         spin_sector_fallback=spin_sector_fallback,
+        spin_flip=spin_flip,
         meta_gga_device=meta_gga_device,
         **_fdet_kinetic_operators(reference, selection.selected, hartree_device),
     )
@@ -6579,8 +7646,310 @@ def profile_hamiltonian_components(
     return averages
 
 
+#: The peak of the full grid of both spin channels on one device (the fallback of a spin sector run, ``off`` of
+#: ``PARSEC_SPIN_FALLBACK_SHARED``) in units of the two bases (states and subspace buffer at every grid point, FP64):
+#: the neutral vacancy in 5^3 diamond cubes (729,000 points, 2004 + 6 states a channel, 21.8 GiB) held 77.4 GiB after
+#: its second iteration and stopped in the third for 11.7 GB more on an 80 GB A100 (2026-11-19, jvf7_fullgrid65), at
+#: least 4.3 times; 4.0 is counted, so that a fallback that may still fit is tried.
+SPIN_FALLBACK_PEAK_FACTOR = 4.0
+
+
+class SpinFallbackPlan:
+    """Where the full grid of both channels of a spin sector run would go if its guard fired (:func:`spin_fallback_plan`).
+
+    ``basis_bytes``: the two channels' bases on the full grid; ``device_bytes``: the memory of the device that holds
+    them in the layout of before (the first GPU of the process, of the root rank in the runner); ``devices``: the GPUs
+    of the process or the ranks of the runner that could share them; ``divided``: whether the first solve divides a
+    shared basis over them (CHEBFF); ``shareable``: a semilocal run (a hybrid's exchange and a meta-GGA's orbital term
+    keep one device per sector basis); ``setting``: ``PARSEC_SPIN_FALLBACK_SHARED``.  ``layout`` is ``shared`` (one
+    sector of the identity shared by the devices or ranks) or ``device`` (the full grid of one device, as before).
+    ``refuses``: a fallback that fits nowhere stops before its full grid is prepared, under ``auto`` and ``on``;
+    ``off`` tries the full grid of one device whatever the estimate, as before.  ``moves`` names a plan of a spin
+    cell that the command line solves on the full grid from its start (molecular dynamics, manual movements,
+    ``Move_Flag``, ``Ignore_Symmetry``: :func:`spin_full_grid_plan`) rather than a fallback.
+    The root alone builds and acts on the plan of a fallback; the other ranks of the runner follow its commands.
+    """
+
+    def __init__(
+        self,
+        *,
+        basis_bytes,
+        device_bytes,
+        devices,
+        divided,
+        shareable,
+        setting,
+        mpi,
+        moves=False,
+        rank_devices=1,
+        gpu_per_rank=True,
+    ) -> None:
+        self.basis_bytes = int(basis_bytes)
+        self.device_bytes = None if device_bytes is None else int(device_bytes)
+        self.devices = int(devices)
+        self.divided = bool(divided)
+        self.shareable = bool(shareable)
+        self.setting = str(setting)
+        self.mpi = bool(mpi)
+        self.moves = bool(moves)
+        # The GPUs of each rank of the runner (one rank per node: those of its node) and whether the launch gives
+        # each rank one GPU (--rank-per-gpu): a shared layout on ranks of several GPUs each holds each rank's share
+        # on its first GPU alone (the layout PARSEC_SINGLE_SECTOR_NODE_LAYOUT refuses elsewhere; the fallback takes
+        # it, and the NOTE of the preparation says so).
+        self.rank_devices = int(rank_devices)
+        self.gpu_per_rank = bool(gpu_per_rank)
+
+    @property
+    def nested(self) -> bool:
+        """Whether a shared layout of the runner spreads each rank's share over the several GPUs of its node.
+
+        The fallback's ``reprepare`` configures its sector of the identity as the runner configures
+        any shared sector, so nested sharing takes it where it applies (``PARSEC_MPI_NESTED_SHARING`` other than
+        ``off``, a CHEBFF first solve, one rank per node of several GPUs: ``experimental/mpi_scf.
+        nested_sharing_applies``); under ``off`` the plan of before.
+        """
+
+        if not self.mpi:
+            return False
+        from .experimental.mpi_scf import nested_sharing_applies
+
+        return nested_sharing_applies(self.devices, self.rank_devices, gpu_per_rank=self.gpu_per_rank,
+                                      exchange=not self.shareable, divided=self.divided)
+
+    @property
+    def first_gpu_shares(self) -> bool:
+        """Whether a shared layout of the runner would hold each rank's share on the first of its several GPUs."""
+
+        return self.mpi and not self.gpu_per_rank and self.rank_devices > 1 and not self.nested
+
+    @property
+    def estimate_bytes(self) -> int:
+        return int(SPIN_FALLBACK_PEAK_FACTOR * self.basis_bytes)
+
+    @property
+    def fits_one_device(self) -> bool:
+        return self.device_bytes is None or self.estimate_bytes <= self.device_bytes
+
+    @property
+    def sharing_devices(self) -> int:
+        """The devices among which a shared layout divides the bases (1 where the first solve does not divide them;
+        every GPU of every rank under nested sharing, :attr:`nested`)."""
+
+        if not self.divided:
+            return 1
+        return self.devices * self.rank_devices if self.nested else self.devices
+
+    @property
+    def layout(self) -> str:
+        if self.setting == "off" or not self.shareable or self.devices < 2:
+            return "device"
+        if self.setting == "on":
+            return "shared"
+        return "device" if self.fits_one_device or self.sharing_devices < 2 else "shared"
+
+    @property
+    def fits(self) -> bool:
+        if self.device_bytes is None:
+            return True
+        if self.layout == "device":
+            return self.fits_one_device
+        return self.estimate_bytes <= self.device_bytes * self.sharing_devices
+
+    @property
+    def refuses(self) -> bool:
+        """Whether a fallback of this plan stops before its full grid is prepared (it fits nowhere, not ``off``)."""
+
+        return not self.fits and self.setting != "off"
+
+    def _where(self) -> str:
+        return f"the {self.devices} ranks of the runner" if self.mpi else f"the {self.devices} GPUs of this process"
+
+    def layout_text(self) -> str:
+        """Where the full grid of a fallback goes, for its NOTE in parsec.out (``none`` where the run stops)."""
+
+        if self.refuses:
+            return "none"
+        if self.layout == "shared":
+            return (
+                f"as one sector of the identity whose basis {self._where()} share "
+                + (
+                    "(each on the first GPU of its node) " if self.first_gpu_shares
+                    else "(each over the GPUs of its node, PARSEC_MPI_NESTED_SHARING) " if self.nested
+                    else ""
+                )
+                + f"(PARSEC_SPIN_FALLBACK_SHARED={self.setting})"
+            )
+        return "on the full grid of one device (Spin_Symmetry_Sectors: off)"
+
+    def text(self) -> str:
+        """What the plan says about the full grid of the fallback (GiB), for the NOTE and for the error."""
+
+        gib = 2.0**30
+        head = (
+            ("the full grid of both spin channels of this cell (molecular dynamics, manual movements, Move_Flag or "
+             "Ignore_Symmetry use no point group)" if self.moves else "the full grid of both spin channels")
+            + f" would take an estimated {self.estimate_bytes / gib:.1f} GiB "
+            f"({self.basis_bytes / gib:.1f} GiB of orbitals times {SPIN_FALLBACK_PEAK_FACTOR:g})"
+        )
+        one = "" if self.device_bytes is None else f" against {self.device_bytes / gib:.1f} GiB of one device"
+        if self.layout == "shared":
+            share = (
+                f"; the run then takes one sector of the identity shared by {self._where()}"
+                + (f" over their {self.sharing_devices} GPUs (PARSEC_MPI_NESTED_SHARING)" if self.nested else "")
+                + (f", about {self.estimate_bytes / self.sharing_devices / gib:.1f} GiB each" if self.divided else
+                   ", each of which holds the whole basis after a first solve other than CHEBFF")
+                + f" (PARSEC_SPIN_FALLBACK_SHARED={self.setting})"
+                + (
+                    f"; each rank holds its share on the first of its {self.rank_devices} GPUs (one rank per node), so "
+                    f"{self.devices} of the {self.devices * self.rank_devices} GPUs hold the basis: "
+                    "scripts/run_multi_gpu_scf.sh --rank-per-gpu shares it over every GPU"
+                    if self.first_gpu_shares
+                    else ""
+                )
+            )
+            return head + one + share + ("" if self.fits else ": that does not fit either")
+        why = (
+            "PARSEC_SPIN_FALLBACK_SHARED=off" if self.setting == "off"
+            else "a hybrid or meta-GGA keeps one device per basis" if not self.shareable
+            else "one GPU" if self.devices < 2
+            else "a first solve other than CHEBFF does not divide a shared basis"
+        )
+        return head + one + (", one device" if self.moves else ", the layout of before on one device") + f" ({why})"
+
+    def note(self) -> str | None:
+        """The NOTE of the preparation where the fallback would not fit one device, or would share its full grid on
+        the first GPUs of ranks of several GPUs each (:attr:`first_gpu_shares`), ``None`` elsewhere."""
+
+        if self.fits_one_device and not (self.layout == "shared" and self.first_gpu_shares):
+            return None
+        return (
+            "should the symmetry guard of the spin sectors fire (Spin_Symmetry_Sectors), "
+            + self.text()
+            + (
+                ""
+                if self.fits
+                else "; such a run stops with an error before that full grid is prepared "
+                "(PARSEC_SPIN_FALLBACK_SHARED=off tries the full grid of one device anyway)"
+                if self.refuses
+                else "; it is tried anyway, as before"
+            )
+        )
+
+    def moves_note(self) -> str | None:
+        """The NOTE of the command line for a spin cell it solves on the full grid (``moves``), ``None`` where the
+        full grid of both channels fits one device: what was decided (the shared layout, or the 1x1x1 k-point driver
+        of the reference solver where no layout fits)."""
+
+        if self.fits_one_device and self.layout == "device":
+            return None
+        if self.fits:
+            return self.text()
+        return (
+            self.text() + ("" if self.layout == "shared" else ": that does not fit")
+            + "; the run therefore keeps the 1x1x1 k-point driver of the reference solver "
+            "(PARSEC_SPIN_SECTOR_FORCES=off keeps it for every such run)"
+        )
+
+
+def spin_fallback_plan(reference, *, mpi_context=None) -> SpinFallbackPlan:
+    """The :class:`SpinFallbackPlan` of a spin-polarized run in the sectors, from its prepared ``reference``.
+
+    The device memory is the total of the first GPU of the process (``PARSEC_CUPY_DEVICES``), which the layout of
+    before fills; the bytes of a shared layout are divided by the devices of the process, or by the ranks of the
+    runner (one GPU each for a shared sector), where a CHEBFF first solve divides the basis over them.
+    """
+
+    from parsec_python.SCF.single_point import _number_of_states
+
+    states = int(_number_of_states(reference)) + int(reference.input.eigensolver.subspace_buffer)
+    basis = 2 * int(reference.grid.size) * states * np.dtype(np.float64).itemsize
+    return _spin_plan(basis, reference.input.scf, reference.input.eigensolver, mpi_context=mpi_context)
+
+
+def spin_full_grid_plan(problem) -> SpinFallbackPlan | None:
+    """The :class:`SpinFallbackPlan` (``moves``) of a spin-polarized bulk cell that the command line would solve on
+    the full grid of the accelerated driver from its start, from the input alone (before anything is prepared).
+
+    Molecular dynamics, manual movements, ``Move_Flag`` fixing atoms and ``Ignore_Symmetry`` take no point group
+    (:func:`.SCF.gamma_spin.spin_full_grid_moves_plan`): both channels on the full grid of one device, or, where they
+    would not fit there, one sector of the identity that the GPUs of the process share (``PARSEC_SPIN_FALLBACK_SHARED``),
+    or, where that does not fit either, the 1x1x1 k-point driver of before.  The grid is that of the default routines
+    (:func:`parsec_python.Grid.pbc.default_periodic_grid_counts`), the states ``States_Num`` (or half the valence
+    electrons and six) and the subspace buffer.  ``None`` where the input does not tell (no estimate: the run goes on
+    as without one).
+    """
+
+    if getattr(problem, "periodic_cell", None) is None or not getattr(problem.scf, "spin_polarized", False):
+        return None
+    try:
+        from parsec_python.Grid.pbc import default_periodic_grid_counts
+
+        points = int(np.prod(default_periodic_grid_counts(problem.periodic_cell, problem.grid)))
+        states = problem.scf.number_of_states
+        if states is None:
+            from parsec_python.V_ion.ionic_potential import ionic_charge, load_pseudopotentials
+
+            potentials = load_pseudopotentials(problem.pseudopotentials, xc_functional=problem.scf.xc_functional)
+            electrons = ionic_charge(problem.atoms, potentials) - problem.scf.net_charge
+            states = int(np.ceil(0.5 * electrons)) + 6
+        states = int(states) + int(problem.eigensolver.subspace_buffer)
+    except Exception:
+        return None
+    basis = 2 * points * states * np.dtype(np.float64).itemsize
+    return _spin_plan(basis, problem.scf, problem.eigensolver, mpi_context=None, moves=True)
+
+
+def _spin_plan(basis, scf, eigensolver, *, mpi_context=None, moves=False) -> SpinFallbackPlan:
+    """The :class:`SpinFallbackPlan` of ``basis`` bytes: the devices of the process (or the ranks of the runner)."""
+
+    from .SCF.spin_sectors import spin_fallback_shared_setting
+
+    device_bytes, devices = None, 1
+    try:
+        from .Eigensolvers.symmetry import selected_device_ids
+        from .backends.cupy import require_cupy
+
+        cp, _ = require_cupy()
+        ids = selected_device_ids(int(cp.cuda.Device().id))
+        with cp.cuda.Device(ids[0]):
+            device_bytes = int(cp.cuda.runtime.memGetInfo()[1])
+        devices = len(ids)
+    except Exception:
+        pass
+    rank_devices = devices
+    if mpi_context is not None:
+        devices = int(getattr(mpi_context, "size", 1))
+    return SpinFallbackPlan(
+        basis_bytes=basis,
+        device_bytes=device_bytes,
+        devices=devices,
+        divided=str(getattr(eigensolver, "method", "")).strip().lower() == "chebff",
+        shareable=not (getattr(scf, "is_hybrid", False) or getattr(scf, "is_meta_gga", False)
+                       or bool(getattr(mpi_context, "exchange", False))),
+        setting=spin_fallback_shared_setting(),
+        mpi=mpi_context is not None,
+        moves=moves,
+        rank_devices=rank_devices if mpi_context is not None else 1,
+        gpu_per_rank=bool(getattr(mpi_context, "gpu_per_rank", True)) if mpi_context is not None else True,
+    )
+
+
+def _weighted_sectors(sectors) -> bool:
+    """Whether the sector eigensolver ``sectors`` (or ``None``) solves the weighted sectors of a subgroup."""
+
+    from .Symmetry import PointGroupReduction
+
+    reduction = getattr(getattr(sectors, "decomposition", None), "reduction", None)
+    return isinstance(reduction, PointGroupReduction)
+
+
 class _SpinSectorFallback:
     """How a spin-polarized run in the symmetry sectors goes back to the full grid.
+
+    A run in the weighted sectors of a subgroup (``Symmetry/weighted_inputs.py``) whose spin guard fires, or whose
+    ``occup.in`` fills the partners of a weighted state unequally (``spin=False``: an unpolarized run with
+    ``occup.in``, which has no guard), is first prepared again in the sectors of the abelian group
+    (:meth:`replace_with_abelian`), whose own guard may still send a spin run to the full grid.
 
     ``Spin_Symmetry_Sectors`` keeps a sector result only where the symmetry
     guard of :mod:`.SCF.spin_sectors` passes.  Otherwise :meth:`run`
@@ -6598,14 +7967,45 @@ class _SpinSectorFallback:
     subspaces).  The pseudopotential files are read here,
     while they exist, so that the full grid can be prepared from them
     later even where the caller has removed them (a temporary directory).
+
+    ``plan`` (:class:`SpinFallbackPlan`, ``PARSEC_SPIN_FALLBACK_SHARED``)
+    says where that full grid goes: the first device of the process as
+    above, or, where both channels would not fit there, one sector of the
+    identity whose basis the GPUs of the process share (``prepare_single_point``
+    with ``spin_identity_sector``), or the ranks of ``mpi_context``, which the
+    root tells to prepare it with it (:meth:`MPISectorContext.reprepare`);
+    a plan that fits nowhere stops the run before anything is prepared.
     """
 
-    def __init__(self, problem, atoms, *, backend, symmetry, symmetry_cache_directory) -> None:
+    def __init__(
+        self,
+        problem,
+        atoms,
+        *,
+        backend,
+        symmetry,
+        symmetry_cache_directory,
+        mpi_context=None,
+        plan=None,
+        symmetry_fixed_atoms=None,
+        symmetry_constraints=(),
+        spin: bool = True,
+    ) -> None:
         self.problem = problem
+        self.spin = bool(spin)
         self.atoms = tuple(atoms)
         self.backend = backend
         self.symmetry = symmetry
         self.symmetry_cache_directory = symmetry_cache_directory
+        # The sector context of the runner (its ranks follow a shared layout) and the SpinFallbackPlan.
+        self.mpi_context = mpi_context
+        self.plan = plan
+        # (the fixed atoms of a relaxation that keeps the subgroup of its Move_Flag: the full grid prepared again finds
+        # the same subgroup, which the moved atoms keep)
+        self.symmetry_fixed_atoms = symmetry_fixed_atoms
+        # (the points the operations must keep besides the atoms, a field axis of Polarizability:
+        # SCF/symmetry_off_inputs.py; the abelian sectors prepared again keep them)
+        self.symmetry_constraints = tuple(symmetry_constraints)
         self.pseudopotential_files = {}
         for symbol, specification in getattr(problem, "pseudopotentials", {}).items():
             try:
@@ -6616,17 +8016,54 @@ class _SpinSectorFallback:
     def run(self, system, run, *, callback=None, warm_start=None, **keywords):
         """``run(system, ...)`` in the sectors; again on the full grid where the guard says so."""
 
-        from .SCF.spin_sectors import SpinSectorsAbandoned
+        from parsec_python.Occupations import UnequalPartnerOccupations
 
-        abandoned = None
-        try:
-            result = run(system, callback=callback, warm_start=warm_start, **keywords)
-            system.scalar_field_adapter.check_spin_result(result, final=True)
-            return result
-        except SpinSectorsAbandoned as error:
-            # Only the report leaves this block: the frames of the sector run,
-            # and the orbitals they hold, go with the exception.
-            abandoned = (error.stage, error.report)
+        from .SCF.spin_sectors import FractionalOccupations, SpinSectorsAbandoned
+
+        while True:
+            abandoned = None
+            weighted = _weighted_sectors(getattr(system.backend, "symmetry_eigensolver", None))
+            try:
+                result = run(system, callback=callback, warm_start=warm_start, **keywords)
+                if self.spin:
+                    system.scalar_field_adapter.check_spin_result(result, final=True)
+                return result
+            except SpinSectorsAbandoned as error:
+                # Only the report leaves this block: the frames of the sector run,
+                # and the orbitals they hold, go with the exception.
+                abandoned = (error.stage, error.report)
+            except UnequalPartnerOccupations as error:
+                if not weighted:
+                    raise
+                abandoned = (
+                    "the occupations of occup.in",
+                    FractionalOccupations(
+                        largest=float(np.ptp(error.entries)),
+                        tolerance=0.0,
+                        lines=(str(error),),
+                        reason="unequal occupations of degenerate partners",
+                        measure="largest difference of the occupations of the partners",
+                    ),
+                )
+            if not weighted:
+                break
+            stage, report = abandoned
+            if callback is not None:
+                from parsec_python.models import SpinSectorFallbackRecord
+
+                callback(
+                    SpinSectorFallbackRecord(
+                        stage=stage,
+                        largest_fractional_occupation=report.largest,
+                        tolerance=report.tolerance,
+                        multiplets=report.lines,
+                        reason=report.reason,
+                        measure=report.measure,
+                        route="weighted",
+                    )
+                )
+            self.replace_with_abelian(system, stage, report)
+            warm_start = self.full_grid_warm_start(warm_start)
         stage, report = abandoned
         if callback is not None:
             # Said before the full-grid preparation, which may fail on its own.
@@ -6640,6 +8077,8 @@ class _SpinSectorFallback:
                     multiplets=report.lines,
                     reason=report.reason,
                     measure=report.measure,
+                    # where the full grid goes (PARSEC_SPIN_FALLBACK_SHARED): named in the NOTE of parsec.out
+                    **({} if self.plan is None else {"layout": self.plan.layout_text()}),
                 )
             )
         self.replace_with_full_grid(system, stage, report)
@@ -6669,10 +8108,19 @@ class _SpinSectorFallback:
             first_iteration_degree=None,
         )
 
-    def _problem_of(self, system):
-        """The input of the full-grid run: as given, at the atoms of the present structure."""
+    def _problem_of(self, system, *, shared: bool = False, full_grid: bool = True):
+        """The input of the full-grid run: as given, at the atoms of the present structure.
 
-        scf = replace(self.problem.scf, spin_symmetry_sectors="off")
+        ``Spin_Symmetry_Sectors: off`` for the full grid of one device; as given for the shared layout, whose one
+        sector of the identity the driver prepares without a guard (``spin_identity_sector``), and for the run in the
+        abelian sectors that replaces weighted ones (``full_grid=False``).
+        """
+
+        scf = (
+            replace(self.problem.scf, spin_symmetry_sectors="off")
+            if full_grid and not shared
+            else self.problem.scf
+        )
         atoms = tuple(system.reference.atoms)
         if _same_atoms(atoms, self.atoms):
             return replace(self.problem, scf=scf)
@@ -6695,13 +8143,84 @@ class _SpinSectorFallback:
             changed = True
         return replace(problem, pseudopotentials=species) if changed else problem
 
+    def replace_with_abelian(self, system, stage: str, report) -> None:
+        """Prepare the system in the sectors of the abelian group and put its objects into ``system``.
+
+        What the weighted sectors hold on the devices goes first.  The preparation keeps the abelian group of the
+        orbitals (:func:`.Symmetry.weighted_inputs.abelian_orbitals`) and says why in its backend details.
+        """
+
+        import gc
+        from dataclasses import fields
+        import tempfile
+
+        from .Symmetry.weighted_inputs import abelian_orbitals
+
+        problem = self._problem_of(system, full_grid=False)
+        sectors = getattr(system.backend, "symmetry_eigensolver", None)
+        if sectors is not None:
+            if self.spin and getattr(sectors, "spin_channel_count", 1) == 2:
+                for index in (0, 1):
+                    sectors.for_spin_channel(index).reset()
+            else:
+                sectors.reset()
+        gc.collect()
+        reason = f"the weighted sectors were left after {stage} ({report.reason})"
+        with tempfile.TemporaryDirectory() as copies, abelian_orbitals(reason):
+            problem = self._with_present_pseudopotentials(problem, Path(copies))
+            abelian = prepare_single_point(
+                problem,
+                backend=self.backend,
+                symmetry=self.symmetry,
+                symmetry_cache_directory=self.symmetry_cache_directory,
+                # (the abelian group of a relaxation that keeps the subgroup of its Move_Flag is detected with the
+                # fixed atoms labelled too, PARSEC_MOVE_FLAG_SUBGROUP)
+                symmetry_fixed_atoms=self.symmetry_fixed_atoms,
+                symmetry_constraints=self.symmetry_constraints,
+            )
+        note = (
+            "weighted_sectors",
+            f"left after {stage} ({report.reason}: {report.measure} = {report.largest:.3e}): the sectors of the "
+            "abelian group",
+        )
+        abelian.backend_info = replace(
+            abelian.backend_info,
+            details=tuple(item for item in abelian.backend_info.details if item[0] != note[0]) + (note,),
+        )
+        abelian.backend.info = abelian.backend_info
+        kept = system.materialize_final_wavefunctions
+        for item in fields(abelian):
+            setattr(system, item.name, getattr(abelian, item.name))
+        system.materialize_final_wavefunctions = kept
+        del abelian, sectors
+        gc.collect()
+        from .backends.cupy import require_cupy
+
+        cp, _ = require_cupy()
+        for device in range(cp.cuda.runtime.getDeviceCount()):
+            with cp.cuda.Device(device):
+                cp.get_default_memory_pool().free_all_blocks()
+
     def replace_with_full_grid(self, system, stage: str, report) -> None:
         """Prepare the full-grid system and put its objects into ``system``."""
 
         import gc
         from dataclasses import fields
 
-        problem = self._problem_of(system)
+        plan = self.plan
+        shared = plan is not None and plan.layout == "shared"
+        if plan is not None and plan.refuses:
+            # Decided before anything is freed or prepared: the full grid would run out of device memory (the
+            # preparation said so in its NOTE).  Under PARSEC_SPIN_FALLBACK_SHARED=off the full grid of one device is
+            # tried whatever the estimate, as before.
+            raise ValueError(
+                f"Spin_Symmetry_Sectors: the run left the symmetry sectors after {stage} ({report.reason}), but "
+                f"{plan.text()}: this run has no full grid that fits. Run it on more GPUs (the full-SCF runner, "
+                "scripts/run_multi_gpu_scf.sh --rank-per-gpu, with PARSEC_SPIN_FALLBACK_SHARED=auto shares that full "
+                "grid among its ranks), or with Spin_Symmetry_Sectors: off on a route that holds it "
+                "(PARSEC_SPIN_FALLBACK_SHARED=off tries the full grid of one device anyway)"
+            )
+        problem = self._problem_of(system, shared=shared)
         # What the sectors hold on the devices goes first: the subspaces of
         # both channels and the exchange's plans.
         sectors = getattr(system.backend, "symmetry_eigensolver", None)
@@ -6722,6 +8241,13 @@ class _SpinSectorFallback:
         gc.collect()
         import tempfile
 
+        context = self.mpi_context if shared else None
+        if shared and context is not None:
+            # The ranks of the runner prepare the shared full grid together: the root sends them the input first
+            # (MPISectorContext.reprepare), and each replaces the sector solver of its worker loop.
+            context.reprepare(
+                dict(problem=problem, backend=self.backend, symmetry_cache_directory=self.symmetry_cache_directory)
+            )
         try:
             with tempfile.TemporaryDirectory() as copies:
                 problem = self._with_present_pseudopotentials(problem, Path(copies))
@@ -6730,8 +8256,16 @@ class _SpinSectorFallback:
                     backend=self.backend,
                     # ``on`` asked for the sectors, which were taken; the full grid
                     # of two spin channels has no reduced component ``on`` demands.
-                    symmetry="auto" if _normalize_symmetry_mode(self.symmetry) == "on" else self.symmetry,
+                    symmetry=(
+                        "off"
+                        if shared
+                        else "auto" if _normalize_symmetry_mode(self.symmetry) == "on" else self.symmetry
+                    ),
                     symmetry_cache_directory=self.symmetry_cache_directory,
+                    # PARSEC_SPIN_FALLBACK_SHARED: one sector of the identity shared by the GPUs or the ranks
+                    **({"spin_identity_sector": True} if shared else {}),
+                    **({"mpi_context": context} if context is not None else {}),
+                    symmetry_fixed_atoms=self.symmetry_fixed_atoms,
                 )
         except ValueError as error:
             # PARSEC_HARTREE_SYMMETRY=1 forbids the full grid of a spin run.
@@ -6742,8 +8276,22 @@ class _SpinSectorFallback:
         note = (
             "spin_symmetry_sectors",
             f"auto: left the sectors after {stage} ({report.reason}: {report.measure} = "
-            f"{report.largest:.3e} >= {report.tolerance:.0e}): full grid",
+            f"{report.largest:.3e} >= {report.tolerance:.0e}): full grid"
+            + (
+                ", one sector of the identity shared by "
+                + (f"{plan.devices} MPI ranks" if context is not None else f"{plan.devices} GPUs")
+                + f" (PARSEC_SPIN_FALLBACK_SHARED={plan.setting})"
+                if shared
+                else ""
+            ),
         )
+        if context is not None:
+            # The root's densities of the shared full grid are summed over the ranks, as the runner set it up.
+            from .experimental.mpi_scf import MPISymmetryDensityBuilder
+
+            full_grid.orbital_density_builder = MPISymmetryDensityBuilder(
+                full_grid.orbital_density_builder, context, full_grid.backend.symmetry_eigensolver
+            )
         full_grid.backend_info = replace(
             full_grid.backend_info,
             details=tuple(item for item in full_grid.backend_info.details if item[0] != note[0]) + (note,),

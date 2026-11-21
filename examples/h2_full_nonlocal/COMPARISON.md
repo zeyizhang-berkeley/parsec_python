@@ -1,6 +1,6 @@
 # H2 physical comparison result
 
-Date: 2026-11-19 (Python run; the run of 2026-11-05 took the abelian D_2h
+Date: 2026-11-20 (Python run; the run of 2026-11-05 took the abelian D_2h
 sectors and gave -2.29319727 Ry in 17 SCF iterations). The comparison of
 2026-07-28 used an earlier Python program, which diagonalized the full grid with an ARPACK first
 solve and converged in 7 SCF iterations to -2.293197288860 Ry; that program
@@ -13,8 +13,8 @@ order, CA-LDA functional, temperature, state count, and convergence criterion.
 The PARSEC values come from `parsec_reference.out`. The Python values come
 from `parsec_python.out`: `python src\parsec_python\main.py
 examples\h2_full_nonlocal\parsec.in --no-archive --log parsec_python.out`
-with the code of 19 November 2026 on a laptop GPU (RTX 5070; paths shortened
-to repository paths). The report prints the energy terms with eight decimals. Differences below are Python
+with the code of 20 November 2026 on one NVIDIA A100 (paths shortened to
+repository paths). The report prints the energy terms with eight decimals. Differences below are Python
 minus PARSEC.
 
 | Quantity | PARSEC [Ry] | Python [Ry] | Signed difference [Ry] |
@@ -37,7 +37,7 @@ Convergence and runtime:
 | Full active grid points | 179,944 | 179,944 |
 | Grid points diagonalized directly | eight symmetry sectors of 22,493 | six weighted sectors of a subgroup of order 8 of D_4h |
 | Nonlocal projector columns | 6 | 6 |
-| Wall time [s] | 19.30 (CPU) | 2.33 (laptop GPU) |
+| Wall time [s] | 19.30 (CPU) | 2.60 (A100 GPU) |
 
 ## Interpretation
 

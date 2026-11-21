@@ -17,9 +17,14 @@ levels as its Ritz values and ``firstfilt`` set: the first pass is the
 SUBSPACE filter of the reference loop, on the device.
 
 A file of this port holds full-grid orbitals of one representation
-(``nrep = 1``, errors 321-329), so a run restarted from it solves on the
-full grid: the accelerated CLI switches the symmetry sectors off for it.
-An eigensolver of sectors (also the one sector of the identity of
+(``nrep = 1``, errors 321-329), so a run restarted from it with its orbitals
+solves on the full grid: the accelerated CLI switches the symmetry sectors
+off for it under ``PARSEC_WFNDAT_RESTART_SECTORS=off`` (the default).  Under
+``auto`` (since 2026-11-19, opt-in) a cluster whose stored density keeps the
+group of the atoms solves in its sectors from the stored potential, without
+the stored orbitals, and one whose density breaks it is prepared again on the
+full grid (:func:`.symmetry_off_inputs.restart_in_sectors`).  An eigensolver
+of sectors (also the one sector of the identity of
 ``PARSEC_CUPY_SINGLE_SECTOR``) takes no stored subspace and is refused.
 """
 

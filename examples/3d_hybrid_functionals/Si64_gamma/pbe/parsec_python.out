@@ -4,7 +4,7 @@
   PARSEC-PYTHON - Modular real-space DFT program
   PARSEC-like report; Python real-space implementation
 
- starting run on 19-Nov-2026 01:10:46 -0800
+ starting run on 20-Nov-2026 14:53:53 -0800
  input file: examples/3d_hybrid_functionals/Si64_gamma/pbe/parsec.in
  Routines: Fortran-derived, chosen automatically: Pseudopotential_Format: fhipp
 
@@ -1181,16 +1181,18 @@ Abelian subgroup contains only the Identity operation
 
  Setup timings [sec]
  --------------------------------------------------
- Pseudopotential loading       :     0.010849
- Grid-domain construction      :     0.014012
- Finite-difference construction:     0.077773
- Local ionic potential setup   :     0.185078
- Nonlocal ionic projector setup:     0.108976
- Initial valence-density setup :     0.607974
- Core-density setup            :     0.001402
- Ion-ion energy setup           :     0.005306
- Preparation wall time          :     1.015862
+ Pseudopotential loading       :     0.010280
+ Grid-domain construction      :     0.009596
+ Finite-difference construction:     0.074908
+ Local ionic potential setup   :     0.184117
+ Nonlocal ionic projector setup:     0.107960
+ Initial valence-density setup :     0.048913
+ Core-density setup            :     0.001440
+ Ion-ion energy setup           :     0.004737
+ Preparation wall time          :     0.446466
  --------------------------------------------------
+
+ The symmetry block above lists PARSEC's Abelian subgroup; the orbitals use the weighted sectors that symmetry_detection names below.
 
  The reference setup above describes the constructed full grid.  The GPU orbital solve is decomposed into the exact symmetry representations reported below.
 
@@ -1202,6 +1204,7 @@ Abelian subgroup contains only the Identity operation
  Device            = CUDA:0 (NVIDIA A100-SXM4-80GB)
  gpu_stencil_kernel = deferred_to_symmetry_sector_operators
  gpu_later_subspace_filter_precision = deferred_to_symmetry_sector_operators
+ symmetry_detection = exact group of 192 operations detected (signed permutations, 168 of them with a translation, by half the cell or, non-symmorphic, a fraction of it, or about a symmetric site off the origin; PARSEC_PERIODIC_TRANSLATIONS, PARSEC_PERIODIC_SYMMETRY_CENTRE); the orbitals use the one-dimensional sectors of a subgroup of 32 (weights 1, 3, 3, 6, 3, 3, 3, 6, 1, 3)
  symmetry_cache_directory = disabled
  orbital_symmetry = CuPy real one-dimensional reflection representations
  finite_difference_builder = validated vectorized Python/SciPy periodic-wraparound CSR builder (SCF.pbc.prepare_periodic_single_point)
@@ -1211,7 +1214,7 @@ Abelian subgroup contains only the Identity operation
  orbital_sector_ritz_handover = rotation
  Detailed backend settings: set Output_Level: 2
  Backend fallback  = periodic cell: the cluster construction and multipole-boundary Hartree kernels (native/CuPy) are not used -- the periodic routes build the wrapped finite differences on the host and, where a GPU is present, the local ionic potential and the Hartree solve on the device (hartree_implementation names the solve)
- Backend initialization [sec] =     0.726380
+ Backend initialization [sec] =     0.015096
 
  Execution resources:
  --------------------
@@ -1221,10 +1224,10 @@ Abelian subgroup contains only the Identity operation
 
  SCF iter #   1
 
- Diagonalization time [sec] :       6.45,      tdiag_sum =        6.45
- Iteration time [sec]       :       6.46
+ Diagonalization time [sec] :       1.10,      tdiag_sum =        1.10
+ Iteration time [sec]       :       1.11
 
- Eigensolver residual max [Ry] :   4.4977e-05
+ Eigensolver residual max [Ry] :   4.4978e-05
 
  Fermi level at     1.1422 [Ry]
 
@@ -1373,7 +1376,7 @@ Abelian subgroup contains only the Identity operation
 
  Max and min values of charge density [e/bohr^3]:   9.1308E-02   2.7129E-03
 
- Hartree potential time [sec]:       0.00
+ Hartree potential time [sec]:       0.01
 
    Eigenvalue Energy             =         187.56355703 [Ry]
    Hartree Energy                =          38.82990147 [Ry]
@@ -1389,8 +1392,8 @@ Abelian subgroup contains only the Identity operation
 
  SCF iter #   2
 
- Diagonalization time [sec] :       0.59,      tdiag_sum =        7.04
- Iteration time [sec]       :       0.60
+ Diagonalization time [sec] :       0.09,      tdiag_sum =        1.19
+ Iteration time [sec]       :       0.09
 
  Fermi level at     1.1434 [Ry]
 
@@ -1415,12 +1418,12 @@ Abelian subgroup contains only the Identity operation
    17         0.3834567697         5.2172361177    1.0000        7
    18         0.3834567697         5.2172361177    1.0000        7
    19         0.3834567697         5.2172361177    1.0000        7
-   20         0.4037152756         5.4928692971    1.0000       10
-   21         0.4037152756         5.4928692971    1.0000       10
-   22         0.4037152756         5.4928692971    1.0000       10
+   20         0.4037152756         5.4928692972    1.0000       10
+   21         0.4037152756         5.4928692972    1.0000       10
+   22         0.4037152756         5.4928692972    1.0000       10
    23         0.4037152767         5.4928693120    1.0000        9
    24         0.5369382219         7.3054740591    1.0000        1
-   25         0.5369382321         7.3054741988    1.0000        1
+   25         0.5369382321         7.3054741989    1.0000        1
    26         0.5369382386         7.3054742863    1.0000        1
    27         0.5371093047         7.3078017774    1.0000        2
    28         0.5371093047         7.3078017774    1.0000        2
@@ -1471,12 +1474,12 @@ Abelian subgroup contains only the Identity operation
    73         0.8415162846        11.4495022651    1.0000        8
    74         0.8415162846        11.4495022651    1.0000        8
    75         0.8415162846        11.4495022651    1.0000        8
-   76         0.8415162995        11.4495024681    1.0000        6
-   77         0.8415162995        11.4495024681    1.0000        6
-   78         0.8415162995        11.4495024681    1.0000        6
-   79         0.8415162998        11.4495024724    1.0000        7
-   80         0.8415162998        11.4495024724    1.0000        7
-   81         0.8415162998        11.4495024724    1.0000        7
+   76         0.8415162995        11.4495024682    1.0000        6
+   77         0.8415162995        11.4495024682    1.0000        6
+   78         0.8415162995        11.4495024682    1.0000        6
+   79         0.8415162998        11.4495024723    1.0000        7
+   80         0.8415162998        11.4495024723    1.0000        7
+   81         0.8415162998        11.4495024723    1.0000        7
    82         0.8507577728        11.5752401055    1.0000        5
    83         0.8507577728        11.5752401055    1.0000        5
    84         0.8507577728        11.5752401055    1.0000        5
@@ -1556,7 +1559,7 @@ Abelian subgroup contains only the Identity operation
 
  SCF iter #   3
 
- Diagonalization time [sec] :       0.08,      tdiag_sum =        7.12
+ Diagonalization time [sec] :       0.08,      tdiag_sum =        1.27
  Iteration time [sec]       :       0.09
 
  Fermi level at     1.1452 [Ry]
@@ -1592,9 +1595,9 @@ Abelian subgroup contains only the Identity operation
    27         0.5482840348         7.4598429211    1.0000        2
    28         0.5482840348         7.4598429211    1.0000        2
    29         0.5482840348         7.4598429211    1.0000        2
-   30         0.5603727290         7.6243192757    1.0000        5
-   31         0.5603727290         7.6243192757    1.0000        5
-   32         0.5603727290         7.6243192757    1.0000        5
+   30         0.5603727290         7.6243192756    1.0000        5
+   31         0.5603727290         7.6243192756    1.0000        5
+   32         0.5603727290         7.6243192756    1.0000        5
    33         0.5603747663         7.6243469956    1.0000        3
    34         0.5603747663         7.6243469956    1.0000        3
    35         0.5603747663         7.6243469956    1.0000        3
@@ -1617,9 +1620,9 @@ Abelian subgroup contains only the Identity operation
    52         0.7202015104         9.7989177102    1.0000        8
    53         0.7202015104         9.7989177102    1.0000        8
    54         0.7202015104         9.7989177102    1.0000        8
-   55         0.7202018393         9.7989221855    1.0000        6
-   56         0.7202018393         9.7989221855    1.0000        6
-   57         0.7202018393         9.7989221855    1.0000        6
+   55         0.7202018393         9.7989221856    1.0000        6
+   56         0.7202018393         9.7989221856    1.0000        6
+   57         0.7202018393         9.7989221856    1.0000        6
    58         0.8391613576        11.4174615986    1.0000        5
    59         0.8391613576        11.4174615986    1.0000        5
    60         0.8391613576        11.4174615986    1.0000        5
@@ -1632,9 +1635,9 @@ Abelian subgroup contains only the Identity operation
    67         0.8391618014        11.4174676382    1.0000        3
    68         0.8391618014        11.4174676382    1.0000        3
    69         0.8391618014        11.4174676382    1.0000        3
-   70         0.8466012308        11.5186870256    1.0000        6
-   71         0.8466012308        11.5186870256    1.0000        6
-   72         0.8466012308        11.5186870256    1.0000        6
+   70         0.8466012308        11.5186870255    1.0000        6
+   71         0.8466012308        11.5186870255    1.0000        6
+   72         0.8466012308        11.5186870255    1.0000        6
    73         0.8466017838        11.5186945501    1.0000        7
    74         0.8466017838        11.5186945501    1.0000        7
    75         0.8466017838        11.5186945501    1.0000        7
@@ -1674,26 +1677,26 @@ Abelian subgroup contains only the Identity operation
   109         1.0258505041        13.9575167893    1.0000        6
   110         1.0258505041        13.9575167893    1.0000        6
   111         1.0258505041        13.9575167893    1.0000        6
-  112         1.0258512312        13.9575266819    1.0000        8
-  113         1.0258512312        13.9575266819    1.0000        8
-  114         1.0258512312        13.9575266819    1.0000        8
-  115         1.0258512312        13.9575266819    1.0000        8
-  116         1.0258512312        13.9575266819    1.0000        8
-  117         1.0258512312        13.9575266819    1.0000        8
+  112         1.0258512312        13.9575266820    1.0000        8
+  113         1.0258512312        13.9575266820    1.0000        8
+  114         1.0258512312        13.9575266820    1.0000        8
+  115         1.0258512312        13.9575266820    1.0000        8
+  116         1.0258512312        13.9575266820    1.0000        8
+  117         1.0258512312        13.9575266820    1.0000        8
   118         1.0354275343        14.0878199462    1.0000        9
   119         1.0354275674        14.0878203966    1.0000        9
   120         1.0354286362        14.0878349390    1.0000       10
   121         1.0354286362        14.0878349390    1.0000       10
   122         1.0354286362        14.0878349390    1.0000       10
-  123         1.0354299181        14.0878523793    1.0000       10
-  124         1.0354299181        14.0878523793    1.0000       10
-  125         1.0354299181        14.0878523793    1.0000       10
+  123         1.0354299181        14.0878523794    1.0000       10
+  124         1.0354299181        14.0878523794    1.0000       10
+  125         1.0354299181        14.0878523794    1.0000       10
   126         1.1239729118        15.2925506431    1.0000        2
   127         1.1239729118        15.2925506431    1.0000        2
   128         1.1239729118        15.2925506431    1.0000        2
-  129         1.1739820150        15.9729644997    0.0000        1
-  130         1.1739997464        15.9732057502    0.0000        1
-  131         1.1740041330        15.9732654322    0.0000        1
+  129         1.1739820150        15.9729644998    0.0000        1
+  130         1.1739997464        15.9732057501    0.0000        1
+  131         1.1740041330        15.9732654321    0.0000        1
   132         1.1740728612        15.9742005356    0.0000        2
   133         1.1740728612        15.9742005356    0.0000        2
   134         1.1740728612        15.9742005356    0.0000        2
@@ -1723,7 +1726,7 @@ Abelian subgroup contains only the Identity operation
 
  SCF iter #   4
 
- Diagonalization time [sec] :       0.08,      tdiag_sum =        7.20
+ Diagonalization time [sec] :       0.08,      tdiag_sum =        1.35
  Iteration time [sec]       :       0.09
 
  Fermi level at     1.1449 [Ry]
@@ -1750,9 +1753,9 @@ Abelian subgroup contains only the Identity operation
    18         0.3925450104         5.3408889028    1.0000        7
    19         0.3925450104         5.3408889028    1.0000        7
    20         0.4138349472         5.6305555246    1.0000        9
-   21         0.4138369932         5.6305833622    1.0000       10
-   22         0.4138369932         5.6305833622    1.0000       10
-   23         0.4138369932         5.6305833622    1.0000       10
+   21         0.4138369932         5.6305833623    1.0000       10
+   22         0.4138369932         5.6305833623    1.0000       10
+   23         0.4138369932         5.6305833623    1.0000       10
    24         0.5472248987         7.4454325273    1.0000        1
    25         0.5472269013         7.4454597733    1.0000        1
    26         0.5472269014         7.4454597749    1.0000        1
@@ -1820,9 +1823,9 @@ Abelian subgroup contains only the Identity operation
    88         0.9123655792        12.4134635979    1.0000        2
    89         0.9123655792        12.4134635979    1.0000        2
    90         0.9123655792        12.4134635979    1.0000        2
-   91         0.9123669215        12.4134818601    1.0000        2
-   92         0.9123669215        12.4134818601    1.0000        2
-   93         0.9123669215        12.4134818601    1.0000        2
+   91         0.9123669215        12.4134818602    1.0000        2
+   92         0.9123669215        12.4134818602    1.0000        2
+   93         0.9123669215        12.4134818602    1.0000        2
    94         0.9833399463        13.3791266408    1.0000        4
    95         0.9833399463        13.3791266408    1.0000        4
    96         0.9833399463        13.3791266408    1.0000        4
@@ -1886,11 +1889,11 @@ Abelian subgroup contains only the Identity operation
    Total Energy =          -503.91365510 [Ry]
    Energy/atom  =          -107.12731888 [eV]
 
-  0-  4    SRE of pot. & charge weighted pot =   0.0430468974   0.0004283091
+  0-  4    SRE of pot. & charge weighted pot =   0.0430468975   0.0004283091
 
  SCF iter #   5
 
- Diagonalization time [sec] :       0.08,      tdiag_sum =        7.29
+ Diagonalization time [sec] :       0.08,      tdiag_sum =        1.44
  Iteration time [sec]       :       0.09
 
  Fermi level at     1.1449 [Ry]
@@ -1938,7 +1941,7 @@ Abelian subgroup contains only the Identity operation
    39         0.5595444939         7.6130504758    1.0000        4
    40         0.5595444939         7.6130504758    1.0000        4
    41         0.5595444939         7.6130504758    1.0000        4
-   42         0.6092508630         8.2893453915    1.0000        9
+   42         0.6092508630         8.2893453914    1.0000        9
    43         0.6092510238         8.2893475802    1.0000       10
    44         0.6092510238         8.2893475802    1.0000       10
    45         0.6092510238         8.2893475802    1.0000       10
@@ -2053,11 +2056,11 @@ Abelian subgroup contains only the Identity operation
    Total Energy =          -503.91373510 [Ry]
    Energy/atom  =          -107.12733589 [eV]
 
-  0-  5    SRE of pot. & charge weighted pot =   0.0214757649   0.0002597759
+  0-  5    SRE of pot. & charge weighted pot =   0.0214757650   0.0002597759
 
  SCF iter #   6
 
- Diagonalization time [sec] :       0.08,      tdiag_sum =        7.37
+ Diagonalization time [sec] :       0.09,      tdiag_sum =        1.52
  Iteration time [sec]       :       0.09
 
  Fermi level at     1.1449 [Ry]
@@ -2080,9 +2083,9 @@ Abelian subgroup contains only the Identity operation
    14         0.3924578859         5.3397035038    1.0000        8
    15         0.3924578859         5.3397035038    1.0000        8
    16         0.3924578859         5.3397035038    1.0000        8
-   17         0.3924580645         5.3397059342    1.0000        6
-   18         0.3924580645         5.3397059342    1.0000        6
-   19         0.3924580645         5.3397059342    1.0000        6
+   17         0.3924580645         5.3397059343    1.0000        6
+   18         0.3924580645         5.3397059343    1.0000        6
+   19         0.3924580645         5.3397059343    1.0000        6
    20         0.4137432946         5.6293085176    1.0000       10
    21         0.4137432946         5.6293085176    1.0000       10
    22         0.4137432946         5.6293085176    1.0000       10
@@ -2224,7 +2227,7 @@ Abelian subgroup contains only the Identity operation
 
  SCF iter #   7
 
- Diagonalization time [sec] :       0.08,      tdiag_sum =        7.45
+ Diagonalization time [sec] :       0.08,      tdiag_sum =        1.61
  Iteration time [sec]       :       0.09
 
  Fermi level at     1.1449 [Ry]
@@ -2352,7 +2355,7 @@ Abelian subgroup contains only the Identity operation
   119         1.0343493872        14.0731508929    1.0000       10
   120         1.0343493872        14.0731508929    1.0000       10
   121         1.0343493933        14.0731509759    1.0000        9
-  122         1.0343493934        14.0731509766    1.0000        9
+  122         1.0343493934        14.0731509767    1.0000        9
   123         1.0343494613        14.0731519008    1.0000       10
   124         1.0343494613        14.0731519008    1.0000       10
   125         1.0343494613        14.0731519008    1.0000       10
@@ -2391,7 +2394,7 @@ Abelian subgroup contains only the Identity operation
 
  SCF iter #   8
 
- Diagonalization time [sec] :       0.08,      tdiag_sum =        7.54
+ Diagonalization time [sec] :       0.08,      tdiag_sum =        1.69
  Iteration time [sec]       :       0.09
 
  Fermi level at     1.1449 [Ry]
@@ -2420,7 +2423,7 @@ Abelian subgroup contains only the Identity operation
    20         0.4138087852         5.6301995703    1.0000       10
    21         0.4138087852         5.6301995703    1.0000       10
    22         0.4138087852         5.6301995703    1.0000       10
-   23         0.4138087891         5.6301996224    1.0000        9
+   23         0.4138087891         5.6301996223    1.0000        9
    24         0.5472129146         7.4452694728    1.0000        1
    25         0.5472129161         7.4452694935    1.0000        1
    26         0.5472129161         7.4452694935    1.0000        1
@@ -2518,7 +2521,7 @@ Abelian subgroup contains only the Identity operation
   118         1.0343588512        14.0732796576    1.0000       10
   119         1.0343588512        14.0732796576    1.0000       10
   120         1.0343588512        14.0732796576    1.0000       10
-  121         1.0343588674        14.0732798788    1.0000        9
+  121         1.0343588674        14.0732798787    1.0000        9
   122         1.0343588675        14.0732798789    1.0000        9
   123         1.0343588781        14.0732800235    1.0000       10
   124         1.0343588781        14.0732800235    1.0000       10
@@ -2558,7 +2561,7 @@ Abelian subgroup contains only the Identity operation
 
  SCF iter #   9
 
- Diagonalization time [sec] :       0.08,      tdiag_sum =        7.62
+ Diagonalization time [sec] :       0.08,      tdiag_sum =        1.77
  Iteration time [sec]       :       0.09
 
  Fermi level at     1.1449 [Ry]
@@ -2725,7 +2728,7 @@ Abelian subgroup contains only the Identity operation
 
  SCF iter #  10
 
- Diagonalization time [sec] :       0.08,      tdiag_sum =        7.70
+ Diagonalization time [sec] :       0.08,      tdiag_sum =        1.85
  Iteration time [sec]       :       0.09
 
  Fermi level at     1.1449 [Ry]
@@ -2892,7 +2895,7 @@ Abelian subgroup contains only the Identity operation
 
  SCF iter #  11
 
- Diagonalization time [sec] :       0.08,      tdiag_sum =        7.78
+ Diagonalization time [sec] :       0.08,      tdiag_sum =        1.93
  Iteration time [sec]       :       0.09
 
  Fermi level at     1.1449 [Ry]
@@ -3059,29 +3062,29 @@ Abelian subgroup contains only the Identity operation
 
 Self-consistency convergence achieved.
 
-Time for self-consistent field [sec] :      10.13,    tdiag_sum =        7.78
+Time for self-consistent field [sec] :       2.96,    tdiag_sum =        1.93
 Time spent on Hartree potential [sec] :        0.04
 
  Initial Hamiltonian component timings [sec]
  --------------------------------------------------
- Finite-difference (-nabla^2) :     0.077773
- V_ion diagonal/local         :     0.185078
- V_ion nonlocal projectors    :     0.108976
- Initial V_xc (PBE)             :     0.073886
- Component subtotal             :     0.445712
+ Finite-difference (-nabla^2) :     0.074908
+ V_ion diagonal/local         :     0.184117
+ V_ion nonlocal projectors    :     0.107960
+ Initial V_xc (PBE)             :     0.001394
+ Component subtotal             :     0.368378
  --------------------------------------------------
 
  SCF timing analysis [sec]
  --------------------------------------------------
- Initial Hartree potential      :     1.401292
- Initial exchange-correlation   :     0.073886
- Hamiltonian binding subtotal  :     0.000359
- Diagonalization subtotal       :     7.779980
- Occupation/density subtotal   :     0.024774
- Hartree potential subtotal     :     0.039919
- Exchange-correlation subtotal  :     0.005747
- Mixing/energy subtotal         :     0.004283
- SCF wall time                   :     9.341576
+ Initial Hartree potential      :     0.250532
+ Initial exchange-correlation   :     0.001394
+ Hamiltonian binding subtotal  :     0.000231
+ Diagonalization subtotal       :     1.930910
+ Occupation/density subtotal   :     0.021459
+ Hartree potential subtotal     :     0.039597
+ Exchange-correlation subtotal  :     0.004966
+ Mixing/energy subtotal         :     0.002243
+ SCF wall time                   :     2.261505
  --------------------------------------------------
 
 Forces, dipoles, and MPI statistics
@@ -3097,24 +3100,24 @@ are not calculated by this Python single-point implementation.
  Total H application time [sec] =     0.000000
  Average H application [sec] =     0.000000
  Local-potential updates =           11
- Local update time [sec] =     0.000207
+ Local update time [sec] =     0.000136
  Per-H device timing = disabled (would synchronize every recurrence)
  GPU initial-eigensolver calls =           10
- GPU initial-eigensolver synchronized time [sec] =     6.440951
+ GPU initial-eigensolver synchronized time [sec] =     1.095431
  GPU SUBSPACE calls =          100
- GPU SUBSPACE synchronized time [sec] =     1.316369
+ GPU SUBSPACE synchronized time [sec] =     0.814502
  GPU representation scheduler batches =           11
- GPU representation scheduler wall time [sec] =     7.767167
+ GPU representation scheduler wall time [sec] =     1.919149
  Final active states by representation = 11 11 11 10 11 10 10 10 10 10
- Requested-eigenpair download [sec] =     0.004691
+ Requested-eigenpair download [sec] =     0.004476
  GPU density builds =          110
- GPU density build/download [sec] =     0.011598
- Final wavefunction download [sec] =     0.783396
+ GPU density build/download [sec] =     0.011568
+ Final wavefunction download [sec] =     0.695384
  Host-to-device time [sec] =     0.000000
- Device kernel time [sec] =     7.757320
- Device-to-host time [sec] =     0.004691
- Pre-SCF setup/reporting wall time [sec] :    4.827815
- Post-SCF finalization/reporting [sec] :    0.001014
- Total accelerated Python wall time [sec] :       14.96
+ Device kernel time [sec] =     1.909933
+ Device-to-host time [sec] =     0.004476
+ Pre-SCF setup/reporting wall time [sec] :    1.954537
+ Post-SCF finalization/reporting [sec] :    0.001146
+ Total accelerated Python wall time [sec] :        4.92
  parsec.dat: examples/3d_hybrid_functionals/Si64_gamma/pbe/parsec.dat (potential and density of 1 spin channel(s) on 314432 points, 128 wavefunction(s))
 Text log: examples/3d_hybrid_functionals/Si64_gamma/pbe/parsec.out

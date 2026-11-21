@@ -588,6 +588,142 @@ def mesh_preserving_operations(group, dimensions, shift, *, tolerance: float = 1
     )
 
 
+def default_stencil_lines(lattice_vectors, counts) -> list[tuple[tuple[int, int, int], float]]:
+    """The second differences ``((offset, weight), ...)`` of the Laplacian of the default routines' grid of
+    ``counts`` points along ``lattice_vectors`` (offsets in grid steps): the three axes, then the extra directions of
+    an oblique grid (:func:`parsec_python.Laplacian.lattice_metric.second_derivative_plan`)."""
+
+    from ..Laplacian.lattice_metric import second_derivative_plan
+
+    counts = np.asarray([float(value) for value in counts], dtype=np.float64)
+    steps = np.asarray(lattice_vectors, dtype=np.float64) / counts[:, None]
+    plan = second_derivative_plan(steps)
+    lines = [(tuple(int(v) for v in np.eye(3, dtype=int)[axis]), float(plan.axial[axis])) for axis in range(3)]
+    lines += [
+        (tuple(int(v) for v in direction), float(weight)) for direction, weight in zip(plan.directions, plan.weights)
+    ]
+    return lines
+
+
+def grid_stencil_lines(cell, settings):
+    """``(counts, lines)`` of the grid that the routines of ``settings`` build for the bulk ``cell``: its points along
+    the lattice vectors and the second differences ``((offset, weight), ...)`` of its Laplacian (offsets in grid
+    steps, weights in 1/bohr^2), for :func:`stencil_preserving_matrices`.
+
+    The default routines: :func:`default_stencil_lines` of
+    :func:`parsec_python.Grid.pbc.default_periodic_grid_counts`.  The Fortran-derived routines
+    (``settings.fortran_routines``): Fortran's counts (:func:`parsec_python.Grid.pbc.fortran_grid_counts`), on the
+    orthorhombic grid the three axes of one step, on Fortran's general grid of a non-orthogonal cell the axes and the
+    auxiliary directions of ``lapmvs`` with their ``b / step^2``
+    (:func:`parsec_python.Laplacian.nonorthogonal.pbc_grid_coefficients`).  Both gradients are the centred
+    differences along the three axes.
+    """
+
+    from .pbc import default_periodic_grid_counts, fortran_grid_counts, fortran_orthorhombic_counts
+
+    lattice_vectors = np.asarray(cell.lattice_vectors, dtype=np.float64)
+    if not getattr(settings, "fortran_routines", False):
+        counts = np.asarray(default_periodic_grid_counts(cell, settings), dtype=np.int64)
+        return counts, default_stencil_lines(lattice_vectors, counts)
+    counts, steps = fortran_grid_counts(cell, settings)
+    counts = np.asarray(counts, dtype=np.int64)
+    steps = np.asarray(steps, dtype=np.float64)
+    if fortran_orthorhombic_counts(cell, settings) is not None:
+        spacing = float(np.diag(lattice_vectors)[0]) / float(counts[0])
+        return counts, [(tuple(int(v) for v in np.eye(3, dtype=int)[axis]), 1.0 / spacing**2) for axis in range(3)]
+    from ..Laplacian.nonorthogonal import pbc_grid_coefficients
+
+    coefficients = pbc_grid_coefficients(lattice_vectors, steps)
+    return counts, [
+        (tuple(int(v) for v in offset), float(coefficient) / float(step) ** 2)
+        for offset, coefficient, step in coefficients.stencil_terms(steps)
+    ]
+
+
+def stencil_preserving_matrices(matrices, counts, lines, *, tolerance: float = 1.0e-9) -> list[bool]:
+    """For each integer matrix ``M`` (lattice coordinates) of ``matrices``: whether the operation maps the
+    finite-difference operators of the grid of ``counts`` points (second differences ``lines``, as
+    :func:`grid_stencil_lines` gives them; centred first differences along the axes) onto themselves.
+
+    ``W = N M N^-1`` (``N = diag(counts)``) moves a stencil offset ``o`` to ``W o``: kept where ``W`` is a signed
+    permutation of the axes (the gradient) that maps every second difference onto one of the same weight (see
+    :func:`stencil_preserving_operations`).
+    """
+
+    counts = np.asarray([float(value) for value in counts], dtype=np.float64)
+    scale = max(abs(weight) for _, weight in lines)
+    weights = {}
+    for offset, weight in lines:
+        weights[tuple(int(v) for v in offset)] = weight
+        weights[tuple(-int(v) for v in offset)] = weight
+    flags = []
+    for matrix in np.asarray(matrices).reshape(-1, 3, 3):
+        index_map = counts[:, None] * np.asarray(matrix, dtype=np.float64) / counts[None, :]
+        rounded = np.rint(index_map)
+        if np.max(np.abs(index_map - rounded)) > 1.0e-9:
+            flags.append(False)
+            continue
+        rounded = rounded.astype(np.int64)
+        if not (np.all(np.abs(rounded).sum(axis=0) == 1) and np.all(np.abs(rounded).sum(axis=1) == 1)):
+            flags.append(False)
+            continue
+        preserved = True
+        for offset, weight in lines:
+            image = tuple(int(v) for v in rounded @ np.asarray(offset, dtype=np.int64))
+            other = weights.get(image)
+            if other is None or abs(other - weight) > tolerance * scale:
+                preserved = False
+                break
+        flags.append(preserved)
+    return flags
+
+
+def stencil_preserving_operations(group, lattice_vectors, counts, *, tolerance: float = 1.0e-9, lines=None):
+    """The operations of ``group`` that map the finite-difference operators of the default routines' grid onto
+    themselves, as a ``SpaceGroup`` (``group`` itself when every operation is kept).
+
+    The grid of the default routines has ``counts`` points along the lattice vectors (steps ``s_i = a_i/n_i``).  Its
+    gradient is the centred first difference along the three grid axes, turned Cartesian by ``S^-1``
+    (:func:`parsec_python.Laplacian.finite_difference.build_gradient`), and its Laplacian the second differences
+    along the axes and, on an oblique grid, along the extra directions of
+    :func:`parsec_python.Laplacian.lattice_metric.second_derivative_plan`, each with its weight.  An operation with
+    the integer matrix ``M`` (lattice coordinates) moves a stencil offset ``o`` (grid steps) to ``W o`` with
+    ``W = N M N^-1``, ``N = diag(counts)``.  The discrete Hamiltonian ``-nabla^2 - 2ik.nabla + k^2`` of a k-point
+    commutes with the operation (``k`` turned with it) when ``W`` is a signed permutation of the axes (the gradient's
+    offsets) that maps every second difference onto one of the same weight; these are the operations kept.  On an
+    orthogonal grid every operation that maps the grid onto itself is kept; on an oblique one an operation that turns
+    an axis onto an extra direction (the three- and six-fold axes of a hexagonal cell, the three-fold axes of the
+    primitive fcc cell off its body diagonal) changes the operators at the order of the discretization, and the
+    wedge of such operations is not the energy of the same points without them (hcp Au2, 0.3 bohr: 7.7e-3 Ry).  hcp
+    keeps 8 of its 24 operations, the primitive fcc cell 12 of 48; their wedges gave the energy of time reversal
+    alone on the same points within 1e-10 and 2e-9 Ry (A100, 2026-11-19).  The kept operations form a group (the
+    operations that preserve a set of offsets and weights do).  ``lines`` (:func:`grid_stencil_lines`) gives the
+    second differences of another grid (Fortran's general grid); ``None`` those of the default routines.
+    """
+
+    from .space_group import SYMMETRY_TOLERANCE, SpaceGroup
+
+    if lines is None:
+        lines = default_stencil_lines(lattice_vectors, counts)
+    preserved = stencil_preserving_matrices(group.rotation_matrices, counts, lines, tolerance=tolerance)
+    kept = [index for index, flag in enumerate(preserved) if flag]
+    if len(kept) == group.order:
+        return group
+    last = group.translations[kept[-1]]
+    return SpaceGroup(
+        rotations=tuple(group.rotations[index] for index in kept),
+        translations=tuple(group.translations[index] for index in kept),
+        cartesian_rotations=tuple(group.cartesian_rotations[index] for index in kept),
+        labels=tuple(group.labels[index] for index in kept),
+        crystal_system=group.crystal_system,
+        full_holohedry=False,
+        lattice_operations=group.lattice_operations,
+        candidate_numbers=tuple(group.candidate_numbers[index] for index in kept),
+        symmorphic=not (abs(last[0]) + abs(last[1]) + abs(last[2]) > SYMMETRY_TOLERANCE),
+        ignored=group.ignored,
+    )
+
+
 def kpoint_sampling_details(problem) -> MonkhorstPackSampling | None:
     """The Fortran-path sampling of a ``SinglePointInput``, or ``None``.
 
@@ -599,13 +735,20 @@ def kpoint_sampling_details(problem) -> MonkhorstPackSampling | None:
     ``Ignore_Symmetry``) and by time reversal unless the calculation is
     non-collinear (``irrbz.f90:96-99``).  A hybrid functional takes time
     reversal only (its exchange operator sums over the full mesh,
-    :mod:`parsec_python.SCF.hybrid_periodic`).
+    :mod:`parsec_python.SCF.hybrid_periodic`), or with
+    ``problem.hybrid_kpoint_wedge`` (``PARSEC_HYBRID_KPOINT_WEDGE``) the
+    operations of the space group that map the mesh onto itself
+    (:func:`hybrid_wedge_group`): the exchange then reaches the other points
+    of the mesh through the images of the wedge.
     """
 
     shift = getattr(problem, "monkhorst_pack_shift", None)
     if shift is None or problem.monkhorst_pack_dimensions is None:
         return None
-    group = None if _hybrid(problem) else getattr(problem, "space_group", None)
+    if _hybrid(problem):
+        group = hybrid_wedge_group(problem) if getattr(problem, "hybrid_kpoint_wedge", False) else None
+    else:
+        group = getattr(problem, "space_group", None)
     lattice = tuple(
         tuple(float(value) for value in row)
         for row in np.asarray(problem.periodic_cell.lattice_vectors, dtype=float)
@@ -654,6 +797,152 @@ def _hybrid(problem) -> bool:
     return bool(getattr(getattr(problem, "scf", None), "is_hybrid", False))
 
 
+HYBRID_KPOINT_WEDGE_ENV = "PARSEC_HYBRID_KPOINT_WEDGE"
+#: The value of PARSEC_HYBRID_KPOINT_WEDGE without the variable.
+HYBRID_KPOINT_WEDGE_DEFAULT = "auto"
+
+
+def hybrid_kpoint_wedge_setting() -> str:
+    """``PARSEC_HYBRID_KPOINT_WEDGE`` (``auto``, ``on``, ``off``): the irreducible wedge of the Monkhorst-Pack mesh of a
+    hybrid single point of a bulk cell, under the operations of the space group that map the grid, the mesh and the
+    grid's finite-difference operators onto themselves (:func:`hybrid_wedge_operations`, on any grid) and time
+    reversal, with the density symmetrized over them: the exchange sums over the whole mesh through the images of the
+    k-points solved, their Bloch factors with the grid points permuted (Quantum ESPRESSO's ``exxinit`` rotates its
+    wavefunctions the same way; :class:`parsec_python.V_xc.bloch_exchange.MeshStars`).
+
+    * ``auto`` (default, since 2026-11-20): the semilocal start runs on the time-reversal pairs, bit for bit as ``off``;
+      where it fills every state to 0 or 1 (no occupation within :data:`HYBRID_WEDGE_FRACTIONAL_TOLERANCE` of the
+      Fermi-Dirac interior, :func:`partly_filled_states`: an insulator) the Fock loop moves to the wedge, from the
+      representatives' orbitals of that start (:meth:`parsec_python.SCF.hybrid_periodic.BlochExchange.after_start`);
+      a start with a partly filled state keeps the pairs for the whole run, bit for bit as ``off``.  The reason: a
+      metal's level that is partly filled at the Fermi level at a set of equivalent k-points (the two L points of hcp
+      Au, the three X points of fcc Au) can take an occupation that breaks the crystal symmetry in the Fock loop of
+      the pairs (exact exchange favours integer occupations: the same-k exchange goes as f^2/N_k), 9.7e-4 Ry (hcp Au2
+      PBE0 4x4x2) and 6.9e-4 Ry (primitive fcc Au 4x4x4) below the symmetric state, which is all the wedge can hold
+      (its star members are images of one representative).  The grid's shape has nothing to do with it: insulators
+      on oblique grids take the wedge within the discretization (primitive Si 1e-10 Ry, hexagonal Si 5.4e-8 Ry), and
+      the conventional cubic fcc Au cell breaks on its orthogonal grid (A100, 2026-11-20).
+    * ``on``: the wedge always, its semilocal start too: the symmetric state, also for a metal.
+    * ``off``: the time-reversal pairs of the mesh, as before.
+
+    Forces, moving atoms and spinors keep the pairs either way.  Any other value is refused (``grid``, the operations
+    of scalar orbitals on any grid of 2026-11-19, among them those that turn an oblique grid's stencil, is gone)."""
+
+    import os
+
+    value = os.environ.get(HYBRID_KPOINT_WEDGE_ENV, HYBRID_KPOINT_WEDGE_DEFAULT).strip().lower()
+    value = value or HYBRID_KPOINT_WEDGE_DEFAULT
+    if value not in ("auto", "on", "off"):
+        raise ValueError(f"{HYBRID_KPOINT_WEDGE_ENV} must be auto, on or off, got {value!r}")
+    return value
+
+
+#: A state of the semilocal start of a hybrid is partly filled where ``tol <= f <= 1 - tol`` (``f`` per spin orbital,
+#: 0 to 1), ``tol`` this value (:func:`partly_filled_states`, ``PARSEC_HYBRID_KPOINT_WEDGE=auto``).  Far above the
+#: round-off of the occupations (they are exactly 0 or 1 beyond 36.7 kT from the Fermi level, the cut-off of
+#: ``flevel.f90``, :func:`parsec_python.Occupations.fermi_dirac.fermi_occupations`), and small enough that any level
+#: within 13.8 kT of the Fermi level counts (f >= 1e-6), also the tail of a level the Fock loop may pull across it.
+#: An insulator at Fermi_Temp 1 K (kT = 6.3e-6 Ry) is exactly 0/1, and so is one at the default 80 K whose gap
+#: exceeds about 0.014 Ry (27.6 kT, the Fermi level mid-gap); a metal's
+#: levels at the Fermi level are partly filled at any smearing (unless its mesh puts no level within 13.8 kT of
+#: it: the test sees the semilocal start only).  Only speed is lost where a smeared insulator counts (the pairs are
+#: the exact route): at 1000 K a gap below about 0.17 Ry keeps the pairs.
+HYBRID_WEDGE_FRACTIONAL_TOLERANCE = 1.0e-6
+
+
+def partly_filled_states(occupations, tolerance: float = HYBRID_WEDGE_FRACTIONAL_TOLERANCE) -> tuple[int, float]:
+    """``(count, largest)`` of the partly filled states among ``occupations`` (a sequence of arrays, one per spin
+    channel or k-point, or one array; values per spin orbital in ``[0, 1]``): ``count`` those with
+    ``tolerance <= f <= 1 - tolerance``, ``largest`` the largest ``min(f, 1 - f)`` of all (0 where every state is
+    exactly 0 or 1)."""
+
+    tolerance = float(tolerance)
+    if not 0.0 < tolerance < 0.5:
+        raise ValueError("the tolerance of a partly filled state must lie between 0 and 1/2")
+    if isinstance(occupations, np.ndarray):
+        occupations = [occupations]
+    count, largest = 0, 0.0
+    for values in occupations:
+        values = np.asarray(values, dtype=np.float64).reshape(-1)
+        if not values.size:
+            continue
+        count += int(np.count_nonzero((values >= tolerance) & (values <= 1.0 - tolerance)))
+        largest = max(largest, float(np.max(np.minimum(values, 1.0 - values))))
+    return count, max(largest, 0.0)
+
+
+@dataclass(frozen=True)
+class DeferredHybridWedge:
+    """The wedge a hybrid single point takes under ``PARSEC_HYBRID_KPOINT_WEDGE=auto`` if its semilocal start fills
+    every state to 0 or 1 (``SinglePointInput.hybrid_kpoint_wedge_deferred``; the input is otherwise that of ``off``).
+
+    ``group`` the space group of the wedge (:func:`hybrid_wedge_operations`: the stencil-exact operations that keep
+    the grid and the mesh ``(dimensions, shift)``); ``density_group`` the group the wedge's density is averaged over
+    where the input of the pairs averages none (the default routines: ``group``), ``None`` where the wedge keeps the
+    input's average (the Fortran-derived routines average over the whole space group; the images take the
+    stencil-exact operations of it)."""
+
+    group: object
+    dimensions: tuple
+    shift: tuple
+    density_group: object = None
+
+
+def mesh_keeps_time_reversal(shift, *, tolerance: float = 1.0e-8) -> bool:
+    """Whether ``k -> -k`` maps the Monkhorst-Pack mesh ``(i + s)/n`` onto itself: ``-(i + s) - s`` whole for every
+    ``i``, so ``2 s`` whole in every direction (a shift of 0 or 1/2).  The exchange of a hybrid's time-reversal pairs
+    sums over the mesh and its mirror image; its irreducible wedge (``PARSEC_HYBRID_KPOINT_WEDGE``) is taken only for
+    a mesh that is its own mirror image, where both are the mesh."""
+
+    doubled = 2.0 * np.asarray([float(value) for value in shift], dtype=np.float64)
+    return bool(np.max(np.abs(doubled - np.rint(doubled)), initial=0.0) <= tolerance)
+
+
+def grid_is_oblique(cell, settings) -> bool:
+    """Whether the grid the routines of ``settings`` build for the bulk ``cell`` has second differences beyond its
+    three axes (:func:`grid_stencil_lines`: the extra directions of an oblique default-routines grid, the auxiliary
+    directions of Fortran's general grid of a non-orthogonal cell)."""
+
+    return len(grid_stencil_lines(cell, settings)[1]) > 3
+
+
+def hybrid_wedge_operations(group, cell, settings, dimensions, shift):
+    """The operations of ``group`` for the irreducible wedge of a hybrid's Monkhorst-Pack mesh ``(dimensions,
+    shift)`` of the bulk ``cell`` on the grid of ``settings``, or ``None`` (none but the identity, or the pairs).
+
+    Those that map the mesh onto itself (:func:`mesh_preserving_operations`; ``None`` for a mesh that time reversal
+    does not keep, :func:`mesh_keeps_time_reversal`) and the grid's finite-difference operators onto themselves
+    (:func:`stencil_preserving_operations` with the stencil of :func:`grid_stencil_lines`, on any grid: on an oblique
+    grid the others, the three- and six-fold axes of a hexagonal cell, change the discrete Hamiltonian at the order
+    of the discretization; on an orthogonal grid every mesh-keeping operation is kept).  The exchange images take the
+    same operations (:func:`parsec_python.SCF.hybrid_periodic.hybrid_mesh_stars`).  Whether a run takes the wedge is
+    :func:`hybrid_kpoint_wedge_setting`'s (``on``; ``auto`` after a semilocal start without partly filled states).
+    """
+
+    if group is None or shift is None or dimensions is None or not mesh_keeps_time_reversal(shift):
+        return None
+    kept = mesh_preserving_operations(group, dimensions, shift)
+    if kept.order > 1 and cell is not None and settings is not None:
+        counts, lines = grid_stencil_lines(cell, settings)
+        kept = stencil_preserving_operations(
+            kept, np.asarray(cell.lattice_vectors, dtype=np.float64), counts, lines=lines
+        )
+    return kept if kept.order > 1 else None
+
+
+def hybrid_wedge_group(problem):
+    """The operations of ``problem.space_group`` for the irreducible wedge of a hybrid (``SinglePointInput
+    .hybrid_kpoint_wedge``): :func:`hybrid_wedge_operations` of its mesh and grid, or ``None``."""
+
+    return hybrid_wedge_operations(
+        getattr(problem, "space_group", None),
+        getattr(problem, "periodic_cell", None),
+        getattr(problem, "grid", None),
+        getattr(problem, "monkhorst_pack_dimensions", None),
+        getattr(problem, "monkhorst_pack_shift", None),
+    )
+
+
 KPOINT_TIME_REVERSAL_ENV = "PARSEC_KPOINT_TIME_REVERSAL"
 
 
@@ -676,12 +965,19 @@ MP_UNSHIFTED_MESH_ENV = "PARSEC_MP_UNSHIFTED_MESH"
 def unshifted_mesh_setting() -> str:
     """``PARSEC_MP_UNSHIFTED_MESH``: the mesh of a ``Monkhorst_Pack_Grid`` without a ``Monkhorst_Pack_Shift`` block.
 
-    ``fortran`` (default, since 2026-11-18): PARSEC 1.5's, the Gamma-centred grid ``k = (i-1)/n`` reduced to its
-    irreducible wedge exactly as a zero ``Monkhorst_Pack_Shift`` is, on either set of routines (the space group
-    and time reversal of ``irrbz``, the density symmetrized, ``Symmetrize_Charge_Density`` true by default), without
-    choosing the Fortran-derived routines as the block does; ``port``: this port's former unreduced grid
+    ``fortran`` (default, since 2026-11-18): PARSEC 1.5's, the Gamma-centred grid ``k = (i-1)/n`` reduced exactly
+    as a zero ``Monkhorst_Pack_Shift`` is, without choosing the Fortran-derived routines as the block does.  On the
+    Fortran-derived routines that is ``irrbz``'s wedge (the space group, and time reversal unless non-collinear).  On
+    the default routines a single point, forces or a relaxation of scalar orbitals and of non-magnetic spin-orbit
+    coupling (``PARSEC_SOC_KPOINT_WEDGE``) take the irreducible wedge of the operations that map the grid and the mesh
+    onto themselves (for spin-orbit coupling those that also keep the grid's finite-difference operators,
+    :func:`stencil_preserving_operations`), with time reversal, the density symmetrized (``Symmetrize_Charge_Density``
+    true by default);
+    a hybrid functional takes the time-reversal pairs of the mesh (its exchange sums over the whole mesh), molecular
+    dynamics and manual movements the whole mesh as its time-reversal pairs, and non-collinear magnetism and
+    spin-polarized spin-orbit coupling the whole mesh.  ``port``: this port's former unreduced grid
     ``(2i-n-1)/(2n)`` of equal weights (:func:`monkhorst_pack_grid`), bit for bit.  A mesh of one point
-    (``1 1 1``) is the Gamma point under both."""
+    (``1 1 1``) is the Gamma point under both.  The parser's note says which of these a run takes."""
 
     import os
 
@@ -707,6 +1003,36 @@ def kpoint_force_wedge_setting() -> str:
     value = os.environ.get(KPOINT_FORCE_WEDGE_ENV, "auto").strip().lower() or "auto"
     if value not in ("auto", "off"):
         raise ValueError(f"{KPOINT_FORCE_WEDGE_ENV} must be auto or off, got {value!r}")
+    return value
+
+
+SOC_KPOINT_WEDGE_ENV = "PARSEC_SOC_KPOINT_WEDGE"
+
+
+def soc_kpoint_wedge_setting() -> str:
+    """``PARSEC_SOC_KPOINT_WEDGE``: the Monkhorst-Pack mesh of non-magnetic spin-orbit coupling on the default routines.
+
+    ``auto`` (default, since 2026-11-19): a bulk cell with self-consistent spin-orbit coupling, neither spin-polarized
+    nor non-collinear, reduces its mesh as PARSEC 1.5 does (``irrbz`` with time reversal for every ``is_so`` run that
+    is not ``ncl``): the irreducible wedge of the operations of the crystal that map the grid, the mesh and the
+    finite-difference operators of the grid onto themselves (:func:`stencil_preserving_operations`), with time
+    reversal, the scalar density averaged over them (a spinor turned with its operation and its SU(2) matrix has the
+    turned density, and the Kramers partner at ``-k`` the same density), so that the wedge gives the energy of the
+    same points without the group to SCF precision on any cell; the forces and a relaxation take the same wedge where
+    ``PARSEC_KPOINT_FORCE_WEDGE`` lets scalar orbitals take it, and the time-reversal pairs of the whole mesh
+    (``PARSEC_KPOINT_TIME_REVERSAL``) where they keep the whole mesh.  On an orthogonal grid that is every operation
+    that maps the grid and the mesh onto themselves; on an oblique one (fcc, hcp) a subgroup.  ``grid``: the
+    operations that map the grid and the mesh onto themselves, the group of scalar orbitals (fewer points on an
+    oblique grid, at a discretization error: fcc Au 1.2e-4 Ry, hcp Au 7.7e-3 Ry at 0.3 bohr).  ``off`` keeps the
+    whole mesh of equal weights, as before, bit for bit.  Non-collinear magnetism and collinear spin with spin-orbit
+    coupling keep the whole mesh under every value (the moments are not part of the group found from the atoms, and
+    time reversal flips them)."""
+
+    import os
+
+    value = os.environ.get(SOC_KPOINT_WEDGE_ENV, "auto").strip().lower() or "auto"
+    if value not in ("auto", "grid", "off"):
+        raise ValueError(f"{SOC_KPOINT_WEDGE_ENV} must be auto, grid or off, got {value!r}")
     return value
 
 
@@ -760,7 +1086,8 @@ def kpoint_sampling(problem) -> tuple[np.ndarray, np.ndarray] | None:
             weights, weights[0], rtol=1.0e-12, atol=0.0
         ):
             # a list of equal weights (a full mesh written out): its time-reversal representatives (a hybrid; the
-            # mesh of the forces and moving atoms of scalar or collinear-spin orbitals, kpoint_time_reversal)
+            # mesh of the forces and moving atoms of scalar or collinear-spin orbitals or of non-magnetic spin-orbit
+            # coupling, kpoint_time_reversal)
             return time_reversal_reduced(k_points, weights, problem.periodic_cell.lattice_vectors)
         return k_points, weights
     details = kpoint_sampling_details(problem)
@@ -781,6 +1108,14 @@ __all__ = [
     "explicit_kpoints",
     "band_path_kpoints",
     "fold_to_centered_zone",
+    "hybrid_kpoint_wedge_setting",
+    "DeferredHybridWedge",
+    "HYBRID_WEDGE_FRACTIONAL_TOLERANCE",
+    "default_stencil_lines",
+    "grid_is_oblique",
+    "grid_stencil_lines",
+    "hybrid_wedge_group",
+    "hybrid_wedge_operations",
     "irreducible_monkhorst_pack",
     "kpoint_sampling",
     "kpoint_force_wedge_setting",
@@ -788,7 +1123,11 @@ __all__ = [
     "kpoint_time_reversal_setting",
     "mesh_preserving_operations",
     "monkhorst_pack_grid",
+    "partly_filled_states",
     "read_kpoint_file",
+    "soc_kpoint_wedge_setting",
+    "stencil_preserving_matrices",
+    "stencil_preserving_operations",
     "time_reversal_reduced",
     "translate01",
     "unshifted_mesh_setting",

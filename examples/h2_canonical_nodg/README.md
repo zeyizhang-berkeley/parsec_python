@@ -24,8 +24,8 @@ python src\parsec_python\main.py examples\h2_canonical_nodg\parsec.in --no-archi
 
 The calculation writes a PARSEC-style text report to `parsec.out` in
 this directory. The retained `parsec_python.out` is this command with
-`--log parsec_python.out`, run with the code of 19 November 2026 on a laptop
-GPU (RTX 5070; paths shortened to repository paths). H2 on the z axis has the
+`--log parsec_python.out`, run with the code of 20 November 2026 on one
+NVIDIA A100 (paths shortened to repository paths). H2 on the z axis has the
 point group D4h on the grid (16 signed permutations); since 18 November 2026
 (`PARSEC_ORBITAL_GROUP_MAX_COST=0.75`) the orbitals use the six weighted
 one-dimensional sectors of a subgroup of order 8 (weights 1, 1, 2, 1, 1, 2),

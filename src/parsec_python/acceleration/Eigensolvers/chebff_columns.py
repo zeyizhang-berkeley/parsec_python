@@ -61,6 +61,7 @@ from .chebff_spinor import (
     START_COLUMNS,
     _filter_columns,
     _filter_group,
+    _filter_group_fused,
     _lanczos_upper_bound,
     _residual_period,
     _row_chunk,
@@ -1139,36 +1140,6 @@ def _random_columns(xp, seed: int, dimension: int, working: int, layout: ColumnL
                 ]
         del real, imaginary
     return local
-
-
-def _filter_group_fused(
-    xp, operator, source, out, columns: slice, degree: int, center, half_span, sigma_one, entering, produced, chunk, stats
-):
-    """:func:`.chebff_spinor._filter_group` with every step of the recurrence in the stencil kernel of the
-    operator (:meth:`..Hamiltonian.device_bloch.DeviceBlochOperator.chebyshev_step`): the same steps and
-    coefficients, the elementwise passes inside the kernel."""
-    start, stop = columns.start, columns.stop
-    for c0 in range(start, stop, chunk):
-        c1 = min(c0 + chunk, stop)
-        local = slice(c0 - start, c1 - start)
-        width = c1 - c0
-        previous = xp.ascontiguousarray(source[:, c0:c1])
-        current = operator.chebyshev_step(previous, None, center, sigma_one / half_span)
-        stats.add("applications", 1)
-        stats.add("application_columns", width)
-        if degree >= 2:
-            sigma_before = xp.asarray(np.ascontiguousarray(entering[:, local]))
-            sigma_after = xp.asarray(np.ascontiguousarray(produced[:, local]))
-            for step in range(degree - 1):
-                following = operator.chebyshev_step(
-                    current, previous, center, 2.0 / half_span, sigma_before[step], sigma_after[step]
-                )
-                stats.add("applications", 1)
-                stats.add("application_columns", width)
-                previous, current = current, following
-        del previous
-        out[:, c0:c1] = current
-        del current
 
 
 def _filter_local(

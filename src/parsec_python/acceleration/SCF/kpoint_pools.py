@@ -1229,6 +1229,8 @@ def _static_device_bytes(operator) -> int:
             total += sum(int(getattr(value, part).nbytes) for part in ("data", "indices", "indptr"))
         elif hasattr(value, "nbytes"):
             total += int(value.nbytes)
+    # the kernel of the local term (its coefficients; the table of a sector of a k-point)
+    total += int(getattr(getattr(operator, "stencil", None), "device_bytes", 0) or 0)
     return total
 
 

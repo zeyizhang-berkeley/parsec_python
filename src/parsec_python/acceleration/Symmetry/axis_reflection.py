@@ -133,8 +133,20 @@ def _folded(points: np.ndarray, period: np.ndarray) -> np.ndarray:
 _MATCHING_TREES: "OrderedDict[tuple, object]" = OrderedDict()
 _MATCHING_TREES_LOCK = Lock()
 _MATCHING_TREE_CAPACITY = 8
-# queries of the matching trees on every core (the answers do not depend on it)
+# Queries of the matching trees of at least _PARALLEL_QUERY_POINTS points run on every core, smaller ones on the
+# calling thread (the answers do not depend on it).  scipy starts os.cpu_count() threads for every query with
+# workers=-1 (128 on a Perlmutter GPU node): a detection asks thousands of small queries.  On an A100 node
+# (2026-11-19, diamond 6^3 / 10^3 / 16^3 / 22^3) the CellGroup took 1.78 / 1.88 / 2.13 / 2.50 s on every core and
+# 0.37 / 0.52 / 0.98 / 1.36 s with this threshold, check_sector_atoms 0.40 / 0.43 / 0.68 / 1.27 s and
+# 0.055 / 0.27 / 0.68 / 1.21 s; 4,096 was slower at 10^3, 32,768 and above at 16^3.
 _QUERY_WORKERS = -1
+_PARALLEL_QUERY_POINTS = 1 << 14
+
+
+def _query_workers(points: int) -> int:
+    """The ``workers`` of a k-d tree query of ``points`` points (see ``_PARALLEL_QUERY_POINTS``)."""
+
+    return _QUERY_WORKERS if int(points) >= _PARALLEL_QUERY_POINTS else 1
 
 
 def _matching_tree(candidates: np.ndarray, period: np.ndarray | None):
@@ -184,7 +196,9 @@ def _threshold_neighbours(
 
     radius = tolerance * (1.0 + 1.0e-9) + 1.0e-12
     queries = transformed if period is None else _folded(transformed, period)
-    proposals = _matching_tree(candidates, period).query_ball_point(queries, radius, workers=_QUERY_WORKERS)
+    proposals = _matching_tree(candidates, period).query_ball_point(
+        queries, radius, workers=_query_workers(queries.shape[0])
+    )
     adjacency = []
     for row, proposed in enumerate(proposals):
         columns = np.sort(np.asarray(proposed, dtype=np.int64))
@@ -217,7 +231,7 @@ def _single_partner_matching(
     queries = transformed if period is None else _folded(transformed, period)
     # A neighbour that does not exist inside the radius has infinite distance.
     proposed, nearest = _matching_tree(candidates, period).query(
-        queries, k=2, distance_upper_bound=radius, workers=_QUERY_WORKERS
+        queries, k=2, distance_upper_bound=radius, workers=_query_workers(queries.shape[0])
     )
     if np.any(np.isfinite(proposed[:, 1])):
         return None
@@ -1048,6 +1062,31 @@ def orbital_group_policy() -> str:
     return value
 
 
+_ORBITAL_IRREPS_SWITCH = "PARSEC_ORBITAL_IRREPS"
+
+
+def orbital_irreps_setting() -> str:
+    """``PARSEC_ORBITAL_IRREPS``: ``off`` (the default), ``once`` or ``split``.
+
+    The weighted sectors of a subgroup ``H`` of the point group ``G`` (:class:`PointGroupReduction`) find a level of
+    an irreducible representation ``Gamma`` of ``G`` in every sector that ``Gamma`` restricted to ``H`` holds: the
+    E levels of Td in both A1 and B1 of D2d, a sixth of the states solved twice.  ``once`` solves every ``Gamma``
+    in one sector (:func:`.orbital_groups.irrep_units`): a sector that keeps some of the representations it holds
+    becomes units of one weight each, whose bases the projector onto their representations keeps after every
+    Chebyshev filter (:meth:`.representations.ReflectionRepresentationDecomposition.projection_tables`); ``split``
+    also splits a sector that holds two representations of one weight (the 3-dimensional ones of a diamond
+    supercell's 192 operations), which halves its Rayleigh-Ritz work.  The rows of every unit are those of its
+    sector.  ``off`` keeps the sectors of before, bit for bit; so do ``once`` and ``split`` where the units are the
+    sectors.  Td: five units of ``M/24, M/24, M/12, M/8, M/8`` states instead of four of ``M/8`` (rows times states
+    1.2, Rayleigh-Ritz 1.5 times less work); the largest unit, and with it the peak memory of a sector, is the same.
+    """
+
+    value = os.environ.get(_ORBITAL_IRREPS_SWITCH, "off").strip().lower() or "off"
+    if value not in ("off", "once", "split"):
+        raise ValueError(f"{_ORBITAL_IRREPS_SWITCH} must be off, once or split, not {value!r}")
+    return value
+
+
 _ORBITAL_GROUP_MAX_COST_SWITCH = "PARSEC_ORBITAL_GROUP_MAX_COST"
 #: The default of ``PARSEC_ORBITAL_GROUP_MAX_COST`` (see :func:`orbital_group_max_cost`).
 ORBITAL_GROUP_MAX_COST = 0.75
@@ -1108,7 +1147,8 @@ class PointGroupReduction(SignedPermutationReduction):
 
     ``f_G(w) = (1 / [G:H]) sum_c f[coset_images[c, w]]``.
 
-    The scalar fields (density, potentials) keep one value per orbit of ``H`` as before.  ``generator_bits``
+    The scalar fields (density, potentials) keep one value per orbit of ``G``
+    (:mod:`.field_orbits`, ``PARSEC_SECTOR_FIELD_GROUP=full``), or of ``H`` with ``subgroup``.  ``generator_bits``
     is empty: ``H`` need not be abelian or of order two per element.
     """
 
@@ -1130,6 +1170,20 @@ class PointGroupReduction(SignedPermutationReduction):
     # give the same nonlocal operator in every sector (:func:`compress_projectors_for_sectors`).
     atom_representatives: np.ndarray = None
     atom_orbit_sizes: np.ndarray = None
+    # Per solved sector, the real irreducible representations of ``G`` (indices) it holds whose partners several
+    # solved states share (:attr:`.orbital_groups.OrbitalGroupPlan.partner_irreps`: the e of Td over two sectors
+    # of D2d); ``None``: not known.  Fixed occupations must fill those partners alike (the weighted density is
+    # averaged over ``G``), which ``Occupations.partner_occupations`` checks.
+    sector_partner_irreps: tuple = None
+    # The units of the irreducible representations of ``G`` (``PARSEC_ORBITAL_IRREPS``, :func:`.orbital_groups.irrep_units`):
+    # ``sector_characters`` then holds one row per unit (a character of ``H`` may recur), ``sector_weights`` the
+    # unit's weight; ``sector_projected[s]`` whether unit ``s`` keeps only some representations of its character,
+    # ``sector_projections[s, c]`` the coefficient of the right coset representative ``c`` of the projector onto them
+    # (``sum_c b_c T_c``, zero where not projected) and ``sector_shares[s]`` its expected share of the states.  ``None``:
+    # the sectors of before.
+    sector_projected: np.ndarray = None
+    sector_projections: np.ndarray = None
+    sector_shares: np.ndarray = None
 
     def operation_translation(self, index: int) -> np.ndarray | None:
         """The translation of ``operations[index]`` (grid steps), ``None`` without translations."""
@@ -1369,12 +1423,31 @@ def periodic_centre_setting() -> str:
     return _auto_or_off(_CENTRE_SWITCH)
 
 
+_DEFECT_CENTRE_SWITCH = "PARSEC_PERIODIC_DEFECT_CENTRE"
+
+
+def periodic_defect_centre_setting() -> str:
+    """``PARSEC_PERIODIC_DEFECT_CENTRE``: ``auto`` (default, since 2026-11-19) completes the group of a periodic cell
+    whose translation searches give up (more than 32 candidates pass their sampled atoms, ``_FRACTIONAL_BUDGET``: a
+    defect off the origin of a cell of 3 x 3 x 3 diamond cubes or more, such as a vacancy at ``(a, a, a)``, which kept
+    the 6 operations of C3v of its 24) from the atoms of its rarest environment (:func:`_rarest_environment`): every
+    operation carries one of them onto an atom of that environment, so its translation is among the at most 32
+    differences, which are matched in full (:func:`_seeded_translations`); and, where the cell has pure translations
+    besides the half-cell ones, its operations about the centre of that environment are matched in full as well
+    (an empty site such as the vacancy among them, ``PARSEC_PERIODIC_SYMMETRY_CENTRE=auto``).  ``off`` keeps the
+    searches of before, bit for bit.  A search that does not give up, and a crystal without a rare environment (a
+    perfect supercell), find the same operations in the same order either way."""
+
+    return _auto_or_off(_DEFECT_CENTRE_SWITCH)
+
+
 def periodic_abelian_translation_setting() -> str:
     """``PARSEC_PERIODIC_ABELIAN_TRANSLATIONS``: ``auto`` (default) gives the orbitals of a periodic cell that keep an
-    abelian group (``occup.in``, ``Fix_Number_Eigenvalues``, ``PARSEC_ORBITAL_GROUP=abelian``, a plan of weighted
-    sectors that gains too little) the largest group of commuting involutions ``r -> R r + t`` of the cell, with its
-    translations (:func:`periodic_abelian_reduction`); ``off`` keeps the commuting signed permutations about the
-    origin, bit for bit as before."""
+    abelian group (spin, a hybrid, ``occup.in`` on several MPI ranks or under ``PARSEC_ORBITAL_GROUP_OCCUPATIONS=off``,
+    ``Fix_Number_Eigenvalues`` under ``PARSEC_ORBITAL_GROUP_FIXED_COUNT=off``, ``PARSEC_ORBITAL_GROUP=abelian``, a plan
+    of weighted sectors that gains too little) the largest group of commuting involutions ``r -> R r + t`` of the
+    cell, with its translations (:func:`periodic_abelian_reduction`); ``off`` keeps the commuting signed permutations
+    about the origin, bit for bit as before."""
 
     return _auto_or_off(_ABELIAN_TRANSLATIONS_SWITCH)
 
@@ -1386,7 +1459,10 @@ def symmetry_atom_tolerance() -> float:
     The positions are not symmetrized: a larger tolerance accepts the operations of a structure symmetric only to
     within it, and the sectors then solve the Hamiltonian averaged over the group (its orbit averages of the local
     potential, the projectors of one atom per orbit), which differs from that of the input by about the distance the
-    atoms are off.  Forces and moves in the sectors check the atoms to 1e-6 bohr and refuse a structure off by more.
+    atoms are off.  Weighted sectors average the local fields over the full group, not only over the subgroup they
+    solve (``PARSEC_SECTOR_INPUT_GROUP_AVERAGE``, ``PARSEC_SECTOR_FIELD_GROUP``); their projectors remain those of
+    one atom per orbit of the subgroup.  Forces and moves in the sectors check the atoms to 1e-6 bohr and refuse a
+    structure off by more.
     """
 
     raw = os.environ.get(_ATOM_TOLERANCE_SWITCH, "").strip()
@@ -1455,7 +1531,7 @@ def _plausible(species: dict, trees: dict, operation, translation, tolerance: fl
         if translation is not None:
             sample = sample + np.asarray(translation, dtype=np.float64)
         queries = sample if period is None else _folded(sample, period)
-        distances, _ = tree.query(queries, k=1, distance_upper_bound=radius, workers=_QUERY_WORKERS)
+        distances, _ = tree.query(queries, k=1, distance_upper_bound=radius, workers=_query_workers(queries.shape[0]))
         if not np.all(np.isfinite(distances)):
             return False
     return True
@@ -1470,7 +1546,7 @@ _UNDECIDED = "undecided"
 
 
 def _translations_mapping(species: dict, trees: dict, operation, period, steps, counts, tolerance,
-                          excluded=(), first: bool = True):
+                          excluded=(), first: bool = True, seed: "_DefectSeed | None" = None):
     """The translations ``t`` (whole grid steps, ascending) with which ``r -> R r + t`` maps the atoms onto
     themselves, apart from ``excluded``.
 
@@ -1479,9 +1555,19 @@ def _translations_mapping(species: dict, trees: dict, operation, period, steps, 
     every species onto atoms of it (one k-d tree query of all candidates per atom), and the survivors are
     matched in full (:func:`_atoms_are_invariant_operation`); with ``first`` (the default) the search stops at the
     first one, which is all the callers need (whether one exists, and one of a coset).  More than
-    ``_FRACTIONAL_BUDGET`` candidates after the sampled atoms return ``_UNDECIDED``.
+    ``_FRACTIONAL_BUDGET`` candidates after the sampled atoms return ``_UNDECIDED``, unless ``seed``
+    (``PARSEC_PERIODIC_DEFECT_CENTRE=auto``) decides them: a pure translation whose smallest candidate maps every atom
+    is that one (a crystal of many cells), else the candidates from the atoms of the rarest environment of the cell
+    (:func:`_seeded_translations`, where it has at most ``_FRACTIONAL_BUDGET`` atoms: a defect) hold the answer, and so
+    they do for every search after the environment is known.
     """
 
+    if seed is not None and seed.known:
+        environment = seed.environment()
+        if environment is not None:
+            return _seeded_translations(
+                species, trees, operation, period, steps, counts, tolerance, environment, excluded, first, seed
+            )
     matrix = np.asarray(operation, dtype=np.float64)
     symbol = min(species, key=lambda name: (len(species[name]), name))
     positions = species[symbol]
@@ -1498,30 +1584,58 @@ def _translations_mapping(species: dict, trees: dict, operation, period, steps, 
         drop = {tuple(int(v) for v in np.mod(np.asarray(step, dtype=np.int64), counts)) for step in excluded}
         whole = np.array([row for row in whole if tuple(int(v) for v in row) not in drop], dtype=np.int64).reshape(-1, 3)
     radius = 2.0 * (tolerance * (1.0 + 1.0e-9) + 1.0e-12)
+    whole = _sampled_translations(species, trees, matrix, period, steps, whole, radius, symbol)
+    if whole.size == 0:
+        return []
+    if whole.shape[0] > _FRACTIONAL_BUDGET:
+        if seed is None:
+            return _UNDECIDED
+        if first and np.array_equal(matrix, np.eye(3)) and _atoms_are_invariant_operation(
+            species, operation, tolerance, period, whole[0] * steps
+        ):
+            # a pure translation, the smallest one (a crystal of many cells: no environment needed)
+            return [whole[0]]
+        environment = seed.environment()
+        if environment is None:
+            return _UNDECIDED
+        return _seeded_translations(
+            species, trees, operation, period, steps, counts, tolerance, environment, excluded, first, seed
+        )
+    return _matched_translations(species, operation, period, steps, whole, tolerance, first)
+
+
+def _sampled_translations(species: dict, trees: dict, matrix, period, steps, whole, radius: float, skip=None):
+    """The rows of ``whole`` (translations in grid steps) with which ``r -> R r + t`` carries a few atoms spread over
+    the list of every species near an atom of it (one k-d tree query of all candidates per atom; the first atom of the
+    species ``skip`` made the candidates and is not sampled; a species of that one atom alone has none to sample)."""
+
     for name, atoms_of in species.items():
         if whole.size == 0:
-            return []
+            return whole
         tree = trees.get(name)
         if tree is None:
             tree = trees[name] = _matching_tree(atoms_of, period)
-        # atoms spread over the list (the first one of the smallest species made the candidates; a species of that
-        # one atom alone has none to sample)
-        first = 1 if name == symbol else 0
+        start = 1 if name == skip else 0
         picks = (
-            np.unique(np.linspace(first, len(atoms_of) - 1, _FRACTIONAL_SAMPLES).astype(int))
-            if len(atoms_of) > first
+            np.unique(np.linspace(start, len(atoms_of) - 1, _FRACTIONAL_SAMPLES).astype(int))
+            if len(atoms_of) > start
             else np.zeros(0, dtype=int)
         )
         for atom in atoms_of[picks]:
             images = atom @ matrix.T + whole * steps
             distances, _ = tree.query(
-                _folded(images, period), k=1, distance_upper_bound=radius, workers=_QUERY_WORKERS
+                _folded(images, period), k=1, distance_upper_bound=radius, workers=_query_workers(images.shape[0])
             )
             whole = whole[np.isfinite(distances)]
             if whole.size == 0:
-                return []
-    if whole.shape[0] > _FRACTIONAL_BUDGET:
-        return _UNDECIDED
+                return whole
+    return whole
+
+
+def _matched_translations(species, operation, period, steps, whole, tolerance, first: bool) -> list:
+    """The rows of ``whole`` (ascending) that map every atom in full (:func:`_atoms_are_invariant_operation`); with
+    ``first`` the first one alone."""
+
     valid = []
     for row in whole:
         if _atoms_are_invariant_operation(species, operation, tolerance, period, row * steps):
@@ -1531,10 +1645,242 @@ def _translations_mapping(species: dict, trees: dict, operation, period, steps, 
     return valid
 
 
-def _fractional_translation(species, trees, operation, period, steps, counts, tolerance):
+# Neighbours of every species in the environment of an atom (_atom_environments), and the most atoms of the rarest
+# environment that seed a translation search (_rarest_environment; the budget of the search itself).
+_ENVIRONMENT_NEIGHBOURS = 12
+_ENVIRONMENT_BUDGET = _FRACTIONAL_BUDGET
+# The rarest environments of the last few cells: (key, RareEnvironment or None), and the defect of the last
+# _space_group_operations that took operations from one (defect_centre_note).
+_RARE_ENVIRONMENTS: "OrderedDict[tuple, object]" = OrderedDict()
+_RARE_ENVIRONMENTS_LOCK = Lock()
+_RARE_ENVIRONMENT_CAPACITY = 4
+_RECENT_DEFECT: tuple | None = None
+
+
+def _atom_environments(species: dict, period: np.ndarray, trees: dict) -> dict[str, np.ndarray]:
+    """``{species: array (atoms, columns)}``: the sorted distances (bohr) from every atom to its
+    ``_ENVIRONMENT_NEIGHBOURS`` nearest atoms of every species (itself left out), modulo the lattice, the species in
+    sorted order.  ``trees`` holds a periodic k-d tree of every species (:func:`_matching_tree`)."""
+
+    names = sorted(species)
+    environments = {}
+    for name in names:
+        columns = []
+        for other in names:
+            # the atom itself is its own nearest neighbour of its species: one more, and dropped
+            own = 1 if other == name else 0
+            count = min(_ENVIRONMENT_NEIGHBOURS + own, species[other].shape[0])
+            if count - own <= 0:
+                continue
+            distances, _ = trees[other].query(_folded(species[name], period), k=count)
+            distances = np.sort(np.asarray(distances, dtype=np.float64).reshape(species[name].shape[0], count), axis=1)
+            columns.append(distances[:, own:])
+        environments[name] = np.hstack(columns) if columns else np.zeros((species[name].shape[0], 0))
+    return environments
+
+
+def _alike_counts(rows: np.ndarray, window: float, budget: int) -> np.ndarray:
+    """For every row of ``rows`` (the environment of an atom), the number of rows within about ``window`` of it
+    (Chebyshev distance, itself among them): at least the number within ``window``, at most the number within
+    ``1.5 window``, and above ``budget`` wherever it is not at most ``budget``.
+
+    The rows are rounded to cells of a quarter of ``window`` and counted per cell, with one k-d tree query of the
+    ``budget + 1`` nearest cells within ``window`` plus a cell: noise in the positions well below the tolerance keeps
+    the atoms of one class of a crystal in a few cells, so neither a crystal of many cells (one class of tens of
+    thousands of atoms) nor such noise costs a query among every atom alike."""
+
+    from scipy.spatial import cKDTree
+
+    count = rows.shape[0]
+    if count == 0:
+        return np.zeros(0, dtype=np.int64)
+    if rows.shape[1] == 0:
+        return np.full(count, count, dtype=np.int64)
+    quantum = window / 4.0
+    keys = np.rint(rows / quantum).astype(np.int64)
+    cells, inverse, weights = np.unique(keys, axis=0, return_inverse=True, return_counts=True)
+    inverse = np.asarray(inverse).reshape(-1)
+    nearest = min(int(budget) + 1, cells.shape[0])
+    distances, indices = cKDTree(cells * quantum).query(
+        cells * quantum, k=nearest, p=np.inf, distance_upper_bound=(window + quantum) * (1.0 + 1.0e-9)
+    )
+    distances = np.asarray(distances).reshape(cells.shape[0], nearest)
+    indices = np.asarray(indices).reshape(cells.shape[0], nearest)
+    found = np.isfinite(distances)
+    # (budget + 1 cells found hold more than budget atoms; fewer are every cell within the radius)
+    per_cell = np.where(found, weights[np.where(found, indices, 0)], 0).sum(axis=1)
+    return per_cell[inverse].astype(np.int64)
+
+
+def _rarest_class(environments: dict[str, np.ndarray], tolerance: float | None = None) -> tuple[str, int, np.ndarray]:
+    """``(species, x0, gap)``: ``gap`` the largest difference of the environment of every atom of the species of
+    ``x0`` from that of ``x0`` (bohr).
+
+    With ``tolerance`` (the defect search, :func:`_rarest_environment`) ``x0`` is an atom with the fewest atoms of its
+    species whose environments lie within four tolerances of its own (:func:`_alike_counts`; the first species among
+    the fewest, and among the atoms of it with the fewest the first of the smallest environment rounded to 1e-4 bohr),
+    so noise in the positions below the tolerance, which splits the rounded classes of a crystal into classes of one
+    atom, does not hide a defect; where the rounded classes are those of the tolerance it is the atom chosen without
+    ``tolerance``.  Without it (the guard of the spin sectors, :func:`..SCF.spin_sectors._environment_operations`),
+    the first atom of the smallest class of environments rounded to 1e-4 bohr (the first species among the
+    smallest), as before."""
+
+    best = None
+    for name in sorted(environments):
+        rows = environments[name]
+        rounded = np.rint(rows / 1.0e-4).astype(np.int64)
+        if tolerance is None:
+            _, first, sizes = np.unique(rounded, axis=0, return_index=True, return_counts=True)
+            smallest = int(np.argmin(sizes))
+            size, origin = int(sizes[smallest]), int(first[smallest])
+        else:
+            counts = _alike_counts(rows, 4.0 * tolerance + 1.0e-9, _ENVIRONMENT_BUDGET)
+            size = int(counts.min())
+            tied = np.flatnonzero(counts == size)
+            # the smallest rounded environment among them (columns compared in order), its first atom (stable sort)
+            order = np.lexsort(rounded[tied].T[::-1]) if rounded.shape[1] else np.zeros(1, dtype=np.int64)
+            origin = int(tied[int(order[0])])
+        if best is None or size < best[0]:
+            best = (size, name, origin)
+    _, name, origin = best
+    reference = environments[name][origin]
+    return name, origin, np.max(np.abs(environments[name] - reference[None, :]), axis=1, initial=0.0)
+
+
+@dataclass(frozen=True)
+class RareEnvironment:
+    """The atoms of the rarest environment of a periodic cell (:func:`_rarest_environment`), indices into the atoms of
+    their species in :func:`_positions_by_species`."""
+
+    species: str
+    #: ``x0``, the atom whose environment the others are compared with
+    origin: int
+    #: the atoms whose environments agree with that of ``x0`` within four atom tolerances: every operation within
+    #: the tolerance carries ``x0`` onto one of them (a distance changes by at most two tolerances)
+    alike: np.ndarray
+    #: the atoms within eight: every such operation carries each of ``alike`` onto one of them
+    near: np.ndarray
+    #: the largest distance of the environment of ``x0`` (bohr)
+    reach: float
+
+    def centre(self, species: dict, period: np.ndarray) -> np.ndarray:
+        """The centroid (bohr, folded into the cell) of the atoms of ``alike`` within twice ``reach`` of ``x0``,
+        their nearest images: the site of a point defect, such as a vacancy among its neighbours."""
+
+        positions = species[self.species]
+        x0 = positions[self.origin]
+        offsets = _minimum_image(positions[self.alike] - x0, period)
+        local = offsets[np.linalg.norm(offsets, axis=1) <= 2.0 * self.reach + 1.0e-9]
+        return _folded((x0 + local.mean(axis=0))[None, :], period)[0]
+
+
+def _environment_key(species: dict, period: np.ndarray, tolerance: float) -> tuple:
+    digest = hashlib.blake2b(digest_size=16)
+    for name in sorted(species):
+        digest.update(name.encode())
+        digest.update(np.ascontiguousarray(species[name], dtype=np.float64).tobytes())
+    return digest.digest(), tuple(float(value) for value in np.asarray(period).reshape(-1)), float(tolerance)
+
+
+def _rarest_environment(species: dict, period: np.ndarray, tolerance: float) -> RareEnvironment | None:
+    """The atoms of the rarest environment of a bulk orthorhombic cell (:class:`RareEnvironment`), ``None`` where they
+    are more than ``_ENVIRONMENT_BUDGET`` (a crystal of many cells, every atom of which has many alike).
+
+    The environment of an atom is the sorted distances to its ``_ENVIRONMENT_NEIGHBOURS`` nearest atoms of every
+    species, modulo the lattice (:func:`_atom_environments`); ``x0`` is an atom with the fewest alike within four atom
+    tolerances (:func:`_rarest_class` with the tolerance, which noise in the positions below it does not mislead; a
+    vacancy of diamond: one of its four neighbours).  The answer of the last few cells
+    is kept (the detection asks for it from :class:`..SCF.kpoint_sectors.CellGroup` and
+    :func:`detect_point_group_reduction` alike).
+    """
+
+    key = _environment_key(species, period, tolerance)
+    with _RARE_ENVIRONMENTS_LOCK:
+        if key in _RARE_ENVIRONMENTS:
+            _RARE_ENVIRONMENTS.move_to_end(key)
+            return _RARE_ENVIRONMENTS[key]
+    trees = {name: _matching_tree(species[name], period) for name in species}
+    environments = _atom_environments(species, period, trees)
+    name, origin, gap = _rarest_class(environments, tolerance)
+    alike = np.flatnonzero(gap <= 4.0 * tolerance + 1.0e-9)
+    found = None
+    if alike.size <= _ENVIRONMENT_BUDGET:
+        found = RareEnvironment(
+            species=name,
+            origin=origin,
+            alike=alike,
+            near=np.flatnonzero(gap <= 8.0 * tolerance + 2.0e-9),
+            reach=float(np.max(environments[name][origin], initial=0.0)),
+        )
+    with _RARE_ENVIRONMENTS_LOCK:
+        _RARE_ENVIRONMENTS[key] = found
+        while len(_RARE_ENVIRONMENTS) > _RARE_ENVIRONMENT_CAPACITY:
+            _RARE_ENVIRONMENTS.popitem(last=False)
+    return found
+
+
+class _DefectSeed:
+    """The rarest environment of the cell of one :func:`_space_group_operations` (``PARSEC_PERIODIC_DEFECT_CENTRE``),
+    found when a translation search first needs it; ``hits`` counts the translations it gave."""
+
+    def __init__(self, species: dict, period: np.ndarray, tolerance: float) -> None:
+        self.species = species
+        self.period = period
+        self.tolerance = float(tolerance)
+        self.known = False
+        self.hits = 0
+        self._environment = None
+
+    def environment(self) -> RareEnvironment | None:
+        if not self.known:
+            self._environment = _rarest_environment(self.species, self.period, self.tolerance)
+            self.known = True
+        return self._environment
+
+
+def _seeded_translations(species, trees, operation, period, steps, counts, tolerance, environment, excluded=(),
+                         first: bool = True, seed: _DefectSeed | None = None) -> list:
+    """The translations of :func:`_translations_mapping`, with candidates from the atoms of the rarest environment.
+
+    A valid ``t`` carries ``x0`` onto an atom of ``environment.alike`` (:class:`RareEnvironment`), so the candidates
+    ``x_j - R x0`` (at most ``_ENVIRONMENT_BUDGET``) hold every one: the answer is that of a search that matched every
+    candidate of :func:`_translations_mapping` in full (the smallest valid ``t`` first).  The candidates that are whole
+    grid steps are kept, then those that carry every atom of ``alike`` near an atom of ``environment.near`` and the
+    sampled atoms of every species near atoms of it, and the survivors are matched in full.
+    """
+
+    from scipy.spatial import cKDTree
+
+    matrix = np.asarray(operation, dtype=np.float64)
+    positions = species[environment.species]
+    members = positions[environment.alike]
+    candidates = members - positions[environment.origin] @ matrix.T
+    candidates = candidates - period * np.floor(candidates / period)
+    in_steps = candidates / steps
+    rounded = np.rint(in_steps)
+    limit = 1.0e-6 if tolerance <= 1.0e-7 else np.maximum(1.0e-6, 2.5 * tolerance / np.asarray(steps, dtype=np.float64))
+    keep = np.all(np.abs(in_steps - rounded) <= limit, axis=1)
+    whole = np.unique(np.mod(rounded[keep].astype(np.int64), counts), axis=0).reshape(-1, 3)
+    if excluded:
+        drop = {tuple(int(v) for v in np.mod(np.asarray(step, dtype=np.int64), counts)) for step in excluded}
+        whole = np.array([row for row in whole if tuple(int(v) for v in row) not in drop], dtype=np.int64).reshape(-1, 3)
+    radius = 2.0 * (tolerance * (1.0 + 1.0e-9) + 1.0e-12)
+    if whole.size:
+        near = cKDTree(_folded(positions[environment.near], period), boxsize=period)
+        images = (members @ matrix.T)[None, :, :] + (whole * steps)[:, None, :]
+        distances, _ = near.query(_folded(images.reshape(-1, 3), period), k=1, distance_upper_bound=radius)
+        whole = whole[np.all(np.isfinite(distances).reshape(whole.shape[0], -1), axis=1)]
+    whole = _sampled_translations(species, trees, matrix, period, steps, whole, radius)
+    valid = _matched_translations(species, operation, period, steps, whole, tolerance, first)
+    if valid and seed is not None and not np.array_equal(matrix, np.eye(3)):
+        seed.hits += 1
+    return valid
+
+
+def _fractional_translation(species, trees, operation, period, steps, counts, tolerance, seed=None):
     """One translation (grid steps) that makes ``r -> R r + t`` a symmetry of the atoms, or ``None``."""
 
-    found = _translations_mapping(species, trees, operation, period, steps, counts, tolerance)
+    found = _translations_mapping(species, trees, operation, period, steps, counts, tolerance, seed=seed)
     return found[0] if found and found is not _UNDECIDED else None
 
 
@@ -1564,7 +1910,9 @@ def _centre_candidates(species: dict, trees: dict, period: np.ndarray) -> np.nda
     """Cartesian candidates for the symmetric site of a supercell: atoms and bond midpoints, folded into the cell.
 
     The site of the largest point group of a crystal is an atom, a bond midpoint or an empty site of the smaller
-    cell it repeats; any image of it under a pure translation gives a group as large.  Tried: up to
+    cell it repeats; any image of it under a pure translation gives a group as large (the centre of a defect that the
+    pure translations repeat, such as a vacancy, is tried in :func:`_space_group_operations` as well, matched in
+    full: :meth:`RareEnvironment.centre`, ``PARSEC_PERIODIC_DEFECT_CENTRE``).  Tried: up to
     ``_CENTRE_ATOMS`` atoms of every species (the smallest species first: a defect or a dopant is the natural centre
     of its supercell), and the midpoints of the first atom of the smallest species with its ``_CENTRE_NEIGHBOURS``
     nearest neighbours of every species.
@@ -1651,6 +1999,12 @@ def _space_group_operations(grid, atoms, atom_tolerance, lattice_tolerance, *, f
     (``fractional``, below), so its operations are those about the origin and the half-cell points.  Where its
     symmetric site lies elsewhere (:func:`_symmetry_centre`, ``PARSEC_PERIODIC_SYMMETRY_CENTRE``) they are taken
     about that site ``x0`` instead: ``t = (I - R) x0`` plus a half-cell step, whole grid steps.
+
+    A translation search that gives up (more than ``_FRACTIONAL_BUDGET`` candidates after its sampled atoms: a defect
+    off the origin of a large cell) is decided from the atoms of the rarest environment of the cell under
+    ``PARSEC_PERIODIC_DEFECT_CENTRE=auto`` (:func:`_translations_mapping`), and a crystal with pure translations
+    beyond ``T`` whose rarest environment is known then takes its operations about the centre of that environment
+    where they are more (:meth:`RareEnvironment.centre`, an empty site among the candidates).
     """
 
     species = _positions_by_species(atoms)
@@ -1665,6 +2019,12 @@ def _space_group_operations(grid, atoms, atom_tolerance, lattice_tolerance, *, f
     for translation in translations[1:]:
         matrices.append(identity)
         shifts.append(translation)
+    # The rarest environment decides the searches that give up (PARSEC_PERIODIC_DEFECT_CENTRE; off: undecided).
+    seed = (
+        _DefectSeed(species, period, atom_tolerance)
+        if period is not None and periodic_defect_centre_setting() == "auto"
+        else None
+    )
     # Operations with a fraction of the cell as translation (non-symmorphic) close into a group with the
     # half-cell translations only where these are all the pure translations of the crystal modulo the cell; a
     # crystal with more (a supercell of n > 1 cubes of diamond) would need all of them, of complex characters.
@@ -1675,7 +2035,7 @@ def _space_group_operations(grid, atoms, atom_tolerance, lattice_tolerance, *, f
         # no pure translation besides the half-cell ones (undecided counts as some)
         and _translations_mapping(
             species, trees, identity, period, np.diag(np.asarray(grid.cell.lattice_vectors, dtype=np.float64)) / counts,
-            counts, atom_tolerance, excluded=translations,
+            counts, atom_tolerance, excluded=translations, seed=seed,
         ) == []
     )
     if fractional and steps is None:
@@ -1710,13 +2070,33 @@ def _space_group_operations(grid, atoms, atom_tolerance, lattice_tolerance, *, f
                     found = candidate
                     break
             if found is None and fractional:
-                found = _fractional_translation(species, trees, operation, period, operation_steps, counts, atom_tolerance)
+                found = _fractional_translation(
+                    species, trees, operation, period, operation_steps, counts, atom_tolerance, seed
+                )
             if found is None:
                 continue
             for translation in translations:
                 found_matrices.append(operation)
                 found_shifts.append((found + translation) % counts)
         return found_matrices, found_shifts
+
+    def taken(result, centre=None):
+        """``result``, with the defect it owes operations to kept for :func:`defect_centre_note`."""
+
+        global _RECENT_DEFECT
+
+        if period is None:
+            return result
+        key = _environment_key(species, period, atom_tolerance) + (tuple(int(v) for v in counts),)
+        record = None
+        if seed is not None and (seed.hits or centre is not None):
+            environment = seed.environment()
+            point = environment.centre(species, period) if centre is None else centre
+            record = (key, environment.species, int(environment.alike.size), np.asarray(point, dtype=np.float64).copy())
+        with _RARE_ENVIRONMENTS_LOCK:
+            if record is not None or (_RECENT_DEFECT is not None and _RECENT_DEFECT[0] == key):
+                _RECENT_DEFECT = record
+        return result
 
     # (I - R) x0 is a translation of its own: PARSEC_PERIODIC_TRANSLATIONS=half (the half-cell translations alone)
     # and off (the point group about the origin alone) keep their groups.
@@ -1727,6 +2107,7 @@ def _space_group_operations(grid, atoms, atom_tolerance, lattice_tolerance, *, f
         and periodic_centre_setting() == "auto"
     ):
         lattice_steps = np.diag(np.asarray(grid.cell.lattice_vectors, dtype=np.float64)) / counts
+        chosen = None
         searched = _symmetry_centre(species, trees, admissible, half_steps, counts, lattice_steps, atom_tolerance, period)
         if searched is not None:
             centre, origin_score = searched
@@ -1735,10 +2116,47 @@ def _space_group_operations(grid, atoms, atom_tolerance, lattice_tolerance, *, f
             # origin is kept where it does as well (its sampled count bounds its own)
             kept = (len(result[0]) - len(translations)) // len(translations)
             if kept > origin_score:
-                return result
-            origin = about(None, steps)
-            return origin if len(origin[0]) >= len(result[0]) else result
-    return about(None, steps)
+                chosen = result
+            else:
+                origin = about(None, steps)
+                chosen = origin if len(origin[0]) >= len(result[0]) else result
+        # A rare environment that decided the search of the pure translations (a defect that they repeat): its
+        # centre, matched in full, where it keeps more operations (the sampled score of an empty site ties with the
+        # origin's, whose sampled atoms do not see the defect).
+        environment = seed.environment() if seed is not None and seed.known else None
+        if environment is not None:
+            if chosen is None:
+                chosen = about(None, steps)
+            point = environment.centre(species, period)
+            defect = about(point / lattice_steps, lattice_steps)
+            if len(defect[0]) > len(chosen[0]):
+                return taken(defect, point)
+        if chosen is not None:
+            return taken(chosen)
+    return taken(about(None, steps))
+
+
+def defect_centre_note(grid, atoms, *, atom_tolerance: float = DEFAULT_ATOM_TOLERANCE) -> str | None:
+    """A line for the report where the last group detected for these atoms owes operations to the atoms of their
+    rarest environment (``PARSEC_PERIODIC_DEFECT_CENTRE``, :func:`_space_group_operations`), ``None`` where not."""
+
+    try:
+        period = _lattice_period(grid)
+    except ValueError:
+        return None
+    if period is None or not atoms or periodic_defect_centre_setting() != "auto":
+        return None
+    species = _positions_by_species(atoms)
+    key = _environment_key(species, period, atom_tolerance) + (tuple(int(v) for v in grid.points_per_axis),)
+    with _RARE_ENVIRONMENTS_LOCK:
+        recent = _RECENT_DEFECT
+    if recent is None or recent[0] != key:
+        return None
+    _, name, count, point = recent
+    return (
+        f"operations about a defect found from its rarest atom environment ({count} {name} atoms about "
+        f"({point[0]:.4f}, {point[1]:.4f}, {point[2]:.4f}) bohr; PARSEC_PERIODIC_DEFECT_CENTRE)"
+    )
 
 
 def _affine_matrix(operation: np.ndarray, translation: np.ndarray) -> np.ndarray:
@@ -1804,7 +2222,9 @@ def atom_image_table(atoms, operations, translations, grid, tolerance: float):
             if translations is not None:
                 image = image + np.asarray(translations[g], dtype=np.float64) * steps
             queries = image if period is None else _folded(image, period)
-            distances, nearest = tree.query(queries, k=1, distance_upper_bound=radius, workers=_QUERY_WORKERS)
+            distances, nearest = tree.query(
+                queries, k=1, distance_upper_bound=radius, workers=_query_workers(queries.shape[0])
+            )
             if not np.all(np.isfinite(distances)):
                 return None
             images[g, members] = members[nearest]
@@ -2192,7 +2612,9 @@ def detect_point_group_reduction(
             index for index, operation in enumerate(candidates) if np.array_equal(operation, np.eye(3))
         )
     )
-    plan = orbital_group_plan(elements, modulus=modulus, required=required)
+    irreps = orbital_irreps_setting()
+    plan = orbital_group_plan(elements, modulus=modulus, required=required,
+                              units=None if irreps == "off" else irreps)
     # Taken where it solves at most PARSEC_ORBITAL_GROUP_MAX_COST of what the abelian group does (Td, Oh, T, Th: a
     # half to a quarter; D4h, D2d, D4, C4v: three quarters, the partner sectors of their E levels merged); a smaller
     # gain keeps the group of before.  ``abelian`` is the group about the origin; a cell refused here takes its
@@ -2226,6 +2648,27 @@ def detect_point_group_reduction(
     characters = np.array(
         [[character[index] for index in plan.subgroup] for character in plan.characters], dtype=np.int8
     )
+    weights = np.asarray(plan.weights, dtype=np.int64)
+    partner_irreps = tuple(tuple(int(g) for g in held) for held in plan.partner_irreps)
+    unit_fields = {}
+    units = plan.units
+    if units is not None and (
+        len(units) != len(plan.characters) or any(unit.projection is not None for unit in units)
+    ):
+        # PARSEC_ORBITAL_IRREPS: one row per unit of the irreducible representations of G; units that are the
+        # sectors of before keep the reduction of before, bit for bit.
+        characters = np.ascontiguousarray(characters[[unit.sector for unit in units]])
+        weights = np.asarray([unit.weight for unit in units], dtype=np.int64)
+        # the partner representations of every unit, as sector_partner_irreps counts the rows
+        partner_irreps = tuple(tuple(int(g) for g in unit.partners) for unit in units)
+        unit_fields = {
+            "sector_projected": np.asarray([unit.projection is not None for unit in units], dtype=bool),
+            "sector_projections": np.asarray(
+                [unit.projection if unit.projection is not None else (0.0,) * len(plan.cosets) for unit in units],
+                dtype=np.float64,
+            ),
+            "sector_shares": np.asarray([unit.share for unit in units], dtype=np.float64),
+        }
     coset_images = np.empty((len(plan.cosets), representative_rows.size), dtype=np.int64)
     for c, index in enumerate(plan.cosets):
         # The whole map: with those of H it shows that every operation of G maps the active grid onto itself.
@@ -2252,6 +2695,7 @@ def detect_point_group_reduction(
         translation_fields = dict(translation_fields, atom_representatives=orbits[0], atom_orbit_sizes=orbits[1])
     return PointGroupReduction(
         **translation_fields,
+        **unit_fields,
         signs=np.ones((order, 3), dtype=np.int8),
         representative_rows=np.ascontiguousarray(representative_rows, dtype=np.int64),
         full_to_wedge=np.ascontiguousarray(full_to_wedge, dtype=np.int64),
@@ -2260,7 +2704,8 @@ def detect_point_group_reduction(
         generator_bits=np.zeros((order, 0), dtype=np.int8),
         full_operations=np.ascontiguousarray(candidates, dtype=np.int8),
         sector_characters=np.ascontiguousarray(characters),
-        sector_weights=np.asarray(plan.weights, dtype=np.int64),
+        sector_weights=weights,
+        sector_partner_irreps=partner_irreps,
         coset_images=np.ascontiguousarray(coset_images),
         coset_operations=np.ascontiguousarray([candidates[index] for index in plan.cosets], dtype=np.int8),
         grid=grid,
@@ -2278,8 +2723,9 @@ def periodic_abelian_reduction(
     """The largest group of commuting involutions ``r -> R r + t`` of a periodic cell, or ``abelian`` where it is
     no larger.
 
-    The orbitals of a cell that keep an abelian group (``occup.in``, ``Fix_Number_Eigenvalues``,
-    ``PARSEC_ORBITAL_GROUP=abelian``, or a plan of weighted sectors that gains too little) take the commuting signed
+    The orbitals of a cell that keep an abelian group (spin, a hybrid, ``occup.in`` or ``Fix_Number_Eigenvalues``
+    where ``driver._orbital_group_refusal`` refuses them the weighted sectors, ``PARSEC_ORBITAL_GROUP=abelian``, or a
+    plan of weighted sectors that gains too little) take the commuting signed
     permutations about the origin (:meth:`SignedPermutationReduction.detect`).  The operations of the cell with their
     translations (:func:`_space_group_operations`: the half-cell translations of a cell that repeats a smaller one,
     the operations about a centre off the origin) hold a larger one: for a diamond supercell 32 operations (the
@@ -2370,7 +2816,9 @@ def lost_operations_note(
         for positions in species.values():
             images = positions @ matrix.T + (0.0 if translation is None else translation)
             queries = images if period is None else _folded(images, period)
-            distances, _ = _matching_tree(positions, period).query(queries, k=1, workers=_QUERY_WORKERS)
+            distances, _ = _matching_tree(positions, period).query(
+                queries, k=1, workers=_query_workers(queries.shape[0])
+            )
             largest = max(largest, float(np.max(distances)))
         return largest
 
@@ -2424,11 +2872,26 @@ def lost_operations_note(
         parts.append(f"{len(lost)} rotation{'s' if len(lost) != 1 else ''} or mirror{'s' if len(lost) != 1 else ''}")
     if lost_half:
         parts.append(f"{len(lost_half)} translation{'s' if len(lost_half) != 1 else ''} by half the cell")
+    from ..Forces.sector_symmetry import MOVE_TOLERANCE
+
+    if worst > MOVE_TOLERANCE:
+        # Forces in the sectors and moves of a structure with a group check the atoms to MOVE_TOLERANCE: a
+        # tolerance that takes these operations serves a single point only
+        # (Forces/sector_symmetry.sector_force_tolerance_refusal refuses the others before their SCF).
+        advice = (
+            f"symmetrize the positions; {_ATOM_TOLERANCE_SWITCH} above {worst:.2g} serves a run without forces only: "
+            f"forces in the sectors, relaxations and molecular dynamics need the atoms on the group to "
+            f"{MOVE_TOLERANCE:g} bohr and are refused before the SCF where it holds them only more loosely; the "
+            "positions are not symmetrized"
+        )
+    else:
+        advice = (
+            f"symmetrize the positions, or set {_ATOM_TOLERANCE_SWITCH} above {worst:.2g}; the positions are not "
+            "symmetrized"
+        )
     return (
         f"{' and '.join(parts)} map the atoms within {loose_tolerance:g} bohr but not within the atom tolerance "
-        f"{atom_tolerance:g} bohr: the input is symmetric only to {worst:.2g} bohr and loses them "
-        f"(symmetrize the positions, or set {_ATOM_TOLERANCE_SWITCH} above {worst:.2g}; the positions are not "
-        "symmetrized)"
+        f"{atom_tolerance:g} bohr: the input is symmetric only to {worst:.2g} bohr and loses them ({advice})"
     )
 
 
@@ -2489,6 +2952,7 @@ __all__ = [
     "abelian_sector_operations",
     "attach_abelian_atom_orbits",
     "compress_projectors_for_sectors",
+    "defect_centre_note",
     "detect_point_group_reduction",
     "orbital_group_max_cost",
     "projector_orbit_counts",
@@ -2498,6 +2962,7 @@ __all__ = [
     "periodic_abelian_reduction",
     "periodic_abelian_translation_setting",
     "periodic_centre_setting",
+    "periodic_defect_centre_setting",
     "periodic_symmetry_setting",
     "periodic_trivial_origin_setting",
     "symmetry_atom_tolerance",

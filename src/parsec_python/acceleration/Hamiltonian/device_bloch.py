@@ -292,8 +292,8 @@ class DeviceBlochOperator:
         elif self.laplacian.dtype == xp.complex128:
             # the Bloch block of the finite-difference Laplacian (PARSEC_KPOINT_KINETIC=bloch): one complex
             # product, no k.grad term, V without |k|^2 (rows of the whole grid: the row-distributed solver refuses it);
-            # a sector of a k-point: its reduced kinetic term with |k|^2 (.complex_csr_device, the diagonal in the
-            # same pass)
+            # a sector of a k-point without its gathered stencil (PARSEC_KPOINT_SECTOR_STENCIL=off, no axial stencil):
+            # its reduced kinetic term with |k|^2 (.complex_csr_device, the diagonal in the same pass)
             product = getattr(self.laplacian, "product", None)
             if product is not None:
                 result = product(block, diagonal=self.diagonal)
@@ -373,20 +373,34 @@ class DeviceBlochOperator:
             and self.exchange is None
         )
 
+    @property
+    def fused_sector_recurrence(self) -> bool:
+        """Whether :attr:`fused_recurrence` holds with the stencil of a sector of a k-point
+        (:mod:`.sector_bloch_stencil`): the filters of one device take its steps in the kernel as well."""
+        return self.fused_recurrence and bool(getattr(self.stencil, "sector", False))
+
     def chebyshev_step(self, current, previous, center: float, scale: float, before=None, after=None):
         """``((H current - center current) scale - before previous) after`` (``before``, ``after`` per
         column; ``previous`` may be ``None``): the projector products, then one pass of the stencil kernel
-        (:meth:`.bloch_stencil.BlochStencil.apply`).  Only where :attr:`fused_recurrence`."""
+        (:meth:`.bloch_stencil.BlochStencil.apply`, :meth:`.sector_bloch_stencil.DeviceSectorStencil.apply`).
+        Only where :attr:`fused_recurrence`."""
         xp = self.xp
         nonlocal_part = None
         if self.projector_forward is not None:
+            # the complex projectors of a sector take the CSR kernel of .complex_csr_device (``product``)
+            adjoint_product = getattr(self.projector_adjoint, "product", None)
+            forward_product = getattr(self.projector_forward, "product", None)
             if self.projector_real:
                 coefficients = self._real_product(self.projector_adjoint, current)
+            elif adjoint_product is not None:
+                coefficients = adjoint_product(current)
             else:
                 coefficients = self.projector_adjoint @ current
             coefficients *= self.projector_signs[:, None]
             if self.projector_real:
                 nonlocal_part = self._real_product(self.projector_forward, coefficients)
+            elif forward_product is not None:
+                nonlocal_part = forward_product(coefficients)
             else:
                 nonlocal_part = xp.ascontiguousarray(self.projector_forward @ coefficients)
         return self.stencil.apply(
@@ -849,6 +863,19 @@ class DeviceBlochConverter:
             found = by_k[k_point] = BlochStencil(self.backend.cp, stencils, k_point)
         return found
 
+    def _sector_stencil(self, table):
+        """The kernel of the kinetic term of a sector of a k-point (a
+        :class:`.sector_bloch_stencil.SectorStencilTable`) on this backend, uploaded once per table."""
+        if self._operator_extras():
+            raise NotImplementedError(
+                "the sectors of a k-point are not implemented for the row-distributed MPI k-point solver"
+            )
+        from .sector_bloch_stencil import DeviceSectorStencil, HostSectorStencil
+
+        if self.backend.name == "cupy":
+            return self._cached(table, lambda: DeviceSectorStencil(self.backend.cp, table))
+        return self._cached(table, lambda: HostSectorStencil(table))
+
     def _scalar_parts(self, hamiltonian, *, derivatives: bool = True):
         backend = self.backend
         laplacian, k_gradient = self._derivative_parts(hamiltonian) if derivatives else (None, None)
@@ -993,7 +1020,12 @@ class DeviceBlochConverter:
         scalar = getattr(hamiltonian, "scalar_hamiltonian", None)
         spinor = scalar is not None or hasattr(hamiltonian, "soc_projectors")
         host_scalar = scalar if scalar is not None else hamiltonian
-        stencil = None if spinor else self._bloch_stencil(host_scalar)
+        table = getattr(host_scalar, "bloch_laplacian", None)
+        if not spinor and getattr(table, "sector_stencil", False):
+            # a sector of a k-point whose kinetic term is its gathered stencil (.sector_bloch_stencil)
+            stencil = self._sector_stencil(table)
+        else:
+            stencil = None if spinor else self._bloch_stencil(host_scalar)
         if stencil is not None:
             # the kernel replaces the stencil matrices: they are not uploaded
             parts = self._scalar_parts(host_scalar, derivatives=False)

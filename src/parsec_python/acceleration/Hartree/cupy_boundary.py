@@ -553,12 +553,14 @@ class CuPySymmetryMultipoleBoundaryBuilder:
     full-grid kernels at round-off.
     """
 
-    def __init__(self, grid, reduction, multipole_order=9, device_id=None):
+    def __init__(self, grid, reduction, multipole_order=9, device_id=None, assembly=None):
         cp, _ = require_cupy()
         if not wedge_kernels_supported(reduction):
             raise ValueError("the wedge boundary kernels need an axis-reflection reduction")
         if reduction.full_size != grid.size:
             raise ValueError("symmetry reduction does not match the Hartree grid")
+        if assembly is not None and assembly.full_size != grid.size:
+            raise ValueError("the reduction of the right-hand side does not match the Hartree grid")
         native = NativeMultipoleBoundaryBuilder(grid, multipole_order)
         if not hasattr(native._native_builder, "export_full_geometry"):
             raise RuntimeError("GPU boundary requires the rebuilt native geometry exporter")
@@ -570,11 +572,19 @@ class CuPySymmetryMultipoleBoundaryBuilder:
         names = ('radius', 'cosine', 'sine', 'phase_real', 'phase_imag')
         rows = np.asarray(reduction.representative_rows, dtype=np.int64)
         wedge = int(rows.size)
-        # Stencil entries of the representative rows, in wedge order.
+        # ``assembly``: the right-hand side on the rows of another wedge, coarser than this one (the orbits of a
+        # group with permutations that contains these reflections, CuPySubgroupMultipoleBoundaryBuilder): the moments
+        # are summed over the rows of ``reduction``, the boundary values are evaluated at the exterior points of the
+        # stencils of the rows of ``assembly`` only, and the right-hand side is assembled there.
+        self.assembly = assembly
+        assembly_reduction = reduction if assembly is None else assembly
+        assembly_rows = np.asarray(assembly_reduction.representative_rows, dtype=np.int64)
+        self.assembly_size = int(assembly_rows.size)
+        # Stencil entries of the rows of the right-hand side, in wedge order.
         indptr = np.asarray(payload['boundary_indptr'], dtype=np.int64)
-        counts = indptr[rows+1]-indptr[rows]
+        counts = indptr[assembly_rows+1]-indptr[assembly_rows]
         wedge_indptr = np.concatenate(([0], np.cumsum(counts))).astype(np.int64)
-        terms = np.repeat(indptr[rows]-wedge_indptr[:-1], counts)+np.arange(wedge_indptr[-1])
+        terms = np.repeat(indptr[assembly_rows]-wedge_indptr[:-1], counts)+np.arange(wedge_indptr[-1])
         self.boundary_term_count = int(terms.size)
         # A point reached from several rows has one bit pattern of geometry.
         unique, point = unique_rows(
@@ -587,7 +597,7 @@ class CuPySymmetryMultipoleBoundaryBuilder:
         with cp.cuda.Device(self.device_id):
             self.source = [cp.asarray(np.asarray(payload['source_'+name])[rows]) for name in names]
             self.weight = cp.asarray(multiplicities*grid.volume_element)
-            self.root = cp.asarray(np.sqrt(multiplicities))
+            self.root = cp.asarray(np.sqrt(np.asarray(assembly_reduction.multiplicities, dtype=np.float64)))
             self.indptr = cp.asarray(wedge_indptr)
             self.coefficient = cp.asarray(np.asarray(payload['boundary_operator_coefficient'])[terms])
             self.point = cp.asarray(point.reshape(-1), dtype=cp.int32)
@@ -598,7 +608,7 @@ class CuPySymmetryMultipoleBoundaryBuilder:
             del payload, unique, terms
             self.partial = cp.zeros((2*self.stride*self.stride, self.blocks), dtype=cp.float64)
             self.density = cp.empty(wedge, dtype=cp.float64)
-            self.rhs = cp.empty(wedge, dtype=cp.float64)
+            self.rhs = cp.empty(self.assembly_size, dtype=cp.float64)
             self.value = cp.empty(self.exterior_point_count, dtype=cp.float64)
             self.tail = None
             self.kernels = tuple(
@@ -650,7 +660,8 @@ class CuPySymmetryMultipoleBoundaryBuilder:
         self.device_storage_bytes += self.tail.nbytes
         self.atomic_tail_seconds = perf_counter()-started
 
-    def boundary_check(self, wedge_density, count, minimum_order=None, seed=0, positions=None):
+    def boundary_check(self, wedge_density, count, minimum_order=None, seed=0, positions=None,
+                       assembly_density=None):
         """Compare the boundary values of a density with its direct Coulomb sum.
 
         At ``count`` of the unique exterior points, the sample of
@@ -661,10 +672,12 @@ class CuPySymmetryMultipoleBoundaryBuilder:
         nearest to an atom.  Returns the points, the number ``total`` they
         were taken from and, in Ry, ``boundary``, ``direct``, ``tail`` and
         ``legacy``, the expansion cut at ``minimum_order``.
+        ``assembly_density``: that of :meth:`build_reduced_device` for a
+        builder with an assembly reduction.
         """
         cp, _ = require_cupy()
         from .cupy_atomic_tail import direct_sum_on_device, nearest_atom_on_device
-        _, expansion = self.build_reduced_device(wedge_density)
+        _, expansion = self.build_reduced_device(wedge_density, assembly_density)
         with cp.cuda.Device(self.device_id):
             points = self.exterior_points_device()
             index = cp.asarray(_check_points(
@@ -690,6 +703,8 @@ class CuPySymmetryMultipoleBoundaryBuilder:
     def build_reduced(self, density):
         """Host interface: normalized wedge RHS and the multipole expansion."""
         cp, _ = require_cupy()
+        if self.assembly is not None:
+            raise ValueError("a builder with an assembly reduction is built through its subgroup builder")
         if isinstance(density, SymmetryScalarField):
             if density.reduction is self.reduction:
                 wedge_density = density.values
@@ -706,11 +721,17 @@ class CuPySymmetryMultipoleBoundaryBuilder:
         with cp.cuda.Device(self.device_id):
             return cp.asnumpy(rhs), boundary
 
-    def build_reduced_device(self, wedge_density):
-        """Borrowed device RHS of one physical value per orbit, valid until the next build."""
+    def build_reduced_device(self, wedge_density, assembly_density=None):
+        """Borrowed device RHS of one physical value per orbit, valid until the next build.
+
+        A builder with an ``assembly`` reduction takes the density per orbit of that one too
+        (``assembly_density``, a device array) and returns its right-hand side.
+        """
         cp, _ = require_cupy()
         on_device = isinstance(wedge_density, cp.ndarray)
         wedge = self.reduction.wedge_size
+        if (assembly_density is None) != (self.assembly is None):
+            raise ValueError("a builder with an assembly reduction takes the density of its rows, and only it")
         with cp.cuda.Device(self.device_id):
             density = (cp.asarray(wedge_density, dtype=cp.float64) if on_device
                        else np.ascontiguousarray(wedge_density, dtype=np.float64))
@@ -732,9 +753,10 @@ class CuPySymmetryMultipoleBoundaryBuilder:
                 np.int64(points), np.int32(self.order), self.m_list, count, self.cls,
                 *self.exterior, self.norm, positive, np.int32(self.tail is not None),
                 self.value if self.tail is None else self.tail, self.value))
-            assemble(((wedge+255)//256,), (256,), (
-                np.int64(wedge), self.density, self.root, self.indptr, self.coefficient,
-                self.point, self.value, self.rhs))
+            rows = self.assembly_size
+            assemble(((rows+255)//256,), (256,), (
+                np.int64(rows), self.density if assembly_density is None else assembly_density, self.root,
+                self.indptr, self.coefficient, self.point, self.value, self.rhs))
             host_positive = cp.asnumpy(positive).view(np.complex128).reshape(self.stride, self.stride)
         moments = {}
         for l in range(self.order+1):
@@ -762,34 +784,61 @@ def diagonal_boundary_requested() -> bool:
     raise ValueError("PARSEC_HARTREE_DIAGONAL_BOUNDARY must be auto or off")
 
 
+def boundary_rows_setting() -> str:
+    """``PARSEC_HARTREE_BOUNDARY_ROWS``: ``wedge`` (the default since 2026-11-19) or ``diagonal``.
+
+    Where the boundary of a Hartree wedge whose group permutes the axes is built on the wedge of its diagonal
+    subgroup (:class:`CuPySubgroupMultipoleBoundaryBuilder`), ``wedge`` evaluates the boundary values at the
+    exterior points of the stencils of the rows of the Hartree wedge itself and assembles its right-hand side
+    there (the moments are summed on the wedge of the diagonal subgroup either way): for the orbits of Td a sixth
+    of the exterior points of those of D2.  ``diagonal`` evaluates them for every row of the wedge of the diagonal
+    subgroup and gathers the right-hand side from its rows, as before, bit for bit.  The two differ by the
+    round-off of one product per row.
+    """
+
+    raw = os.environ.get("PARSEC_HARTREE_BOUNDARY_ROWS", "wedge").strip().lower() or "wedge"
+    if raw not in {"wedge", "diagonal"}:
+        raise ValueError("PARSEC_HARTREE_BOUNDARY_ROWS must be wedge or diagonal")
+    return raw
+
+
 class CuPySubgroupMultipoleBoundaryBuilder:
     """Boundary of a group with permutations on the wedge of its diagonal subgroup.
 
     ``reduction`` is the group of the Hartree problem (a
     :class:`SignedPermutationReduction` whose operations permute the axes,
-    such as the subgroup D2d of the orbitals of a tetrahedral cluster), which
-    the wedge kernels cannot take; ``diagonal`` is the axis-reflection
-    reduction of its diagonal members
-    (:func:`..Symmetry.diagonal_subgroup_reduction`, D2 there).  A field on
-    the wedge of ``reduction`` is invariant under ``diagonal``: its value per
-    orbit of ``diagonal`` is that of the orbit of ``reduction`` holding the
-    representative row, the kernels of
-    :class:`CuPySymmetryMultipoleBoundaryBuilder` give the multipoles and the
-    right-hand side ``rhs_D = sqrt(m_D) b`` there, and the right-hand side of
-    ``reduction`` is ``sqrt(m) b`` at its own representative rows, ``b`` being
-    the value of the orbit of ``diagonal`` that holds the row.  The interface
-    is that of the wedge builder on ``reduction``; the device holds the arrays
-    of the wedge of ``diagonal`` (a quarter of the grid for D2) and two maps
-    instead of the full-grid arrays of :class:`CuPyPointMultipoleBoundaryBuilder`.
-    The results differ from that builder at round-off.
+    such as the subgroup D2d of the orbitals of a tetrahedral cluster, or Td
+    itself where the SCF fields keep its orbits), which the wedge kernels
+    cannot take; ``diagonal`` is the axis-reflection reduction of its
+    diagonal members (:func:`..Symmetry.diagonal_subgroup_reduction`, D2
+    there).  A field on the wedge of ``reduction`` is invariant under
+    ``diagonal``: its value per orbit of ``diagonal`` is that of the orbit of
+    ``reduction`` holding the representative row, and the kernels of
+    :class:`CuPySymmetryMultipoleBoundaryBuilder` sum the multipoles there.
+    With ``rows="wedge"`` (``PARSEC_HARTREE_BOUNDARY_ROWS``, the default) the
+    boundary values are evaluated at the exterior points of the stencils of
+    the representative rows of ``reduction`` and its right-hand side
+    ``sqrt(m) b`` is assembled at those rows.  With ``rows="diagonal"`` the
+    right-hand side ``rhs_D = sqrt(m_D) b`` is assembled on the wedge of
+    ``diagonal`` and that of ``reduction`` is ``sqrt(m) b`` at its own
+    representative rows, ``b`` being the value of the orbit of ``diagonal``
+    that holds the row, as before 2026-11-19.  The interface is that of the
+    wedge builder on ``reduction``; the device holds the arrays of the wedge
+    of ``diagonal`` (a quarter of the grid for D2) and the maps instead of the
+    full-grid arrays of :class:`CuPyPointMultipoleBoundaryBuilder`.  The
+    results differ from that builder at round-off.
     """
 
-    def __init__(self, grid, reduction, diagonal, multipole_order=9, device_id=None):
+    def __init__(self, grid, reduction, diagonal, multipole_order=9, device_id=None, rows=None):
         cp, _ = require_cupy()
         if reduction.full_size != grid.size or diagonal.full_size != grid.size:
             raise ValueError("symmetry reductions do not match the Hartree grid")
+        self.rows = boundary_rows_setting() if rows is None else str(rows)
+        if self.rows not in {"wedge", "diagonal"}:
+            raise ValueError("the rows of the boundary are wedge or diagonal")
         self._wedge = CuPySymmetryMultipoleBoundaryBuilder(
-            grid, diagonal, multipole_order, device_id=device_id)
+            grid, diagonal, multipole_order, device_id=device_id,
+            assembly=reduction if self.rows == "wedge" else None)
         self.grid, self.reduction, self.diagonal = grid, reduction, diagonal
         self.order = self._wedge.order
         self.device_id = self._wedge.device_id
@@ -800,21 +849,27 @@ class CuPySubgroupMultipoleBoundaryBuilder:
         # diagonal subgroup, and the orbit of the subgroup that holds each of
         # the group.
         to_group = full_to_wedge[np.asarray(diagonal.representative_rows, dtype=np.int64)]
-        to_diagonal = np.asarray(diagonal.full_to_wedge, dtype=np.int64)[
-            np.asarray(reduction.representative_rows, dtype=np.int64)]
         index = np.int32 if max(reduction.wedge_size, diagonal.wedge_size) < np.iinfo(np.int32).max else np.int64
         with cp.cuda.Device(self.device_id):
             self.to_group = cp.asarray(to_group.astype(index))
-            self.to_diagonal = cp.asarray(to_diagonal.astype(index))
-            self.diagonal_root = cp.asarray(np.sqrt(np.asarray(diagonal.multiplicities, dtype=np.float64))[to_diagonal])
-            self.root = cp.asarray(np.sqrt(np.asarray(reduction.multiplicities, dtype=np.float64)))
             self.density = cp.empty(diagonal.wedge_size, dtype=cp.float64)
-            self.rhs = cp.empty(reduction.wedge_size, dtype=cp.float64)
+            if self.rows == "wedge":
+                self.field_density = cp.empty(reduction.wedge_size, dtype=cp.float64)
+                self._own = (self.to_group, self.density, self.field_density)
+            else:
+                self.field_density = None
+                to_diagonal = np.asarray(diagonal.full_to_wedge, dtype=np.int64)[
+                    np.asarray(reduction.representative_rows, dtype=np.int64)]
+                self.to_diagonal = cp.asarray(to_diagonal.astype(index))
+                self.diagonal_root = cp.asarray(
+                    np.sqrt(np.asarray(diagonal.multiplicities, dtype=np.float64))[to_diagonal])
+                self.root = cp.asarray(np.sqrt(np.asarray(reduction.multiplicities, dtype=np.float64)))
+                self.rhs = cp.empty(reduction.wedge_size, dtype=cp.float64)
+                self._own = (self.to_group, self.to_diagonal, self.diagonal_root, self.root, self.density, self.rhs)
 
     @property
     def device_storage_bytes(self):
-        return self._wedge.device_storage_bytes + sum(a.nbytes for a in (
-            self.to_group, self.to_diagonal, self.diagonal_root, self.root, self.density, self.rhs))
+        return self._wedge.device_storage_bytes + sum(a.nbytes for a in self._own)
 
     @property
     def atomic_tail_maximum(self):
@@ -836,20 +891,34 @@ class CuPySubgroupMultipoleBoundaryBuilder:
         self._wedge.set_atomic_tail(positions, charges, tail_values)
 
     def _diagonal_density(self, wedge_density):
-        """The physical density per orbit of the diagonal subgroup, on the device."""
+        """The physical density per orbit of the diagonal subgroup, on the device (and, with ``rows="wedge"``, that
+        of the wedge of the group in ``field_density``)."""
         cp, _ = require_cupy()
         with cp.cuda.Device(self.device_id):
-            density = cp.asarray(wedge_density, dtype=cp.float64)
-            if density.shape != (self.reduction.wedge_size,):
-                raise ValueError("density must match the symmetry wedge")
+            if self.rows == "wedge":
+                density = self.field_density
+                if isinstance(wedge_density, cp.ndarray):
+                    if wedge_density.shape != density.shape:
+                        raise ValueError("density must match the symmetry wedge")
+                    cp.copyto(density, wedge_density.astype(cp.float64, copy=False))
+                else:
+                    host = np.ascontiguousarray(wedge_density, dtype=np.float64)
+                    if host.shape != density.shape:
+                        raise ValueError("density must match the symmetry wedge")
+                    density.set(host)
+            else:
+                density = cp.asarray(wedge_density, dtype=cp.float64)
+                if density.shape != (self.reduction.wedge_size,):
+                    raise ValueError("density must match the symmetry wedge")
             cp.take(density, self.to_group, out=self.density)
         return self.density
 
     def boundary_check(self, wedge_density, count, minimum_order=None, seed=0, positions=None):
         """The check of the wedge builder of the diagonal subgroup."""
+        diagonal = self._diagonal_density(wedge_density)
         return self._wedge.boundary_check(
-            self._diagonal_density(wedge_density), count, minimum_order=minimum_order, seed=seed,
-            positions=positions)
+            diagonal, count, minimum_order=minimum_order, seed=seed, positions=positions,
+            assembly_density=self.field_density)
 
     def build_reduced(self, density):
         """Host interface: normalized wedge RHS and the multipole expansion."""
@@ -877,7 +946,10 @@ class CuPySubgroupMultipoleBoundaryBuilder:
                       else bool(np.isfinite(wedge_density).all()))
             if not finite:
                 raise ValueError("density must be finite and match the symmetry wedge")
-            rhs, boundary = self._wedge.build_reduced_device(self._diagonal_density(wedge_density))
+            diagonal = self._diagonal_density(wedge_density)
+            if self.rows == "wedge":
+                return self._wedge.build_reduced_device(diagonal, self.field_density)
+            rhs, boundary = self._wedge.build_reduced_device(diagonal)
             cp.take(rhs, self.to_diagonal, out=self.rhs)
             self.rhs /= self.diagonal_root
             self.rhs *= self.root

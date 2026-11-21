@@ -87,7 +87,29 @@ run again on the full grid and starts it there):
    (:func:`fractional_occupations`; the symmetric ensemble of a partly filled
    shell holds a third or a half per level).  A fractional single level, or a multiplet within one sector, is
    what the full grid has too.  Fixed occupations are not tested here (test 1
-   covers their multiplets).
+   covers their multiplets; in the weighted sectors ``Occupations.partner_occupations`` refuses, at every step,
+   unequal entries of the partners of a weighted state and of degenerate partners that several sectors hold).
+
+The weighted sectors of a subgroup ``H`` of the point group ``G`` of the atoms (``PARSEC_ORBITAL_GROUP_SPIN``,
+:class:`~parsec_python.acceleration.Symmetry.PointGroupReduction`) solve one partner of some degenerate levels and
+count it ``w`` times; the density of each channel is averaged over ``G`` (the partners no sector holds), so the
+potentials keep every operation of ``G`` and test 2 finds no asymmetry there whatever the occupations.  What breaks
+``G`` shows in the levels instead: partners of one level stay degenerate, and a partly filled multiplet holds a
+fractional occupation of a state of weight ``w > 1``, or of the partners of a level that several sectors of ``H``
+hold.  Tests 1 and 3 therefore count a state of weight ``w`` as ``w`` partner levels in distinct sectors
+(:func:`partner_levels`): a triplet of Td held by one state of D2d with one electron is a partly filled multiplet
+of three levels, as the same triplet in three sectors of D2 is.  A pair of partners with integer but unequal
+occupations (one filled, one empty: degenerate within :data:`MULTIPLET_WIDTH`), which the average over ``G``
+would turn into the symmetric ensemble, fails test 3 too (``min(f, 1 - f)`` of the mean occupation of the
+multiplet).  A run that fails starts again in the abelian sectors.
+
+With ``PARSEC_SPIN_FLIP_SYMMETRY=auto`` (:mod:`.spin_flip`) the loop solves the
+up channel of an antiferromagnetic start alone and takes the down channel as its
+image under an operation that exchanges the partner labels; the tests see that
+down channel as it is: test 1 and 3 its levels (those of the up channel) with
+the images of the up channel's sector labels, test 2 its density, the image of
+the up density (which passes where the up density passes: the operation maps
+the group of the labels onto itself).
 
 What the tests do not see: a partly filled multiplet whose partners no grid
 operation of the atoms relates (the e levels of a C3 or C6 axis) and that is
@@ -134,6 +156,8 @@ DENSITY_SYMMETRY_TOLERANCE = 1.0e-2
 DENSITY_SYMMETRY_NOISE_BOUND = 0.2
 #: Times a converged reduced loop may tighten its criterion tenfold to see whether an asymmetry is noise.
 DENSITY_SYMMETRY_TIGHTENINGS = 3
+#: Sector labels of the partner levels of a weighted state (:func:`partner_levels`): sector times this plus partner.
+PARTNER_LABEL_STRIDE = 1024
 _RYDBERG_TO_EV = 13.605693122994
 _CHANNEL_NAMES = ("up", "down")
 
@@ -241,7 +265,7 @@ def partly_filled_multiplets(
                 continue
             largest = max(largest, part)
             levels = " ".join(f"{values[member] * _RYDBERG_TO_EV:.4f}" for member in group)
-            labels = " ".join(str(int(sectors[member])) for member in group)
+            labels = " ".join(_sector_label(sectors[member]) for member in group)
             lines.append(
                 f"{_CHANNEL_NAMES[index] if index < 2 else index} channel: {len(group)} levels within "
                 f"{width:g} Ry at {levels} eV hold {electrons:.4f} electrons (sectors {labels})"
@@ -254,6 +278,41 @@ def partly_filled_multiplets(
         lines=tuple(lines),
         reason="a partly filled multiplet",
         measure="largest min(n, d - n) of d levels holding n electrons",
+    )
+
+
+def _sector_label(value) -> str:
+    """A sector label of a report: ``s`` or, for a partner level of a weighted state, ``s.k`` (its partner k)."""
+
+    value = int(value)
+    if value < PARTNER_LABEL_STRIDE:
+        return str(value)
+    return f"{value // PARTNER_LABEL_STRIDE}.{value % PARTNER_LABEL_STRIDE + 1}"
+
+
+def partner_levels(values, filled, sectors, weights):
+    """The levels of one channel with every partner of a weighted state as a level of its own.
+
+    ``values`` (Ry), ``filled`` (electrons per state: the occupation times the weight) and ``sectors`` (labels) of
+    the states the weighted sectors solved, ``weights`` their weights (``None``: no weights, returned as given).  A
+    state of weight ``w`` becomes ``w`` levels of its energy holding ``filled / w`` electrons each, labelled
+    ``sector * PARTNER_LABEL_STRIDE + k`` for its ``k``-th partner: partners lie in distinct sectors, as they do in
+    the sectors of an abelian group, which is what the multiplet tests of the module ask.
+    """
+
+    values = np.asarray(values, dtype=np.float64)
+    filled = np.asarray(filled, dtype=np.float64)
+    sectors = np.asarray(sectors, dtype=np.int64)
+    if weights is None:
+        return values, filled, sectors
+    repeats = np.rint(np.asarray(weights, dtype=np.float64)).astype(np.int64)
+    if repeats.shape != values.shape or np.any(repeats < 1):
+        raise ValueError("one positive integer weight per state is needed")
+    partners = np.arange(int(repeats.sum()), dtype=np.int64) - np.repeat(np.cumsum(repeats) - repeats, repeats)
+    return (
+        np.repeat(values, repeats),
+        np.repeat(filled / repeats, repeats),
+        np.repeat(sectors, repeats) * PARTNER_LABEL_STRIDE + partners,
     )
 
 
@@ -386,6 +445,35 @@ def spin_guard_cell_group_setting() -> str:
     return value
 
 
+_FALLBACK_SHARED_SWITCH = "PARSEC_SPIN_FALLBACK_SHARED"
+
+
+def spin_fallback_shared_setting() -> str:
+    """``PARSEC_SPIN_FALLBACK_SHARED``: ``auto`` (the default), ``on`` or ``off`` (also ``0``, ``false``, ``no``).
+
+    The layout of the full grid a spin-polarized sector run goes back to where its guard fires
+    (``driver._SpinSectorFallback``).  ``off``: both channels on the full grid of the first device of the process
+    (the root's in the full-SCF runner), as before, whatever the memory estimate.  ``on``: both channels in one
+    sector of the identity, whose basis the GPUs of the process share (``distributed_state``), or the ranks of the
+    runner, which all prepare it together; a hybrid's or a meta-GGA's Fock and orbital terms, which keep one device
+    per sector basis, keep the layout of ``off``.  ``auto``: ``on`` where the full grid of both channels is estimated
+    not to fit the one device of ``off`` (``driver.spin_fallback_plan``), ``off`` elsewhere, so that every fallback
+    that fitted runs as before; under ``auto`` and ``on`` a fallback that fits no layout stops before its full grid.
+    The same layouts serve a spin cell that the command line solves on the full grid from its start (molecular
+    dynamics, manual movements, ``Move_Flag``, ``Ignore_Symmetry``: ``driver.spin_full_grid_plan``), which keeps the
+    1x1x1 k-point driver where no layout fits (under ``off`` where one device does not).
+    """
+
+    value = os.environ.get(_FALLBACK_SHARED_SWITCH, "auto").strip().lower() or "auto"
+    if value in {"0", "false", "no"}:
+        value = "off"
+    if value in {"1", "true", "yes"}:
+        value = "on"
+    if value not in ("auto", "on", "off"):
+        raise ValueError(f"{_FALLBACK_SHARED_SWITCH} must be auto, on or off, not {value!r}")
+    return value
+
+
 def _is_diagonal(matrix) -> bool:
     matrix = np.asarray(matrix)
     return np.count_nonzero(matrix - np.diag(np.diag(matrix))) == 0
@@ -480,7 +568,8 @@ class _AffineClosure:
 #: them in n x n x n diamond cubes): a candidate that would take it beyond is left out, one about the origin is tested
 #: on its own instead.
 _GUARD_GROUP_LIMIT = 1 << 15
-#: Neighbours of every species in the environment of an atom (:func:`_environment_operations`).
+#: Neighbours of every species in the environment of an atom (:func:`_environment_operations`; the classes are those of
+#: ``Symmetry.axis_reflection._atom_environments``, whose ``_ENVIRONMENT_NEIGHBOURS`` this is).
 _ENVIRONMENT_NEIGHBOURS = 12
 #: The most atoms of one environment from which :func:`_environment_operations` takes its candidates.
 _ENVIRONMENT_BUDGET = 32
@@ -494,14 +583,16 @@ def _environment_operations(grid, atoms, tolerance: float) -> list[np.ndarray] |
     group :class:`.kpoint_sectors.CellGroup` finds about its symmetric site).
 
     The cell group of the detection searches the translation of every ``R`` among those that carry the first atom of
-    the smallest species onto an atom of it, and gives up after 32 candidates that pass its sampled atoms: a defect
-    off the origin of a cell larger than 2 x 2 x 2 diamond cubes loses most of its operations there (the vacancy at
-    ``(a/2, a/2, 0)`` of 3 x 3 x 3 cubes keeps the swap of x and y of its 24).  Here the candidates carry an atom
-    ``x0`` of the rarest environment onto the atoms of its environment, which every symmetry must: the environment
-    of an atom is the sorted distances to its :data:`_ENVIRONMENT_NEIGHBOURS` nearest atoms of every species
-    (modulo the lattice), atoms of one species whose lists agree within four atom tolerances (an operation within the
-    tolerance changes a distance by at most two); ``x0`` is chosen among the classes of those lists rounded to
-    1e-4 bohr (a vacancy of diamond: its four neighbours).  Each candidate is a whole number of grid steps; those
+    the smallest species onto an atom of it, and gives up after 32 candidates that pass its sampled atoms: under
+    ``PARSEC_PERIODIC_DEFECT_CENTRE=off`` (before 2026-11-19) a defect off the origin of a cell larger than 2 x 2 x 2
+    diamond cubes loses most of its operations there (the vacancy at ``(a/2, a/2, 0)`` of 3 x 3 x 3 cubes keeps the
+    swap of x and y of its 24); under ``auto`` the search takes the candidates of this one where it gives up
+    (:func:`..Symmetry.axis_reflection._seeded_translations`, the same classes of environments).  Here the candidates
+    carry an atom ``x0`` of the rarest environment onto the atoms of its environment, which every symmetry must: the
+    environment of an atom is the sorted distances to its :data:`_ENVIRONMENT_NEIGHBOURS` nearest atoms of every
+    species (modulo the lattice), atoms of one species whose lists agree within four atom tolerances (an operation
+    within the tolerance changes a distance by at most two); ``x0`` is chosen among the classes of those lists rounded
+    to 1e-4 bohr (a vacancy of diamond: its four neighbours).  Each candidate is a whole number of grid steps; those
     that carry 16 sampled atoms of every species near atoms of it are matched with every atom (each within the
     tolerance of a different atom of its species, single-threaded k-d tree queries; two images nearest one atom go to
     :func:`..Symmetry.axis_reflection._atoms_are_invariant_operation`).
@@ -510,11 +601,13 @@ def _environment_operations(grid, atoms, tolerance: float) -> list[np.ndarray] |
     from scipy.spatial import cKDTree
 
     from ..Symmetry.axis_reflection import (
+        _atom_environments,
         _atoms_are_invariant_operation,
         _folded,
         _integer_signed_permutation_parameters,
         _lattice_period,
         _positions_by_species,
+        _rarest_class,
         _signed_permutation_operations,
     )
 
@@ -526,30 +619,10 @@ def _environment_operations(grid, atoms, tolerance: float) -> list[np.ndarray] |
     steps = period / counts
     names = sorted(species)
     trees = {name: cKDTree(_folded(species[name], period), boxsize=period) for name in names}
-    environments = {}
-    for name in names:
-        columns = []
-        for other in names:
-            # the atom itself is its own nearest neighbour of its species: one more, and dropped
-            own = 1 if other == name else 0
-            count = min(_ENVIRONMENT_NEIGHBOURS + own, species[other].shape[0])
-            if count - own <= 0:
-                continue
-            distances, _ = trees[other].query(_folded(species[name], period), k=count)
-            distances = np.sort(np.asarray(distances, dtype=np.float64).reshape(species[name].shape[0], count), axis=1)
-            columns.append(distances[:, own:])
-        environments[name] = np.hstack(columns) if columns else np.zeros((species[name].shape[0], 0))
-    # x0: an atom of the smallest class of rounded environments (the first of the first species among the smallest)
-    best = None
-    for name in names:
-        rounded = np.rint(environments[name] / 1.0e-4).astype(np.int64)
-        _, first, sizes = np.unique(rounded, axis=0, return_index=True, return_counts=True)
-        smallest = int(np.argmin(sizes))
-        if best is None or int(sizes[smallest]) < best[0]:
-            best = (int(sizes[smallest]), name, int(first[smallest]))
-    _, name, origin = best
-    reference = environments[name][origin]
-    alike = np.flatnonzero(np.max(np.abs(environments[name] - reference[None, :]), axis=1, initial=0.0) <= 4.0 * tolerance + 1.0e-9)
+    # x0: an atom of the smallest class of rounded environments (the first of the first species among the smallest;
+    # the classes of the detection, Symmetry/axis_reflection.py, PARSEC_PERIODIC_DEFECT_CENTRE)
+    name, origin, gap = _rarest_class(_atom_environments(species, period, trees))
+    alike = np.flatnonzero(gap <= 4.0 * tolerance + 1.0e-9)
     if alike.size > _ENVIRONMENT_BUDGET:
         return None
     x0 = species[name][origin]
@@ -839,15 +912,30 @@ def density_symmetry_breaking(densities, grid, atoms=None, tolerance: float = DE
     largest = 0.0
     lines: list[str] = []
     for matrix, rows in images:
+        broken = 0
         for index, density in enumerate(densities):
             values = np.asarray(density, dtype=np.float64)
             deviation = float(grid.volume_element * np.sum(np.abs(values[rows] - values)))
             largest = max(largest, deviation)
             if deviation >= tolerance:
+                broken += 1
                 lines.append(
                     f"{_CHANNEL_NAMES[index] if index < 2 else index} channel: the density differs by "
                     f"{deviation:.4f} electrons from its image under the operation "
                     f"{_operation_text(matrix)} of the atoms"
+                )
+        if broken == 2 and len(densities) == 2:
+            # Both channels break it: an antiferromagnetic or broken-symmetry state where the operation
+            # carries one channel onto the other (a diagnostic line; the test is the same).
+            up, down = (np.asarray(density, dtype=np.float64) for density in densities)
+            exchanged = float(grid.volume_element * np.sum(np.abs(up[rows] - down)))
+            if exchanged < tolerance:
+                lines.append(
+                    f"the operation {_operation_text(matrix)} carries one channel onto the other "
+                    f"(int |rho_up(g r) - rho_down(r)| = {exchanged:.2e} electrons): an antiferromagnetic or "
+                    "broken-symmetry state, which two labels of the species with opposite "
+                    "Initial_Spin_Polarization keep in the sectors (PARSEC_SPIN_FLIP_SYMMETRY=auto then solves "
+                    "one channel)"
                 )
     if largest < tolerance:
         return None
@@ -860,7 +948,9 @@ def density_symmetry_breaking(densities, grid, atoms=None, tolerance: float = DE
     )
 
 
-def fractional_occupations(channels, tolerance: float = SPIN_SECTOR_OCCUPATION_TOLERANCE):
+def fractional_occupations(
+    channels, tolerance: float = SPIN_SECTOR_OCCUPATION_TOLERANCE, *, unequal_partners: bool = False
+):
     """:class:`FractionalOccupations` of the spin ``channels`` of a result, ``None`` where all are integer.
 
     ``channels`` are :class:`parsec_python.models.SpinChannelResult` (or
@@ -870,7 +960,10 @@ def fractional_occupations(channels, tolerance: float = SPIN_SECTOR_OCCUPATION_T
     sectors, exact (levels within :data:`MULTIPLET_WIDTH` of each other) or of
     :func:`sector_multiplets`.  A fractional single level, or a multiplet within
     one sector, is what the full grid has as well.  The line of a multiplet
-    gives its levels (eV), occupations and sectors.
+    gives its levels (eV), occupations and sectors.  ``unequal_partners``
+    (the weighted sectors, whose density is averaged over the point group):
+    an exact multiplet whose levels hold unequal occupations counts by
+    ``min(f, 1 - f)`` of their mean as well.
     """
 
     largest = 0.0
@@ -888,12 +981,17 @@ def fractional_occupations(channels, tolerance: float = SPIN_SECTOR_OCCUPATION_T
         exact = {tuple(group) for group in groups}
         groups += [group for group in sector_multiplets(values, sectors) if tuple(group) not in exact]
         for group in groups:
-            if float(np.max(fractional[group])) < tolerance:
+            measure = float(np.max(fractional[group]))
+            if unequal_partners and tuple(group) in exact and float(np.ptp(occupations[group])) > 0.0:
+                # (degenerate partners filled unequally, one whole and one empty: their mean is fractional)
+                mean = float(np.mean(occupations[group]))
+                measure = max(measure, min(mean, 1.0 - mean))
+            if measure < tolerance:
                 continue
-            largest = max(largest, float(np.max(fractional[group])))
+            largest = max(largest, measure)
             levels = " ".join(f"{values[member] * _RYDBERG_TO_EV:.4f}" for member in group)
             filled = " ".join(f"{occupations[member]:.4f}" for member in group)
-            labels = " ".join(str(int(sectors[member])) for member in group)
+            labels = " ".join(_sector_label(sectors[member]) for member in group)
             lines.append(
                 f"{_CHANNEL_NAMES[index] if index < 2 else index} channel: {len(group)} level(s) at {levels} eV "
                 f"hold {float(np.sum(occupations[group])):.4f} electrons (occupations {filled}; sectors {labels})"
@@ -946,7 +1044,9 @@ class SpinSectorReducer:
     each with the orbit multiplicities as quadrature weights, which gives the
     full-grid sums of invariant fields, and the symmetry guard (see the
     module).  ``hybrid`` says whether the run is a hybrid's Fock loop, which
-    names the loop of a failed check.
+    names the loop of a failed check.  ``guard`` false: no test (the one
+    sector of the identity of a fallback's shared full grid, which holds
+    every state of the full grid).
     """
 
     spin_channels_supported = True
@@ -959,8 +1059,11 @@ class SpinSectorReducer:
         tolerance: float = SPIN_SECTOR_OCCUPATION_TOLERANCE,
         fixed_occupations: bool = False,
         structure=None,
+        guard: bool = True,
     ) -> None:
         self.reducer = reducer
+        # False for one sector of the identity (the shared full grid of a fallback): nothing to test
+        self.guard = bool(guard)
         self.hybrid = bool(hybrid)
         self.tolerance = float(tolerance)
         # Occupations of occup.in (no Fermi level): test 3 does not apply.
@@ -1158,7 +1261,45 @@ class SpinSectorReducer:
         Fermi level of +8 eV), and a report on them disappears or keeps moving.
         """
 
+        if not self.guard:
+            return None
+        if self.sector_weights is not None:
+            # Weighted sectors: every partner of a weighted state as a level of its own (see the module).
+            expanded = [
+                partner_levels(values, filled, sectors, self._weights_of(sectors))
+                for values, filled, sectors in zip(eigenvalues, occupations, representations)
+            ]
+            eigenvalues = [item[0] for item in expanded]
+            occupations = [item[1] for item in expanded]
+            representations = [item[2] for item in expanded]
         return partly_filled_multiplets(eigenvalues, occupations, representations, fixed=self.fixed_occupations)
+
+    @property
+    def sector_weights(self):
+        """The weights of the sectors of a subgroup with weights (``PointGroupReduction``), ``None`` otherwise."""
+
+        weights = getattr(self.reducer.reduction, "sector_weights", None)
+        return None if weights is None else np.asarray(weights, dtype=np.int64)
+
+    def _weights_of(self, sectors) -> np.ndarray:
+        """The weight of every state of the sector labels (from one) of a channel."""
+
+        return self.sector_weights[np.asarray(sectors, dtype=np.int64) - 1]
+
+    def _partner_channel(self, channel):
+        """A result channel of weighted sectors with partner levels in distinct sectors (:func:`partner_levels`)."""
+
+        solved = getattr(channel, "sector_states", None)
+        if solved is None:
+            return channel
+        sectors, _, weights = solved
+        repeats = np.asarray(weights, dtype=np.int64)
+        partners = np.arange(int(repeats.sum()), dtype=np.int64) - np.repeat(np.cumsum(repeats) - repeats, repeats)
+        return SimpleNamespace(
+            eigenvalues=np.asarray(channel.eigenvalues, dtype=np.float64),
+            occupations=np.asarray(channel.occupations, dtype=np.float64),
+            representations=np.repeat(np.asarray(sectors, dtype=np.int64), repeats) * PARTNER_LABEL_STRIDE + partners,
+        )
 
     def abandon_start(self, report, passes: int = 0) -> None:
         """Raise :class:`SpinSectorsAbandoned` for a converged report of :meth:`start_spectrum_report`."""
@@ -1206,7 +1347,7 @@ class SpinSectorReducer:
         (see the module).
         """
 
-        if self.structure is None:
+        if self.structure is None or not self.guard:
             return None
         grid, images = self._grid_and_images()
         largest = 0.0
@@ -1226,7 +1367,7 @@ class SpinSectorReducer:
 
         result = getattr(result, "result", result)
         channels = getattr(result, "spin", None)
-        if channels is None:
+        if channels is None or not self.guard:
             return
         if self.structure is not None:
             grid, images = self._grid_and_images()
@@ -1237,7 +1378,10 @@ class SpinSectorReducer:
                 raise SpinSectorsAbandoned(self._stage(final), report)
         if self.fixed_occupations:
             return
-        report = fractional_occupations(channels, self.tolerance)
+        weighted = self.sector_weights is not None
+        if weighted:
+            channels = [self._partner_channel(channel) for channel in channels]
+        report = fractional_occupations(channels, self.tolerance, unequal_partners=weighted)
         if report is not None:
             raise SpinSectorsAbandoned(self._stage(final), report)
 
@@ -1274,8 +1418,10 @@ __all__ = [
     "atom_group_images",
     "density_symmetry_breaking",
     "guard_group_order",
+    "spin_fallback_shared_setting",
     "spin_guard_cell_group_setting",
     "partly_filled_multiplets",
+    "partner_levels",
     "HostSpinXCOnOrbits",
     "MULTIPLET_WIDTH",
     "SPIN_SECTOR_OCCUPATION_TOLERANCE",

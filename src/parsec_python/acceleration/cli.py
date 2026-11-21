@@ -26,12 +26,15 @@ from parsec_python.MolecularDynamics.run import (
     restart_structure as dynamics_restart_structure,
     run_recorded_molecular_dynamics,
 )
+from parsec_python.Forces.position_symmetry import symmetrize_input_positions
 from parsec_python.Relaxation.run import (
+    move_flag_subgroup_setting,
     relaxation_header_lines,
     restart_structure,
     run_recorded_relaxation,
     run_single_point_with_forces,
     symmetry_decision,
+    symmetry_fixed_atoms,
 )
 from parsec_python.cli import (
     load_restart_start,
@@ -468,22 +471,25 @@ def _resolve_symmetry_mode(
     ignore_symmetry: bool,
     *,
     accelerated_self_consistent_soc: bool,
+    soc_sectors: str = "off",
 ) -> str:
     """Resolve ``--symmetry``/``Ignore_Symmetry`` to an effective mode.
 
-    Self-consistent SOC on the accelerated path always forces "off": the
-    orbital-sector symmetry decomposition
-    (``CuPySymmetrySCFEigensolver``/``SymmetrySCFReducer``) assumes
-    real-valued, spin-diagonal 1-D irreps, but the spin-orbit L.S cross term
-    (``lzsz``/``lsxy``) mixes spin channels and breaks that assumption, and
-    ``CuPySpinorHamiltonian``/``run_chebff_spinor`` only accept plain
-    complex128 ndarrays, not the compact ``SymmetryScalarField``
-    representation the symmetry-reduced Hartree/XC/mixing hooks would
-    otherwise produce for this system. "auto"/unset falls back to full-grid
-    silently (its own documented contract); "on" explicitly promises a
-    nontrivial reduction, which this tier cannot deliver, so that
-    combination is rejected with a ``ValueError`` instead of silently
-    overriding the user's explicit request.
+    Self-consistent SOC on the accelerated path always forces "off" for the
+    scalar machinery the solver is prepared with: the orbital-sector symmetry
+    decomposition (``CuPySymmetrySCFEigensolver``/``SymmetrySCFReducer``)
+    assumes real-valued, spin-diagonal 1-D irreps, but the spin-orbit L.S
+    cross term (``lzsz``/``lsxy``) mixes spin channels and breaks that
+    assumption, and the spinor loop keeps its Hartree/XC/mixing on the whole
+    grid.  Its own reduction is the double-group sectors of the spinor loop
+    (``PARSEC_SOC_SECTORS=kramers`` or ``on``, ``soc_sectors``,
+    :mod:`.SCF.soc_sectors`), which the caller enables unless the run uses no
+    symmetry (``--symmetry off``, or ``Ignore_Symmetry`` without a mode on the
+    command line, :func:`_soc_symmetry_choice`).  "auto"/unset keeps whatever the
+    switch gives; "on" explicitly promises a nontrivial reduction, so with
+    ``PARSEC_SOC_SECTORS=off`` it is rejected with a ``ValueError`` that names
+    the switch (the caller refuses it too for a cluster without a two-fold
+    rotation or mirror, where the sectors cannot be used).
     """
 
     mode = (
@@ -492,15 +498,69 @@ def _resolve_symmetry_mode(
         else ("off" if ignore_symmetry else "auto")
     )
     if accelerated_self_consistent_soc:
-        if requested_symmetry == "on":
+        if requested_symmetry == "on" and soc_sectors == "off":
             raise ValueError(
-                "self-consistent spin-orbit coupling on the accelerated "
-                "path does not yet support symmetry reduction, so "
-                "--symmetry on cannot be satisfied for this input; omit "
-                "--symmetry or pass --symmetry off"
+                "self-consistent spin-orbit coupling on the accelerated path "
+                "reduces by symmetry only in the double-group sectors of "
+                "PARSEC_SOC_SECTORS=kramers or on, so --symmetry on cannot be "
+                "satisfied with PARSEC_SOC_SECTORS=off; set PARSEC_SOC_SECTORS "
+                "or omit --symmetry"
             )
         return "off"
     return mode
+
+
+def _soc_symmetry_choice(
+    symmetry_mode: str,
+    requested_symmetry: str | None,
+    ignore_symmetry: bool,
+    soc_sectors: str,
+) -> tuple[str, bool, str]:
+    """The symmetry of a self-consistent SOC run on the accelerated path: the mode the solver is prepared with
+    (always ``"off"``, :func:`_resolve_symmetry_mode`, which refuses ``--symmetry on`` with
+    ``PARSEC_SOC_SECTORS=off``), whether the spinor loop may use the double-group sectors of the switch, and the
+    mode the report is written with.
+
+    ``symmetry_mode`` is the mode of the run before this choice (the command line where it overrides
+    ``Ignore_Symmetry``, as for every other run): the sectors are allowed unless it is ``"off"``, and the report
+    then prints PARSEC 1.5's block of the point group rather than the lines of ``Ignore_Symmetry``.
+    """
+
+    resolved = _resolve_symmetry_mode(
+        requested_symmetry,
+        ignore_symmetry,
+        accelerated_self_consistent_soc=True,
+        soc_sectors=soc_sectors,
+    )
+    allowed = symmetry_mode != "off"
+    return resolved, allowed, (symmetry_mode if allowed else resolved)
+
+
+def _soc_orbital_symmetry(system, soc_sectors: str, symmetry_on: bool):
+    """The backend record of a self-consistent SOC run whose input allows symmetry, with the
+    ``orbital_symmetry`` of its spinor loop: the double-group sectors of ``PARSEC_SOC_SECTORS`` (or why the
+    whole grid stays), or the whole grid under ``off``.  ``--symmetry on`` (``symmetry_on``) with a cluster
+    whose sectors cannot be used is refused (``ValueError``) before the SCF, as the scalar route refuses it.
+    """
+
+    info = system.backend_info
+    if soc_sectors == "off":
+        text = "full grid (self-consistent spin-orbit coupling: PARSEC_SOC_SECTORS=off)"
+    else:
+        from .SCF.soc_sectors import soc_orbital_symmetry
+
+        text, reason = soc_orbital_symmetry(system.grid, system.atoms, soc_sectors)
+        if reason and symmetry_on:
+            raise ValueError(
+                f"symmetry='on' requested, but the spin-orbit sectors of PARSEC_SOC_SECTORS={soc_sectors} "
+                f"cannot be used: {reason}"
+            )
+    details = tuple(
+        (key, text if key == "orbital_symmetry" else value) for key, value in info.details
+    )
+    if not any(key == "orbital_symmetry" for key, _ in details):
+        details = details + (("orbital_symmetry", text),)
+    return replace(info, details=details)
 
 
 def _reference_only_solver_options(problem) -> list[str]:
@@ -527,6 +587,22 @@ def _reference_only_solver_options(problem) -> list[str]:
             "(Reorthogonalization_Threshold)"
         )
     return features
+
+
+def _symmetrized_cell_in_sectors(problem) -> bool:
+    """Whether the accelerated driver runs ``Symmetrize_Charge_Density`` of this periodic cell
+    (``PARSEC_SYMMETRIZED_DENSITY_SECTORS=auto``): an unpolarized bulk cell at the Gamma point that the route of the
+    sectors takes (:func:`.driver.periodic_sector_refusal`); the rest keeps the reference solver."""
+
+    from .driver import periodic_sector_refusal
+
+    if bool(getattr(problem.scf, "spin_polarized", False)):
+        # (a spin cell with the option keeps the reference 1x1x1 k-point driver: SCF/gamma_spin.py)
+        return False
+    try:
+        return periodic_sector_refusal(problem) is None
+    except (AttributeError, TypeError, ValueError):
+        return False
 
 
 def _reference_only_features(
@@ -655,18 +731,38 @@ def _reference_only_features(
     # The seven field loops (acceleration.SCF.polarizability), the potential
     # of point charges and the symmetrized density (acceleration.SCF.
     # density_symmetry) run on the accelerated SCF of a cluster; the
-    # reference solver keeps those of a periodic cell (its space group).
-    if getattr(problem.scf, "symmetrize_density", False) and problem.periodic_cell is not None:
-        features.append(
-            "charge-density symmetrization of a periodic cell (Symmetrize_Charge_Density)"
-        )
+    # reference solver keeps those of a periodic cell (its space group),
+    # except a bulk cell at the Gamma point that the route of the sectors
+    # takes, whose density the space group averages on the orbits of its
+    # sectors (PARSEC_SYMMETRIZED_DENSITY_SECTORS=auto, since 2026-11-19).
+    # A periodic spinor run (self-consistent spin-orbit coupling or
+    # non-collinear magnetism) is named above already, and the reference
+    # solver averages its density too (the wedge of PARSEC_SOC_KPOINT_WEDGE,
+    # the Fortran-derived routines): no second or third reason for it.
+    periodic_spinor = problem.periodic_cell is not None and bool(
+        problem.scf.self_consistent_spin_orbit or problem.scf.noncollinear
+    )
+    if (
+        getattr(problem.scf, "symmetrize_density", False)
+        and problem.periodic_cell is not None
+        and not periodic_spinor
+    ):
+        from .SCF.density_symmetry import symmetrized_density_sectors_setting
+
+        if symmetrized_density_sectors_setting() == "off" or not _symmetrized_cell_in_sectors(problem):
+            features.append(
+                "charge-density symmetrization of a periodic cell (Symmetrize_Charge_Density)"
+            )
     if problem.scf.self_consistent_spin_orbit or problem.scf.noncollinear:
         # The accelerated spinor loop (SCF.self_consistent_soc) has none of them.
         output_files = getattr(translation, "output_files", None)
         for present, name in (
             (getattr(translation, "polarizability_field", None) is not None, "Polarizability"),
             (bool(getattr(problem, "point_charges", ())), "Add_Point_Charges"),
-            (getattr(problem.scf, "symmetrize_density", False), "Symmetrize_Charge_Density"),
+            (
+                getattr(problem.scf, "symmetrize_density", False) and not periodic_spinor,
+                "Symmetrize_Charge_Density",
+            ),
             (
                 output_files is not None
                 and output_files.output_data
@@ -1004,18 +1100,45 @@ def _gamma_hybrid_sector_handover(arguments: argparse.Namespace, translation) ->
     return reference_main(_reference_argv(arguments))
 
 
-def _gamma_spin_on_device(arguments: argparse.Namespace, translation) -> bool:
+def _backend_resolves_to_cupy(arguments: argparse.Namespace, translation) -> bool:
+    """Whether the backend of this run resolves to CuPy (``False`` where it cannot be resolved)."""
+
+    try:
+        selection = resolve_backend(arguments.backend, translation.problem)
+    except (BackendUnavailableError, NotImplementedError, ValueError):
+        return False
+    return selection.selected == "cupy"
+
+
+def _spin_symmetry_off(arguments: argparse.Namespace, translation) -> bool:
+    """Whether the solver of a periodic cell takes no point group by request: ``--symmetry off``, or
+    ``Ignore_Symmetry`` without a ``--symmetry`` option (the rule of ``solver_symmetry_mode`` in :func:`_run`)."""
+
+    requested = getattr(arguments, "symmetry", None)
+    return requested == "off" or (requested is None and bool(getattr(translation, "ignore_symmetry", False)))
+
+
+def _gamma_spin_on_device(
+    arguments: argparse.Namespace, translation, *, supercell: bool = False, notes: list | None = None
+) -> bool:
     """Whether the accelerated Gamma sectors run this spin-polarized periodic input (``PARSEC_GAMMA_SPIN_SECTORS``).
 
     :func:`parsec_python.acceleration.SCF.gamma_spin.gamma_spin_on_sector_route`: a collinear single point of a bulk
-    cell at the Gamma point that the route of the sectors takes, in one process, on a backend that resolves to CuPy.
-    ``False`` keeps the reference solver's 1x1x1 k-point driver of before.
+    cell at the Gamma point that the route of the sectors takes, in one process, on a backend that resolves to CuPy,
+    and its forces and relaxations by an optimizer where they keep the sectors (``PARSEC_SPIN_SECTOR_FORCES=auto``;
+    ``supercell``: the input is the supercell of a k-point mesh, whose forces keep the reference solver), and its
+    forces and moves on the full grid where both channels fit this process (``notes`` receives the NOTE of one that
+    does not).  ``False`` keeps the reference solver's 1x1x1 k-point driver of before.
     """
 
     from .Parallel import mpi
-    from .SCF.gamma_spin import gamma_spin_on_sector_route, gamma_spin_sector_setting
+    from .SCF.gamma_features import gamma_feature_settings
+    from .SCF.gamma_spin import gamma_spin_on_sector_route, gamma_spin_sector_setting, spin_sector_forces_setting
 
     gamma_spin_sector_setting()
+    spin_sector_forces_setting()
+    # (TS, a meta-GGA and libxc take this route under their switches: SCF/gamma_features.py)
+    gamma_feature_settings()
 
     def backend_is_cupy() -> bool:
         try:
@@ -1028,6 +1151,9 @@ def _gamma_spin_on_device(arguments: argparse.Namespace, translation) -> bool:
         translation,
         mpi=bool(getattr(arguments, "mpi", False) or mpi.requested()),
         backend_is_cupy=backend_is_cupy,
+        supercell=supercell,
+        symmetry_off=_spin_symmetry_off(arguments, translation),
+        notes=notes,
     )
 
 
@@ -1104,15 +1230,26 @@ def periodic_sector_forces_refusal(translation, *, supercell: bool = False) -> s
     full group ``G`` of the reduction (:mod:`.Forces.sector_symmetry`).  That holds for a single point with forces and
     for a relaxation by an optimizer (``bfgs``, ``simple``), whose ionic loop finds ``G`` once and averages the forces
     and the moved positions over it (``parsec.F90`` keeps the structure of a relaxation in its group in the same way).
+    The Fortran-derived routines (``Use_Fortran_Routines``, also where the parser chose them: Cubic_Spline forces,
+    an FHI pseudopotential, a core correction, ``Restart_Run``, ...) do the same under
+    ``PARSEC_FORTRAN_SECTOR_FORCES=auto`` (their terms on the fields the sectors expand, their nonlocal term in the
+    sectors: :func:`.Forces.periodic_device.compute_device_periodic_forces`); under ``off`` their forces read the full
+    grid, as before.
     The rest stays on the full grid: molecular dynamics and manual movements (``parsec.F90`` uses no symmetry there),
-    ``Move_Flag`` fixing atoms (a fixed atom that ``G`` exchanges with a movable one leaves the group), the
-    Fortran-derived routines (``Use_Fortran_Routines``, whose forces read the full grid), point charges, a band
-    structure under ``PARSEC_PERIODIC_SECTOR_BANDS=off`` (under ``auto`` the bands take the expanded potential of the
-    sectors), a non-self-consistent run, a restart from ``wfn.dat`` (full-grid states), an electric field
+    ``Move_Flag`` fixing atoms under ``PARSEC_MOVE_FLAG_SUBGROUP=off`` (a fixed atom that ``G`` exchanges with a
+    movable one leaves the group; under ``auto`` a relaxation keeps the sectors of the subgroup that maps the fixed
+    atoms onto fixed atoms, which the driver detects with them as a species of their own, and a single point moves no
+    atom; the relaxation with fixed atoms of a spin-polarized cell keeps the full grid of both channels,
+    ``PARSEC_SPIN_SECTOR_FORCES``, and that of a cell on the Fortran-derived routines the full grid of those
+    routines, which symmetrize with their own group), point charges, a band structure under
+    ``PARSEC_PERIODIC_SECTOR_BANDS=off`` (under ``auto`` the bands take the expanded potential of the sectors), a
+    non-self-consistent run, a restart from ``wfn.dat`` (full-grid states), an electric field
     (``Polarizability``), k-point sampling beyond the Gamma point (its own routes, e.g. the force wedge of the mesh)
     and the supercell that stands for a mesh of the time-reversal invariant points (``supercell``: it repeats the
     atoms of the input).  ``PARSEC_PERIODIC_SECTOR_FORCES=off`` keeps every one on the full grid, as before.
     """
+
+    from .Forces.sector_symmetry import fortran_sector_forces_setting
 
     problem = translation.problem
     if problem.periodic_cell is None:
@@ -1126,13 +1263,61 @@ def periodic_sector_forces_refusal(translation, *, supercell: bool = False) -> s
         return "manual movements use no symmetry"
     if relaxation is None and not getattr(translation, "compute_forces", False):
         return "no forces are computed"
-    if getattr(getattr(translation, "routines", None), "fortran", False) or getattr(
-        problem.grid, "fortran_routines", False
+    if (
+        getattr(getattr(translation, "routines", None), "fortran", False)
+        or getattr(problem.grid, "fortran_routines", False)
+    ) and fortran_sector_forces_setting() == "off":
+        # PARSEC_FORTRAN_SECTOR_FORCES=auto: their forces and moves keep the sectors as well.
+        return (
+            "the forces of the Fortran-derived routines (Use_Fortran_Routines) read the full grid "
+            "(PARSEC_FORTRAN_SECTOR_FORCES=off)"
+        )
+    if (
+        getattr(getattr(translation, "routines", None), "fortran", False)
+        or getattr(problem.grid, "fortran_routines", False)
+    ) and (
+        getattr(getattr(problem, "scf", None), "van_der_waals", False)
+        or any(getattr(item, "has_hubbard", False) for item in getattr(problem, "pseudopotentials", {}).values())
     ):
-        return "the forces of the Fortran-derived routines (Use_Fortran_Routines) read the full grid"
+        # TS and LDA+U take the Gamma sectors for their SCF (PARSEC_GAMMA_TS_SECTORS,
+        # PARSEC_GAMMA_LDAU_SECTORS, validated for single points); their forces on the Fortran-derived routines (every
+        # TS input) keep the full grid, as before PARSEC_FORTRAN_SECTOR_FORCES, whose sector forces were validated
+        # without these corrections.
+        return (
+            "the forces of the TS correction or of LDA+U on the Fortran-derived routines read the full grid (their "
+            "sector forces are not validated)"
+        )
     movable = getattr(translation, "movable", None)
     if movable is not None and not all(bool(flag) for flag in movable):
-        return "Move_Flag fixes atoms"
+        from parsec_python.Relaxation.run import MOVE_FLAG_SUBGROUP_SWITCH, move_flag_subgroup_setting
+
+        # PARSEC_MOVE_FLAG_SUBGROUP=auto: a relaxation by an optimizer keeps the sectors of the group the detection
+        # finds with the fixed atoms as a species of their own (every operation maps them onto fixed atoms:
+        # parsec_python.Relaxation.run.symmetry_fixed_atoms), and the flags of a single point with forces move no
+        # atom; off keeps both on the full grid, as before.
+        if move_flag_subgroup_setting() == "off":
+            return f"Move_Flag fixes atoms ({MOVE_FLAG_SUBGROUP_SWITCH}=off)"
+        if relaxation is not None and getattr(getattr(problem, "scf", None), "spin_polarized", False):
+            # The subgroup sectors of Move_Flag are validated for unpolarized cells; a spin-polarized
+            # cell relaxed with fixed atoms keeps the full grid of both channels that PARSEC_SPIN_SECTOR_FORCES gives
+            # it (SCF/gamma_spin._full_grid_moves, validated against the k-point driver), and the runner refuses it
+            # on several ranks.  Its single-point forces move no atom and keep the sectors.
+            return (
+                "Move_Flag fixes atoms of a spin-polarized cell (the subgroup sectors of "
+                f"{MOVE_FLAG_SUBGROUP_SWITCH} are not validated for two channels: both on the full grid)"
+            )
+        if relaxation is not None and (
+            getattr(getattr(translation, "routines", None), "fortran", False)
+            or getattr(problem.grid, "fortran_routines", False)
+        ):
+            # The subgroup sectors of Move_Flag are validated on the default routines; the forces of
+            # the Fortran-derived routines in sectors (PARSEC_FORTRAN_SECTOR_FORCES) are averaged over their own group,
+            # which ignores Move_Flag as PARSEC 1.5 does, so a relaxation with fixed atoms keeps their full grid.
+            return (
+                "Move_Flag fixes atoms of a cell on the Fortran-derived routines (Use_Fortran_Routines), whose forces "
+                f"are symmetrized with their own group (the subgroup sectors of {MOVE_FLAG_SUBGROUP_SWITCH} are "
+                "validated on the default routines)"
+            )
     if getattr(problem, "point_charges", ()):
         return "point charges (Add_Point_Charges)"
     if getattr(translation, "polarizability_field", None) is not None:
@@ -1194,6 +1379,54 @@ def _periodic_sector_forces_line(system, operations) -> str | None:
         f"operations; projectors of {kept_atoms} of {atom_count} atoms ({kept_columns} of {len(labels)} columns) "
         f"({_PERIODIC_SECTOR_FORCES_SWITCH}=auto)"
     )
+
+
+def _fortran_sector_forces_line(system) -> str | None:
+    """The parsec.out line of the forces of a cell of the Fortran-derived routines in sectors, or ``None``.
+
+    How many operations their total and the moved positions of a relaxation are averaged over: the group that the
+    operations of those routines (:func:`parsec_python.Forces.periodic.periodic_force_operations`) and of the sectors
+    generate (:func:`.Forces.sector_symmetry.fortran_force_operations`, ``PARSEC_FORTRAN_SECTOR_FORCES=auto``).
+    """
+
+    from parsec_python.Forces.periodic import periodic_force_operations
+    from parsec_python.Grid.pbc import uses_fortran_routines
+
+    from .Forces.sector_symmetry import fortran_force_operations, sector_symmetry_operations
+
+    if getattr(getattr(system, "input", None), "periodic_cell", None) is None or not uses_fortran_routines(
+        system.grid
+    ):
+        return None
+    sectors = sector_symmetry_operations(system)
+    if sectors is None:
+        return None
+    routine = periodic_force_operations(system, None)
+    combined = fortran_force_operations(routine, sectors)
+    return (
+        " Forces of the Fortran-derived routines in the sectors: their own terms, the total and the moved positions "
+        f"averaged over {len(combined)} operations (the group of their {len(routine)} and of the {len(sectors)} of "
+        "the sectors; PARSEC_FORTRAN_SECTOR_FORCES=auto)"
+    )
+
+
+def _supercell_kpoints_handover(translation) -> bool:
+    """Whether ``PARSEC_SUPERCELL_KPOINTS=auto`` solves this Gamma-point cell as a smaller cell with k-points, which
+    the reference CLI runs (``parsec_python/SCF/supercell_mesh.py``; it makes the same cell and mesh).  A switch
+    value it refuses is handed over too: the reference CLI reports it as an input error.  Where the cell repeats a
+    smaller one that cannot take its grid (too small for the stencil), the note says why it stays here, at the Gamma
+    point."""
+
+    from parsec_python.SCF.supercell_mesh import supercell_mesh_route
+
+    notes: list[str] = []
+    try:
+        found = supercell_mesh_route(translation, notes=notes)
+    except ValueError:
+        return True
+    for note in notes:
+        print(f"NOTE: {note}")
+    return found is not None
 
 
 def _reference_argv(arguments: argparse.Namespace) -> list[str]:
@@ -1347,6 +1580,29 @@ def _abort_mpi(status: int, error: BaseException | None = None) -> None:
         context.comm.Abort(int(status))
 
 
+def _apply_restarts(translation, arguments):
+    """``(translation, relax_restart, dynamics_restart, notes)``: ``Relax_Restart`` or ``--restart-from``, then the
+    restart of a dynamics run, applied to ``translation``."""
+
+    translation, relax_restart, restart_notes = restart_structure(
+        translation,
+        translation.source.parent,
+        None
+        if arguments.restart_from is None
+        else _resolve_output(arguments.restart_from, translation.source.parent, ""),
+    )
+    translation, dynamics_restart, dynamics_notes = dynamics_restart_structure(
+        translation, translation.source.parent
+    )
+    return translation, relax_restart, dynamics_restart, [*restart_notes, *dynamics_notes]
+
+
+def _found_problem(found_supercell, problem_of_input):
+    """The problem the restarts started from: the supercell where the route took it, else that of the input."""
+
+    return problem_of_input if found_supercell is None else found_supercell[0]
+
+
 def _run(
     arguments: argparse.Namespace, resources: Resources, scope: ExitStack | None = None
 ) -> int:
@@ -1365,6 +1621,21 @@ def _run(
     except (ParsecInputError, ValueError) as error:
         print(f"Input error: {error}", file=sys.stderr)
         return 2
+    try:
+        # The switches of the local forces of a cell are used after the first
+        # SCF, also by the k-point runs of the reference solver: read here so
+        # that a value they do not know stops every run before it.
+        from .Forces.periodic_local import validate_local_force_settings
+
+        validate_local_force_settings()
+        # PARSEC_SUPERCELL_KPOINTS_MESH and PARSEC_SUPERCELL_KPOINTS_WEDGE (SCF/supercell_mesh.py), read in every run
+        # so that a value they do not know is refused before anything is prepared
+        from parsec_python.SCF.supercell_mesh import validate_settings as _validate_supercell_mesh
+
+        _validate_supercell_mesh()
+    except ValueError as error:
+        print(f"Input error: {error}", file=sys.stderr)
+        return 2
     translation = shared_vector_seed(translation)
     if arguments.mlff is not None:
         from parsec_python.MLFF import apply_mlff_option
@@ -1380,40 +1651,83 @@ def _run(
         except ValueError as error:
             print(f"Input error: {error}", file=sys.stderr)
             return 2
+    if translation.problem.periodic_cell is not None:
+        # The switches of the k-point sectors and of the detection of their cell group
+        # (PARSEC_SYMMETRY_ATOM_TOLERANCE, PARSEC_PERIODIC_DEFECT_CENTRE, ...), read before any hand-over to the
+        # reference solver, so that a value they do not know is refused here and not at the setup of its k-point
+        # solver (the driver reads them for the routes of this path).
+        from .SCF.kpoint_sectors import check_kpoint_sector_switches
+
+        try:
+            check_kpoint_sector_switches()
+        except ValueError as error:
+            print(f"Input error: {error}", file=sys.stderr)
+            return 2
     # A k-point mesh of the time-reversal invariant points as the Gamma point of the supercell
-    # (PARSEC_KPOINT_SUPERCELL=auto), and a repeating Gamma-point cell as its smaller cell with a mesh
-    # (PARSEC_SUPERCELL_KPOINTS=auto, a k-point run of the reference CLI, which makes the same cell):
+    # (PARSEC_KPOINT_SUPERCELL: auto, the default since 2026-11-19, for a single point whose estimated difference of
+    # the two kinetic forms is small; on wherever it applies), and a repeating Gamma-point cell as its smaller cell
+    # with a mesh (PARSEC_SUPERCELL_KPOINTS=auto, a k-point run of the reference CLI, which makes the same cell):
     # parsec_python/SCF/kpoint_supercell.py, the same energies with the Bloch kinetic term.
     from parsec_python.SCF.kpoint_supercell import (
-        describe as _describe_kpoint_cells,
+        cell_parsec_dat_view as _cell_parsec_dat_view,
+        cell_result_view as _cell_result_view,
+        kpoint_supercell_setting as _supercell_setting,
         kpoints_of_supercell as _bloch_cells,
-        supercell_of_trim_mesh as _trim_supercell,
+        per_cell_lines as _per_cell_lines,
+        process_gpu_count as _process_gpu_count,
+        trim_supercell_route as _trim_supercell_route,
+        validate_settings as _validate_supercell_settings,
     )
 
     from .driver import periodic_sector_refusal as _sector_refusal
+    from .Parallel import mpi as _mpi_of_route
 
-    _found_supercell = _trim_supercell(translation.problem, refusal=_sector_refusal)
+    problem_of_input = translation.problem
+    translation_of_input = translation
+    restarts = None
+    try:
+        _validate_supercell_settings()
+        if _supercell_setting() == "auto":
+            # Relax_Restart, --restart-from and the restart of a dynamics run before the route of a mesh: their
+            # structure stands for the atoms of the input, of which a supercell is made (on and off keep the order
+            # of before below; on's relaxations write the files of the supercell)
+            restarts = _apply_restarts(translation, arguments)
+            translation = restarts[0]
+        _trim_route = _trim_supercell_route(
+            translation,
+            refusal=_sector_refusal,
+            device=resources.device,
+            # --mpi: the ranks divide the k-points
+            kpoint_ranks=bool(getattr(arguments, "mpi", False) or _mpi_of_route.requested()),
+            # the GPUs of this process: the k-point pools divide the k-points over several
+            gpus=_process_gpu_count,
+            orbitals=bool(getattr(arguments, "save_wavefunctions", False)),
+        )
+    except (OSError, ValueError) as error:
+        print(f"Input error: {error}", file=sys.stderr)
+        return 2
+    _mesh_problem = translation.problem
+    _found_supercell = (_trim_route.problem, _trim_route.repeats) if _trim_route.taken else None
+    if _trim_route.note is not None and getattr(arguments, "mpi_rank", 0) == 0:
+        print(_trim_route.note)
     if _found_supercell is not None:
         translation = replace(translation, problem=_found_supercell[0])
-        print(_describe_kpoint_cells("supercell", _found_supercell[1]))
-    elif _bloch_cells(translation.problem) is not None:
+    elif _supercell_kpoints_handover(translation_of_input):
+        # the reference command line decides on the structure of the input, before its restarts (the
+        # route of PARSEC_SUPERCELL_KPOINTS is asked only where no TRIM supercell was taken; a k-point input, which
+        # TRIM takes, never repeats into a smaller cell there, so the two routes never hand one run back and forth)
         return reference_main(_reference_argv(arguments))
 
     from parsec_python.MLFF import MLFFError, relax_initial_structure
 
     try:
-        problem_of_input = translation.problem
-        translation, relax_restart, restart_notes = restart_structure(
-            translation,
-            translation.source.parent,
-            None
-            if arguments.restart_from is None
-            else _resolve_output(arguments.restart_from, translation.source.parent, ""),
-        )
-        translation, dynamics_restart, dynamics_notes = dynamics_restart_structure(
-            translation, translation.source.parent
-        )
-        restart_notes = [*restart_notes, *dynamics_notes]
+        if restarts is None:
+            restarts = _apply_restarts(translation, arguments)
+            translation = restarts[0]
+            restarted = translation.problem is not _found_problem(_found_supercell, problem_of_input)
+        else:
+            restarted = restarts[0].problem is not problem_of_input
+        _, relax_restart, dynamics_restart, restart_notes = restarts
         # Initial_Structure: mlff, unless a restart file gave the structure;
         # a dry run only reports the settings.
         mlff_notes = []
@@ -1421,10 +1735,23 @@ def _run(
             translation, mlff_notes = relax_initial_structure(
                 translation,
                 translation.source.parent,
-                restarted=translation.problem is not problem_of_input,
+                restarted=restarted,
                 progress=None if arguments.quiet else print,
             )
         restart_notes = [*restart_notes, *mlff_notes]
+        # PARSEC_SYMMETRIZE_POSITIONS=on: the positions averaged over the group found within
+        # PARSEC_SYMMETRY_ATOM_TOLERANCE, before anything reads them (off, the default: as given).
+        translation, position_notes = symmetrize_input_positions(translation)
+        restart_notes = [*restart_notes, *position_notes]
+        # PARSEC_MOVE_FLAG_SUBGROUP and PARSEC_SYMMETRIZED_DENSITY_SECTORS, read in every run so that a value they
+        # do not know is refused.
+        move_flag_subgroup_setting()
+        from .SCF.density_symmetry import symmetrized_density_sectors_setting
+
+        symmetrized_density_sectors_setting()
+        if _found_supercell is not None:
+            # the mesh solved as its supercell: said in parsec.out too
+            restart_notes = [*restart_notes, f" {_trim_route.note}"]
         use_symmetry, symmetry_note = symmetry_decision(translation)
         # Whether the atoms stay in the point group of the first structure,
         # which Ignore_Symmetry does not tell.  The command line may overrule
@@ -1432,6 +1759,9 @@ def _run(
         keeps_group, group_note = symmetry_decision(
             replace(translation, ignore_symmetry=False)
         )
+        # The atoms Move_Flag fixes in a relaxation that keeps the subgroup respecting the flags: a species of their
+        # own for the symmetry detection of the driver (PARSEC_MOVE_FLAG_SUBGROUP=auto), None otherwise.
+        fixed_atoms = symmetry_fixed_atoms(translation)
     except MLFFError as error:
         print(f"MLFF error: {error}", file=sys.stderr)
         return 2
@@ -1479,12 +1809,25 @@ def _run(
 
         scope.enter_context(periodic_ionic_scope(translation))
     hybrid_on_device = _hybrid_on_device(arguments, translation)
+    soc_sectors = "off"
     try:
-        # PARSEC_GAMMA_SPIN_SECTORS, read in every run so that a value it does not know is refused.
-        gamma_spin_on_device = _gamma_spin_on_device(arguments, translation)
+        # PARSEC_GAMMA_SPIN_SECTORS and PARSEC_SPIN_SECTOR_FORCES, read in every run so that a value they do not
+        # know is refused.
+        gamma_spin_notes: list[str] = []
+        gamma_spin_on_device = _gamma_spin_on_device(
+            arguments, translation, supercell=_found_supercell is not None, notes=gamma_spin_notes
+        )
+        if accelerated_self_consistent_soc:
+            # PARSEC_SOC_SECTORS: a value it does not know is refused before the SCF.
+            from .SCF.soc_sectors import soc_sectors_setting
+
+            soc_sectors = soc_sectors_setting()
     except ValueError as error:
         print(f"Input error: {error}", file=sys.stderr)
         return 2
+    for note in gamma_spin_notes:
+        # (a spin cell whose full grid fits nowhere here: it keeps the k-point driver of the reference solver)
+        print(f"NOTE: {note}", file=sys.stderr)
     unsupported = _reference_only_features(
         translation,
         accelerated_backend_selected=accelerated_self_consistent_soc,
@@ -1575,12 +1918,18 @@ def _run(
             file=sys.stderr,
         )
         return 2
+    # The report of a self-consistent SOC run that allows symmetry prints PARSEC 1.5's block of the point group
+    # (as the Fortran does for spinors), not the Ignore_Symmetry lines of a run without symmetry.
+    report_symmetry_mode = symmetry_mode
+    # Whether the spinor loop may use the double-group sectors of PARSEC_SOC_SECTORS.
+    soc_symmetry = False
     if accelerated_self_consistent_soc:
         try:
-            symmetry_mode = _resolve_symmetry_mode(
+            symmetry_mode, soc_symmetry, report_symmetry_mode = _soc_symmetry_choice(
+                symmetry_mode,
                 arguments.symmetry,
                 translation.ignore_symmetry,
-                accelerated_self_consistent_soc=True,
+                soc_sectors,
             )
         except ValueError as error:
             print(f"Input error: {error}", file=sys.stderr)
@@ -1598,10 +1947,44 @@ def _run(
         return 2
     # The symmetry the solver is prepared with; the report keeps the mode above.
     solver_symmetry_mode = symmetry_mode
-    if translation.restart_run and getattr(translation, "restart_from_wfndat", False):
+    # Inputs whose symmetry PARSEC 1.5 switches off, and restarts on the full grid, that keep the sectors of the
+    # group they leave intact (SCF/symmetry_off_inputs.py; read here so that a value they do not know is refused).
+    from .SCF.symmetry_off_inputs import (
+        kept_group_note,
+        kept_group_reasons,
+        kept_group_warnings,
+        read_settings as symmetry_off_settings,
+        restart_sector_switch,
+    )
+
+    try:
+        symmetry_off_settings()
+        kept_reasons = kept_group_reasons(translation)
+        restart_sectors = restart_sector_switch(translation)
+    except ValueError as error:
+        print(f"Input error: {error}", file=sys.stderr)
+        return 2
+    if (
+        kept_reasons
+        and arguments.symmetry != "off"
+        # the spinor driver takes no sectors (_resolve_symmetry_mode)
+        and not accelerated_self_consistent_soc
+        and solver_symmetry_mode == "off"
+    ):
+        solver_symmetry_mode = "auto"
+    else:
+        # --symmetry off, or another rule of this CLI keeps the full grid: no group is kept (no field loop in sectors)
+        kept_reasons = ()
+    if (
+        translation.restart_run
+        and getattr(translation, "restart_from_wfndat", False)
+        and restart_sectors is None
+    ):
         # The orbitals of wfn.dat are full-grid states of one representation:
         # they seed the eigensolver of the full grid (SCF.restart).  The
-        # forces keep the symmetrization of the input.
+        # forces keep the symmetrization of the input.  (A cluster under
+        # PARSEC_WFNDAT_RESTART_SECTORS=auto keeps its sectors where the stored
+        # density keeps the group: SCF/symmetry_off_inputs.restart_in_sectors.)
         if arguments.symmetry == "on":
             print(
                 "Input error: --symmetry on cannot be used with Restart_From_Wfndat: "
@@ -1615,10 +1998,13 @@ def _run(
         translation.restart_run
         and scf_settings.spin_polarized
         and scf_settings.spin_symmetry_sector_mode == "auto"
+        and restart_sectors is None
     ):
         # parsec.dat holds full-grid fields of a run that may have broken the
         # point group of the atoms, which the sectors would average: the two
-        # channels of a restart are solved on the full grid.
+        # channels of a restart are solved on the full grid.  (A cluster under
+        # PARSEC_SPIN_RESTART_SECTORS=auto keeps the sectors where both stored
+        # densities keep the group: SCF/symmetry_off_inputs.restart_in_sectors.)
         translation = replace(
             translation,
             problem=replace(
@@ -1630,11 +2016,31 @@ def _run(
             "NOTE: Restart_Run of a spin-polarized calculation: both channels on the full grid "
             "(Spin_Symmetry_Sectors: off for the restart)",
         ]
-    # PARSEC_PERIODIC_SECTOR_FORCES and PARSEC_PERIODIC_SECTOR_BANDS, read in
-    # every run so that a value they do not know is refused.
+    if kept_reasons and (
+        solver_symmetry_mode == "off"
+        or (scf_settings.spin_polarized and translation.problem.scf.spin_symmetry_sector_mode == "off")
+    ):
+        # A restart above keeps the full grid (wfn.dat, or both spin channels): so does the input, as before.
+        solver_symmetry_mode = "off"
+        kept_reasons = ()
+    if kept_reasons:
+        restart_notes = [*restart_notes, kept_group_note(kept_reasons)]
+    # PARSEC_PERIODIC_SECTOR_FORCES, PARSEC_PERIODIC_SECTOR_BANDS and
+    # PARSEC_FORTRAN_SECTOR_FORCES, read in every run so that a value they do
+    # not know is refused.
     try:
         periodic_sector_forces_setting()
         periodic_sector_bands_setting()
+        from .Forces.sector_symmetry import fortran_sector_forces_setting
+
+        fortran_sector_forces_setting()
+        # and the switches of TS, LDA+U, meta-GGA and libxc in the Gamma sectors (SCF/gamma_features.py)
+        from .SCF.gamma_features import gamma_feature_settings
+
+        gamma_feature_settings()
+        from .SCF.band_sectors import band_kpoint_sectors_setting
+
+        band_kpoint_sectors_setting()
     except ValueError as error:
         print(f"Input error: {error}", file=sys.stderr)
         return 2
@@ -1649,9 +2055,13 @@ def _run(
         # (PARSEC_PERIODIC_SYMMETRY).  Its single-point forces and its
         # relaxations by an optimizer keep those sectors too, their forces and
         # moved positions averaged over the full group of the sectors
-        # (PARSEC_PERIODIC_SECTOR_FORCES=auto); molecular dynamics, manual
-        # movements, Move_Flag with fixed atoms and the Fortran-derived routines
-        # read the full grid (periodic_sector_forces_refusal).  A band structure
+        # (PARSEC_PERIODIC_SECTOR_FORCES=auto), on the Fortran-derived routines
+        # as well under PARSEC_FORTRAN_SECTOR_FORCES=auto; molecular dynamics,
+        # manual movements and Move_Flag with fixed atoms under
+        # PARSEC_MOVE_FLAG_SUBGROUP=off (under auto the sectors of the subgroup
+        # that keeps the fixed atoms, but for a spin-polarized cell or the
+        # Fortran-derived routines) read the full grid
+        # (periodic_sector_forces_refusal).  A band structure
         # keeps the sectors of the SCF under PARSEC_PERIODIC_SECTOR_BANDS=auto:
         # the bands read the potential the result holds on the full grid
         # (Output/post_scf.band_hand_over); under off the whole run reads the
@@ -1712,12 +2122,41 @@ def _run(
                 file=sys.stderr,
             )
             return 2
+        from .SCF.gamma_features import ts_ignore_symmetry_note
+
+        # The Ignore_Symmetry that PARSEC demands of the TS correction (error 159) does not keep a bulk cell at the
+        # Gamma point off the sectors of a CuPy run under PARSEC_GAMMA_TS_SECTORS=auto|on (SCF/gamma_features.py).
+        ts_note = (
+            ts_ignore_symmetry_note(
+                translation, backend_is_cupy=lambda: _backend_resolves_to_cupy(arguments, translation)
+            )
+            if arguments.symmetry is None and periodic_full_grid is None and not wfndat_restart
+            else None
+        )
         if periodic_full_grid is not None:
             solver_symmetry_mode = "off"
         elif not wfndat_restart and not translation.problem.point_charges and (
             arguments.symmetry == "on" or (arguments.symmetry is None and not translation.ignore_symmetry)
         ):
             solver_symmetry_mode = arguments.symmetry or "auto"
+        elif ts_note is not None and not translation.problem.point_charges:
+            solver_symmetry_mode = "auto"
+            restart_notes = [*restart_notes, ts_note]
+
+    # A spin cell whose forces or moves the accelerated driver solves on the full grid (molecular dynamics, manual
+    # movements, Move_Flag, Ignore_Symmetry): where both channels would not fit one device, one sector of the identity
+    # whose basis the GPUs of the process share (PARSEC_SPIN_FALLBACK_SHARED; the routing kept the k-point driver for
+    # a run that fits neither).
+    spin_identity_sector = False
+    if gamma_spin_on_device and solver_symmetry_mode == "off":
+        from .SCF.gamma_spin import spin_full_grid_moves_plan
+
+        moves_plan = spin_full_grid_moves_plan(translation, symmetry_off=_spin_symmetry_off(arguments, translation))
+        if moves_plan is not None and moves_plan.fits:
+            spin_identity_sector = moves_plan.layout == "shared"
+            moves_note = moves_plan.moves_note()
+            if moves_note is not None:
+                restart_notes = [*restart_notes, f"NOTE: {moves_note}"]
 
     summary = summarize_translation(translation)
     if arguments.dry_run:
@@ -1735,7 +2174,7 @@ def _run(
         print(summary)
         for line in domain_lines:
             print(line)
-        for warning in translation.warnings:
+        for warning in kept_group_warnings(translation.warnings, kept_reasons):
             print(f"WARNING: {warning}")
         print(
             f"Backend: requested={selection.requested}, "
@@ -1749,9 +2188,11 @@ def _run(
         )
         print(f"Hartree backend: {selection.hartree_backend}")
         print(
-            f"Symmetry: mode={symmetry_mode}; exact detection is deferred "
+            f"Symmetry: mode={solver_symmetry_mode if kept_reasons else symmetry_mode}; exact detection is deferred "
             "until grid construction"
         )
+        if kept_reasons:
+            print(kept_group_note(kept_reasons))
         for reason in selection.fallback_reasons:
             print(f"BACKEND FALLBACK: {reason}")
         print("Dry run successful; no grid or SCF calculation was started.")
@@ -1823,6 +2264,11 @@ def _run(
     # parsec.dat, eigen.dat and the cube files of Output_Grid_Data, beside
     # the input as PARSEC writes them in its run directory.
     files = output_files_for(translation, input_directory)
+    if _found_supercell is not None and _trim_route.cell_files:
+        # PARSEC_KPOINT_SUPERCELL=auto: parsec.dat of the cell of the input, as the k-points write it (the
+        # potential and density of the first cell, the levels dealt to the k-points of the mesh, no orbitals),
+        # which Restart_Run and nscf_kpoints of that input read on either route
+        files.parsec_dat_view = _cell_parsec_dat_view(_mesh_problem, _found_supercell[1])
     taken = {*protected_paths, log_path}
     if not arguments.no_archive:
         taken.add(archive_path)
@@ -1856,8 +2302,14 @@ def _run(
             reporter = AcceleratedTextReporter(
                 log.write,
                 translation,
-                symmetry_mode=symmetry_mode,
+                # A kept group (SCF/symmetry_off_inputs.py): the symmetry block of PARSEC 1.5 for this input, as the
+                # reference CLI prints it, not that of Ignore_Symmetry (the sectors are named below it); a spin-orbit
+                # run that allows symmetry: its own mode (PARSEC_SOC_SECTORS, _soc_symmetry_choice)
+                symmetry_mode=None if kept_reasons else report_symmetry_mode,
             )
+            if _found_supercell is not None and _trim_route.cell_files:
+                # PARSEC_KPOINT_SUPERCELL=auto: the energy lines of the cell of the input, as the k-points give them
+                reporter.reference.cells_in_report = int(np.prod(_found_supercell[1]))
             reporter.header()
             # What usrinputfile.F90 prints about the output keywords the input gives.
             for line in output_header_lines(translation.output_files):
@@ -1877,7 +2329,7 @@ def _run(
                 log.write(line)
             if scan_folder_note is not None:
                 log.write(scan_folder_note)
-            for warning in translation.warnings:
+            for warning in kept_group_warnings(translation.warnings, kept_reasons):
                 log.write(f"WARNING: {warning}")
             if symmetry_note is not None:
                 log.write(f"WARNING: {symmetry_note}")
@@ -1900,6 +2352,11 @@ def _run(
                 backend=arguments.backend,
                 symmetry=solver_symmetry_mode,
                 symmetry_cache_directory=symmetry_cache_directory,
+                **({"spin_identity_sector": True} if spin_identity_sector else {}),
+                symmetry_fixed_atoms=fixed_atoms,
+                # forces and moves averaged over the group of the sectors: a small cell keeps its sectors
+                # (PARSEC_PERIODIC_SECTOR_FLOOR applies to the SCF alone)
+                sector_forces=periodic_sector_forces,
             )
             if _context is None or _context.is_root:
                 # What of a cluster with a point group runs on the full grid for want of the native extension
@@ -1907,6 +2364,10 @@ def _run(
                 for key, value in getattr(getattr(system, "backend_info", None), "details", ()):
                     if key == "symmetry_full_grid_note":
                         print(f"NOTE: {value}", file=sys.stderr)
+            if accelerated_self_consistent_soc and soc_symmetry:
+                # The orbitals of the spinor loop: the double-group sectors of PARSEC_SOC_SECTORS, which the
+                # solver prepared without symmetry does not know of.
+                system.backend_info = _soc_orbital_symmetry(system, soc_sectors, arguments.symmetry == "on")
             # Wavefunctions are much larger than all scalar observables and
             # are absent from the default archive.  Keep symmetry-sector
             # orbitals resident/lazy unless the user explicitly requests
@@ -1925,6 +2386,15 @@ def _run(
                 or translation.molecular_dynamics is not None
             )
             reporter.setup(system)
+            if moving or translation.compute_forces:
+                # A group that PARSEC_SYMMETRY_ATOM_TOLERANCE took beyond the
+                # 1e-6 bohr of the forces and moves in the sectors: refused
+                # here, before the SCF, not by the forces after it.
+                from .Forces.sector_symmetry import sector_force_tolerance_refusal
+
+                tolerance_refusal = sector_force_tolerance_refusal(system, moves=moving)
+                if tolerance_refusal is not None:
+                    raise ValueError(tolerance_refusal)
             # The forces of a cell solved in the sectors of a point group with
             # weighted representations: averaged over the full group G of the
             # sectors (Forces/sector_symmetry.py), which the ionic loop of a
@@ -1941,6 +2411,9 @@ def _run(
                 if sector_symmetry_operations(system) is not None:
                     symmetrize_forces = True
                 line = _periodic_sector_forces_line(system, sector_operations)
+                if line is not None:
+                    log.write(line)
+                line = _fortran_sector_forces_line(system)
                 if line is not None:
                     log.write(line)
             # FDET (PARSEC 1.5): the frozen field and the tip sphere.
@@ -1960,7 +2433,31 @@ def _run(
                 )
                 log.write(f"Text log: {log_path}")
                 return 0
-            restart = load_restart_start(translation, system, log, input_directory)
+            restart_fields_read: list = []
+            restart = load_restart_start(
+                translation,
+                system,
+                log,
+                input_directory,
+                **({"fields_out": restart_fields_read} if restart_sectors is not None else {}),
+            )
+            if restart is not None and restart_sectors is not None:
+                # A spin Restart_Run or Restart_From_Wfndat of a cluster in the sectors: kept where the stored
+                # densities keep the group of the atoms, else prepared again as the switches off prepare it.
+                from .SCF.symmetry_off_inputs import restart_in_sectors
+
+                restart = restart_in_sectors(
+                    translation,
+                    system,
+                    restart,
+                    input_directory,
+                    backend=arguments.backend,
+                    symmetry=solver_symmetry_mode,
+                    symmetry_cache_directory=symmetry_cache_directory,
+                    log=log,
+                    densities=restart_fields_read[0].densities if restart_fields_read else None,
+                )
+            del restart_fields_read
             if restart is not None:
                 # wfn.dat: the stored orbitals go into the eigensolver of the run.
                 from .SCF.restart import accelerated_restart_start
@@ -1969,6 +2466,12 @@ def _run(
             # The wavefunctions of parsec.dat are brought to the host like
             # those of the archive.
             start_output_files(files, translation, system, log)
+            if files.parsec_dat_view is not None:
+                # the parsec.dat of the cell holds no orbitals, as that of the k-points: none brought to the host
+                # for it (those of the supercell repeat no cell)
+                from parsec_python.Output.output_files import WavefunctionSelection
+
+                files.selection = WavefunctionSelection(mode="list", indices=(), explicit=False)
             wavefunctions_wanted = wavefunctions_wanted or files.selection_has_states
             system.materialize_final_wavefunctions = wavefunctions_wanted and not moving
             reporter = ReporterWithFiles(reporter, files)
@@ -2011,6 +2514,10 @@ def _run(
                         reporter.reference.iteration_self_consistent_soc(step),
                         files.iteration(step),
                     ),
+                    note=log.write,
+                    # --symmetry off, and Ignore_Symmetry without a mode on the command line, keep the whole grid
+                    # with PARSEC_SOC_SECTORS too
+                    symmetry=soc_symmetry,
                 )
                 scf_completed = time.perf_counter()
                 reporter.reference.finish_self_consistent_soc(
@@ -2082,6 +2589,21 @@ def _run(
                     next_field_warm_start,
                 )
 
+                field_loop = None
+                if "polarizability" in kept_reasons and solver_symmetry_mode != "off":
+                    # PARSEC_POLARIZABILITY_SYMMETRY auto or on: the zero field in the group of the atoms, each field
+                    # axis in the operations that keep it, the loops that are images of a solved one not solved.
+                    from .SCF.symmetry_off_inputs import symmetric_field_loop
+
+                    field_loop = symmetric_field_loop(
+                        system,
+                        problem=translation.problem,
+                        backend=arguments.backend,
+                        symmetry_cache_directory=symmetry_cache_directory,
+                        log=log,
+                        iteration_state_callback=iteration_state_callback,
+                        symmetry=solver_symmetry_mode,
+                    )
                 polarization, result, forces = _run_polarizability(
                     system.reference,
                     translation,
@@ -2093,6 +2615,7 @@ def _run(
                     ),
                     warm_start_builder=next_field_warm_start(system),
                     compute_forces=field_forces(system),
+                    field_loop=field_loop,
                 )
                 scf_completed = time.perf_counter()
             elif translation.relaxation is not None:
@@ -2142,6 +2665,11 @@ def _run(
                 # before it returns: it is finalization, not SCF.
                 check_seconds = hartree_boundary_check_seconds(result)
                 reporter.finish(result, scf_completed - scf_started - check_seconds)
+            if _found_supercell is not None and getattr(getattr(result, "energies", None), "total", None) is not None:
+                # the mesh solved as its supercell: the energy of the cell of the input closes the report
+                for line in _per_cell_lines(result.energies.total, _found_supercell[1], len(_mesh_problem.atoms),
+                                            per_cell_report=_trim_route.cell_files):
+                    log.write(line)
             reporting_completed = time.perf_counter()
             refinement = None
             if getattr(translation, "energy_refinement", None) is not None:
@@ -2186,7 +2714,11 @@ def _run(
             if not arguments.no_archive:
                 saved = save_result_archive(
                     archive_path,
-                    result,
+                    # PARSEC_KPOINT_SUPERCELL=auto: the archive of the cell of the input (its atoms, grid, fields
+                    # and energies, the levels dealt to the k-points), which --bands-from of that input reads
+                    _cell_result_view(result, _mesh_problem, _found_supercell[1])
+                    if _found_supercell is not None and _trim_route.cell_files
+                    else result,
                     include_wavefunctions=(
                         arguments.save_wavefunctions
                         or translation.output_all_states

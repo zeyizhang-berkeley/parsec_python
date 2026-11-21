@@ -35,6 +35,15 @@ orbit of wedge point ``w`` and ``K`` the vector kernel of a term,
 and ``g^-1 R_a`` is the position of an atom of the same species.  The wedge
 sums ``W`` of all atoms cost ``|G|`` times less than the sums over the grid
 and give the same forces up to the order of the additions.
+
+Weighted sectors solve the one-dimensional sectors of a subgroup ``H`` of the
+point group ``G`` and keep the fields on the orbits of ``H``, but average the
+density over ``G`` (:class:`..Symmetry.axis_reflection.PointGroupReduction`).
+Their sums run over one point per orbit of ``G`` (the union of the coset images
+of the orbits of ``H``) and are completed by the operations of ``G``, ``|G|/|H|``
+times fewer points than the wedge of ``H`` (``PARSEC_LOCAL_FORCE_SUMS=orbits``,
+opt-in, :func:`group_wedge`); the fields are averaged over ``G`` first, which
+the symmetrized total does in any case.
 """
 
 from __future__ import annotations
@@ -432,8 +441,32 @@ def cupy_local_forces(
     )
 
 
-def sector_atom_images(reduction, atoms: Sequence[Atom], *, tolerance: float = 1.0e-6):
-    """For every operation of ``reduction``, its matrix and where it finds each atom.
+def group_wedge(reduction):
+    """One point per orbit of the full group ``G`` of a weighted reduction, ``None`` for any other reduction.
+
+    ``reduction`` keeps the orbits of a subgroup ``H`` (its wedge); ``coset_images[c, w]`` is the orbit of ``H``
+    of ``c r_w`` for the right coset representatives ``c`` (:class:`..Symmetry.axis_reflection.PointGroupReduction`),
+    so the orbit of ``G`` of ``r_w`` is the union of the orbits ``coset_images[:, w]``.  Returns ``(members,
+    sizes)``: the orbit of ``H`` that stands for each orbit of ``G`` (the smallest index among its images) and the
+    number of grid points of that orbit of ``G`` (the sum of the sizes of the distinct orbits of ``H`` in it).
+    Translations are not taken (clusters only).
+    """
+
+    images = getattr(reduction, "coset_images", None)
+    full = getattr(reduction, "full_operations", None)
+    if images is None or full is None or getattr(reduction, "full_translations", None) is not None:
+        return None
+    images = np.asarray(images, dtype=np.int64)
+    if images.ndim != 2 or images.shape[0] < 2:
+        return None
+    standing = images.min(axis=0)
+    members, inverse = np.unique(standing, return_inverse=True)
+    sizes = np.bincount(inverse, weights=np.asarray(reduction.multiplicities, dtype=np.float64))
+    return members, sizes
+
+
+def sector_atom_images(reduction, atoms: Sequence[Atom], *, tolerance: float = 1.0e-6, operations=None):
+    """For every operation of ``reduction`` (or of ``operations``), its matrix and where it finds each atom.
 
     Returns ``[(matrix, image), ...]``: ``image[a]`` is the atom at
     ``g^-1 R_a``, of the species of atom ``a``.  Raises ``ValueError`` when an
@@ -443,7 +476,8 @@ def sector_atom_images(reduction, atoms: Sequence[Atom], *, tolerance: float = 1
 
     from scipy.spatial import cKDTree
 
-    operations = getattr(reduction, "operations", None)
+    if operations is None:
+        operations = getattr(reduction, "operations", None)
     if operations is None:
         operations = [np.diag(signs) for signs in np.asarray(reduction.signs)]
     positions = np.array([atom.position for atom in atoms], dtype=np.float64)
@@ -476,6 +510,7 @@ def cupy_wedge_local_forces(
     reduction,
     *,
     device_ids: Sequence[int] | None = None,
+    full_group: bool = False,
 ) -> LocalForceTerms:
     """The three terms from the symmetry wedge of the grid (see the module text).
 
@@ -483,19 +518,46 @@ def cupy_wedge_local_forces(
     (:class:`parsec_python.acceleration.Symmetry.AxisReflectionReduction` or
     its signed-permutation form).  A field is a full-grid array or a scalar
     field on the wedge of this reduction.  The atoms must have the symmetry
-    of the reduction, which a relaxation with symmetry keeps.
+    of the reduction, which a relaxation with symmetry keeps.  ``full_group``
+    sums a weighted reduction over one point per orbit of its full group
+    (:func:`group_wedge`) with the fields averaged over that group; other
+    reductions keep their wedge.
     """
 
-    images = sector_atom_images(reduction, atoms)
-    rows = np.asarray(reduction.representative_rows)
-    weights = np.asarray(reduction.multiplicities, dtype=np.float64) / float(
-        reduction.group_order
-    )
+    grouped = group_wedge(reduction) if full_group else None
+    if grouped is None:
+        images = sector_atom_images(reduction, atoms)
+        rows = np.asarray(reduction.representative_rows)
+        weights = np.asarray(reduction.multiplicities, dtype=np.float64) / float(
+            reduction.group_order
+        )
+        members = None
+    else:
+        members, sizes = grouped
+        full = np.asarray(reduction.full_operations)
+        images = sector_atom_images(reduction, atoms, operations=full)
+        rows = np.asarray(reduction.representative_rows)[members]
+        weights = sizes / float(full.shape[0])
+        wedge_rows = np.asarray(reduction.representative_rows)
 
     def on_wedge(field) -> np.ndarray:
+        # (a field on the orbits of the full group of weighted sectors, Symmetry/field_orbits.py, PARSEC_SECTOR_FIELD_GROUP:
+        # its values on the orbits of this reduction first)
+        on_subgroup = getattr(getattr(field, "reduction", None), "subgroup", None) is reduction
+        if members is None:
+            if getattr(field, "reduction", None) is reduction:
+                return np.asarray(field.values, dtype=np.float64) * weights
+            if on_subgroup:
+                return field.reduction.to_subgroup(field.values) * weights
+            return np.asarray(field, dtype=np.float64)[rows] * weights
         if getattr(field, "reduction", None) is reduction:
-            return np.asarray(field.values, dtype=np.float64) * weights
-        return np.asarray(field, dtype=np.float64)[rows] * weights
+            values = np.asarray(field.values, dtype=np.float64)
+        elif on_subgroup:
+            values = np.asarray(field.reduction.to_subgroup(field.values), dtype=np.float64)
+        else:
+            # a full-grid field: its values at the points of the wedge of H, as the sums over that wedge take them
+            values = np.asarray(field, dtype=np.float64)[wedge_rows]
+        return reduction.symmetrize_values(values)[members] * weights
 
     partial = cupy_local_forces(
         grid,
@@ -520,17 +582,24 @@ def cupy_wedge_local_forces(
 
 
 def local_force_sums_setting() -> str:
-    """``PARSEC_LOCAL_FORCE_SUMS``: ``wedge`` (default) or ``full``.
+    """``PARSEC_LOCAL_FORCE_SUMS``: ``wedge`` (default), ``orbits`` or ``full``.
 
-    ``full`` sums the local forces over the whole grid also where symmetry
+    ``wedge`` sums every sector calculation over the wedge of the solved
+    group; ``orbits`` (opt-in, 2026-11-19) sums the local forces of a cluster
+    in weighted sectors over one point per orbit of the full group of the
+    sectors (:func:`group_wedge`) and those of abelian sectors over their
+    wedge: three times fewer points for Td in D2d, but the average of the
+    fields over the full group on the host costs more than the points save
+    (A100, nanodiamonds k06 and k08: 0.070 and 0.118 s against 0.058 and
+    0.090 s, warm); ``full`` sums over the whole grid also where symmetry
     sectors would allow the wedge.
     """
 
     import os
 
     value = os.environ.get("PARSEC_LOCAL_FORCE_SUMS", "wedge").strip().lower() or "wedge"
-    if value not in {"wedge", "full"}:
-        raise ValueError("PARSEC_LOCAL_FORCE_SUMS must be wedge or full")
+    if value not in {"orbits", "wedge", "full"}:
+        raise ValueError(f"PARSEC_LOCAL_FORCE_SUMS must be orbits, wedge or full, not {value!r}")
     return value
 
 
@@ -568,6 +637,7 @@ __all__ = [
     "CHUNK_POINTS",
     "cupy_local_forces",
     "cupy_wedge_local_forces",
+    "group_wedge",
     "local_force_device_ids",
     "sector_atom_images",
     "local_force_sums_setting",

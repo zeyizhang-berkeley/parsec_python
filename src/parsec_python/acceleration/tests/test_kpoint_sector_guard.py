@@ -246,7 +246,7 @@ def _tested_group_order(solver) -> int:
 class GuardGroupAboutADefectTests(unittest.TestCase):
     """Test 2 of the k-point sectors about a diamond vacancy of 3 x 3 x 3 cubes (``PARSEC_SPIN_GUARD_CELL_GROUP``)."""
 
-    def solver(self, site, value, k_point=(0.0, 0.0, 0.0)):
+    def solver(self, site, value, k_point=(0.0, 0.0, 0.0), environment=None):
         from parsec_python.acceleration.tests.test_gamma_spin_sectors import _vacancy_cell
 
         grid, atoms = _vacancy_cell(3, site)
@@ -259,7 +259,7 @@ class GuardGroupAboutADefectTests(unittest.TestCase):
             "density_symmetry": None,
         }
         job = KPointJob(1, 200, lambda *a: None, lambda *a: None, lambda *a, **k: {}, geometry=geometry)
-        with mock.patch.dict(os.environ, {"PARSEC_SPIN_GUARD_CELL_GROUP": value}):
+        with mock.patch.dict(os.environ, {"PARSEC_SPIN_GUARD_CELL_GROUP": value, **(environment or {})}):
             solver = sectors.sector_solver(
                 job, lambda inner, **options: SerialKPointSolver(inner), problem_size=grid.size
             )
@@ -279,6 +279,14 @@ class GuardGroupAboutADefectTests(unittest.TestCase):
         from parsec_python.acceleration.tests.test_gamma_spin_sectors import _defect_densities, _lobe
 
         a = 6.74
+        # (with PARSEC_PERIODIC_DEFECT_CENTRE=auto, the default since 2026-11-19: the search of the
+        # translations at (a/2, a/2, 0) no longer gives up, and the cell group of the k-point sectors is Td under
+        # either value; the swap alone is what that search gives under PARSEC_PERIODIC_DEFECT_CENTRE=off)
+        defect_off = {"PARSEC_PERIODIC_DEFECT_CENTRE": "off"}
+        for site in ((0.0, 0.0, 0.0), (0.5, 0.5, 0.0)):
+            for value in ("auto", "off"):
+                with self.subTest(site=site, value=value, defect="auto"):
+                    self.assertEqual(_tested_group_order(self.solver(site, value)[2]), 24)
         for site, filled, sizes in (
             ((0.0, 0.0, 0.0), ((1.0, 0.0, 0.0), (0.0, 1.0, 0.0)), {"auto": 24, "off": 24}),
             ((0.5, 0.5, 0.0), ((1.0, 1.0, 0.0), (0.0, 0.0, 1.0)), {"auto": 24, "off": 2}),
@@ -286,7 +294,7 @@ class GuardGroupAboutADefectTests(unittest.TestCase):
             centre = a * np.asarray(site)
             for value in ("auto", "off"):
                 with self.subTest(site=site, value=value):
-                    grid, atoms, solver = self.solver(site, value)
+                    grid, atoms, solver = self.solver(site, value, environment=defect_off)
                     self.assertEqual(_tested_group_order(solver), sizes[value])
                     volume = grid.volume_element
                     bulk, partners = _defect_densities(grid, atoms, centre)

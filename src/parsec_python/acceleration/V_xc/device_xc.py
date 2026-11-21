@@ -454,15 +454,20 @@ def _orbit_flips(grid, reduction) -> np.ndarray:
 
 
 def _orbit_operations(grid, reduction) -> tuple[np.ndarray, np.ndarray]:
-    """Per grid row, the operation (a signed permutation) carrying its representative onto it, and their table.
+    """Per grid row, the rotation (a signed permutation) of the operation carrying its representative onto it, and
+    the table of those rotations.
 
     The counterpart of :func:`_orbit_flips` for a group whose operations permute the axes
     (:class:`..Symmetry.PointGroupReduction`, :class:`..Symmetry.SignedPermutationReduction`): row ``i``
-    gets the index of the first operation (the identity first) that maps its representative onto it, and
-    ``table[g] = (perm_0, perm_1, perm_2, sign_0, sign_1, sign_2)`` with ``R_g[a, perm_a] = sign_a``, so that
+    gets the code of the first operation (the identity first) that maps its representative onto it, and
+    ``table[code] = (perm_0, perm_1, perm_2, sign_0, sign_1, sign_2)`` with ``R[a, perm_a] = sign_a``, so that
     component ``a`` of the image of a vector is ``sign_a`` times its component ``perm_a``.  Where two
     operations carry the representative onto the same row, an invariant vector field takes the same value
-    either way.
+    either way.  The table holds each distinct rotation once: an operation ``r -> R r + t`` of a cell that
+    repeats a smaller one turns a vector by ``R`` alone, so the operations that differ by a translation share
+    their entry.  A signed permutation of three axes is one of 48, so a byte per row holds the code for a group
+    of any order (Oh with the 8 half-cell translations of a doubled cell: 384 operations, 48 entries); each row
+    reads the same entry as with one entry per operation.
     """
 
     from ..Symmetry.axis_reflection import _grid_row_mapping_operation
@@ -470,16 +475,24 @@ def _orbit_operations(grid, reduction) -> tuple[np.ndarray, np.ndarray]:
     rows = np.asarray(reduction.representative_rows, dtype=np.int64)
     full_to_wedge = np.asarray(reduction.full_to_wedge)
     operations = np.asarray(reduction.operations, dtype=np.int64)
-    if operations.shape[0] > 255:
-        raise ValueError("too many symmetry operations for a byte per row")
     order = sorted(range(operations.shape[0]), key=lambda g: not np.array_equal(operations[g], np.eye(3)))
     unset = np.uint8(255)
     codes = np.full(reduction.full_size, unset, dtype=np.uint8)
-    table = np.zeros((operations.shape[0], 6), dtype=np.int8)
+    # entry_of[g]: the row of the table that holds the rotation of operation g (each rotation once, in the order
+    # of the operations)
+    entries: dict[tuple[int, ...], int] = {}
+    entry_of = np.empty(operations.shape[0], dtype=np.int64)
     for g in range(operations.shape[0]):
         permutation = np.argmax(np.abs(operations[g]), axis=1)
-        table[g, :3] = permutation
-        table[g, 3:] = operations[g][np.arange(3), permutation]
+        key = tuple(int(value) for value in permutation) + tuple(
+            int(value) for value in operations[g][np.arange(3), permutation]
+        )
+        entry_of[g] = entries.setdefault(key, len(entries))
+    if len(entries) >= int(unset):
+        raise ValueError("too many distinct rotations for a byte per row")
+    table = np.zeros((len(entries), 6), dtype=np.int8)
+    for key, entry in entries.items():
+        table[entry] = key
     # r -> R r + t in a cell that repeats a smaller one: the translation moves the row, the vector turns by R alone
     translations = getattr(reduction, "translations", None)
     for g in order:
@@ -492,7 +505,7 @@ def _orbit_operations(grid, reduction) -> tuple[np.ndarray, np.ndarray]:
                 "the symmetry operations do not map the orbit representatives onto their orbits"
             )
         images = images[codes[images] == unset]
-        codes[images] = np.uint8(g)
+        codes[images] = np.uint8(entry_of[g])
     if np.any(codes == unset):
         raise RuntimeError("a grid row is the image of no orbit representative")
     return codes, table

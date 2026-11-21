@@ -1188,6 +1188,12 @@ def run_hybrid_scf(
             start_iterations += int(start.iterations)
         if recorded:
             mixer.seed(recorded[-1].pairs)
+        # An engine may move the Fock loop to other k-points after the start, with the system of those
+        # (PARSEC_HYBRID_KPOINT_WEDGE=auto: the irreducible wedge of an insulating start,
+        # parsec_python.SCF.hybrid_periodic.BlochExchange.after_start); unchanged otherwise.
+        after_start = getattr(engine, "after_start", None)
+        if callable(after_start):
+            system, start = after_start(system, start, callback=callback)
         sets = engine.orbital_sets(start)
         inner_start = engine.transition_warm_start(system, start)
         start_functional = definition.start_functional

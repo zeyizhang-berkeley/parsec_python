@@ -4,7 +4,7 @@
   PARSEC-PYTHON - Modular real-space DFT program
   PARSEC-like report; Python real-space implementation
 
- starting run on 07-Nov-2026 06:46:28 -0800
+ starting run on 20-Nov-2026 14:29:10 -0800
  input file: examples/0d_hybrid_functionals/CO/pbe0/parsec.in
 
  =================================================================
@@ -174,17 +174,19 @@
 
  Setup timings [sec]
  --------------------------------------------------
- Pseudopotential loading       :     0.018402
- Grid-domain construction      :     0.032162
- Finite-difference construction:     0.009298
- Local ionic potential setup   :     0.037691
- Nonlocal ionic projector setup:     0.017452
- Initial valence-density setup :     0.010528
- Core-density setup            :     0.000468
- Ion-ion energy setup           :     0.000064
- Hartree boundary estimate/tail :     0.060333
- Preparation wall time          :     0.186580
+ Pseudopotential loading       :     0.019773
+ Grid-domain construction      :     0.034366
+ Finite-difference construction:     0.009917
+ Local ionic potential setup   :     0.286431
+ Nonlocal ionic projector setup:     0.011527
+ Initial valence-density setup :     0.014705
+ Core-density setup            :     0.001148
+ Ion-ion energy setup           :     0.000090
+ Hartree boundary estimate/tail :     0.060977
+ Preparation wall time          :     0.136790
  --------------------------------------------------
+
+ The local ionic, density and ion-ion setups above ran on a thread beside the symmetry and sector setup and are not part of the preparation wall time.  Thread [sec] = 0.302409, wait at its join [sec] = 0.000024.
 
  The reference setup above describes the constructed full grid.  The GPU orbital solve is decomposed into the exact symmetry representations reported below.
 
@@ -196,10 +198,11 @@
  Device            = CUDA:0 (NVIDIA A100-SXM4-80GB)
  gpu_stencil_kernel = deferred_to_symmetry_sector_operators
  gpu_later_subspace_filter_precision = deferred_to_symmetry_sector_operators
+ symmetry_detection = exact Cartesian axis-reflection subgroup detected
  symmetry_cache_directory = disabled
  orbital_symmetry = CuPy real one-dimensional reflection representations
  finite_difference_builder = C++17 compressed-grid CSR builder (exact stencil parity)
- hartree_backend = native-boundary/cupy-linear
+ hartree_backend = cupy-boundary/cupy-linear
  hartree_boundary = PARSEC multipole expansion
  orbital_sector_stencil_kernel = pipelined: fast path for 37 slots
  orbital_sector_later_filter_precision = float64
@@ -207,18 +210,18 @@
  hartree_symmetry = normalized Cartesian axis-reflection wedge
  native_openmp_max_threads = 16
  Detailed backend settings: set Output_Level: 2
- Backend initialization [sec] =     0.076365
+ Backend initialization [sec] =     0.076598
 
  Execution resources:
  --------------------
  Device            = GPU (auto, the default: a usable GPU was found)
  GPUs              = 1 of 1 visible, index 0; all visible, the default
- CPU threads       = 16 of 128 CPUs allowed (affinity of the process); OMP_NUM_THREADS=16
+ CPU threads       = 16 of 32 CPUs allowed (affinity of the process); OMP_NUM_THREADS=16
 
  SCF iter #   1
 
- Diagonalization time [sec] :       1.50,      tdiag_sum =        1.50
- Iteration time [sec]       :       1.60
+ Diagonalization time [sec] :       1.28,      tdiag_sum =        1.28
+ Iteration time [sec]       :       1.35
 
  Eigensolver residual max [Ry] :   2.9504e-04
 
@@ -238,7 +241,7 @@
 
  Max and min values of charge density [e/bohr^3]:   1.1464E+00   5.8836E-13
 
- Hartree potential time [sec]:       0.09
+ Hartree potential time [sec]:       0.05
 
    Eigenvalue Energy             =         -12.86285728 [Ry]
    Hartree Energy                =          59.58854000 [Ry]
@@ -254,8 +257,8 @@
 
  SCF iter #   2
 
- Diagonalization time [sec] :       0.07,      tdiag_sum =        1.57
- Iteration time [sec]       :       0.17
+ Diagonalization time [sec] :       0.05,      tdiag_sum =        1.33
+ Iteration time [sec]       :       0.12
 
  Fermi level at    -0.4877 [Ry]
 
@@ -273,7 +276,7 @@
 
  Max and min values of charge density [e/bohr^3]:   1.1023E+00   4.7303E-12
 
- Hartree potential time [sec]:       0.09
+ Hartree potential time [sec]:       0.05
 
    Eigenvalue Energy             =         -11.81001802 [Ry]
    Hartree Energy                =          58.29305723 [Ry]
@@ -290,8 +293,8 @@
 
  SCF iter #   3
 
- Diagonalization time [sec] :       0.05,      tdiag_sum =        1.62
- Iteration time [sec]       :       0.15
+ Diagonalization time [sec] :       0.05,      tdiag_sum =        1.38
+ Iteration time [sec]       :       0.12
 
  Fermi level at    -0.4680 [Ry]
 
@@ -309,7 +312,7 @@
 
  Max and min values of charge density [e/bohr^3]:   1.0909E+00   1.0074E-11
 
- Hartree potential time [sec]:       0.08
+ Hartree potential time [sec]:       0.05
 
    Eigenvalue Energy             =         -11.38440120 [Ry]
    Hartree Energy                =          57.99673811 [Ry]
@@ -326,8 +329,8 @@
 
  SCF iter #   4
 
- Diagonalization time [sec] :       0.05,      tdiag_sum =        1.67
- Iteration time [sec]       :       0.16
+ Diagonalization time [sec] :       0.05,      tdiag_sum =        1.43
+ Iteration time [sec]       :       0.13
 
  Fermi level at    -0.4553 [Ry]
 
@@ -345,7 +348,7 @@
 
  Max and min values of charge density [e/bohr^3]:   1.0795E+00   1.2120E-11
 
- Hartree potential time [sec]:       0.09
+ Hartree potential time [sec]:       0.05
 
    Eigenvalue Energy             =         -11.10285924 [Ry]
    Hartree Energy                =          57.72199819 [Ry]
@@ -362,8 +365,8 @@
 
  SCF iter #   5
 
- Diagonalization time [sec] :       0.05,      tdiag_sum =        1.72
- Iteration time [sec]       :       0.16
+ Diagonalization time [sec] :       0.05,      tdiag_sum =        1.48
+ Iteration time [sec]       :       0.12
 
  Fermi level at    -0.4558 [Ry]
 
@@ -381,7 +384,7 @@
 
  Max and min values of charge density [e/bohr^3]:   1.0780E+00   4.9327E-12
 
- Hartree potential time [sec]:       0.08
+ Hartree potential time [sec]:       0.05
 
    Eigenvalue Energy             =         -11.11822915 [Ry]
    Hartree Energy                =          57.65554508 [Ry]
@@ -398,8 +401,8 @@
 
  SCF iter #   6
 
- Diagonalization time [sec] :       0.05,      tdiag_sum =        1.77
- Iteration time [sec]       :       0.16
+ Diagonalization time [sec] :       0.05,      tdiag_sum =        1.53
+ Iteration time [sec]       :       0.12
 
  Fermi level at    -0.4561 [Ry]
 
@@ -417,7 +420,7 @@
 
  Max and min values of charge density [e/bohr^3]:   1.0761E+00   1.0281E-12
 
- Hartree potential time [sec]:       0.08
+ Hartree potential time [sec]:       0.05
 
    Eigenvalue Energy             =         -11.12969895 [Ry]
    Hartree Energy                =          57.62223625 [Ry]
@@ -434,8 +437,8 @@
 
  SCF iter #   7
 
- Diagonalization time [sec] :       0.05,      tdiag_sum =        1.82
- Iteration time [sec]       :       0.15
+ Diagonalization time [sec] :       0.05,      tdiag_sum =        1.58
+ Iteration time [sec]       :       0.12
 
  Fermi level at    -0.4563 [Ry]
 
@@ -453,7 +456,7 @@
 
  Max and min values of charge density [e/bohr^3]:   1.0757E+00   5.7702E-14
 
- Hartree potential time [sec]:       0.08
+ Hartree potential time [sec]:       0.05
 
    Eigenvalue Energy             =         -11.13446364 [Ry]
    Hartree Energy                =          57.60265032 [Ry]
@@ -470,8 +473,8 @@
 
  SCF iter #   8
 
- Diagonalization time [sec] :       0.05,      tdiag_sum =        1.87
- Iteration time [sec]       :       0.15
+ Diagonalization time [sec] :       0.05,      tdiag_sum =        1.63
+ Iteration time [sec]       :       0.12
 
  Fermi level at    -0.4563 [Ry]
 
@@ -489,7 +492,7 @@
 
  Max and min values of charge density [e/bohr^3]:   1.0749E+00   1.9532E-13
 
- Hartree potential time [sec]:       0.08
+ Hartree potential time [sec]:       0.05
 
    Eigenvalue Energy             =         -11.13429660 [Ry]
    Hartree Energy                =          57.58811913 [Ry]
@@ -506,8 +509,8 @@
 
  SCF iter #   9
 
- Diagonalization time [sec] :       0.05,      tdiag_sum =        1.91
- Iteration time [sec]       :       0.15
+ Diagonalization time [sec] :       0.05,      tdiag_sum =        1.68
+ Iteration time [sec]       :       0.12
 
  Fermi level at    -0.4560 [Ry]
 
@@ -525,7 +528,7 @@
 
  Max and min values of charge density [e/bohr^3]:   1.0747E+00   5.4436E-13
 
- Hartree potential time [sec]:       0.08
+ Hartree potential time [sec]:       0.05
 
    Eigenvalue Energy             =         -11.12846111 [Ry]
    Hartree Energy                =          57.57662878 [Ry]
@@ -542,8 +545,8 @@
 
  SCF iter #  10
 
- Diagonalization time [sec] :       0.05,      tdiag_sum =        1.96
- Iteration time [sec]       :       0.15
+ Diagonalization time [sec] :       0.05,      tdiag_sum =        1.72
+ Iteration time [sec]       :       0.12
 
  Fermi level at    -0.4563 [Ry]
 
@@ -561,7 +564,7 @@
 
  Max and min values of charge density [e/bohr^3]:   1.0748E+00   1.0082E-12
 
- Hartree potential time [sec]:       0.08
+ Hartree potential time [sec]:       0.05
 
    Eigenvalue Energy             =         -11.13557565 [Ry]
    Hartree Energy                =          57.57841201 [Ry]
@@ -578,8 +581,8 @@
 
  SCF iter #  11
 
- Diagonalization time [sec] :       0.05,      tdiag_sum =        2.01
- Iteration time [sec]       :       0.16
+ Diagonalization time [sec] :       0.05,      tdiag_sum =        1.77
+ Iteration time [sec]       :       0.12
 
  Fermi level at    -0.4564 [Ry]
 
@@ -597,7 +600,7 @@
 
  Max and min values of charge density [e/bohr^3]:   1.0754E+00   1.4518E-12
 
- Hartree potential time [sec]:       0.08
+ Hartree potential time [sec]:       0.05
 
    Eigenvalue Energy             =         -11.14432864 [Ry]
    Hartree Energy                =          57.58087336 [Ry]
@@ -614,8 +617,8 @@
 
  SCF iter #  12
 
- Diagonalization time [sec] :       0.05,      tdiag_sum =        2.06
- Iteration time [sec]       :       0.15
+ Diagonalization time [sec] :       0.05,      tdiag_sum =        1.82
+ Iteration time [sec]       :       0.13
 
  Fermi level at    -0.4565 [Ry]
 
@@ -633,7 +636,7 @@
 
  Max and min values of charge density [e/bohr^3]:   1.0754E+00   1.6899E-12
 
- Hartree potential time [sec]:       0.08
+ Hartree potential time [sec]:       0.05
 
    Eigenvalue Energy             =         -11.15217009 [Ry]
    Hartree Energy                =          57.58886101 [Ry]
@@ -646,12 +649,12 @@
    Total Energy =           -43.31666188 [Ry]
    Energy/atom  =          -294.67891910 [eV]
 
-  0- 12    SRE of pot. & charge weighted pot =   0.2526943004   0.0119297226
+  0- 12    SRE of pot. & charge weighted pot =   0.2526943003   0.0119297225
 
  SCF iter #  13
 
- Diagonalization time [sec] :       0.05,      tdiag_sum =        2.11
- Iteration time [sec]       :       0.15
+ Diagonalization time [sec] :       0.05,      tdiag_sum =        1.87
+ Iteration time [sec]       :       0.12
 
  Fermi level at    -0.4570 [Ry]
 
@@ -661,7 +664,7 @@
     2        -1.0358415069       -14.0934523750    1.0000        1
     3        -0.8681539969       -11.8119296507    1.0000        2
     4        -0.8681539452       -11.8119289482    1.0000        3
-    5        -0.6631338724        -9.0224668408    1.0000        1
+    5        -0.6631338724        -9.0224668407    1.0000        1
     6        -0.1443952146        -1.9646124108    0.0000        3
     7        -0.1443937978        -1.9645931340    0.0000        2
     8         0.0263764882         0.3588732229    0.0000        1
@@ -669,7 +672,7 @@
 
  Max and min values of charge density [e/bohr^3]:   1.0762E+00   2.1459E-12
 
- Hartree potential time [sec]:       0.08
+ Hartree potential time [sec]:       0.05
 
    Eigenvalue Energy             =         -11.17355478 [Ry]
    Hartree Energy                =          57.60863943 [Ry]
@@ -686,8 +689,8 @@
 
  SCF iter #  14
 
- Diagonalization time [sec] :       0.05,      tdiag_sum =        2.15
- Iteration time [sec]       :       0.15
+ Diagonalization time [sec] :       0.04,      tdiag_sum =        1.92
+ Iteration time [sec]       :       0.12
 
  Fermi level at    -0.4559 [Ry]
 
@@ -705,7 +708,7 @@
 
  Max and min values of charge density [e/bohr^3]:   1.0758E+00   1.6176E-12
 
- Hartree potential time [sec]:       0.08
+ Hartree potential time [sec]:       0.05
 
    Eigenvalue Energy             =         -11.15061238 [Ry]
    Hartree Energy                =          57.59803066 [Ry]
@@ -722,26 +725,26 @@
 
  SCF iter #  15
 
- Diagonalization time [sec] :       0.05,      tdiag_sum =        2.20
- Iteration time [sec]       :       0.15
+ Diagonalization time [sec] :       0.04,      tdiag_sum =        1.96
+ Iteration time [sec]       :       0.12
 
  Fermi level at    -0.4565 [Ry]
 
    State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
-    1        -2.1515128757       -29.2730538842    1.0000        1
+    1        -2.1515128757       -29.2730538841    1.0000        1
     2        -1.0360129823       -14.0957854351    1.0000        1
     3        -0.8669951817       -11.7961630438    1.0000        2
     4        -0.8669951804       -11.7961630255    1.0000        3
     5        -0.6629526397        -9.0200010251    1.0000        1
     6        -0.1432162194        -1.9485712381    0.0000        3
-    7        -0.1432153827        -1.9485598534    0.0000        2
+    7        -0.1432153827        -1.9485598533    0.0000        2
     8         0.0267534296         0.3640018128    0.0000        1
     9         0.0963888305         1.3114471506    0.0000        1
 
  Max and min values of charge density [e/bohr^3]:   1.0758E+00   2.2615E-12
 
- Hartree potential time [sec]:       0.08
+ Hartree potential time [sec]:       0.05
 
    Eigenvalue Energy             =         -11.16893772 [Ry]
    Hartree Energy                =          57.60893590 [Ry]
@@ -758,26 +761,26 @@
 
  SCF iter #  16
 
- Diagonalization time [sec] :       0.04,      tdiag_sum =        2.24
- Iteration time [sec]       :       0.14
+ Diagonalization time [sec] :       0.04,      tdiag_sum =        2.00
+ Iteration time [sec]       :       0.12
 
  Fermi level at    -0.4568 [Ry]
 
    State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
-    1        -2.1574813992       -29.3542604217    1.0000        1
+    1        -2.1574813992       -29.3542604216    1.0000        1
     2        -1.0402640314       -14.1536243585    1.0000        1
-    3        -0.8725037822       -11.8711119599    1.0000        3
-    4        -0.8725037652       -11.8711117279    1.0000        2
+    3        -0.8725037822       -11.8711119598    1.0000        3
+    4        -0.8725037651       -11.8711117278    1.0000        2
     5        -0.6674597354        -9.0813236675    1.0000        1
-    6        -0.1479411204        -2.0128572960    0.0000        2
-    7        -0.1479408181        -2.0128531828    0.0000        3
+    6        -0.1479411204        -2.0128572959    0.0000        2
+    7        -0.1479408181        -2.0128531827    0.0000        3
     8         0.0272114948         0.3702341563    0.0000        1
     9         0.0978699029         1.3315983254    0.0000        1
 
  Max and min values of charge density [e/bohr^3]:   1.0777E+00   2.7285E-12
 
- Hartree potential time [sec]:       0.08
+ Hartree potential time [sec]:       0.05
 
    Eigenvalue Energy             =         -11.22042543 [Ry]
    Hartree Energy                =          57.64465671 [Ry]
@@ -790,12 +793,12 @@
    Total Energy =           -43.31670866 [Ry]
    Energy/atom  =          -294.67923737 [eV]
 
-  0- 16    SRE of pot. & charge weighted pot =   0.0597468534   0.0023183490
+  0- 16    SRE of pot. & charge weighted pot =   0.0597468533   0.0023183490
 
  SCF iter #  17
 
- Diagonalization time [sec] :       0.04,      tdiag_sum =        2.28
- Iteration time [sec]       :       0.15
+ Diagonalization time [sec] :       0.04,      tdiag_sum =        2.05
+ Iteration time [sec]       :       0.11
 
  Fermi level at    -0.4566 [Ry]
 
@@ -804,7 +807,7 @@
     1        -2.1563030244       -29.3382276896    1.0000        1
     2        -1.0392881915       -14.1403472760    1.0000        1
     3        -0.8726195443       -11.8726869955    1.0000        2
-    4        -0.8726195264       -11.8726867520    1.0000        3
+    4        -0.8726195264       -11.8726867519    1.0000        3
     5        -0.6667697974        -9.0719365089    1.0000        1
     6        -0.1481986749        -2.0163615312    0.0000        3
     7        -0.1481986736        -2.0163615132    0.0000        2
@@ -813,7 +816,7 @@
 
  Max and min values of charge density [e/bohr^3]:   1.0777E+00   2.4465E-12
 
- Hartree potential time [sec]:       0.09
+ Hartree potential time [sec]:       0.05
 
    Eigenvalue Energy             =         -11.21520017 [Ry]
    Hartree Energy                =          57.64407547 [Ry]
@@ -830,8 +833,8 @@
 
  SCF iter #  18
 
- Diagonalization time [sec] :       0.04,      tdiag_sum =        2.32
- Iteration time [sec]       :       0.14
+ Diagonalization time [sec] :       0.04,      tdiag_sum =        2.09
+ Iteration time [sec]       :       0.11
 
  Fermi level at    -0.4563 [Ry]
 
@@ -849,7 +852,7 @@
 
  Max and min values of charge density [e/bohr^3]:   1.0776E+00   2.3232E-12
 
- Hartree potential time [sec]:       0.08
+ Hartree potential time [sec]:       0.05
 
    Eigenvalue Energy             =         -11.20778852 [Ry]
    Hartree Energy                =          57.64215425 [Ry]
@@ -866,8 +869,8 @@
 
  SCF iter #  19
 
- Diagonalization time [sec] :       0.04,      tdiag_sum =        2.36
- Iteration time [sec]       :       0.14
+ Diagonalization time [sec] :       0.04,      tdiag_sum =        2.13
+ Iteration time [sec]       :       0.11
 
  Fermi level at    -0.4563 [Ry]
 
@@ -885,7 +888,7 @@
 
  Max and min values of charge density [e/bohr^3]:   1.0776E+00   2.3092E-12
 
- Hartree potential time [sec]:       0.08
+ Hartree potential time [sec]:       0.05
 
    Eigenvalue Energy             =         -11.20675995 [Ry]
    Hartree Energy                =          57.64267763 [Ry]
@@ -902,8 +905,8 @@
 
  SCF iter #  20
 
- Diagonalization time [sec] :       0.04,      tdiag_sum =        2.40
- Iteration time [sec]       :       0.14
+ Diagonalization time [sec] :       0.04,      tdiag_sum =        2.16
+ Iteration time [sec]       :       0.11
 
  Fermi level at    -0.4564 [Ry]
 
@@ -921,7 +924,7 @@
 
  Max and min values of charge density [e/bohr^3]:   1.0776E+00   2.3009E-12
 
- Hartree potential time [sec]:       0.08
+ Hartree potential time [sec]:       0.05
 
    Eigenvalue Energy             =         -11.20754132 [Ry]
    Hartree Energy                =          57.64383930 [Ry]
@@ -938,8 +941,8 @@
 
  SCF iter #  21
 
- Diagonalization time [sec] :       0.04,      tdiag_sum =        2.44
- Iteration time [sec]       :       0.13
+ Diagonalization time [sec] :       0.04,      tdiag_sum =        2.20
+ Iteration time [sec]       :       0.10
 
  Fermi level at    -0.4564 [Ry]
 
@@ -957,7 +960,7 @@
 
  Max and min values of charge density [e/bohr^3]:   1.0776E+00   2.2558E-12
 
- Hartree potential time [sec]:       0.08
+ Hartree potential time [sec]:       0.05
 
    Eigenvalue Energy             =         -11.20736081 [Ry]
    Hartree Energy                =          57.64438994 [Ry]
@@ -974,8 +977,8 @@
 
  SCF iter #  22
 
- Diagonalization time [sec] :       0.04,      tdiag_sum =        2.48
- Iteration time [sec]       :       0.13
+ Diagonalization time [sec] :       0.04,      tdiag_sum =        2.24
+ Iteration time [sec]       :       0.10
 
  Fermi level at    -0.4564 [Ry]
 
@@ -984,7 +987,7 @@
     1        -2.1554117342       -29.3261009733    1.0000        1
     2        -1.0386627066       -14.1318370538    1.0000        1
     3        -0.8716386441       -11.8593410641    1.0000        2
-    4        -0.8716386362       -11.8593409566    1.0000        3
+    4        -0.8716386362       -11.8593409567    1.0000        3
     5        -0.6661470450        -9.0634634653    1.0000        1
     6        -0.1473532967        -2.0048594837    0.0000        3
     7        -0.1473532701        -2.0048591229    0.0000        2
@@ -993,7 +996,7 @@
 
  Max and min values of charge density [e/bohr^3]:   1.0776E+00   2.2135E-12
 
- Hartree potential time [sec]:       0.08
+ Hartree potential time [sec]:       0.05
 
    Eigenvalue Energy             =         -11.20699753 [Ry]
    Hartree Energy                =          57.64472035 [Ry]
@@ -1010,8 +1013,8 @@
 
  SCF iter #  23
 
- Diagonalization time [sec] :       0.04,      tdiag_sum =        2.51
- Iteration time [sec]       :       0.14
+ Diagonalization time [sec] :       0.04,      tdiag_sum =        2.28
+ Iteration time [sec]       :       0.10
 
  Fermi level at    -0.4564 [Ry]
 
@@ -1029,7 +1032,7 @@
 
  Max and min values of charge density [e/bohr^3]:   1.0776E+00   2.1923E-12
 
- Hartree potential time [sec]:       0.08
+ Hartree potential time [sec]:       0.05
 
    Eigenvalue Energy             =         -11.20749313 [Ry]
    Hartree Energy                =          57.64539125 [Ry]
@@ -1046,15 +1049,15 @@
 
  SCF iter #  24
 
- Diagonalization time [sec] :       0.04,      tdiag_sum =        2.55
- Iteration time [sec]       :       0.15
+ Diagonalization time [sec] :       0.04,      tdiag_sum =        2.32
+ Iteration time [sec]       :       0.11
 
  Fermi level at    -0.4563 [Ry]
 
    State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
     1        -2.1553504773       -29.3252675243    1.0000        1
-    2        -1.0386293164       -14.1313827524    1.0000        1
+    2        -1.0386293164       -14.1313827525    1.0000        1
     3        -0.8715943214       -11.8587380183    1.0000        2
     4        -0.8715943152       -11.8587379337    1.0000        3
     5        -0.6661163089        -9.0630452758    1.0000        1
@@ -1065,7 +1068,7 @@
 
  Max and min values of charge density [e/bohr^3]:   1.0776E+00   2.1497E-12
 
- Hartree potential time [sec]:       0.09
+ Hartree potential time [sec]:       0.05
 
    Eigenvalue Energy             =         -11.20656948 [Ry]
    Hartree Energy                =          57.64530731 [Ry]
@@ -1082,8 +1085,8 @@
 
  SCF iter #  25
 
- Diagonalization time [sec] :       0.04,      tdiag_sum =        2.59
- Iteration time [sec]       :       0.15
+ Diagonalization time [sec] :       0.04,      tdiag_sum =        2.36
+ Iteration time [sec]       :       0.11
 
  Fermi level at    -0.4564 [Ry]
 
@@ -1101,7 +1104,7 @@
 
  Max and min values of charge density [e/bohr^3]:   1.0776E+00   2.1267E-12
 
- Hartree potential time [sec]:       0.09
+ Hartree potential time [sec]:       0.05
 
    Eigenvalue Energy             =         -11.20638804 [Ry]
    Hartree Energy                =          57.64544307 [Ry]
@@ -1118,8 +1121,8 @@
 
  SCF iter #  26
 
- Diagonalization time [sec] :       0.04,      tdiag_sum =        2.63
- Iteration time [sec]       :       0.14
+ Diagonalization time [sec] :       0.04,      tdiag_sum =        2.40
+ Iteration time [sec]       :       0.11
 
  Fermi level at    -0.4564 [Ry]
 
@@ -1137,7 +1140,7 @@
 
  Max and min values of charge density [e/bohr^3]:   1.0776E+00   2.1061E-12
 
- Hartree potential time [sec]:       0.08
+ Hartree potential time [sec]:       0.05
 
    Eigenvalue Energy             =         -11.20616574 [Ry]
    Hartree Energy                =          57.64552281 [Ry]
@@ -1154,8 +1157,8 @@
 
  SCF iter #  27
 
- Diagonalization time [sec] :       0.04,      tdiag_sum =        2.67
- Iteration time [sec]       :       0.15
+ Diagonalization time [sec] :       0.04,      tdiag_sum =        2.44
+ Iteration time [sec]       :       0.11
 
  Fermi level at    -0.4564 [Ry]
 
@@ -1173,7 +1176,7 @@
 
  Max and min values of charge density [e/bohr^3]:   1.0776E+00   2.0875E-12
 
- Hartree potential time [sec]:       0.09
+ Hartree potential time [sec]:       0.05
 
    Eigenvalue Energy             =         -11.20587962 [Ry]
    Hartree Energy                =          57.64552279 [Ry]
@@ -1195,12 +1198,12 @@
    Total Energy (PBE0) of them   =         -43.29235117 [Ry]
    The start stopped below a residual of 1.00E-04 Ry (adaptive criterion): its energy is that of a start, not a converged semilocal energy
    ACE operator: 9 orbitals, max|M - M^T|/max|M| = 4.2E-12
-   Exact exchange: 35 pair-density Poisson solves, 0.03 s of 0.32 s (FP64 CUDA Kronecker-product FD Poisson solve (order 12) on the 138x138x138 box, multipole boundary of order 9, 1/r kernel; devices take tiles of 32-column orbital blocks; the pair densities of symmetry-sector orbitals in reflection-parity classes on the 69x69x69 octant)
+   Exact exchange: 35 pair-density Poisson solves, 0.04 s of 0.32 s (FP64 CUDA Kronecker-product FD Poisson solve (order 12) on the 138x138x138 box, multipole boundary of order 9, 1/r kernel; devices take tiles of 32-column orbital blocks; the pair densities of symmetry-sector orbitals in reflection-parity classes on the 69x69x69 octant)
 
  SCF iter #   1
 
- Diagonalization time [sec] :       0.08,      tdiag_sum =        2.75
- Iteration time [sec]       :       0.19
+ Diagonalization time [sec] :       0.12,      tdiag_sum =        2.56
+ Iteration time [sec]       :       0.18
 
  Fermi level at    -0.5013 [Ry]
 
@@ -1218,7 +1221,7 @@
 
  Max and min values of charge density [e/bohr^3]:   1.0718E+00   1.9865E-12
 
- Hartree potential time [sec]:       0.09
+ Hartree potential time [sec]:       0.05
 
    Eigenvalue Energy             =         -12.81371046 [Ry]
    Hartree Energy                =          57.78606307 [Ry]
@@ -1238,8 +1241,8 @@
 
  SCF iter #   2
 
- Diagonalization time [sec] :       0.07,      tdiag_sum =        2.82
- Iteration time [sec]       :       0.16
+ Diagonalization time [sec] :       0.07,      tdiag_sum =        2.62
+ Iteration time [sec]       :       0.13
 
  Fermi level at    -0.4998 [Ry]
 
@@ -1257,7 +1260,7 @@
 
  Max and min values of charge density [e/bohr^3]:   1.0751E+00   1.1833E-12
 
- Hartree potential time [sec]:       0.08
+ Hartree potential time [sec]:       0.05
 
    Eigenvalue Energy             =         -12.77295141 [Ry]
    Hartree Energy                =          57.70792770 [Ry]
@@ -1273,12 +1276,12 @@
    Total Energy =           -43.29429292 [Ry]
    Energy/atom  =          -294.52674530 [eV]
 
-  0-  2    SRE of pot. & charge weighted pot =   0.0873535743   0.0040088800
+  0-  2    SRE of pot. & charge weighted pot =   0.0873535744   0.0040088800
 
  SCF iter #   3
 
- Diagonalization time [sec] :       0.07,      tdiag_sum =        2.88
- Iteration time [sec]       :       0.17
+ Diagonalization time [sec] :       0.07,      tdiag_sum =        2.69
+ Iteration time [sec]       :       0.13
 
  Fermi level at    -0.4993 [Ry]
 
@@ -1296,7 +1299,7 @@
 
  Max and min values of charge density [e/bohr^3]:   1.0730E+00   1.2320E-12
 
- Hartree potential time [sec]:       0.08
+ Hartree potential time [sec]:       0.05
 
    Eigenvalue Energy             =         -12.76564652 [Ry]
    Hartree Energy                =          57.69081070 [Ry]
@@ -1316,8 +1319,8 @@
 
  SCF iter #   4
 
- Diagonalization time [sec] :       0.07,      tdiag_sum =        2.95
- Iteration time [sec]       :       0.17
+ Diagonalization time [sec] :       0.07,      tdiag_sum =        2.76
+ Iteration time [sec]       :       0.14
 
  Fermi level at    -0.4989 [Ry]
 
@@ -1335,7 +1338,7 @@
 
  Max and min values of charge density [e/bohr^3]:   1.0759E+00   1.2535E-12
 
- Hartree potential time [sec]:       0.08
+ Hartree potential time [sec]:       0.05
 
    Eigenvalue Energy             =         -12.76826813 [Ry]
    Hartree Energy                =          57.71255706 [Ry]
@@ -1355,8 +1358,8 @@
 
  SCF iter #   5
 
- Diagonalization time [sec] :       0.07,      tdiag_sum =        3.02
- Iteration time [sec]       :       0.17
+ Diagonalization time [sec] :       0.07,      tdiag_sum =        2.82
+ Iteration time [sec]       :       0.14
 
  Fermi level at    -0.4987 [Ry]
 
@@ -1374,7 +1377,7 @@
 
  Max and min values of charge density [e/bohr^3]:   1.0748E+00   1.5204E-12
 
- Hartree potential time [sec]:       0.08
+ Hartree potential time [sec]:       0.05
 
    Eigenvalue Energy             =         -12.76192306 [Ry]
    Hartree Energy                =          57.70425367 [Ry]
@@ -1394,26 +1397,26 @@
 
  SCF iter #   6
 
- Diagonalization time [sec] :       0.07,      tdiag_sum =        3.08
- Iteration time [sec]       :       0.17
+ Diagonalization time [sec] :       0.07,      tdiag_sum =        2.89
+ Iteration time [sec]       :       0.13
 
  Fermi level at    -0.4986 [Ry]
 
    State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
     1        -2.4042924331       -32.7123219867    1.0000        1
-    2        -1.2014155320       -16.3462194458    1.0000        1
+    2        -1.2014155320       -16.3462194457    1.0000        1
     3        -0.9916608666       -13.4923394190    1.0000        3
     4        -0.9916608383       -13.4923390334    1.0000        2
     5        -0.7889699447       -10.7345672742    1.0000        1
-    6        -0.0575828182        -0.7834603082    0.0000        2
+    6        -0.0575828182        -0.7834603081    0.0000        2
     7        -0.0575826399        -0.7834578826    0.0000        3
     8         0.0573651564         0.7804988455    0.0000        1
     9         0.1245353387         1.6944029109    0.0000        1
 
  Max and min values of charge density [e/bohr^3]:   1.0749E+00   1.5134E-12
 
- Hartree potential time [sec]:       0.08
+ Hartree potential time [sec]:       0.05
 
    Eigenvalue Energy             =         -12.75599923 [Ry]
    Hartree Energy                =          57.69817909 [Ry]
@@ -1433,8 +1436,8 @@
 
  SCF iter #   7
 
- Diagonalization time [sec] :       0.07,      tdiag_sum =        3.15
- Iteration time [sec]       :       0.17
+ Diagonalization time [sec] :       0.07,      tdiag_sum =        2.96
+ Iteration time [sec]       :       0.14
 
  Fermi level at    -0.4986 [Ry]
 
@@ -1452,7 +1455,7 @@
 
  Max and min values of charge density [e/bohr^3]:   1.0747E+00   1.4229E-12
 
- Hartree potential time [sec]:       0.08
+ Hartree potential time [sec]:       0.05
 
    Eigenvalue Energy             =         -12.75693193 [Ry]
    Hartree Energy                =          57.69932146 [Ry]
@@ -1472,8 +1475,8 @@
 
  SCF iter #   8
 
- Diagonalization time [sec] :       0.07,      tdiag_sum =        3.22
- Iteration time [sec]       :       0.16
+ Diagonalization time [sec] :       0.07,      tdiag_sum =        3.02
+ Iteration time [sec]       :       0.14
 
  Fermi level at    -0.4986 [Ry]
 
@@ -1491,7 +1494,7 @@
 
  Max and min values of charge density [e/bohr^3]:   1.0750E+00   1.3892E-12
 
- Hartree potential time [sec]:       0.08
+ Hartree potential time [sec]:       0.05
 
    Eigenvalue Energy             =         -12.75801321 [Ry]
    Hartree Energy                =          57.70106163 [Ry]
@@ -1523,8 +1526,8 @@
 
  SCF iter #   1
 
- Diagonalization time [sec] :       0.07,      tdiag_sum =        3.29
- Iteration time [sec]       :       0.16
+ Diagonalization time [sec] :       0.07,      tdiag_sum =        3.09
+ Iteration time [sec]       :       0.13
 
  Fermi level at    -0.4988 [Ry]
 
@@ -1532,7 +1535,7 @@
 
     1        -2.4053678627       -32.7269540670    1.0000        1
     2        -1.2022746138       -16.3579079406    1.0000        1
-    3        -0.9922435996       -13.5002679668    1.0000        3
+    3        -0.9922435996       -13.5002679669    1.0000        3
     4        -0.9922435906       -13.5002678452    1.0000        2
     5        -0.7893164303       -10.7392814869    1.0000        1
     6        -0.0569537079        -0.7749007586    0.0000        2
@@ -1542,7 +1545,7 @@
 
  Max and min values of charge density [e/bohr^3]:   1.0749E+00   1.4498E-12
 
- Hartree potential time [sec]:       0.08
+ Hartree potential time [sec]:       0.05
 
    Eigenvalue Energy             =         -12.76289219 [Ry]
    Hartree Energy                =          57.72155785 [Ry]
@@ -1562,8 +1565,8 @@
 
  SCF iter #   2
 
- Diagonalization time [sec] :       0.07,      tdiag_sum =        3.35
- Iteration time [sec]       :       0.16
+ Diagonalization time [sec] :       0.07,      tdiag_sum =        3.16
+ Iteration time [sec]       :       0.13
 
  Fermi level at    -0.4986 [Ry]
 
@@ -1581,7 +1584,7 @@
 
  Max and min values of charge density [e/bohr^3]:   1.0750E+00   1.5135E-12
 
- Hartree potential time [sec]:       0.08
+ Hartree potential time [sec]:       0.05
 
    Eigenvalue Energy             =         -12.75746775 [Ry]
    Hartree Energy                =          57.71032364 [Ry]
@@ -1601,8 +1604,8 @@
 
  SCF iter #   3
 
- Diagonalization time [sec] :       0.07,      tdiag_sum =        3.42
- Iteration time [sec]       :       0.17
+ Diagonalization time [sec] :       0.07,      tdiag_sum =        3.23
+ Iteration time [sec]       :       0.13
 
  Fermi level at    -0.4985 [Ry]
 
@@ -1620,7 +1623,7 @@
 
  Max and min values of charge density [e/bohr^3]:   1.0748E+00   1.4197E-12
 
- Hartree potential time [sec]:       0.08
+ Hartree potential time [sec]:       0.05
 
    Eigenvalue Energy             =         -12.75682681 [Ry]
    Hartree Energy                =          57.70869576 [Ry]
@@ -1640,8 +1643,8 @@
 
  SCF iter #   4
 
- Diagonalization time [sec] :       0.07,      tdiag_sum =        3.49
- Iteration time [sec]       :       0.16
+ Diagonalization time [sec] :       0.07,      tdiag_sum =        3.29
+ Iteration time [sec]       :       0.14
 
  Fermi level at    -0.4985 [Ry]
 
@@ -1659,7 +1662,7 @@
 
  Max and min values of charge density [e/bohr^3]:   1.0751E+00   1.3419E-12
 
- Hartree potential time [sec]:       0.08
+ Hartree potential time [sec]:       0.05
 
    Eigenvalue Energy             =         -12.75708551 [Ry]
    Hartree Energy                =          57.71103275 [Ry]
@@ -1679,8 +1682,8 @@
 
  SCF iter #   5
 
- Diagonalization time [sec] :       0.07,      tdiag_sum =        3.55
- Iteration time [sec]       :       0.17
+ Diagonalization time [sec] :       0.07,      tdiag_sum =        3.36
+ Iteration time [sec]       :       0.14
 
  Fermi level at    -0.4984 [Ry]
 
@@ -1698,7 +1701,7 @@
 
  Max and min values of charge density [e/bohr^3]:   1.0750E+00   1.3003E-12
 
- Hartree potential time [sec]:       0.08
+ Hartree potential time [sec]:       0.05
 
    Eigenvalue Energy             =         -12.75603879 [Ry]
    Hartree Energy                =          57.70971646 [Ry]
@@ -1718,8 +1721,8 @@
 
  SCF iter #   6
 
- Diagonalization time [sec] :       0.07,      tdiag_sum =        3.62
- Iteration time [sec]       :       0.17
+ Diagonalization time [sec] :       0.07,      tdiag_sum =        3.43
+ Iteration time [sec]       :       0.14
 
  Fermi level at    -0.4984 [Ry]
 
@@ -1737,7 +1740,7 @@
 
  Max and min values of charge density [e/bohr^3]:   1.0750E+00   1.2631E-12
 
- Hartree potential time [sec]:       0.08
+ Hartree potential time [sec]:       0.05
 
    Eigenvalue Energy             =         -12.75555312 [Ry]
    Hartree Energy                =          57.70942941 [Ry]
@@ -1757,8 +1760,8 @@
 
  SCF iter #   7
 
- Diagonalization time [sec] :       0.07,      tdiag_sum =        3.69
- Iteration time [sec]       :       0.17
+ Diagonalization time [sec] :       0.11,      tdiag_sum =        3.54
+ Iteration time [sec]       :       0.18
 
  Fermi level at    -0.4984 [Ry]
 
@@ -1776,7 +1779,7 @@
 
  Max and min values of charge density [e/bohr^3]:   1.0750E+00   1.2461E-12
 
- Hartree potential time [sec]:       0.08
+ Hartree potential time [sec]:       0.05
 
    Eigenvalue Energy             =         -12.75557376 [Ry]
    Hartree Energy                =          57.70941651 [Ry]
@@ -1796,7 +1799,7 @@
 
  SCF iter #   8
 
- Diagonalization time [sec] :       0.07,      tdiag_sum =        3.75
+ Diagonalization time [sec] :       0.09,      tdiag_sum =        3.63
  Iteration time [sec]       :       0.16
 
  Fermi level at    -0.4984 [Ry]
@@ -1815,7 +1818,7 @@
 
  Max and min values of charge density [e/bohr^3]:   1.0750E+00   1.2338E-12
 
- Hartree potential time [sec]:       0.08
+ Hartree potential time [sec]:       0.05
 
    Eigenvalue Energy             =         -12.75568975 [Ry]
    Hartree Energy                =          57.70967264 [Ry]
@@ -1835,8 +1838,8 @@
 
  SCF iter #   9
 
- Diagonalization time [sec] :       0.07,      tdiag_sum =        3.82
- Iteration time [sec]       :       0.17
+ Diagonalization time [sec] :       0.06,      tdiag_sum =        3.69
+ Iteration time [sec]       :       0.14
 
  Fermi level at    -0.4984 [Ry]
 
@@ -1854,7 +1857,7 @@
 
  Max and min values of charge density [e/bohr^3]:   1.0750E+00   1.2281E-12
 
- Hartree potential time [sec]:       0.09
+ Hartree potential time [sec]:       0.05
 
    Eigenvalue Energy             =         -12.75572989 [Ry]
    Hartree Energy                =          57.70967326 [Ry]
@@ -1874,7 +1877,7 @@
 
  SCF iter #  10
 
- Diagonalization time [sec] :       0.06,      tdiag_sum =        3.88
+ Diagonalization time [sec] :       0.08,      tdiag_sum =        3.77
  Iteration time [sec]       :       0.16
 
  Fermi level at    -0.4984 [Ry]
@@ -1893,7 +1896,7 @@
 
  Max and min values of charge density [e/bohr^3]:   1.0750E+00   1.2237E-12
 
- Hartree potential time [sec]:       0.08
+ Hartree potential time [sec]:       0.05
 
    Eigenvalue Energy             =         -12.75566996 [Ry]
    Hartree Energy                =          57.70960099 [Ry]
@@ -1913,8 +1916,8 @@
 
  SCF iter #  11
 
- Diagonalization time [sec] :       0.06,      tdiag_sum =        3.94
- Iteration time [sec]       :       0.17
+ Diagonalization time [sec] :       0.06,      tdiag_sum =        3.84
+ Iteration time [sec]       :       0.13
 
  Fermi level at    -0.4984 [Ry]
 
@@ -1923,8 +1926,8 @@
     1        -2.4044868943       -32.7149677860    1.0000        1
     2        -1.2011750248       -16.3429471519    1.0000        1
     3        -0.9913229225       -13.4877414190    1.0000        3
-    4        -0.9913229170       -13.4877413448    1.0000        2
-    5        -0.7894843657       -10.7415663827    1.0000        1
+    4        -0.9913229170       -13.4877413447    1.0000        2
+    5        -0.7894843657       -10.7415663828    1.0000        1
     6        -0.0568785345        -0.7738779651    0.0000        2
     7        -0.0568784677        -0.7738770556    0.0000        3
     8         0.0576116988         0.7838532516    0.0000        1
@@ -1932,7 +1935,7 @@
 
  Max and min values of charge density [e/bohr^3]:   1.0750E+00   1.2225E-12
 
- Hartree potential time [sec]:       0.08
+ Hartree potential time [sec]:       0.05
 
    Eigenvalue Energy             =         -12.75558425 [Ry]
    Hartree Energy                =          57.70926536 [Ry]
@@ -1948,12 +1951,12 @@
    Total Energy =           -43.29457605 [Ry]
    Energy/atom  =          -294.52867144 [eV]
 
-  0- 11    SRE of pot. & charge weighted pot =   0.0017751279   0.0001930017
+  0- 11    SRE of pot. & charge weighted pot =   0.0017751280   0.0001930017
 
  SCF iter #  12
 
- Diagonalization time [sec] :       0.06,      tdiag_sum =        4.00
- Iteration time [sec]       :       0.16
+ Diagonalization time [sec] :       0.06,      tdiag_sum =        3.90
+ Iteration time [sec]       :       0.13
 
  Fermi level at    -0.4984 [Ry]
 
@@ -1964,14 +1967,14 @@
     3        -0.9913461309       -13.4880571876    1.0000        2
     4        -0.9913461305       -13.4880571822    1.0000        3
     5        -0.7894748495       -10.7414369077    1.0000        1
-    6        -0.0568879790        -0.7740064645    0.0000        2
+    6        -0.0568879790        -0.7740064646    0.0000        2
     7        -0.0568879335        -0.7740058452    0.0000        3
     8         0.0576108994         0.7838423747    0.0000        1
     9         0.1247557295         1.6974015040    0.0000        1
 
  Max and min values of charge density [e/bohr^3]:   1.0750E+00   1.2199E-12
 
- Hartree potential time [sec]:       0.07
+ Hartree potential time [sec]:       0.04
 
    Eigenvalue Energy             =         -12.75575155 [Ry]
    Hartree Energy                =          57.70973300 [Ry]
@@ -1991,26 +1994,26 @@
 
  SCF iter #  13
 
- Diagonalization time [sec] :       0.06,      tdiag_sum =        4.06
- Iteration time [sec]       :       0.16
+ Diagonalization time [sec] :       0.06,      tdiag_sum =        3.96
+ Iteration time [sec]       :       0.13
 
  Fermi level at    -0.4984 [Ry]
 
    State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
-    1        -2.4045442168       -32.7157477049    1.0000        1
-    2        -1.2012273131       -16.3436585766    1.0000        1
-    3        -0.9913702833       -13.4883858011    1.0000        2
+    1        -2.4045442168       -32.7157477050    1.0000        1
+    2        -1.2012273131       -16.3436585767    1.0000        1
+    3        -0.9913702833       -13.4883858012    1.0000        2
     4        -0.9913702830       -13.4883857962    1.0000        3
     5        -0.7894905193       -10.7416501077    1.0000        1
-    6        -0.0569064205        -0.7742573757    0.0000        2
+    6        -0.0569064205        -0.7742573758    0.0000        2
     7        -0.0569063792        -0.7742568142    0.0000        3
     8         0.0576160138         0.7839119608    0.0000        1
     9         0.1247602424         1.6974629066    0.0000        1
 
  Max and min values of charge density [e/bohr^3]:   1.0750E+00   1.2229E-12
 
- Hartree potential time [sec]:       0.08
+ Hartree potential time [sec]:       0.05
 
    Eigenvalue Energy             =         -12.75600523 [Ry]
    Hartree Energy                =          57.71006942 [Ry]
@@ -2038,12 +2041,12 @@
    Total Energy (PBE0)            =         -43.29458001 [Ry]
    Inner SCF: stopped below a residual of 3.68E-05 Ry (adaptive criterion)
    ACE operator: 9 orbitals, max|M - M^T|/max|M| = 3.8E-12
-   Exact exchange: 35 pair-density Poisson solves, 0.03 s of 0.05 s (FP64 CUDA Kronecker-product FD Poisson solve (order 12) on the 138x138x138 box, multipole boundary of order 9, 1/r kernel; devices take tiles of 32-column orbital blocks; the pair densities of symmetry-sector orbitals in reflection-parity classes on the 69x69x69 octant)
+   Exact exchange: 35 pair-density Poisson solves, 0.04 s of 0.12 s (FP64 CUDA Kronecker-product FD Poisson solve (order 12) on the 138x138x138 box, multipole boundary of order 9, 1/r kernel; devices take tiles of 32-column orbital blocks; the pair densities of symmetry-sector orbitals in reflection-parity classes on the 69x69x69 octant)
 
  SCF iter #   1
 
- Diagonalization time [sec] :       0.07,      tdiag_sum =        4.13
- Iteration time [sec]       :       0.16
+ Diagonalization time [sec] :       0.07,      tdiag_sum =        4.03
+ Iteration time [sec]       :       0.13
 
  Fermi level at    -0.4985 [Ry]
 
@@ -2061,7 +2064,7 @@
 
  Max and min values of charge density [e/bohr^3]:   1.0751E+00   1.2675E-12
 
- Hartree potential time [sec]:       0.08
+ Hartree potential time [sec]:       0.05
 
    Eigenvalue Energy             =         -12.75670078 [Ry]
    Hartree Energy                =          57.71385014 [Ry]
@@ -2077,18 +2080,18 @@
    Total Energy =           -43.29458027 [Ry]
    Energy/atom  =          -294.52870013 [eV]
 
-  0-  1    SRE of pot. & charge weighted pot =   0.0058505762   0.0006716835
+  0-  1    SRE of pot. & charge weighted pot =   0.0058505763   0.0006716835
 
  SCF iter #   2
 
- Diagonalization time [sec] :       0.07,      tdiag_sum =        4.20
- Iteration time [sec]       :       0.17
+ Diagonalization time [sec] :       0.13,      tdiag_sum =        4.15
+ Iteration time [sec]       :       0.19
 
  Fermi level at    -0.4984 [Ry]
 
    State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
-    1        -2.4044437428       -32.7143806761    1.0000        1
+    1        -2.4044437428       -32.7143806762    1.0000        1
     2        -1.2011097834       -16.3420594915    1.0000        1
     3        -0.9912889997       -13.4872798725    1.0000        3
     4        -0.9912889973       -13.4872798397    1.0000        2
@@ -2100,7 +2103,7 @@
 
  Max and min values of charge density [e/bohr^3]:   1.0750E+00   1.2552E-12
 
- Hartree potential time [sec]:       0.09
+ Hartree potential time [sec]:       0.05
 
    Eigenvalue Energy             =         -12.75558812 [Ry]
    Hartree Energy                =          57.71170786 [Ry]
@@ -2120,8 +2123,8 @@
 
  SCF iter #   3
 
- Diagonalization time [sec] :       0.07,      tdiag_sum =        4.26
- Iteration time [sec]       :       0.17
+ Diagonalization time [sec] :       0.07,      tdiag_sum =        4.22
+ Iteration time [sec]       :       0.13
 
  Fermi level at    -0.4984 [Ry]
 
@@ -2139,7 +2142,7 @@
 
  Max and min values of charge density [e/bohr^3]:   1.0750E+00   1.2354E-12
 
- Hartree potential time [sec]:       0.08
+ Hartree potential time [sec]:       0.05
 
    Eigenvalue Energy             =         -12.75541984 [Ry]
    Hartree Energy                =          57.71140612 [Ry]
@@ -2159,8 +2162,8 @@
 
  SCF iter #   4
 
- Diagonalization time [sec] :       0.07,      tdiag_sum =        4.33
- Iteration time [sec]       :       0.17
+ Diagonalization time [sec] :       0.08,      tdiag_sum =        4.30
+ Iteration time [sec]       :       0.15
 
  Fermi level at    -0.4984 [Ry]
 
@@ -2178,7 +2181,7 @@
 
  Max and min values of charge density [e/bohr^3]:   1.0750E+00   1.2194E-12
 
- Hartree potential time [sec]:       0.08
+ Hartree potential time [sec]:       0.05
 
    Eigenvalue Energy             =         -12.75538907 [Ry]
    Hartree Energy                =          57.71154629 [Ry]
@@ -2198,8 +2201,8 @@
 
  SCF iter #   5
 
- Diagonalization time [sec] :       0.07,      tdiag_sum =        4.40
- Iteration time [sec]       :       0.16
+ Diagonalization time [sec] :       0.07,      tdiag_sum =        4.37
+ Iteration time [sec]       :       0.14
 
  Fermi level at    -0.4984 [Ry]
 
@@ -2217,7 +2220,7 @@
 
  Max and min values of charge density [e/bohr^3]:   1.0750E+00   1.2120E-12
 
- Hartree potential time [sec]:       0.08
+ Hartree potential time [sec]:       0.05
 
    Eigenvalue Energy             =         -12.75524062 [Ry]
    Hartree Energy                =          57.71135321 [Ry]
@@ -2237,15 +2240,15 @@
 
  SCF iter #   6
 
- Diagonalization time [sec] :       0.07,      tdiag_sum =        4.46
- Iteration time [sec]       :       0.16
+ Diagonalization time [sec] :       0.07,      tdiag_sum =        4.44
+ Iteration time [sec]       :       0.14
 
  Fermi level at    -0.4984 [Ry]
 
    State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
     1        -2.4044410226       -32.7143436658    1.0000        1
-    2        -1.2010837303       -16.3417050170    1.0000        1
+    2        -1.2010837302       -16.3417050170    1.0000        1
     3        -0.9912665359       -13.4869742348    1.0000        3
     4        -0.9912665351       -13.4869742237    1.0000        2
     5        -0.7895814412       -10.7428871721    1.0000        1
@@ -2256,7 +2259,7 @@
 
  Max and min values of charge density [e/bohr^3]:   1.0750E+00   1.2081E-12
 
- Hartree potential time [sec]:       0.08
+ Hartree potential time [sec]:       0.05
 
    Eigenvalue Energy             =         -12.75527853 [Ry]
    Hartree Energy                =          57.71142558 [Ry]
@@ -2276,8 +2279,8 @@
 
  SCF iter #   7
 
- Diagonalization time [sec] :       0.06,      tdiag_sum =        4.53
- Iteration time [sec]       :       0.16
+ Diagonalization time [sec] :       0.06,      tdiag_sum =        4.50
+ Iteration time [sec]       :       0.13
 
  Fermi level at    -0.4984 [Ry]
 
@@ -2295,7 +2298,7 @@
 
  Max and min values of charge density [e/bohr^3]:   1.0750E+00   1.2059E-12
 
- Hartree potential time [sec]:       0.08
+ Hartree potential time [sec]:       0.05
 
    Eigenvalue Energy             =         -12.75529287 [Ry]
    Hartree Energy                =          57.71145495 [Ry]
@@ -2315,8 +2318,8 @@
 
  SCF iter #   8
 
- Diagonalization time [sec] :       0.06,      tdiag_sum =        4.58
- Iteration time [sec]       :       0.16
+ Diagonalization time [sec] :       0.06,      tdiag_sum =        4.56
+ Iteration time [sec]       :       0.13
 
  Fermi level at    -0.4984 [Ry]
 
@@ -2334,7 +2337,7 @@
 
  Max and min values of charge density [e/bohr^3]:   1.0750E+00   1.2047E-12
 
- Hartree potential time [sec]:       0.08
+ Hartree potential time [sec]:       0.05
 
    Eigenvalue Energy             =         -12.75529194 [Ry]
    Hartree Energy                =          57.71146100 [Ry]
@@ -2354,15 +2357,15 @@
 
  SCF iter #   9
 
- Diagonalization time [sec] :       1.38,      tdiag_sum =        5.96
- Iteration time [sec]       :       1.49
+ Diagonalization time [sec] :       1.33,      tdiag_sum =        5.89
+ Iteration time [sec]       :       1.40
 
  Fermi level at    -0.4984 [Ry]
 
    State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
     1        -2.4044433921       -32.7143759041    1.0000        1
-    2        -1.2010864669       -16.3417422519    1.0000        1
+    2        -1.2010864669       -16.3417422518    1.0000        1
     3        -0.9912684194       -13.4869998605    1.0000        3
     4        -0.9912684194       -13.4869998600    1.0000        2
     5        -0.7895792704       -10.7428576365    1.0000        1
@@ -2373,7 +2376,7 @@
 
  Max and min values of charge density [e/bohr^3]:   1.0750E+00   1.2001E-12
 
- Hartree potential time [sec]:       0.09
+ Hartree potential time [sec]:       0.05
 
    Eigenvalue Energy             =         -12.75529194 [Ry]
    Hartree Energy                =          57.71146473 [Ry]
@@ -2401,12 +2404,12 @@
    Total Energy (PBE0)            =         -43.29458080 [Ry]
    Inner SCF: levels converged by 24 eigensolver passes at its last Hamiltonian (last move 9.9E-09 Ry)
    ACE operator: 9 orbitals, max|M - M^T|/max|M| = 3.8E-12
-   Exact exchange: 35 pair-density Poisson solves, 0.03 s of 0.05 s (FP64 CUDA Kronecker-product FD Poisson solve (order 12) on the 138x138x138 box, multipole boundary of order 9, 1/r kernel; devices take tiles of 32-column orbital blocks; the pair densities of symmetry-sector orbitals in reflection-parity classes on the 69x69x69 octant)
+   Exact exchange: 35 pair-density Poisson solves, 0.03 s of 0.06 s (FP64 CUDA Kronecker-product FD Poisson solve (order 12) on the 138x138x138 box, multipole boundary of order 9, 1/r kernel; devices take tiles of 32-column orbital blocks; the pair densities of symmetry-sector orbitals in reflection-parity classes on the 69x69x69 octant)
 
  SCF iter #   1
 
- Diagonalization time [sec] :       0.07,      tdiag_sum =        6.03
- Iteration time [sec]       :       0.16
+ Diagonalization time [sec] :       0.07,      tdiag_sum =        5.96
+ Iteration time [sec]       :       0.13
 
  Fermi level at    -0.4984 [Ry]
 
@@ -2424,7 +2427,7 @@
 
  Max and min values of charge density [e/bohr^3]:   1.0750E+00   1.2109E-12
 
- Hartree potential time [sec]:       0.08
+ Hartree potential time [sec]:       0.05
 
    Eigenvalue Energy             =         -12.75540961 [Ry]
    Hartree Energy                =          57.71213174 [Ry]
@@ -2444,8 +2447,8 @@
 
  SCF iter #   2
 
- Diagonalization time [sec] :       0.07,      tdiag_sum =        6.10
- Iteration time [sec]       :       0.18
+ Diagonalization time [sec] :       0.07,      tdiag_sum =        6.03
+ Iteration time [sec]       :       0.13
 
  Fermi level at    -0.4984 [Ry]
 
@@ -2463,7 +2466,7 @@
 
  Max and min values of charge density [e/bohr^3]:   1.0750E+00   1.2083E-12
 
- Hartree potential time [sec]:       0.09
+ Hartree potential time [sec]:       0.05
 
    Eigenvalue Energy             =         -12.75521701 [Ry]
    Hartree Energy                =          57.71174512 [Ry]
@@ -2483,8 +2486,8 @@
 
  SCF iter #   3
 
- Diagonalization time [sec] :       0.07,      tdiag_sum =        6.16
- Iteration time [sec]       :       0.16
+ Diagonalization time [sec] :       0.07,      tdiag_sum =        6.10
+ Iteration time [sec]       :       0.13
 
  Fermi level at    -0.4984 [Ry]
 
@@ -2502,7 +2505,7 @@
 
  Max and min values of charge density [e/bohr^3]:   1.0750E+00   1.2045E-12
 
- Hartree potential time [sec]:       0.08
+ Hartree potential time [sec]:       0.05
 
    Eigenvalue Energy             =         -12.75519401 [Ry]
    Hartree Energy                =          57.71169747 [Ry]
@@ -2522,8 +2525,8 @@
 
  SCF iter #   4
 
- Diagonalization time [sec] :       0.07,      tdiag_sum =        6.23
- Iteration time [sec]       :       0.17
+ Diagonalization time [sec] :       0.07,      tdiag_sum =        6.16
+ Iteration time [sec]       :       0.14
 
  Fermi level at    -0.4984 [Ry]
 
@@ -2541,7 +2544,7 @@
 
  Max and min values of charge density [e/bohr^3]:   1.0750E+00   1.2016E-12
 
- Hartree potential time [sec]:       0.08
+ Hartree potential time [sec]:       0.05
 
    Eigenvalue Energy             =         -12.75519270 [Ry]
    Hartree Energy                =          57.71171439 [Ry]
@@ -2561,8 +2564,8 @@
 
  SCF iter #   5
 
- Diagonalization time [sec] :       0.07,      tdiag_sum =        6.30
- Iteration time [sec]       :       0.16
+ Diagonalization time [sec] :       0.07,      tdiag_sum =        6.23
+ Iteration time [sec]       :       0.14
 
  Fermi level at    -0.4984 [Ry]
 
@@ -2580,7 +2583,7 @@
 
  Max and min values of charge density [e/bohr^3]:   1.0750E+00   1.2000E-12
 
- Hartree potential time [sec]:       0.08
+ Hartree potential time [sec]:       0.05
 
    Eigenvalue Energy             =         -12.75516927 [Ry]
    Hartree Energy                =          57.71168343 [Ry]
@@ -2600,8 +2603,8 @@
 
  SCF iter #   6
 
- Diagonalization time [sec] :       0.06,      tdiag_sum =        6.36
- Iteration time [sec]       :       0.16
+ Diagonalization time [sec] :       0.06,      tdiag_sum =        6.29
+ Iteration time [sec]       :       0.14
 
  Fermi level at    -0.4984 [Ry]
 
@@ -2619,7 +2622,7 @@
 
  Max and min values of charge density [e/bohr^3]:   1.0750E+00   1.1993E-12
 
- Hartree potential time [sec]:       0.08
+ Hartree potential time [sec]:       0.05
 
    Eigenvalue Energy             =         -12.75517860 [Ry]
    Hartree Energy                =          57.71170071 [Ry]
@@ -2639,8 +2642,8 @@
 
  SCF iter #   7
 
- Diagonalization time [sec] :       0.06,      tdiag_sum =        6.42
- Iteration time [sec]       :       0.16
+ Diagonalization time [sec] :       0.08,      tdiag_sum =        6.38
+ Iteration time [sec]       :       0.15
 
  Fermi level at    -0.4984 [Ry]
 
@@ -2658,7 +2661,7 @@
 
  Max and min values of charge density [e/bohr^3]:   1.0750E+00   1.1989E-12
 
- Hartree potential time [sec]:       0.08
+ Hartree potential time [sec]:       0.05
 
    Eigenvalue Energy             =         -12.75518258 [Ry]
    Hartree Energy                =          57.71170928 [Ry]
@@ -2678,8 +2681,8 @@
 
  SCF iter #   8
 
- Diagonalization time [sec] :       0.06,      tdiag_sum =        6.48
- Iteration time [sec]       :       0.16
+ Diagonalization time [sec] :       0.12,      tdiag_sum =        6.50
+ Iteration time [sec]       :       0.19
 
  Fermi level at    -0.4984 [Ry]
 
@@ -2697,7 +2700,7 @@
 
  Max and min values of charge density [e/bohr^3]:   1.0750E+00   1.1988E-12
 
- Hartree potential time [sec]:       0.08
+ Hartree potential time [sec]:       0.05
 
    Eigenvalue Energy             =         -12.75517912 [Ry]
    Hartree Energy                =          57.71170427 [Ry]
@@ -2717,8 +2720,8 @@
 
  SCF iter #   9
 
- Diagonalization time [sec] :       0.06,      tdiag_sum =        6.54
- Iteration time [sec]       :       0.16
+ Diagonalization time [sec] :       0.06,      tdiag_sum =        6.56
+ Iteration time [sec]       :       0.13
 
  Fermi level at    -0.4984 [Ry]
 
@@ -2736,7 +2739,7 @@
 
  Max and min values of charge density [e/bohr^3]:   1.0750E+00   1.1987E-12
 
- Hartree potential time [sec]:       0.08
+ Hartree potential time [sec]:       0.05
 
    Eigenvalue Energy             =         -12.75517912 [Ry]
    Hartree Energy                =          57.71170406 [Ry]
@@ -2781,19 +2784,19 @@
    Total Energy (PBE0)         =           -43.29458083 [Ry]
 
  Fock loop converged after 4 outer iterations (estimated exchange error 5.03E-09 Ry < 1.0E-08 Ry).
- Exact exchange: 155 pair-density Poisson solves in 0.48 s (0.12 s in the solver); Fock loop 14.39 s, 27 SCF iterations of the PBE start
+ Exact exchange: 155 pair-density Poisson solves in 0.57 s (0.15 s in the solver); Fock loop 12.73 s, 27 SCF iterations of the PBE start
  Pair-density Poisson solver: FP64 CUDA Kronecker-product FD Poisson solve (order 12) on the 138x138x138 box, multipole boundary of order 9, 1/r kernel; devices take tiles of 32-column orbital blocks; the pair densities of symmetry-sector orbitals in reflection-parity classes on the 69x69x69 octant
 
 Self-consistency convergence achieved.
 
-Time for self-consistent field [sec] :      14.52,    tdiag_sum =        6.54
-Time spent on Hartree potential [sec] :        5.34
+Time for self-consistent field [sec] :      12.86,    tdiag_sum =        6.56
+Time spent on Hartree potential [sec] :        3.32
 
  Tot. charge (user input) [e] =   0.00000000
- Tot. charge (computed) [e] =  -0.00000000
+ Tot. charge (computed) [e] =   0.00000000
  Dipole components [Debye]:
  x-component =   0.00000000
- y-component =   0.00000000
+ y-component =  -0.00000000
  z-component =   0.11077429
 
  Density at the sphere: the sphere adds an estimated 1.8E-06 Ry to the total energy (decay constant 0.87 /bohr: a factor 10 per 0.70 ang)
@@ -2805,24 +2808,24 @@ Time spent on Hartree potential [sec] :        5.34
 
  Initial Hamiltonian component timings [sec]
  --------------------------------------------------
- Finite-difference (-nabla^2) :     0.009298
- V_ion diagonal/local         :     0.037691
- V_ion nonlocal projectors    :     0.017452
- Initial V_xc (PBE0)             :     0.067159
- Component subtotal             :     0.131599
+ Finite-difference (-nabla^2) :     0.009917
+ V_ion diagonal/local         :     0.286431
+ V_ion nonlocal projectors    :     0.011527
+ Initial V_xc (PBE0)             :     0.017415
+ Component subtotal             :     0.325290
  --------------------------------------------------
 
  SCF timing analysis [sec]
  --------------------------------------------------
- Initial Hartree potential      :     0.084211
- Initial exchange-correlation   :     0.067159
- Hamiltonian binding subtotal  :     0.018453
- Diagonalization subtotal       :     6.538160
- Occupation/density subtotal   :     0.367600
- Hartree potential subtotal     :     5.344376
- Exchange-correlation subtotal  :     0.138449
- Mixing/energy subtotal         :     0.700125
- SCF wall time                   :    14.392774
+ Initial Hartree potential      :     0.110997
+ Initial exchange-correlation   :     0.017415
+ Hamiltonian binding subtotal  :     0.019425
+ Diagonalization subtotal       :     6.555266
+ Occupation/density subtotal   :     0.376666
+ Hartree potential subtotal     :     3.316226
+ Exchange-correlation subtotal  :     0.124623
+ Mixing/energy subtotal         :     0.665535
+ SCF wall time                   :    12.734156
  --------------------------------------------------
 
 Forces and MPI statistics
@@ -2838,28 +2841,28 @@ are not calculated by this Python single-point implementation.
  Total H application time [sec] =     0.000000
  Average H application [sec] =     0.000000
  Local-potential updates =           66
- Local update time [sec] =     0.016291
+ Local update time [sec] =     0.017303
  Per-H device timing = disabled (would synchronize every recurrence)
  GPU initial-eigensolver calls =            4
- GPU initial-eigensolver synchronized time [sec] =     1.491439
+ GPU initial-eigensolver synchronized time [sec] =     1.277504
  GPU SUBSPACE calls =          352
- GPU SUBSPACE synchronized time [sec] =     4.866183
+ GPU SUBSPACE synchronized time [sec] =     5.094784
  GPU representation scheduler batches =           89
- GPU representation scheduler wall time [sec] =     6.392351
+ GPU representation scheduler wall time [sec] =     6.406473
  Final active states by representation = 8 8 8 6
- Requested-eigenpair download [sec] =     0.015822
+ Requested-eigenpair download [sec] =     0.015912
  GPU density builds =          198
- GPU density build/download [sec] =     0.075546
- Final wavefunction download [sec] =     0.130428
+ GPU density build/download [sec] =     0.078480
+ Final wavefunction download [sec] =     0.124549
  Accelerated Hartree solves =           67
- Accelerated Hartree total [sec] =     5.426775
- Hartree boundary/RHS [sec] =     2.008758
- Hartree linear solve [sec] =     3.417659
+ Accelerated Hartree total [sec] =     3.425552
+ Hartree boundary/RHS [sec] =     0.111390
+ Hartree linear solve [sec] =     3.291367
  Host-to-device time [sec] =     0.000000
- Device kernel time [sec] =     6.357622
- Device-to-host time [sec] =     0.015822
- Pre-SCF setup/reporting wall time [sec] :    1.683596
- Post-SCF finalization/reporting [sec] :    0.039281
- Total accelerated Python wall time [sec] :       16.25
+ Device kernel time [sec] =     6.372288
+ Device-to-host time [sec] =     0.015912
+ Pre-SCF setup/reporting wall time [sec] :    1.403695
+ Post-SCF finalization/reporting [sec] :    0.043048
+ Total accelerated Python wall time [sec] :       14.32
  parsec.dat: examples/0d_hybrid_functionals/CO/pbe0/parsec.dat (potential and density of 1 spin channel(s) on 1387496 points, 5 wavefunction(s))
 Text log: examples/0d_hybrid_functionals/CO/pbe0/parsec.out

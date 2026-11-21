@@ -98,13 +98,25 @@ def run_self_consistent_soc(
     *,
     callback: Callable[[SelfConsistentSOCIteration], None] | None = None,
     backend=None,
+    note: Callable[[str], None] | None = None,
+    symmetry: bool = True,
 ) -> SelfConsistentSOCResult:
     """Run self-consistent SOC with the device spinor Hamiltonian and eigensolver.
 
     Without ``backend`` the system must be bound to CuPy
     (``system.backend_info.selected == "cupy"``); periodic systems are not
     covered by this Gamma-point tier.
+
+    ``PARSEC_SOC_SECTORS=kramers`` solves the ``+i`` sector of a two-fold
+    operation of the double group, one state of every Kramers pair, and ``on``
+    splits it by inversion parity where the cluster has a centre of inversion
+    (:mod:`.soc_sectors`); ``note`` receives a line that says which route the
+    run takes and why.  ``symmetry=False`` (``Ignore_Symmetry``, ``--symmetry
+    off``) keeps the whole grid whatever the switch.
     """
+    from .soc_sectors import soc_sectors_setting
+
+    sectors = soc_sectors_setting()
     if backend is None:
         if system.backend_info.selected != "cupy":
             raise ValueError(
@@ -117,6 +129,30 @@ def run_self_consistent_soc(
         backend = CupyArrayBackend(int(cp.cuda.Device().id))
     backend.use()
     xp = backend.xp
+
+    if sectors != "off" and not symmetry:
+        if note is not None:
+            note(
+                f"NOTE: PARSEC_SOC_SECTORS={sectors}: the input uses no symmetry (Ignore_Symmetry or "
+                "--symmetry off); the spinors stay on the whole grid"
+            )
+    elif sectors != "off":
+        route = _sector_route(system, soc_projectors, backend, note, parity=sectors == "on")
+        if route is not None:
+            result = run_reference_self_consistent_soc(
+                system,
+                soc_projectors,
+                callback=callback,
+                eigenproblem_solver=route.eigensolver,
+                spinor_hamiltonian_builder=route.hamiltonian,
+                orbital_density_builder=route.density,
+                synchronize=backend.synchronize,
+                to_host=route.to_host,
+            )
+            result.timings["soc_sector_setup"] = route.setup_seconds
+            if route.regrown:
+                result.timings["soc_sector_regrown"] = float(route.regrown)
+            return result
 
     def solver(operator, requested_states, *, settings, state=None):
         return solve_spinor_eigval(
@@ -140,6 +176,29 @@ def run_self_consistent_soc(
         synchronize=backend.synchronize,
         to_host=backend.asnumpy,
     )
+
+
+def _sector_route(system, soc_projectors, backend, note, *, parity: bool):
+    """The hooks of the double-group sectors (:class:`.soc_sectors.SectorRoute`), split by inversion parity with
+    ``parity``, or ``None`` (the whole grid) for a cluster without a two-fold rotation or mirror; ``note`` hears
+    which."""
+    import time
+
+    from .soc_sectors import SWITCH, SectorRoute, detect_sector_plan
+
+    setting = "on" if parity else "kramers"
+    start = time.perf_counter()
+    plan, reason = detect_sector_plan(system.grid, system.atoms, parity=parity)
+    seconds = time.perf_counter() - start
+    if plan is None:
+        if note is not None:
+            note(f"NOTE: {SWITCH}={setting}: {reason}; the spinors stay on the whole grid")
+        return None
+    route = SectorRoute(plan, backend, soc_projectors)
+    route.setup_seconds = seconds
+    if note is not None:
+        note(f"Spin-orbit sectors ({SWITCH}={setting}): {plan.description()}")
+    return route
 
 
 __all__ = ["DeviceSpinorHamiltonianBuilder", "run_self_consistent_soc"]

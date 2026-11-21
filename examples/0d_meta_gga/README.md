@@ -100,12 +100,13 @@ QE at 300 Ry (N2, CO: 150 Ry); HOMO in eV (O2: up / down channel).
 | O2 | -63.71093108 | -63.71092564 | 300 | -5.44e-06 | -6.8729 / -11.6050 | -6.8741 / -11.6063 | +1.2 / +1.3 |
 
 The PBE inputs equal those of `../0d_hybrid_functionals` (its README explains the remaining offsets: PARSEC's
-Kleinman-Bylander quadrature and QE's cutoff at 150 Ry). The logs of the PBE inputs of CH4, N2 and CO are of
-19 November 2026: these molecules have the point groups Td, D4h and C4v on the grid, and since 15 and 18 November
-2026 a PBE run solves the weighted one-dimensional sectors of a larger subgroup (D2d for Td, a subgroup of order 8
-or 4 for D4h and C4v) instead of the abelian group of before. Their energies are those of the former logs to the
-printed digits; the CO HOMO moved by 0.02 meV (the last printed digit). The meta-GGAs and their hybrids keep the
-abelian group (`src/parsec_python/acceleration/README.md`, "Weighted sectors of a larger subgroup").
+Kleinman-Bylander quadrature and QE's cutoff at 150 Ry). The logs are of 20 November 2026. CH4, N2, CO and O2 have
+the point groups Td, D4h, C4v and D4h on the grid, and a PBE run solves the weighted one-dimensional sectors of a
+larger subgroup (D2d for Td, a subgroup of order 8 or 4 for D4h and C4v) instead of the abelian group of the logs of
+8 November 2026: CH4, N2 and CO since 15 and 18 November, the spin-polarized O2 with its `occup.in` since
+20 November (38 SCF iterations instead of 29, at h = 0.13 bohr 42 instead of 37). Their energies are those of the
+abelian runs to the printed digits; the CO HOMO moved by 0.02 meV (the last printed digit). The meta-GGAs and their
+hybrids keep the abelian group (`src/parsec_python/acceleration/README.md`, "Weighted sectors of a larger subgroup").
 
 ## Meta-GGAs against QE
 
@@ -163,7 +164,7 @@ The difference changes sign and shrinks (the quadrature error above). Advice:
 
 - r2SCAN, TPSS and other smooth meta-GGAs: `Grid_Spacing` 0.16 bohr gives E - E_PBE within about 0.1 mRy (O2 0.35)
   and levels within 2 meV; 0.13 bohr for energy differences to 0.05-0.1 mRy with first-row atoms (1.9 times the grid
-  points of 0.16, 2.3 times the time here). 0.20 bohr is too coarse for oxygen (O2 r2SCAN: 1 mRy, 14 meV).
+  points of 0.16, 2.2 times the time here). 0.20 bohr is too coarse for oxygen (O2 r2SCAN: 1 mRy, 14 meV).
 - SCAN: 0.13 bohr or finer, and still up to 0.2 mRy and 25 meV; prefer r2SCAN (built to remove this sensitivity)
   unless SCAN itself is required.
 - LUMOs of small molecules near 0 eV are diffuse and confined by `Boundary_Sphere_Radius`: not compared here.
@@ -180,7 +181,7 @@ final orbitals (TPSSh 0.10, r2SCAN0 0.25 of E_x^HF). QE 7.5 gives no O2 TPSSh or
 | CH4 | TPSSh | -41.476 | -41.426 | -0.050 | -0.59343222 | -0.59342921 | -0.003 | -10.2559 | -10.2556 | -0.3 | [12, 10, 15, 9] |
 | CH4 | r2SCAN0 | -3.799 | -3.745 | -0.054 | -1.48112791 | -1.48112872 | +0.001 | -11.2307 | -11.2306 | -0.1 | [7, 14, 9, 7] |
 | NH3 | TPSSh | -16.874 | -16.873 | -0.001 | -0.67179881 | -0.67180198 | +0.003 | -6.8437 | -6.8434 | -0.3 | [7, 15, 11] |
-| NH3 | r2SCAN0 | +11.177 | +11.158 | +0.019 | -1.68126314 | -1.68127045 | +0.007 | -7.9244 | -7.9234 | -1.0 | [12, 20, 16, 16] |
+| NH3 | r2SCAN0 | +11.177 | +11.158 | +0.019 | -1.68126311 | -1.68127045 | +0.007 | -7.9244 | -7.9234 | -1.0 | [12, 20, 16, 16] |
 | N2 | TPSSh | +18.447 | +18.419 | +0.028 | -0.89752338 | -0.89752649 | +0.003 | -11.2062 | -11.2070 | +0.8 | [6, 6, 9] |
 | N2 | r2SCAN0 | +61.904 | +61.921 | -0.018 | -2.24537516 | -2.24536486 | -0.010 | -12.4850 | -12.4856 | +0.6 | [8, 6, 17, 5] |
 | CO | TPSSh | +9.782 | +9.795 | -0.013 | -0.93593418 | -0.93593890 | +0.005 | -9.9364 | -9.9371 | +0.7 | [6, 9, 9] |
@@ -230,20 +231,20 @@ at h = 0.16 bohr (H2O 1,568,208), 3 million at 0.13.
 
 | input | PBE | SCAN | r2SCAN | TPSS | TPSSh | r2SCAN0 |
 |---|---|---|---|---|---|---|
-| H2O, h 0.16 | 9 s / 44 / 1.2 GiB | 31 s / 45 / 3.0 GiB | 25 s / 31 / 2.7 GiB | 24 s / 43 / 2.5 GiB | 29 s / 20 + 29 / 3.0 GiB | 49 s / 20 + 48 / 3.3 GiB |
-| CH4, h 0.16 | 6 s / 36 / 1.0 GiB | 108 s / 200 (Max_Iter) / 3.6 GiB | 29 s / 29 / 3.2 GiB | 26 s / 28 / 3.0 GiB | 33 s / 13 + 46 / 3.5 GiB | 47 s / 13 + 37 / 3.8 GiB |
-| NH3, h 0.16 | 14 s / 41 / 2.2 GiB | 149 s / 200 (Max_Iter) / 4.5 GiB | 59 s / 62 / 3.7 GiB | 37 s / 45 / 3.7 GiB | 45 s / 19 + 33 / 4.2 GiB | 79 s / 19 + 64 / 4.4 GiB |
-| N2, h 0.16 | 5 s / 24 / 0.8 GiB | 28 s / 59 / 2.4 GiB | 22 s / 35 / 2.3 GiB | 19 s / 27 / 2.1 GiB | 22 s / 14 + 21 / 2.6 GiB | 33 s / 14 + 36 / 2.8 GiB |
-| CO, h 0.16 | 6 s / 36 / 1.2 GiB | 92 s / 200 (Max_Iter) / 2.8 GiB | 28 s / 44 / 2.5 GiB | 23 s / 43 / 2.3 GiB | 29 s / 27 + 24 / 2.8 GiB | 44 s / 27 + 53 / 3.0 GiB |
-| O2, h 0.16 | 12 s / 29 / 1.1 GiB | 39 s / 41 / 3.5 GiB | 32 s / 28 / 2.5 GiB | 30 s / 30 / 2.3 GiB |  |  |
-| H2O, h 0.13 | 16 s / 44 / 1.8 GiB |  | 59 s / 43 / 4.7 GiB |  |  |  |
-| O2, h 0.13 | 23 s / 37 / 1.6 GiB |  | 72 s / 35 / 4.2 GiB |  |  |  |
-| H2O distorted (forces), h 0.16 | 11 s / 28 / 2.1 GiB |  | 32 s / 27 / 3.5 GiB |  |  |  |
+| H2O, h 0.16 | 8 s / 44 / 1.2 GiB | 30 s / 45 / 3.0 GiB | 25 s / 31 / 2.7 GiB | 24 s / 43 / 2.5 GiB | 30 s / 20 + 29 / 3.0 GiB | 48 s / 20 + 48 / 3.2 GiB |
+| CH4, h 0.16 | 5 s / 36 / 0.9 GiB | 113 s / 200 (Max_Iter) / 3.7 GiB | 28 s / 29 / 3.2 GiB | 23 s / 28 / 3.0 GiB | 33 s / 13 + 46 / 3.5 GiB | 46 s / 13 + 37 / 3.8 GiB |
+| NH3, h 0.16 | 13 s / 41 / 2.2 GiB | 145 s / 200 (Max_Iter) / 4.5 GiB | 55 s / 62 / 3.7 GiB | 34 s / 45 / 3.7 GiB | 42 s / 19 + 33 / 4.4 GiB | 76 s / 19 + 64 / 4.4 GiB |
+| N2, h 0.16 | 5 s / 24 / 0.8 GiB | 28 s / 59 / 2.4 GiB | 21 s / 35 / 2.3 GiB | 17 s / 27 / 2.1 GiB | 22 s / 14 + 21 / 2.6 GiB | 29 s / 14 + 36 / 2.8 GiB |
+| CO, h 0.16 | 5 s / 36 / 1.2 GiB | 96 s / 200 (Max_Iter) / 2.8 GiB | 26 s / 44 / 2.5 GiB | 21 s / 43 / 2.3 GiB | 26 s / 27 + 24 / 2.8 GiB | 41 s / 27 + 53 / 3.0 GiB |
+| O2, h 0.16 | 11 s / 38 / 1.1 GiB | 39 s / 41 / 3.5 GiB | 31 s / 28 / 2.5 GiB | 27 s / 30 / 2.3 GiB |  |  |
+| H2O, h 0.13 | 16 s / 44 / 1.8 GiB |  | 56 s / 43 / 4.7 GiB |  |  |  |
+| O2, h 0.13 | 18 s / 42 / 1.6 GiB |  | 65 s / 35 / 4.2 GiB |  |  |  |
+| H2O distorted (forces), h 0.16 | 9 s / 28 / 2.1 GiB |  | 29 s / 27 / 3.5 GiB |  |  |  |
 
-A meta-GGA run takes 2.5 to 4.2 times the time of PBE on the same route here (the SCAN runs stopped at `Max_Iter`
-more); the PBE runs of CH4, N2 and CO in their weighted sectors (above) took 5 to 6 s, against 6 to 9 s in the
-former logs on the abelian route, which the meta-GGAs keep. An SCF iteration costs 2 to 3 times as much (`tau` of the
-orbitals, the orbital term `-div(vtau grad)` in every Hamiltonian application and the wider Chebyshev interval it
-brings: H2O 0.17 s per iteration with PBE, 0.33 s with TPSS, 0.46-0.51 s with SCAN and r2SCAN), and the set-up
-before the SCF ("Pre-SCF setup/reporting wall time" of the log) takes 8 to 12 s for a meta-GGA against 1.3 to 1.7 s
-for PBE (17 to 18 s at h = 0.13 bohr). The meta-GGA hybrids add 3 to 24 s to the semilocal meta-GGA run.
+A meta-GGA run takes 2.6 to 4.2 times the time of PBE on the same route here (H2O, NH3; the SCAN runs stopped at
+`Max_Iter` more); the PBE runs of CH4, N2 and CO in their weighted sectors (above) took 5 s, against 6 to 9 s in the
+logs of 8 November on the abelian route, which the meta-GGAs keep, and O2 11 and 18 s (h = 0.16 and 0.13 bohr)
+against 12 and 23 s. An SCF iteration costs 2 to 3 times as much (`tau` of the orbitals, the orbital term
+`-div(vtau grad)` in every Hamiltonian application and the wider Chebyshev interval it brings: H2O 0.16 s per iteration with PBE, 0.33 s with TPSS, 0.45-0.49 s with SCAN and r2SCAN), and the set-up
+before the SCF ("Pre-SCF setup/reporting wall time" of the log) takes 8 to 11 s for a meta-GGA against 1.1 to 2.1 s
+for PBE (16 to 17 s at h = 0.13 bohr). The meta-GGA hybrids add 5 to 23 s to the semilocal meta-GGA run.

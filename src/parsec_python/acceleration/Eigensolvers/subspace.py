@@ -14,6 +14,7 @@ from parsec_python.Eigensolvers.subspace import SubspaceSettings, subspace_filte
 from ..backends.cupy import device_stage
 from .chebyshev import FilterBlock, subspace_filter, subspace_filter_blocks
 from .handover import RitzHandover, release_coefficients
+from .irrep_projection import orthonormal_in_unit
 from .orthogonalize import orthonormalize_complete_subspace
 from .rayleigh_ritz import (
     DeviceRayleighRitzResult,
@@ -267,9 +268,11 @@ def run_subspace_filter(
             generalized_ritz_failed = True
             note = "QR fallback"
             with device_stage(operator, "subspace_orthogonalization_seconds"):
-                basis = orthonormalize_complete_subspace(
-                    filtered, rng=generator
-                ).basis
+                # A unit of irreducible representations keeps its basis in
+                # their range (irrep_projection.orthonormal_in_unit).
+                basis = orthonormal_in_unit(
+                    operator, orthonormalize_complete_subspace(filtered, rng=generator), generator
+                )
             with device_stage(operator, "subspace_ritz_seconds"):
                 ritz = rayleigh_ritz(
                     operator,
@@ -279,7 +282,9 @@ def run_subspace_filter(
     else:
         note = "QR route"
         with device_stage(operator, "subspace_orthogonalization_seconds"):
-            basis = orthonormalize_complete_subspace(filtered, rng=generator).basis
+            basis = orthonormal_in_unit(
+                operator, orthonormalize_complete_subspace(filtered, rng=generator), generator
+            )
         with device_stage(operator, "subspace_ritz_seconds"):
             ritz = rayleigh_ritz(
                 operator,

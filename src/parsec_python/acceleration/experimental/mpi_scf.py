@@ -14,7 +14,15 @@ ranks share the sectors, one or (after a CHEBFF first solve) several sectors per
 group, solved one after another, which may span nodes: each group's communicator carries the
 filter, layout changes, Gram sums and rotations of its basis
 (Eigensolvers/mpi_shared_basis.py), and a run without symmetry is the case of one
-sector. Only a CHEBFF first solve divides the columns of a sector among the ranks
+sector. With one rank per node the ranks share the one sector of a run without
+symmetry too (PARSEC_MPI_NESTED_SHARING=auto, nested_sharing_applies), each
+spreading its share over the GPUs of its node (Eigensolvers/mpi_nested_basis.py),
+and so they share fewer sectors than ranks, which they could not place otherwise;
+with PARSEC_MPI_NESTED_SHARING=groups also groups of several sectors where
+they balance the sectors better than one rank each. Where nested sharing does not
+apply (a CHEBDAV first solve, PARSEC_MPI_NESTED_SHARING=off) one rank per node
+would hold the one sector on the first GPU of each node only: that layout is
+refused (single_sector_layout_refusal, PARSEC_SINGLE_SECTOR_NODE_LAYOUT). Only a CHEBFF first solve divides the columns of a sector among the ranks
 of its group; after any other (CHEBDAV) every rank of the group holds and solves
 the whole basis, and its density and force terms count on the group's first rank
 alone (MPISectorContext.whole_basis_sectors). A hybrid functional keeps its own
@@ -238,7 +246,7 @@ def _rank_device_groups(owned, costs, devices, pool=True):
 
 
 def sector_device_groups(representations, size, rank, devices, shared=False, exchange=False, costs=None,
-                         divided=False, divisible=None):
+                         divided=False, divisible=None, nested=False):
     """The devices of every sector that rank ``rank`` solves (``{sector: devices}``).
 
     ``PARSEC_SECTOR_PLACEMENT=cyclic`` assigns sectors cyclically to ranks and disjoint GPU groups when possible,
@@ -250,7 +258,10 @@ def sector_device_groups(representations, size, rank, devices, shared=False, exc
     device pool only where its bases are divided over them: ``divided``, and every sector of the rank marked in
     ``divisible`` (one flag per sector, ``None`` for all: whether a CHEBFF first solve shares the basis over the
     devices of a group, ``Eigensolvers/symmetry.sector_bases_divisible``, which leaves below the threshold of the
-    generalized Ritz step the basis on one device).  With ``exchange`` (a hybrid
+    generalized Ritz step the basis on one device).  With ``shared`` and ``nested`` (one rank per node whose
+    share of a basis is spread over all its devices, :func:`nested_sharing_applies`,
+    ``Eigensolvers/mpi_nested_basis.py``) every sector of the rank takes all of ``devices``, solved one after
+    another.  With ``exchange`` (a hybrid
     functional, ``SCF/hybrid_mpi.py``) every sector basis lies on one device
     of its rank, which the exchange operator needs, and a rank may own no
     sector: every device of every rank solves pair densities of the exchange.
@@ -269,7 +280,8 @@ def sector_device_groups(representations, size, rank, devices, shared=False, exc
         if representations < 1 or not 0 <= rank < size or (size < representations and (cyclic or not divided)):
             raise ValueError('a shared sector needs at least one rank per sector')
         plan = sector_rank_plan(representations, size, shared=True, costs=costs, divided=divided)
-        return {sector: (devices[0],) for sector, ranks in enumerate(plan) if rank in ranks}
+        return {sector: (tuple(devices) if nested else (devices[0],)) for sector, ranks in enumerate(plan)
+                if rank in ranks}
     if representations < 1 or not 1 <= size <= representations or not 0 <= rank < size:
         raise ValueError('MPI ranks must be between one and the representation count')
     if not cyclic:
@@ -329,13 +341,131 @@ def force_signature_mismatches(signatures):
 
 def sector_device_pool_setting():
     """``PARSEC_SECTOR_DEVICE_POOL``: ``auto`` (default) spreads every sector of a rank over all its devices where
-    the sectors do not divide them evenly (:func:`sector_device_groups`); ``off`` keeps disjoint groups, as before."""
+    that holds less than the disjoint groups: under ``PARSEC_SECTOR_PLACEMENT=size`` (the default) where it lowers the
+    share of the fullest device by more than ``_POOL_GAIN`` (5 %) and the first solve divides every basis of the rank
+    over its devices (:func:`_rank_device_groups`), under ``cyclic`` where the sectors do not divide the devices
+    evenly (three on four, the rule of before 2026-11-18, :func:`sector_device_groups`); ``off`` keeps disjoint
+    groups, as before."""
     import os
 
     value = os.environ.get('PARSEC_SECTOR_DEVICE_POOL', 'auto').strip().lower() or 'auto'
     if value not in {'auto', 'off'}:
         raise ValueError(f'PARSEC_SECTOR_DEVICE_POOL must be auto or off, not {value!r}')
     return value
+
+
+_NESTED_SHARING_SWITCH = 'PARSEC_MPI_NESTED_SHARING'
+
+
+def nested_sharing_setting():
+    """``PARSEC_MPI_NESTED_SHARING``: ``auto`` (the default), ``groups`` or ``off``.
+
+    Where each rank drives several GPUs (one rank per node, the default launch of
+    ``scripts/run_multi_gpu_scf.sh``) and the ranks share the basis of a sector, every rank spreads its share
+    over all of them (:func:`nested_sharing_applies`, ``Eigensolvers/mpi_nested_basis.py``).  ``auto`` does so
+    for the one sector of a run without a point group (diamond 6^3 on two nodes: 327.0 -> 42.6 s), and (since
+    2026-11-20) for fewer sectors than ranks, which one rank per node cannot place otherwise; as many sectors as
+    ranks or more keep one rank, or one group of sectors, per node as before.  ``groups`` also lets groups of such
+    ranks solve several sectors where the placement by cost balances them better than one rank each
+    (:func:`plan_sector_groups`), and lets the driver take a group with fewer sectors than ranks: opt-in, since the exchanges of
+    a basis shared across nodes go through one network interface per rank (five sectors of 15^3 diamond on four
+    nodes were slower as one group of four).  ``off`` keeps the layout of before 2026-11-19: one sector shared
+    by such ranks on the first GPU of each, and no group of several sectors.
+    """
+    import os
+
+    value = os.environ.get(_NESTED_SHARING_SWITCH, 'auto').strip().lower() or 'auto'
+    if value not in {'auto', 'groups', 'off'}:
+        raise ValueError(f'{_NESTED_SHARING_SWITCH} must be auto, groups or off, not {value!r}')
+    return value
+
+
+def nested_sharing_applies(size, device_count, *, gpu_per_rank=False, exchange=False, divided=False):
+    """Whether ``size`` ranks of ``device_count`` GPUs each spread their shares of shared bases over their GPUs.
+
+    The one check of the nested layout (:class:`MPISectorContext`, and whatever refuses the single-sector layout
+    of one rank per node: where this is true that layout runs over every GPU of every rank).  True for several
+    ranks with several GPUs each (not ``gpu_per_rank``, the ``--rank-per-gpu`` launch, whose ranks share one GPU
+    each), no hybrid exchange (``exchange``: its sectors lie on one device by design), a CHEBFF first solve
+    (``divided``: only it divides a basis among the ranks; after CHEBDAV every rank holds the whole basis) and
+    ``PARSEC_MPI_NESTED_SHARING`` other than ``off``.  Groups of such ranks over several sectors need ``groups``
+    in addition (:func:`nested_groups_apply`).
+    """
+    if int(size) <= 1 or int(device_count) <= 1 or bool(gpu_per_rank) or bool(exchange) or not bool(divided):
+        return False
+    return nested_sharing_setting() != 'off'
+
+
+def nested_groups_apply(size, device_count, *, gpu_per_rank=False, exchange=False, divided=False):
+    """Whether ranks of several GPUs each may also share several sectors in groups (``PARSEC_MPI_NESTED_SHARING=groups``).
+
+    :func:`nested_sharing_applies` and the value ``groups``: then the placement by cost may give such ranks groups
+    that solve several sectors, or more ranks than sectors, as it gives ranks of one GPU each
+    (:meth:`MPISectorContext._shared`).
+    """
+    return (nested_sharing_applies(size, device_count, gpu_per_rank=gpu_per_rank, exchange=exchange,
+                                   divided=divided)
+            and nested_sharing_setting() == 'groups')
+
+
+_SINGLE_SECTOR_NODE_LAYOUT_SWITCH = 'PARSEC_SINGLE_SECTOR_NODE_LAYOUT'
+
+
+def single_sector_node_layout_setting():
+    """``PARSEC_SINGLE_SECTOR_NODE_LAYOUT``: ``refuse`` (default, since 2026-11-19) or ``allow``.
+
+    What :func:`single_sector_layout_refusal` does with one sector shared by several ranks that each hold several
+    GPUs (one rank per node): ``refuse`` stops the run at its preparation with advice; ``allow`` runs it as before,
+    the share of each rank on the first GPU of its node only.
+    """
+    import os
+
+    value = os.environ.get(_SINGLE_SECTOR_NODE_LAYOUT_SWITCH, 'refuse').strip().lower() or 'refuse'
+    if value not in {'refuse', 'allow'}:
+        raise ValueError(f'{_SINGLE_SECTOR_NODE_LAYOUT_SWITCH} must be refuse or allow, not {value!r}')
+    return value
+
+
+def single_sector_layout_refusal(representations, size, device_count, *, gpu_per_rank=False, exchange=False,
+                                 divided=False):
+    """Why ``size`` ranks of ``device_count`` GPUs each must not share ``representations`` sectors, or ``None``.
+
+    The one check of this layout (the full-SCF runner before its preparation, the driver where it takes one sector
+    of the identity, :meth:`MPISectorContext.configure`): several ranks share the basis of a single sector (a run
+    without a point group, the identity sector of ``PARSEC_CUPY_SINGLE_SECTOR``) one device each
+    (:mod:`..Eigensolvers.mpi_shared_basis`), so a rank with the GPUs of its node (one rank per node, the default
+    launch of ``scripts/run_multi_gpu_scf.sh``) holds its share on its first GPU and leaves the others idle: diamond
+    6^3 (1,728 atoms) without symmetry took 327.0 s on 2 nodes of 4 A100 against 36.8 s on one node, where the one
+    rank spreads the basis over its four GPUs (2026-11-19).  Under ``PARSEC_SINGLE_SECTOR_NODE_LAYOUT=refuse`` (the
+    default) that layout is refused with advice: ``Eigensolver: chebff`` with nested sharing, one node, or one rank
+    per GPU (``--rank-per-gpu``), which shares the basis over every GPU of every node.  ``None`` for one rank, one
+    GPU per rank (``gpu_per_rank``), a hybrid's exchange (``exchange``: the sector lies on the first device of the
+    root by design), more than one sector, a rank with one GPU, under ``allow``, and wherever nested sharing spreads
+    the share of every rank over the GPUs of its node (:func:`nested_sharing_applies` with ``divided``, whether a
+    CHEBFF first solve divides the basis among the ranks; ``PARSEC_MPI_NESTED_SHARING=auto``, the default since
+    2026-11-19: diamond 6^3 on 2 nodes 42.9 s): this layout is then refused only after a CHEBDAV first solve or
+    under ``PARSEC_MPI_NESTED_SHARING=off``.
+    """
+    if (int(representations) != 1 or int(size) <= 1 or int(device_count) <= 1 or bool(gpu_per_rank)
+            or bool(exchange)):
+        return None
+    if nested_sharing_applies(size, device_count, gpu_per_rank=gpu_per_rank, exchange=exchange, divided=divided):
+        return None
+    if single_sector_node_layout_setting() == 'allow':
+        return None
+    if not bool(divided):
+        nested = ('name Eigensolver: chebff, whose first solve divides the basis among the ranks, which then spread '
+                  'their shares over the GPUs of their nodes (PARSEC_MPI_NESTED_SHARING=auto, the default; diamond '
+                  '6^3 on 2 nodes: 42.9 s)')
+    else:
+        nested = ('leave PARSEC_MPI_NESTED_SHARING at auto (it is off), whose ranks spread their shares over the '
+                  'GPUs of their nodes (diamond 6^3 on 2 nodes: 42.9 s)')
+    return (f'one sector (a run without a point group, or the one sector of the identity) would be shared by '
+            f'{int(size)} MPI ranks of {int(device_count)} GPUs each on the first GPU of each rank only: '
+            f'{int(size)} of their {int(size) * int(device_count)} GPUs (diamond 6^3 without symmetry: 327.0 s on '
+            f'2 nodes against 36.8 s on one). {nested[0].upper() + nested[1:]}; or run it on one node (one rank, '
+            'whose GPUs share the basis), or with one rank per GPU (scripts/run_multi_gpu_scf.sh --rank-per-gpu), '
+            f'whose ranks share it over every GPU; {_SINGLE_SECTOR_NODE_LAYOUT_SWITCH}=allow runs it as before')
 
 
 class MPISectorContext:
@@ -383,6 +513,18 @@ class MPISectorContext:
         self.sector_owners = ()
         # One GPU per rank (the runner's --rank-per-gpu launch): more ranks than several sectors then share them.
         self.gpu_per_rank = False
+        # Set by reprepare on every rank: the one sector of the identity of a spin guard fallback, which the ranks
+        # share by design (PARSEC_SPIN_FALLBACK_SHARED) and single_sector_layout_refusal does not refuse.
+        self.spin_fallback_layout = False
+        # The GPUs that each rank drives (the runner sets it from --devices): with several, and one rank per node,
+        # the ranks of a group spread their shares of a shared basis over them (nested_sharing_applies).
+        self.node_devices = 1
+        # Whether configure gave this rank shares of shared bases over all its devices
+        # (Eigensolvers/mpi_nested_basis.py).
+        self.nested = False
+        # The sector count and costs of the last configure (nested_groups_hint).
+        self.representation_count = 0
+        self.sector_costs = None
         # Whether the first solve divides each shared basis among the ranks of its group (a CHEBFF first solve,
         # mpi_shared_basis.SharedBasis; the runner sets it from the input): only then may a group of ranks solve
         # several sectors (sector_rank_plan).
@@ -406,55 +548,159 @@ class MPISectorContext:
     # (``divisible``, symmetry.sector_bases_divisible; None for every sector).
     accepts_sector_costs = True
 
+    @property
+    def nested_sharing(self):
+        """Whether the ranks of this context spread shared bases over their devices (:func:`nested_sharing_applies`)."""
+        return nested_sharing_applies(self.size, self.node_devices, gpu_per_rank=self.gpu_per_rank,
+                                      exchange=self.exchange, divided=self.divided_bases)
+
+    @property
+    def nested_groups(self):
+        """Whether such ranks also share several sectors in groups (:func:`nested_groups_apply`, ``groups``)."""
+        return nested_groups_apply(self.size, self.node_devices, gpu_per_rank=self.gpu_per_rank,
+                                   exchange=self.exchange, divided=self.divided_bases)
+
     def planned_groups(self, representations, devices, costs=None, divisible=None):
         """The device groups of the sectors this rank will own (what ``configure`` assigns)."""
+        shared = self._shared(representations, costs)
+        refusal = self._fewer_sectors_refusal(representations, shared)
+        if refusal is not None:
+            raise ValueError(refusal)
         return sector_device_groups(representations, self.size, self.rank, devices,
-                                    shared=self._shared(representations, costs), exchange=self.exchange,
-                                    costs=costs, divided=self.divided_bases, divisible=divisible)
+                                    shared=shared, exchange=self.exchange,
+                                    costs=costs, divided=self.divided_bases, divisible=divisible,
+                                    nested=shared and self.nested_sharing)
 
     def divides(self, representations, costs=None):
         """Whether :meth:`configure` can give ``representations`` sectors to the ranks (no MPI call).
 
         A rank with the GPUs of its node owns one sector or more, so more ranks than several sectors need one GPU
-        per rank (``gpu_per_rank``: groups of ranks share a sector) or a hybrid's exchange (ranks without a
+        per rank (``gpu_per_rank``: groups of ranks share a sector), nested groups (:attr:`nested_groups`,
+        ``PARSEC_MPI_NESTED_SHARING=groups``: groups of such ranks share a sector over all their GPUs) or a
+        hybrid's exchange (ranks without a
         sector).  The driver keeps the group of before where a larger one has too few sectors for the ranks.
         Placing the sectors by size (``PARSEC_SECTOR_PLACEMENT``) changes which ranks solve them, not whether
-        they can: the same counts divide either way.
+        they can: the same counts divide either way.  Fewer sectors than ranks of several GPUs each, which
+        :meth:`configure` still places in groups of such ranks where nested sharing applies as the only layout
+        there is (:meth:`_shared`, ``last_resort``), do not divide here under ``auto``: the driver keeps the group
+        of before where one divides, as it did before 2026-11-20.
         """
         try:
+            shared = self._shared(representations, costs, last_resort=False)
             sector_device_groups(representations, self.size, self.rank, (0,),
-                                 shared=self._shared(representations, costs), exchange=self.exchange,
-                                 costs=costs, divided=self.divided_bases)
+                                 shared=shared, exchange=self.exchange,
+                                 costs=costs, divided=self.divided_bases, nested=shared and self.nested_sharing)
         except ValueError:
             return False
         return True
 
-    def _shared(self, representations, costs=None):
+    def single_sector_layout_refusal(self, device_count, representations=1):
+        """:func:`single_sector_layout_refusal` for the ranks of this context with ``device_count`` GPUs each.
+
+        ``None`` for the shared full grid of a spin guard fallback (``spin_fallback_layout``, set by
+        :meth:`reprepare`): its plan (``driver.SpinFallbackPlan``) counts one GPU per rank, it replaces the full grid
+        of the root's first GPU of before, and refusing it would discard the sector SCF that ran first.  ``None``
+        also where nested sharing spreads the share of every rank over its GPUs (``divided``: the first solve of
+        this context, :attr:`divided_bases`).
+        """
+        if self.spin_fallback_layout:
+            return None
+        return single_sector_layout_refusal(representations, self.size, device_count,
+                                            gpu_per_rank=self.gpu_per_rank, exchange=self.exchange,
+                                            divided=self.divided_bases)
+
+    def nested_groups_hint(self):
+        """Whether ``PARSEC_MPI_NESTED_SHARING=groups`` would give the configured sectors groups of ranks.
+
+        True where nested sharing applies (:attr:`nested_sharing`) but not its groups (:attr:`nested_groups`), the
+        last :meth:`configure` gave every rank its own sectors, and the placement by cost would share several of
+        them in groups of such ranks: the full-SCF runner names the value in a NOTE where the margin of a sector
+        was cut for memory (diamond 22^3 on four nodes holds its margin in two groups of two nodes).  No MPI call;
+        every rank answers alike.
+        """
+        representations = int(getattr(self, 'representation_count', 0) or 0)
+        if (representations <= 1 or self.shared or self.gpu_per_rank or not self.nested_sharing
+                or self.nested_groups):
+            return False
+        try:
+            return bool(self._shared(representations, self.sector_costs, groups=True))
+        except ValueError:
+            return False
+
+    def _shared(self, representations, costs=None, groups=None, last_resort=True):
         # More ranks than sectors share their bases: the one sector of a run without symmetry, or several with
         # one GPU per rank (not with a hybrid).  Placed by size, ranks of one GPU each whose first solve divides
         # the bases also share them where groups that solve several sectors balance better than one rank each
         # (ten sectors on four ranks: two groups of two with five sectors, 2.5 bases per GPU instead of 3).
+        # With nested groups (one rank per node, PARSEC_MPI_NESTED_SHARING=groups) ranks that drive several GPUs
+        # share them alike, each spreading its share over its GPUs: more ranks than sectors, or groups that
+        # balance better.  The one sector is shared under any value (over every GPU of a rank unless off; under
+        # off, or after a CHEBDAV first solve, configure refuses that layout first, single_sector_layout_refusal,
+        # unless PARSEC_SINGLE_SECTOR_NODE_LAYOUT=allow).
+        # ``groups`` True asks as under that value (nested_groups_hint), None as the switch says.
+        # ``last_resort``: fewer sectors than such ranks are shared in groups wherever nested sharing applies
+        # (auto too), since one rank per node has no other layout for them (a ValueError in the preparation before
+        # 2026-11-20); divides() asks without it, so that the driver still keeps a group of before that divides.
         representations = int(representations)
         if self.exchange or self.size <= 1:
             return False
         if representations == 1 or (self.gpu_per_rank and self.size > representations):
             return True
-        if not self.gpu_per_rank or not self.divided_bases or sector_placement_setting() == 'cyclic':
+        if last_resort and self.size > representations >= 1 and self.nested_sharing:
+            return True
+        nested_groups = self.nested_groups if groups is None else bool(groups) and self.nested_sharing
+        if (not (self.gpu_per_rank or nested_groups) or not self.divided_bases
+                or sector_placement_setting() == 'cyclic'):
             return False
         plan = plan_sector_groups(_placement_costs(representations, costs), self.size, range(1, self.size + 1))
         return any(len(ranks) > 1 for ranks in plan)
 
+    def _fewer_sectors_refusal(self, representations, shared):
+        """Why ``representations`` sectors, fewer than the ranks and not shared, cannot be placed (``None``: they can).
+
+        A rank that drives the GPUs of its node takes one sector or more, so fewer sectors than such ranks stop the
+        run where no layout shares them (a CHEBDAV first solve, ``PARSEC_MPI_NESTED_SHARING=off``, one GPU per
+        rank without ``--rank-per-gpu``); before 2026-11-20 they stopped it with the bare ValueError of
+        :func:`sector_device_groups`.  The message names what runs them.
+        """
+        representations = int(representations)
+        if shared or self.exchange or self.size <= 1 or not 1 <= representations < self.size:
+            return None
+        ways = []
+        if int(self.node_devices) > 1 and not self.gpu_per_rank:
+            # What nested sharing lacks here (nested_sharing_applies): a CHEBFF first solve, or a value but off.
+            if not self.divided_bases:
+                ways.append('name Eigensolver: chebff (ranks of several GPUs each then share the sectors over all '
+                            'their GPUs, PARSEC_MPI_NESTED_SHARING)')
+            elif nested_sharing_setting() == 'off':
+                ways.append('leave PARSEC_MPI_NESTED_SHARING at auto (ranks of several GPUs each then share the '
+                            'sectors over all their GPUs; it is off)')
+        ways.append('launch one rank per GPU (scripts/run_multi_gpu_scf.sh --rank-per-gpu)')
+        ways.append(f'run on at most {representations} node(s)')
+        return (f'the {representations} symmetry sector(s) of this structure are fewer than the {self.size} MPI '
+                'ranks, each of which takes one sector or more with one rank per node: ' + ', '.join(ways[:-1])
+                + ', or ' + ways[-1])
+
     def configure(self, representations, devices, costs=None, divisible=None):
         error = None
         try:
+            # The driver refuses this layout where it takes the sector of the identity; any other way to one shared
+            # sector stops here, on every rank alike.
+            layout_refusal = self.single_sector_layout_refusal(len(tuple(devices)), representations)
+            if layout_refusal is not None:
+                raise ValueError(layout_refusal)
             shared = self._shared(representations, costs)
+            refusal = self._fewer_sectors_refusal(representations, shared)
+            if refusal is not None:
+                raise ValueError(refusal)
+            nested = bool(shared and self.nested_sharing)
             groups = sector_device_groups(representations, self.size, self.rank, devices, shared=shared,
                                           exchange=self.exchange, costs=costs, divided=self.divided_bases,
-                                          divisible=divisible)
+                                          divisible=divisible, nested=nested)
             rank_groups = sector_rank_plan(representations, self.size, shared=shared, exchange=self.exchange,
                                            costs=costs, divided=self.divided_bases)
         except Exception as exc:
-            shared, groups, rank_groups = False, {}, ()
+            shared, nested, groups, rank_groups = False, False, {}, ()
             error = f'{type(exc).__name__}: {exc}'
         records = self.comm.allgather((int(representations), groups, error, rank_groups))
         errors = [f'rank {rank}: {record[2]}' for rank, record in enumerate(records) if record[2]]
@@ -467,9 +713,13 @@ class MPISectorContext:
             self.failed = True
             raise MPISCFError('sector configuration failed: the ranks placed the sectors differently')
         self.representation_count = int(representations)
+        self.sector_costs = None if costs is None else tuple(float(cost) for cost in costs)
         self.device_groups = groups
         self.owned_sectors = tuple(groups)
         self.shared = shared
+        # Every shared basis of this rank over all its devices (Eigensolvers/mpi_nested_basis.py), where a share
+        # has more than one device to spread over.
+        self.nested = bool(nested and any(len(group) > 1 for group in groups.values()))
         self.topology = tuple(record[1] for record in records)
         # The ranks of every sector (one rank each unless they share it) and the first of them, which reports its
         # Ritz values (the solve command checks every sector against it).
@@ -494,6 +744,11 @@ class MPISectorContext:
         return self._execute_local(solver, command, payload, density_builder, channel)
 
     def worker_loop(self, solver, density_builder):
+        """Serve the root's commands until it stops the workers; return the sector solver this rank ended with.
+
+        That is ``solver`` unless the root prepared the run again (``reprepare``: the shared full grid of a spin run
+        that left its sectors), after which the loop serves the solver of that preparation.
+        """
         if self.rank == self.root:
             raise MPISCFError('root must run SCF, not the worker loop')
         try:
@@ -504,10 +759,53 @@ class MPISectorContext:
                 channel = message[2] if len(message) > 2 else None
                 if command == 'stop':
                     self.stopped = True
-                    return
+                    return solver
+                if command == 'reprepare':
+                    solver, density_builder = self._reprepare_worker(solver, payload)
+                    continue
                 self._execute_local(solver, command, payload, density_builder, channel)
         finally:
             solver.restore_memory_allocator()
+
+    def reprepare(self, payload):
+        """Tell the workers to prepare the run again, as the root does next (``driver._SpinSectorFallback``).
+
+        ``payload``: ``problem``, ``backend`` and ``symmetry_cache_directory`` of a spin-polarized run whose guard
+        fired, prepared as one sector of the identity whose basis the ranks share (``prepare_single_point`` with
+        ``symmetry='off'``, ``spin_identity_sector`` and this context, whose ``configure`` every rank then calls
+        again).  The subspaces of the sectors of before were reset (the ``reset`` command) first.
+        """
+        if self.rank != self.root:
+            raise MPISCFError('only root may dispatch SCF commands')
+        if self.failed or self.stopped:
+            raise MPISCFError('MPI sector context is no longer active')
+        self.spin_fallback_layout = True
+        self.comm.bcast(('reprepare', payload, None), root=self.root)
+        self.command_counts['reprepare'] = self.command_counts.get('reprepare', 0) + 1
+
+    def _reprepare_worker(self, solver, payload):
+        """A worker's part of :meth:`reprepare`: the new system, whose solver and density builder it serves from then.
+
+        The prepared system is kept on the context (``reprepared_system``), which holds the operators of its solver
+        (the caller's frame still holds the system of before).  A failure leaves the worker loop, which the runner
+        ends with an abort of the job, as for a failed preparation.
+        """
+        from ..driver import prepare_single_point
+
+        self.command_counts['reprepare'] = self.command_counts.get('reprepare', 0) + 1
+        self.spin_fallback_layout = True
+        solver.restore_memory_allocator()
+        solver._mpi_latest_results = {}
+        solver._mpi_retained_results = {}
+        self.reprepared_system = None
+        import gc
+
+        gc.collect()
+        system = prepare_single_point(payload['problem'], backend=payload['backend'], symmetry='off',
+                                      symmetry_cache_directory=payload.get('symmetry_cache_directory'),
+                                      mpi_context=self, spin_identity_sector=True)
+        self.reprepared_system = system
+        return system.backend.symmetry_eigensolver, system.orbital_density_builder
 
     def stop_workers(self):
         if self.rank != self.root:
@@ -537,9 +835,13 @@ class MPISectorContext:
     def update_potential(self, solver, potential):
         from ..SCF.symmetry_fields import SymmetryScalarField
         if isinstance(potential, SymmetryScalarField):
-            if potential.reduction is not solver.decomposition.reduction:
+            if potential.reduction is solver.decomposition.reduction:
+                values = potential.values
+            elif getattr(potential.reduction, 'subgroup', None) is solver.decomposition.reduction:
+                # The orbits of the full group (Symmetry/field_orbits.py): the ranks take those of the sectors.
+                values = potential.reduction.to_subgroup(potential.values)
+            else:
                 raise ValueError('local potential uses a different symmetry map')
-            values = potential.values
         else:
             values = solver.decomposition.invariant_wedge_values(potential)
         self.execute(solver, 'potential', np.ascontiguousarray(values, dtype=np.float64))
@@ -566,7 +868,11 @@ class MPISectorContext:
                           for sector, result in value.items()}
             elif command == 'density':
                 value = np.ascontiguousarray(value, dtype=np.float64)
-                if value.shape != (solver.decomposition.wedge_size,) or not np.all(np.isfinite(value)):
+                # One value per orbit of the SCF fields: those of the sectors, or of the full point group where the
+                # fields keep its orbits (Symmetry/field_orbits.py), as the density builder of every rank has them.
+                fields = getattr(getattr(density_builder, 'reducer', None), 'reduction', None)
+                size = solver.decomposition.wedge_size if fields is None else fields.wedge_size
+                if value.shape != (size,) or not np.all(np.isfinite(value)):
                     raise ValueError('local density must be a finite physical wedge field')
             elif command in ('forces', 'spin_forces'):
                 value = np.ascontiguousarray(value, dtype=np.float64)
@@ -835,4 +1141,5 @@ class MPISymmetryDensityBuilder:
 
 __all__ = ['MPISCFError', 'MPISectorContext', 'MPISymmetryDensityBuilder', 'force_signature_mismatches',
            'force_term_signature', 'plan_sector_groups', 'sector_device_groups', 'sector_placement_setting',
-           'sector_rank_groups', 'sector_rank_plan']
+           'sector_rank_groups', 'sector_rank_plan', 'nested_groups_apply', 'nested_sharing_applies',
+           'nested_sharing_setting', 'single_sector_layout_refusal', 'single_sector_node_layout_setting']

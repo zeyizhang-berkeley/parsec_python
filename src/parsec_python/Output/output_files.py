@@ -32,6 +32,7 @@ import numpy as np
 
 from ..models import (
     ExchangeLoopIteration,
+    HybridMeshRouteRecord,
     OutputFileSettings,
     SpinSectorFallbackRecord,
     WavefunctionSelection,
@@ -141,6 +142,9 @@ class RunOutputFiles:
         self._eigen: EigenDatFile | None = None
         self._notes: list[str] = []
         self._unsupported: str | None = None
+        # ``(result, grid, problem) -> (result, grid, problem)`` applied before ``parsec.dat`` is written: a k-point
+        # mesh solved as its supercell writes the file of the cell (SCF/kpoint_supercell.cell_parsec_dat_view).
+        self.parsec_dat_view: Callable | None = None
 
     # ----- files ---------------------------------------------------------
 
@@ -249,9 +253,10 @@ class RunOutputFiles:
         )
 
     def iteration(self, step) -> None:
-        if isinstance(step, (ExchangeLoopIteration, SpinSectorFallbackRecord)):
-            # An outer iteration of a hybrid's Fock loop, or the note that a
-            # spin loop leaves the symmetry sectors: no levels of its own.
+        if isinstance(step, (ExchangeLoopIteration, SpinSectorFallbackRecord, HybridMeshRouteRecord)):
+            # An outer iteration of a hybrid's Fock loop, the note that a
+            # spin loop leaves the symmetry sectors, or the mesh of a hybrid's
+            # Fock loop: no levels of their own.
             # (A spin-polarized record has eigenvalues_up/_down and no
             # eigenvalues: it is not one.)
             return
@@ -354,6 +359,8 @@ class RunOutputFiles:
         return written
 
     def _write_parsec_dat(self, result, grid, problem, *, report: bool) -> Path:
+        if self.parsec_dat_view is not None:
+            result, grid, problem = self.parsec_dat_view(result, grid, problem)
         mp_grid = getattr(problem, "monkhorst_pack_dimensions", None) if problem is not None else None
         data, notes = parsec_dat_from_result(
             result,

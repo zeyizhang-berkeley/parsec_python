@@ -11,16 +11,28 @@ interpreter lock; PARSEC_CUDA_CONTEXT_CREATION=runtime leaves them to CuPy's
 first calls on each device, which hold the lock, as before.
 No symmetry cache is read or written unless --symmetry-cache names a directory:
 a run with default flags is the first calculation of its structure.
-A bulk periodic cell at the Gamma point (orthorhombic, unpolarized, a native
-LDA or GGA) runs in the sectors of its point group about the origin of the cell,
-or as one sector of the identity, whose orbitals several ranks per node share,
-one GPU each (scripts/run_multi_gpu_scf.sh --rank-per-gpu); its forces and its
+Restart_Run starts the first SCF loop from the potential of parsec.dat beside
+the input, as main.py does: the root loads it once the system is prepared
+(PARSEC error 371 without the file); Restart_From_Wfndat is refused, and so is
+a spin-polarized restart, whose two channels main.py solves on the full grid,
+except with --serial-control (since 2026-11-19; before, Restart_Run was
+ignored, which PARSEC_MPI_RESTART_RUN=off keeps).
+A bulk periodic cell at the Gamma point (orthorhombic, a native LDA or GGA,
+unpolarized or collinear spin) runs in the sectors of its group (about the
+origin of the cell, about a symmetric site off it, with the half-cell
+translations; both spin channels in its abelian sectors), or, unpolarized, as
+one sector of the identity, whose orbitals several ranks per node share, one
+GPU each (scripts/run_multi_gpu_scf.sh --rank-per-gpu), or one rank per node
+over all the GPUs of each with Eigensolver: chebff (PARSEC_MPI_NESTED_SHARING,
+Eigensolvers/mpi_nested_basis.py; one rank per node on several nodes without
+it would hold them on the first GPU of each node and is refused,
+PARSEC_SINGLE_SECTOR_NODE_LAYOUT); its unpolarized forces and its
 relaxations (bfgs, simple, every atom movable) on the default routines run there
 too, the nonlocal terms of the sectors summed over the ranks and completed over
 the full group of the sectors on the root, every rank moving the projectors of
 its sectors; its molecular dynamics, manual movements and relaxations with fixed
-atoms on one sector of the identity, which one rank or the ranks of
---rank-per-gpu share, as all its forces and moves under
+atoms on one sector of the identity, which one rank, the ranks of
+--rank-per-gpu or (nested sharing) one rank per node share, as all its forces and moves under
 PARSEC_PERIODIC_SECTOR_FORCES=off (the rule of main.py). The other periodic
 calculations are refused by name (_refuse_unsupported_periodic).
 """
@@ -55,7 +67,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 # bytes of the slabs of that step, the columns of the slabs of its overlap
 # (PARSEC_CUPY_DISTRIBUTED_STATE_OVERLAP_COLUMNS), the device that estimates
 # the condition number beside its small solve and the row count from which
-# its devices read tiles. Without a sector context nothing is shared. The
+# its devices read tiles. Without a sector context nothing is shared: the
+# entry PARSEC_CUPY_SECTOR_PLACEMENT=cyclic below keeps the control off the
+# placement of one process by size, which shares bases (since 2026-11-19). The
 # slab budget (PARSEC_CUPY_STREAMING_RITZ_BYTES) is the one-array route's as
 # well and is left to the launcher for that reason too.
 # The ionic sums give the same fields bit for bit on one device as on all. The
@@ -204,6 +218,13 @@ _SERIAL_CONTROL_SETTINGS = {
     # The former recurrence kernel of the filter: the pipelined one gives the
     # same bits, and a defect of it would otherwise be in both sides.
     'PARSEC_CUPY_STENCIL_KERNEL': 'former',
+    # The cyclic deal of the sectors to the devices of the process, as before
+    # 2026-11-19: the control has no sector context, and under the default
+    # placement of one process (size) its sectors would take the device pool
+    # and share their bases (Eigensolvers/symmetry.process_sector_device_groups),
+    # so that a defect of the shared basis would be in both sides. With this
+    # entry nothing of the control is shared.
+    'PARSEC_CUPY_SECTOR_PLACEMENT': 'cyclic',
 }
 
 
@@ -228,7 +249,9 @@ _PERIODIC_NOTES = [
     'command), which checks them against the group of its sectors (Forces/sector_symmetry.check_sector_atoms) and '
     'replaces the projectors of its sectors; the root also rebuilds the fields of the cell (SCF/pbc.'
     'update_periodic_geometry). A relaxation in the sectors of a point group averages forces and positions over G; '
-    'molecular dynamics, manual movements and Move_Flag with fixed atoms run on one sector of the identity, as every '
+    'a relaxation with Move_Flag fixing atoms keeps the sectors of the subgroup that maps the fixed atoms onto fixed '
+    'atoms (PARSEC_MOVE_FLAG_SUBGROUP=auto); molecular dynamics, manual movements and, under '
+    'PARSEC_MOVE_FLAG_SUBGROUP=off, Move_Flag with fixed atoms run on one sector of the identity, as every '
     'forces or moving run of a cell under PARSEC_PERIODIC_SECTOR_FORCES=off (the rule of main.py: '
     'acceleration.cli.periodic_sector_forces_refusal).',
 ]
@@ -313,6 +336,54 @@ def _shared_first_solve_note(context, method):
             'every rank of a group then holds and filters the whole basis of its sector, so the further ranks of a '
             'group save neither memory nor time. Eigensolver: chebff divides each basis among the ranks of its '
             'group.')
+
+
+def _nested_attachment(comm, context, solver):
+    """The sectors whose shared bases the ranks spread over all their GPUs, as their eigensolvers attached them.
+
+    Collective on ``comm``: called by every rank after the preparation where the configured sectors are shared
+    by ranks of several GPUs each (``PARSEC_MPI_NESTED_SHARING``; :attr:`MPISectorContext.shared` and
+    :attr:`~MPISectorContext.nested_sharing` are the same on every rank).  Each rank's sector eigensolver records
+    the nested groups it attached (``nested_representations``; the ranks of a group agree on them,
+    :func:`Eigensolvers.mpi_nested_basis.nested_filter_agreement`).  Returns the sorted sectors of all ranks,
+    ``None`` where nothing is shared this way (no collective then).
+    """
+    if context is None or not getattr(context, 'shared', False) or not getattr(context, 'nested_sharing', False):
+        return None
+    records = comm.allgather(tuple(int(sector) for sector in getattr(solver, 'nested_representations', ())))
+    return tuple(sorted({sector for record in records for sector in record}))
+
+
+def _nested_sharing_line(context, device_count, attachment=None):
+    """The line of parsec.out of ranks that share sectors over all their GPUs, or ``None``.
+
+    Where the configured sectors are shared by groups of ranks that drive ``device_count`` GPUs each
+    (``PARSEC_MPI_NESTED_SHARING``, :attr:`MPISectorContext.nested_sharing`, the same on every rank), it names
+    the layout and how the orbital exchanges between nodes travel (``Eigensolvers/mpi_shared_basis.shared_transport``;
+    host-staged where the MPI library has no GPU transport layer, :func:`_nested_gpu_support`, which it names).
+    ``attachment`` (:func:`_nested_attachment`) names the sectors whose groups were attached that way (since
+    2026-11-20; without it every shared sector of more than one rank counts).  Launches that share nothing
+    (several sectors, one rank per node each) print nothing, as before.
+    """
+    if context is None or not getattr(context, 'shared', False) or not getattr(context, 'nested_sharing', False):
+        return None
+    rank_groups = [tuple(group) for group in getattr(context, 'rank_groups', ())]
+    if attachment is None:
+        sectors = [sector for sector, group in enumerate(rank_groups) if len(group) > 1]
+    else:
+        sectors = [int(sector) for sector in attachment if 0 <= int(sector) < len(rank_groups)]
+    if not sectors:
+        return None
+    from parsec_python.acceleration.Eigensolvers.mpi_shared_basis import shared_transport
+    from parsec_python.acceleration.experimental.mpi_scf import nested_sharing_setting
+
+    sizes = '/'.join(str(size) for size in sorted({len(rank_groups[sector]) for sector in sectors}))
+    transport = 'device arrays' if shared_transport() == 'cuda' else 'host-staged arrays'
+    if transport != 'device arrays' and _NESTED_TRANSPORT_NOTE:
+        transport += f' ({_NESTED_TRANSPORT_NOTE})'
+    return (f'Nested sharing (PARSEC_MPI_NESTED_SHARING={nested_sharing_setting()}): {len(sectors)} sector(s) '
+            f'shared by groups of {sizes} rank(s), each rank spreading its share over its {int(device_count)} '
+            f'GPUs; orbital exchanges between nodes as {transport}')
 
 
 def _digest(path):
@@ -789,11 +860,12 @@ def _periodic_sector_forces_refusal(translation, *, supercell: bool = False) -> 
 
     The rule of the command line (``acceleration.cli.periodic_sector_forces_refusal``, PARSEC_PERIODIC_SECTOR_FORCES),
     so that main.py and this runner solve the same runs in sectors: under ``auto`` single-point forces and
-    relaxations by an optimizer (bfgs, simple) with every atom movable keep the sectors of the point group of the
-    cell; molecular dynamics and manual movements use no symmetry (PARSEC), and movable flags (Move_Flag) that fix
-    some atoms let a relaxation leave the group of the first structure (the moved atoms of its sectors would leave
-    it: ``Forces.sector_symmetry.check_sector_atoms`` refuses them). Those, and every forces or moving run of a cell
-    under ``off``, take one sector of the identity, whose basis one rank solves or the ranks share (where main.py
+    relaxations by an optimizer (bfgs, simple) keep the sectors of the point group of the cell, with movable flags
+    (Move_Flag) that fix some atoms the sectors of the subgroup that maps the fixed atoms onto fixed atoms, which the
+    driver detects with them as a species of their own (PARSEC_MOVE_FLAG_SUBGROUP=auto; under off such a relaxation
+    would leave the group of the first structure, whose moved atoms ``Forces.sector_symmetry.check_sector_atoms``
+    refuses); molecular dynamics and manual movements use no symmetry (PARSEC). Those, and every forces or moving run
+    of a cell under ``off``, take one sector of the identity, whose basis one rank solves or the ranks share (where main.py
     takes the full grid: the same numbers). A cell keeps no point group in the parser
     (``Relaxation.run.symmetry_decision`` says nothing about it), so this is decided here. ``None`` for an SCF
     alone and for a cluster.
@@ -805,8 +877,8 @@ def _periodic_sector_forces_refusal(translation, *, supercell: bool = False) -> 
         return None
     from parsec_python.acceleration.cli import periodic_sector_forces_refusal
 
-    # This runner reads no wfn.dat (Restart_Run), so the clause of the command line that keeps a run seeded by stored
-    # full-grid orbitals on the full grid does not apply here.
+    # This runner reads no wfn.dat (execute refuses Restart_From_Wfndat, _restart_rules), so the clause of the
+    # command line that keeps a run seeded by stored full-grid orbitals on the full grid does not apply here.
     if getattr(translation, 'restart_from_wfndat', False):
         translation = replace(translation, restart_from_wfndat=False)
     return periodic_sector_forces_refusal(translation, supercell=supercell)
@@ -825,32 +897,61 @@ def _refuse_unsupported_periodic(translation, *, supercell: bool = False) -> Non
     """Refuse by name what this runner does not run of a periodic cell.
 
     It solves a bulk cell at the Gamma point (orthorhombic, a native LDA or
-    GGA, unpolarized or collinear spin) in the sectors of its point group
-    about the origin of the cell, or as one sector of the identity whose
-    basis the ranks share (driver.periodic_sector_refusal). A spin cell
+    GGA, unpolarized or collinear spin) in the sectors of its group (about
+    the origin, about a symmetric site off it, with the half-cell
+    translations), or as one sector of the identity whose basis the ranks
+    share (driver.periodic_sector_refusal). A spin cell
     (PARSEC_GAMMA_SPIN_SECTORS=auto, since 2026-11-19) solves both channels
-    in the abelian sectors of the cell; its forces and relaxations are
-    refused on several ranks (:func:`_refuse_spin_ionic_steps`). The forces
+    in the abelian sectors of the cell; one that has no such group is
+    refused (driver.spin_cell_group_refusal: before the preparation where
+    no group is looked for, after the detection otherwise); its forces and
+    relaxations by an optimizer run in those sectors too where they keep
+    them, refused on several ranks otherwise (PARSEC_SPIN_SECTOR_FORCES,
+    :func:`_refuse_spin_ionic_steps`). The forces
     of an unpolarized cell and its relaxations (bfgs, simple) with every atom
     movable run here on the default
     routines: the ranks sum the nonlocal terms of their sectors, and the root
     completes them over the full group of the sectors
     (acceleration/Forces/sector_symmetry.py), as one process does; at every move
     each rank replaces the projectors of its sectors (the geometry command,
-    driver ``move_atoms``). Molecular dynamics, manual movements and
-    relaxations with fixed atoms run on one sector of the identity
+    driver ``move_atoms``); a relaxation with fixed atoms (Move_Flag) keeps the
+    sectors of the subgroup that maps them onto fixed atoms
+    (PARSEC_MOVE_FLAG_SUBGROUP=auto). Molecular dynamics, manual movements and,
+    under PARSEC_MOVE_FLAG_SUBGROUP=off, relaxations with fixed atoms run on one sector of the identity
     (:func:`_periodic_solver_symmetry`), as every forces or moving run of a
     cell under PARSEC_PERIODIC_SECTOR_FORCES=off, whose basis one rank or the
-    ranks of ``--rank-per-gpu`` share; one rank on each of several nodes does
-    not divide it, which ``execute`` refuses as for a cluster. The forces of the Fortran-derived
-    routines (Use_Fortran_Routines), those of the supercell of a k-point mesh
+    ranks of ``--rank-per-gpu`` share, or one rank on each of several nodes
+    over all its GPUs where nested sharing applies (``Eigensolver: chebff``,
+    PARSEC_MPI_NESTED_SHARING); otherwise one rank on each of several nodes
+    would hold it on the first GPU of each node, which is refused as for a
+    cluster (``execute``, and
+    experimental/mpi_scf.single_sector_layout_refusal for a cell or cluster
+    whose detection finds no group). The single-point forces and the
+    optimizer relaxations of the Fortran-derived routines
+    (Use_Fortran_Routines) run in the sectors as well under
+    PARSEC_FORTRAN_SECTOR_FORCES=auto; their other forces and moving runs
+    (a spin-polarized cell, a Restart_Run, whose parsec.dat this runner does
+    not read, a relaxation with fixed atoms, and all of them under off),
+    those of the supercell of a k-point mesh
     (``supercell``: PARSEC_KPOINT_SUPERCELL, whose atoms are copies) and the
     band calculations after an SCF of a cell stay with main.py, as do k-points
     (main.py --mpi pools them on several ranks).
     """
     problem = translation.problem
+    from parsec_python.SCF.supercell_mesh import supercell_mesh_route, validate_settings as _validate_supercell_mesh
+
+    # PARSEC_SUPERCELL_KPOINTS_MESH and _WEDGE: a value they do not know is refused in every run
+    _validate_supercell_mesh()
     if problem.periodic_cell is None:
         return
+    if not supercell:
+        # PARSEC_SUPERCELL_KPOINTS=auto: a cell that repeats a smaller one runs as a cell with a k-point mesh
+        # (SCF/supercell_mesh.py), which main.py runs; here it was the Gamma point of the supercell, silently
+        found = supercell_mesh_route(translation)
+        if found is not None:
+            raise ValueError(f'PARSEC_SUPERCELL_KPOINTS=auto: {found.describe()}. The full-SCF runner solves the '
+                             'Gamma point and no k-points: run it with parsec_python/main.py --mpi (k-point pools), '
+                             'or with PARSEC_SUPERCELL_KPOINTS=off as the Gamma point of the supercell')
     from parsec_python.acceleration.driver import periodic_sector_refusal
 
     reason = periodic_sector_refusal(problem)
@@ -868,9 +969,29 @@ def _refuse_unsupported_periodic(translation, *, supercell: bool = False) -> Non
     if not (getattr(translation, 'compute_forces', False) or moving):
         return
     if bool(getattr(problem.grid, 'fortran_routines', False)):
-        raise ValueError('forces, relaxation and molecular dynamics of a periodic cell on the Fortran-derived routines '
-                         '(Use_Fortran_Routines) are not available in the full-SCF runner, whose sectors take the '
-                         'default routines: run them with parsec_python/main.py')
+        from parsec_python.acceleration.Forces.sector_symmetry import fortran_sector_forces_setting
+
+        # PARSEC_FORTRAN_SECTOR_FORCES=auto: the single-point forces and the relaxations by an optimizer of those
+        # routines in the sectors of the point group of the cell, as main.py takes them; what keeps their full grid
+        # (molecular dynamics, manual movements, fixed atoms, the supercell, PARSEC_PERIODIC_SECTOR_FORCES=off), a
+        # spin-polarized cell (not validated here with those routines), a Restart_Run (this runner reads no
+        # parsec.dat; main.py starts the SCF from it) and everything under off stays with main.py, as before. The
+        # message names the reason.
+        subject = ('forces, relaxation and molecular dynamics of a periodic cell on the Fortran-derived routines '
+                   '(Use_Fortran_Routines) are not available in the full-SCF runner')
+        if fortran_sector_forces_setting() == 'off':
+            raise ValueError(f'{subject}, whose sectors take the default routines (PARSEC_FORTRAN_SECTOR_FORCES=off): '
+                             'run them with parsec_python/main.py')
+        if bool(getattr(problem.scf, 'spin_polarized', False)):
+            raise ValueError(f'{subject} for a spin-polarized cell, which is not validated there with these routines: '
+                             'run it with parsec_python/main.py')
+        if getattr(translation, 'restart_run', False):
+            raise ValueError(f'{subject} with Restart_Run: the runner reads no parsec.dat. Run it with '
+                             'parsec_python/main.py, which starts the SCF from it')
+        keeps = _periodic_sector_forces_refusal(translation, supercell=supercell)
+        if keeps is not None:
+            raise ValueError(f'{subject} where they keep the full grid ({_periodic_run_name(translation)}: {keeps}): '
+                             'run them with parsec_python/main.py')
     if supercell:
         raise ValueError('forces, relaxation and molecular dynamics of the supercell of a k-point mesh '
                          '(PARSEC_KPOINT_SUPERCELL) are not available in the full-SCF runner: the supercell repeats '
@@ -886,8 +1007,8 @@ def _periodic_solver_symmetry(translation, requested, symmetry, *, supercell: bo
     cell about its origin (PARSEC_PERIODIC_SYMMETRY) and solves its sectors, or one sector of the identity: ``auto``
     for a single point, its forces and a relaxation whose atoms all move; ``off`` (one sector of the identity) with
     point charges, Ignore_Symmetry, and for the forces and moves that the rule of the command line keeps off the
-    sectors (:func:`_periodic_sector_forces_refusal`: molecular dynamics, manual movements, fixed atoms, every one
-    under PARSEC_PERIODIC_SECTOR_FORCES=off), for which ``--symmetry on`` is refused with that reason.
+    sectors (:func:`_periodic_sector_forces_refusal`: molecular dynamics, manual movements, fixed atoms under
+    PARSEC_MOVE_FLAG_SUBGROUP=off, every one under PARSEC_PERIODIC_SECTOR_FORCES=off), for which ``--symmetry on`` is refused with that reason.
     """
     leaves = _periodic_sector_forces_refusal(translation, supercell=supercell)
     if requested == 'on' and leaves is not None:
@@ -921,17 +1042,105 @@ def _periodic_force_symmetry(translation, system) -> bool:
     return sector_symmetry_operations(system) is not None
 
 
-def _ionic_backend_of(translation, ionic_backend, extrapolation='none'):
+def _ionic_backend_of(translation, ionic_backend, extrapolation='none', restart=None):
     """The accelerated ionic backend of the root; a periodic cell keeps its structure on the group of the cell.
 
-    As ``acceleration.cli`` builds it for main.py: :func:`..Forces.periodic_device.with_periodic_operations`.
+    As ``acceleration.cli`` builds it for main.py: :func:`..Forces.periodic_device.with_periodic_operations`, and the
+    warm start of ``Restart_Run`` (``restart``) for the first SCF loop of the forces, a relaxation or molecular
+    dynamics (:func:`parsec_python.SCF.restart.with_first_warm_start`).
     """
     backend = ionic_backend(extrapolation)
     if translation.problem.periodic_cell is not None:
         from parsec_python.acceleration.Forces.periodic_device import with_periodic_operations
 
         backend = with_periodic_operations(backend)
+    if restart is not None:
+        from parsec_python.SCF.restart import with_first_warm_start
+
+        backend = with_first_warm_start(backend, restart)
     return backend
+
+
+_RESTART_SWITCH = 'PARSEC_MPI_RESTART_RUN'
+
+
+def restart_run_setting():
+    """``PARSEC_MPI_RESTART_RUN``: ``auto`` (default, since 2026-11-19) or ``off``.
+
+    ``auto``: the runner takes ``Restart_Run`` as main.py does (:func:`_restart_rules`, :func:`_load_restart_start`).
+    ``off``: it ignores the keyword as before, every rank starting from the atomic densities (no error 371, no
+    refusal of ``Restart_From_Wfndat`` or of a spin restart), bit for bit; the header of parsec.out still names the
+    restart of the input, as it did.
+    """
+    value = os.environ.get(_RESTART_SWITCH, 'auto').strip().lower() or 'auto'
+    if value in {'0', 'false', 'no'}:
+        value = 'off'
+    if value not in {'auto', 'off'}:
+        raise ValueError(f'{_RESTART_SWITCH} must be auto or off, not {value!r}')
+    return value
+
+
+def _restart_rules(translation, comm, *, serial_control=False):
+    """``Restart_Run`` in this runner: what main.py decides before its preparation, on every rank alike.
+
+    Returns the translation and the notes for parsec.out.  The root loads the stored potential of ``parsec.dat`` once
+    the system is prepared (:func:`_load_restart_start`); before 2026-11-19 the runner ignored ``Restart_Run``, solved
+    the SCF from the atomic densities and printed the restart header all the same.  Here, as in
+    ``acceleration.cli``:
+
+    * ``Restart_From_Wfndat`` is refused by name: main.py seeds the eigensolver of the full grid with the stored
+      orbitals of ``wfn.dat`` in one process, which the sectors of the ranks do not take;
+    * a missing ``parsec.dat`` beside the input stops the run with PARSEC's error 371 (the root looks, every rank
+      stops);
+    * a spin-polarized restart solves both channels on the full grid in main.py (``Spin_Symmetry_Sectors: off`` for
+      the restart: ``parsec.dat`` may hold a state that broke the point group of the atoms, which the sectors would
+      average).  A serial control does the same; the ranks of the runner do not divide the full grid of two
+      channels, so there it is refused by name.
+
+    ``PARSEC_MPI_RESTART_RUN=off`` (:func:`restart_run_setting`, read in every run) keeps the former runner, which
+    ignored the keyword.
+    """
+    if restart_run_setting() == 'off' or not getattr(translation, 'restart_run', False):
+        return translation, []
+    if getattr(translation, 'restart_from_wfndat', False):
+        raise ValueError('Restart_From_Wfndat is not available in the full-SCF runner: main.py seeds the eigensolver '
+                         'of the full grid with the stored orbitals of wfn.dat in one process, which the sectors of '
+                         'the ranks do not take. Run it with parsec_python/main.py')
+    path = translation.source.parent / 'parsec.dat'
+    present = path.is_file() if comm.rank == 0 else None
+    if comm.size > 1:
+        present = comm.bcast(present, root=0)
+    if not present:
+        raise ValueError(f'Restart_Run: {path} not found (PARSEC error 371)')
+    scf = translation.problem.scf
+    if not scf.spin_polarized:
+        return translation, []
+    if not serial_control:
+        raise ValueError('Restart_Run of a spin-polarized calculation solves both channels on the full grid (the rule '
+                         'of main.py: parsec.dat may hold a state that broke the point group of the atoms, which the '
+                         'sectors would average), and the ranks of the full-SCF runner do not divide the full grid of '
+                         'two channels: run it with parsec_python/main.py, or here with --serial-control')
+    if scf.spin_symmetry_sector_mode != 'auto':
+        return translation, []
+    translation = replace(translation, problem=replace(translation.problem,
+                                                       scf=replace(scf, spin_symmetry_sectors='off')))
+    return translation, ['NOTE: Restart_Run of a spin-polarized calculation: both channels on the full grid '
+                         '(Spin_Symmetry_Sectors: off for the restart)']
+
+
+def _load_restart_start(translation, system, log):
+    """The warm start of ``Restart_Run`` from ``parsec.dat`` beside the input, on the root; ``None`` without one.
+
+    ``parsec_python.cli.load_restart_start``, which main.py calls: the stored potential (``vnew``) of the first
+    eigenproblem, or the fields of the stored density where the sphere changed, and the restart lines of parsec.out.
+    The warm start holds full-grid fields of the root, which alone runs the SCF loop; the workers solve its sectors
+    as in any run.
+    """
+    if not getattr(translation, 'restart_run', False) or restart_run_setting() == 'off':
+        return None
+    from parsec_python.cli import load_restart_start
+
+    return load_restart_start(translation, system, log, translation.source.parent)
 
 
 def _hartree_boundary_record(system, result):
@@ -990,19 +1199,150 @@ def _input_has_hybrid(path) -> bool:
         return False
 
 
-def _refuse_spin_ionic_steps(translation, size: int) -> None:
-    """Refuse forces, relaxation and molecular dynamics of a spin-polarized calculation on several ranks.
+def _input_first_solve_is_chebff(path) -> bool:
+    """Whether the input names ``Eigensolver: chebff``, read before MPI starts (as :func:`_input_has_hybrid`).
 
-    The single point of both channels in the sectors of several ranks is validated against one process
-    (O2 PBE and PBE0, O2 Hartree-Fock); the nonlocal force terms of both channels summed over the ranks
-    (the spin_forces command) are not yet.
+    Only a CHEBFF first solve divides a shared basis among ranks, and so only it may take nested sharing
+    (``PARSEC_MPI_NESTED_SHARING``), whose exchanges pass device arrays to MPI.  An input that cannot be read
+    here says no.
     """
-    if (translation.problem.scf.spin_polarized and int(size) > 1
+    try:
+        from parsec_python.Input.parsec_input import _read_items
+
+        values = [item.value for item in _read_items(Path(path)) if item.key == 'eigensolver']
+        return bool(values) and str(values[-1]).split()[0].strip().lower() == 'chebff'
+    except Exception:
+        return False
+
+
+def _nested_launch(args) -> bool:
+    """Whether this launch may spread shared bases over the GPUs of each rank (``PARSEC_MPI_NESTED_SHARING``).
+
+    Decided before MPI starts, from the launch alone (one rank per node, several of them, several GPUs per
+    rank, a CHEBFF first solve, no hybrid, no serial control) and the switch, the same on every rank: the
+    runner then lets MPI take device arrays (``MPICH_GPU_SUPPORT_ENABLED=1``) unless
+    ``PARSEC_MPI_SHARED_TRANSPORT=host`` or the MPI library has no GPU transport layer
+    (:func:`_nested_gpu_support`).  Whether a run shares any basis is known only after the symmetry is
+    found; a run that shares none passes host arrays to MPI as before.
+    """
+    from parsec_python.acceleration.experimental.mpi_scf import nested_sharing_applies
+
+    try:
+        ranks = int(os.environ.get('SLURM_NTASKS', os.environ.get('SLURM_NPROCS', '1')).strip() or 1)
+    except ValueError:
+        ranks = 1
+    return (not args.serial_control and _ranks_per_node_of_launch() == 1
+            and nested_sharing_applies(ranks, len(args.devices), exchange=_input_has_hybrid(args.input),
+                                       divided=_input_first_solve_is_chebff(args.input)))
+
+
+# Why a nested launch stages its exchanges through the host (set by main() before MPI starts; None: it does not).
+_NESTED_TRANSPORT_NOTE = None
+
+
+def _gpu_transport_layer_loaded(maps='/proc/self/maps') -> bool:
+    """Whether the GPU transport layer of Cray MPICH (``libmpi_gtl_cuda``) is mapped into this process.
+
+    Cray MPICH aborts in ``MPI_Init`` when ``MPICH_GPU_SUPPORT_ENABLED=1`` asks for GPU support and that library
+    is not linked ('GPU_SUPPORT_ENABLED is requested, but GTL library is not linked'): mpi4py built without
+    ``craype-accel-nvidia80`` loaded.  The library is mapped once ``mpi4py.MPI`` is imported (a dependency of the
+    extension, or ``LD_PRELOAD``), before ``MPI_Init``; ``maps`` is the map of the process (Linux).  A map that
+    cannot be read says no.
+    """
+    try:
+        with open(maps, encoding='utf-8', errors='replace') as handle:
+            return any('libmpi_gtl_cuda' in line for line in handle)
+    except OSError:
+        return False
+
+
+def _nested_gpu_support(nested, transport_setting, layer_loaded):
+    """``(MPICH_GPU_SUPPORT_ENABLED of a nested launch, the note of a host-staged one)``, decided before MPI_Init.
+
+    ``nested`` is :func:`_nested_launch`; ``transport_setting`` ``PARSEC_MPI_SHARED_TRANSPORT`` (``host`` keeps
+    host staging); ``layer_loaded`` :func:`_gpu_transport_layer_loaded`.  Since 2026-11-20 a nested launch asks for
+    GPU support only where the GTL library is loaded, since Cray MPICH stops in MPI_Init otherwise; its exchanges
+    are host-staged then (``mpi_shared_basis.shared_transport`` reads the flag), and parsec.out names the reason.
+    ``cuda`` named asks for GPU support whatever is loaded (MPI_Init then says what is missing).  ``(None, None)``
+    leaves the flag as the launch set it (no nested launch, or host staging asked for).
+    """
+    setting = str(transport_setting).strip().lower() or 'auto'
+    if not nested or setting == 'host':
+        return None, None
+    if layer_loaded or setting == 'cuda':
+        return '1', None
+    return None, ('the MPI library has no GPU transport layer: mpi4py was built without libmpi_gtl_cuda, '
+                  'Cray MPICH needs craype-accel-nvidia80 loaded at its build')
+
+
+def _nested_groups_note(context, solver):
+    """A NOTE where the margin of sectors was cut for memory and ``PARSEC_MPI_NESTED_SHARING=groups`` would share them.
+
+    The root's ``sector_margin_record`` (``PARSEC_CUPY_SECTOR_MARGIN=auto``) names the share of the margin that
+    every sector kept; where one kept less than all and the placement by cost would give groups of nodes several
+    sectors over all their GPUs (:meth:`MPISectorContext.nested_groups_hint`), the note names the three ways to
+    keep the margin with what each cost diamond 22^3 on four nodes (since 2026-11-20, after review: before, it named
+    ``groups`` and ``--rank-per-gpu`` alone, though ``PARSEC_CUPY_SECTOR_MARGIN=fixed`` is the fastest where the
+    full margin fits).  ``None`` otherwise.  Nothing of the run depends on it.
+    """
+    if context is None or not callable(getattr(context, 'nested_groups_hint', None)):
+        return None
+    record = getattr(solver, 'sector_margin_record', None) or {}
+    try:
+        cut = [sector for sector, item in record.items() if float(item.get('fraction', 1.0)) < 1.0]
+    except (AttributeError, TypeError, ValueError):
+        return None
+    if not cut or not context.nested_groups_hint():
+        return None
+    return (f'NOTE: the margin of {len(cut)} of the {len(record)} sectors was cut to fit the memory of their GPUs '
+            '(PARSEC_CUPY_SECTOR_MARGIN=auto), which can cost SCF steps (diamond 22^3 on 4 nodes: 1044 s). Ways '
+            'to keep the full margin, as measured there: PARSEC_CUPY_SECTOR_MARGIN=fixed where it fits after all '
+            '(264.2 s, 76.8 GiB at the fullest GPU of 80, close to the limit), one rank per GPU '
+            '(scripts/run_multi_gpu_scf.sh --rank-per-gpu: 322.9 s, 66.4 GiB), or '
+            'PARSEC_MPI_NESTED_SHARING=groups, groups of nodes that share the sectors over all their GPUs '
+            '(518.6 s, 74.9 GiB: their exchanges between nodes go through one network interface per rank).')
+
+
+def _refuse_spin_ionic_steps(translation, size: int, *, supercell: bool = False) -> None:
+    """Refuse the forces, relaxations and molecular dynamics of a spin-polarized calculation that several ranks
+    cannot run.
+
+    The single point of both channels in the sectors of several ranks is validated against one process (O2 PBE and
+    PBE0, O2 Hartree-Fock).  Under ``PARSEC_SPIN_SECTOR_FORCES=auto`` (the default since 2026-11-19) so are the
+    nonlocal force terms of both channels summed over the ranks (the ``spin_forces`` command): the single-point forces
+    and the relaxations by an optimizer of a run that keeps its sectors run here, a cluster whose structure keeps its
+    point group (``symmetry_decision``: no ``Ignore_Symmetry``, manual movements or ``Move_Flag`` against the group)
+    and a cell whose forces keep the sectors of its point group (:func:`_periodic_sector_forces_refusal`).  Molecular
+    dynamics and the moving runs that take no sectors are refused here, as is every one under ``off`` (the rule of
+    before): the two channels of a spin-polarized run are not shared as one sector of the identity.
+    """
+    if not (translation.problem.scf.spin_polarized and int(size) > 1
             and (getattr(translation, 'compute_forces', False) or getattr(translation, 'relaxation', None) is not None
                  or getattr(translation, 'molecular_dynamics', None) is not None)):
+        return
+    from parsec_python.acceleration.SCF.gamma_spin import spin_sector_forces_setting
+
+    if spin_sector_forces_setting() == 'off':
         raise ValueError('forces, relaxation and molecular dynamics of a spin-polarized calculation are not '
                          'available on several ranks (their force terms of both channels have not been validated '
                          'there): run them with parsec_python/main.py or with --serial-control')
+    if getattr(translation, 'molecular_dynamics', None) is not None:
+        reason = 'molecular dynamics uses no symmetry'
+    elif getattr(translation.problem, 'periodic_cell', None) is not None:
+        reason = _periodic_sector_forces_refusal(translation, supercell=supercell)
+        if reason is None and (getattr(getattr(translation, 'routines', None), 'fortran', False)
+                               or getattr(translation.problem.grid, 'fortran_routines', False)):
+            # (the sector forces of these routines have not been validated for two spin channels)
+            reason = 'the forces of the Fortran-derived routines (Use_Fortran_Routines) of a spin-polarized cell'
+    else:
+        from parsec_python.Relaxation.run import symmetry_decision
+
+        keeps, note = symmetry_decision(translation)
+        reason = None if keeps else (note or 'Ignore_Symmetry or manual movements: the run uses no point group')
+    if reason is not None:
+        raise ValueError(f'{_periodic_run_name(translation)} of a spin-polarized calculation on several ranks run in '
+                         f'the symmetry sectors of both channels, which this one does not keep ({reason}): run it '
+                         'with parsec_python/main.py or with --serial-control')
 
 
 def _ranks_per_node_of_launch() -> int:
@@ -1018,14 +1358,16 @@ def execute(args, cp, comm, MPI, initialization_seconds, initial_affinity=None):
     import numpy as np
     from parsec_python.Input import parse_parsec_input
     from parsec_python.cli import save_result_archive
-    from parsec_python.acceleration.cli import _RunLog, _periodic_sector_forces_line, _symmetry_cache_directory
+    from parsec_python.acceleration.cli import (_RunLog, _fortran_sector_forces_line, _periodic_sector_forces_line,
+                                                _symmetry_cache_directory)
     from parsec_python.acceleration.Output import AcceleratedTextReporter
     from parsec_python.acceleration.backends.cupy_capture import capture_statistics
     from parsec_python.acceleration.driver import (hartree_boundary_check_seconds, ionic_backend, prepare_single_point,
                                                    run_scf)
     from parsec_python.cli import relaxation_exit_code
-    from parsec_python.Relaxation.run import (relaxation_header_lines, restart_structure, run_recorded_relaxation,
-                                              run_single_point_with_forces, symmetry_decision)
+    from parsec_python.Relaxation.run import (move_flag_subgroup_setting, relaxation_header_lines, restart_structure,
+                                              run_recorded_relaxation, run_single_point_with_forces,
+                                              symmetry_decision, symmetry_fixed_atoms)
     from parsec_python.acceleration.experimental.mpi_scf import MPISectorContext, MPISymmetryDensityBuilder
 
     affinity_restorations = int(_restore_affinity(initial_affinity))
@@ -1033,6 +1375,15 @@ def execute(args, cp, comm, MPI, initialization_seconds, initial_affinity=None):
     if args.serial_control and size != 1:
         raise ValueError('--serial-control requires exactly one MPI rank')
     hosts = comm.allgather(socket.gethostname())
+    if _nested_launch(args):
+        # Every rank looked for the GPU transport layer in its own process before MPI_Init (main); the exchanges
+        # of a nested group must travel alike on every rank, so a launch whose nodes answered differently stops.
+        flags = comm.allgather(os.environ.get('MPICH_GPU_SUPPORT_ENABLED', '0'))
+        if len(set(flags)) != 1:
+            raise RuntimeError('the ranks of this launch disagree on MPICH_GPU_SUPPORT_ENABLED '
+                               f'({", ".join(f"rank {index}: {flag}" for index, flag in enumerate(flags))}): '
+                               'libmpi_gtl_cuda is loaded on some nodes only; use one software environment on '
+                               'every node or PARSEC_MPI_SHARED_TRANSPORT=host')
     # One rank per node divides the symmetry sectors among the nodes; several ranks per node, one GPU each,
     # share the basis of the single sector of a run without symmetry, or the sectors of a symmetric run in groups
     # of ranks that may span nodes and, after a CHEBFF first solve, solve several sectors one after another
@@ -1047,29 +1398,73 @@ def execute(args, cp, comm, MPI, initialization_seconds, initial_affinity=None):
                          'CUDA_VISIBLE_DEVICES set per rank (scripts/run_multi_gpu_scf.sh --rank-per-gpu)')
 
     translation = parse_parsec_input(args.input, pseudopotential_directory=args.pp_dir)
-    # PARSEC_KPOINT_SUPERCELL=auto: a mesh of the time-reversal invariant k-points as the Gamma point of the
-    # supercell (parsec_python/SCF/kpoint_supercell.py; the same energies with the Bloch kinetic term)
-    from parsec_python.SCF.kpoint_supercell import describe as _describe_kpoint_cells, supercell_of_trim_mesh
+    if args.mlff is not None:
+        from parsec_python.MLFF import apply_mlff_option
+        translation = apply_mlff_option(translation, args.mlff)
+    # PARSEC_KPOINT_SUPERCELL (auto by default: a single point whose estimated difference of the kinetic forms is
+    # small; on: wherever it applies): a mesh of the time-reversal invariant k-points as the Gamma point of the
+    # supercell (parsec_python/SCF/kpoint_supercell.py; the same energies with the Bloch kinetic term). The
+    # decision reads the input alone: every rank takes the same one.
+    from parsec_python.SCF.kpoint_supercell import (
+        cell_result_view as _cell_result_view,
+        energies_per_cell as _energies_per_cell,
+        kpoint_supercell_setting as _supercell_setting,
+        per_cell_lines as _per_cell_lines,
+        trim_supercell_route as _trim_supercell_route,
+        validate_settings as _validate_supercell_settings,
+    )
     from parsec_python.acceleration.driver import periodic_sector_refusal as _sector_refusal
+    from parsec_python.MolecularDynamics.run import (restart_structure as dynamics_restart_structure,
+                                                     run_recorded_molecular_dynamics)
 
-    _found_supercell = supercell_of_trim_mesh(translation.problem, refusal=_sector_refusal)
+    _validate_supercell_settings()
+    # PARSEC_KPOINT_SUPERCELL=auto: Relax_Restart, or --restart-from, and the restart of a dynamics run replace the
+    # coordinates of the input on every rank alike before the route of a mesh, whose supercell is then made of the
+    # atoms they give (on and off keep the order of before below; on's relaxations write the files of the supercell).
+    early_restarts = None
+    if _supercell_setting() == 'auto':
+        _input_problem = translation.problem
+        translation, _relax_restart, _restart_notes = restart_structure(
+            translation, translation.source.parent,
+            None if args.restart_from is None else args.restart_from.expanduser().resolve())
+        translation, _dynamics_restart, _dynamics_notes = dynamics_restart_structure(translation,
+                                                                                    translation.source.parent)
+        early_restarts = (_relax_restart, _dynamics_restart, [*_restart_notes, *_dynamics_notes],
+                          translation.problem is not _input_problem)
+    _trim_route = _trim_supercell_route(translation, refusal=_sector_refusal, device='gpu')
+    _mesh_problem = translation.problem
+    _mesh_atoms = len(translation.problem.atoms)
+    _found_supercell = (_trim_route.problem, _trim_route.repeats) if _trim_route.taken else None
+    if _trim_route.note is not None and rank == 0:
+        print(_trim_route.note, flush=True)
     if _found_supercell is not None:
         from dataclasses import replace as _replace
 
         translation = _replace(translation, problem=_found_supercell[0])
-        if rank == 0:
-            print(_describe_kpoint_cells("supercell", _found_supercell[1]), flush=True)
-    if args.mlff is not None:
-        from parsec_python.MLFF import apply_mlff_option
-        translation = apply_mlff_option(translation, args.mlff)
     # A bulk cell at the Gamma point runs in the sectors of its point group or as one sector of the identity shared
     # by the ranks; every other periodic
     # calculation is refused here by name, on every rank alike, before anything is prepared.
     periodic = translation.problem.periodic_cell is not None
-    # PARSEC_PERIODIC_SECTOR_FORCES (acceleration.cli), read in every run so that a value it does not know is refused.
+    # PARSEC_PERIODIC_SECTOR_FORCES (acceleration.cli) and PARSEC_FORTRAN_SECTOR_FORCES, read in every run so that a
+    # value they do not know is refused.
     from parsec_python.acceleration.cli import periodic_sector_forces_setting
+    from parsec_python.acceleration.Forces.sector_symmetry import fortran_sector_forces_setting
+    from parsec_python.acceleration.SCF.gamma_spin import spin_sector_forces_setting
 
     periodic_sector_forces_setting()
+    fortran_sector_forces_setting()
+    # (and the switches of the local forces of a cell, used after the first SCF: PARSEC_PERIODIC_LOCAL_ORBITS,
+    # PARSEC_PERIODIC_LOCAL_BALLS and their siblings)
+    from parsec_python.acceleration.Forces.periodic_local import validate_local_force_settings
+
+    validate_local_force_settings()
+    # (and PARSEC_SPIN_SECTOR_FORCES: _refuse_spin_ionic_steps)
+    spin_sector_forces_setting()
+    # PARSEC_MPI_NESTED_SHARING (experimental/mpi_scf.py), read in every run so that a value it does not know is
+    # refused before anything is prepared.
+    from parsec_python.acceleration.experimental.mpi_scf import nested_sharing_setting
+
+    nested_sharing_setting()
     _refuse_unsupported_periodic(translation, supercell=_found_supercell is not None)
     if getattr(translation, 'polarizability_field', None) is not None:
         # Refused rather than ignored: the seven field loops run in one process (main.py).
@@ -1079,33 +1474,61 @@ def execute(args, cp, comm, MPI, initialization_seconds, initial_affinity=None):
         # Refused rather than ignored: the orbitals of this runner stay divided among ranks and devices.
         raise ValueError('Energy_Refinement is not available in the full-SCF runner, whose orbitals stay divided '
                          'among ranks: run the refinement with parsec_python/main.py')
+    # Restart_Run: the root loads the stored potential of parsec.dat after the preparation, as main.py does
+    # (_restart_rules, _load_restart_start); refused or stopped here, on every rank alike, where it cannot.
+    translation, restart_rule_notes = _restart_rules(translation, comm, serial_control=args.serial_control)
     # A hybrid functional: the ranks divide the sectors, each basis on one device, and every GPU of every rank
     # solves pair densities of the exchange (SCF/hybrid_mpi.py); a rank may own no sector.
     hybrid = bool(getattr(translation.problem.scf, 'is_hybrid', False))
-    # A spin-polarized calculation divides the sectors of both channels (Spin_Symmetry_Sectors): single points;
-    # the driver refuses one whose channels stay on the full grid.
-    _refuse_spin_ionic_steps(translation, size)
-    # Relax_Restart, or --restart-from, replaces the coordinates of the input on every rank alike.
-    problem_of_input = translation.problem
-    translation, relax_restart, restart_notes = restart_structure(
-        translation, translation.source.parent,
-        None if args.restart_from is None else args.restart_from.expanduser().resolve())
+    # A spin-polarized calculation divides the sectors of both channels (Spin_Symmetry_Sectors): single points, and
+    # forces and relaxations that keep the sectors (PARSEC_SPIN_SECTOR_FORCES=auto); the driver refuses one whose
+    # channels stay on the full grid.
+    _refuse_spin_ionic_steps(translation, size, supercell=_found_supercell is not None)
+    if early_restarts is None:
+        # Relax_Restart, or --restart-from, replaces the coordinates of the input on every rank alike.
+        problem_of_input = translation.problem
+        translation, relax_restart, restart_notes = restart_structure(
+            translation, translation.source.parent,
+            None if args.restart_from is None else args.restart_from.expanduser().resolve())
+    else:
+        relax_restart, dynamics_restart, restart_notes, restarted = early_restarts
     # No point group for manual movements, or where the movable flags do not respect it. One rank can still
     # solve such a run as the single sector of the identity, whose basis the GPUs of its node then share.
     from parsec_python.acceleration.driver import single_sector_setting
     # A hybrid's ranks need not share a basis: the sector lies on the root's first device and the other ranks
     # solve pair densities of its exchange.
-    one_sector = (single_sector_setting() != 'off' and (size == 1 or shared_ranks or hybrid)
+    # With one rank per node the ranks share that sector over all their GPUs where nested sharing applies
+    # (PARSEC_MPI_NESTED_SHARING, a CHEBFF first solve: experimental/mpi_scf.nested_sharing_applies).
+    from parsec_python.acceleration.experimental.mpi_scf import nested_sharing_applies
+
+    first_solve_divides = str(getattr(getattr(translation.problem, 'eigensolver', None), 'method',
+                                      '')).strip().lower() == 'chebff'
+    node_sharing = nested_sharing_applies(size, len(args.devices), gpu_per_rank=shared_ranks, exchange=hybrid,
+                                          divided=first_solve_divides)
+    one_sector = (single_sector_setting() != 'off' and (size == 1 or shared_ranks or hybrid or node_sharing)
                   and not args.serial_control)
     if translation.molecular_dynamics is not None and not args.serial_control and not one_sector:
         # The ranks of this runner divide the symmetry sectors, and molecular dynamics uses no symmetry.
         raise ValueError('molecular dynamics uses no symmetry and so cannot be divided among the sectors of '
                          'one rank per node: run it with one rank (one node), or with one rank per GPU, '
                          'whose ranks share the basis of its one sector')
-    from parsec_python.MolecularDynamics.run import (restart_structure as dynamics_restart_structure,
-                                                     run_recorded_molecular_dynamics)
-    translation, dynamics_restart, dynamics_notes = dynamics_restart_structure(translation, translation.source.parent)
-    restart_notes = [*restart_notes, *dynamics_notes]
+    if early_restarts is None:
+        translation, dynamics_restart, dynamics_notes = dynamics_restart_structure(translation,
+                                                                                   translation.source.parent)
+        restart_notes = [*restart_notes, *dynamics_notes]
+        # computed where the former code read it (relax_initial_structure below): the restarts changed the problem
+        restarted = translation.problem is not problem_of_input
+    restart_notes = [*restart_notes, *restart_rule_notes]
+    if _found_supercell is not None:
+        restart_notes = [*restart_notes, f' {_trim_route.note}']
+    # PARSEC_SYMMETRIZE_POSITIONS=on: the positions averaged over the group found within PARSEC_SYMMETRY_ATOM_TOLERANCE,
+    # on every rank alike (off, the default: as given; a TRIM supercell is averaged as the cell it is solved as).
+    from parsec_python.Forces.position_symmetry import symmetrize_input_positions
+
+    translation, position_notes = symmetrize_input_positions(translation)
+    restart_notes = [*restart_notes, *position_notes]
+    # PARSEC_MOVE_FLAG_SUBGROUP, read in every run so that a value it does not know is refused on every rank alike.
+    move_flag_subgroup_setting()
     use_symmetry, symmetry_note = symmetry_decision(translation)
     # Whether the atoms stay in the point group of the first structure, which Ignore_Symmetry does not tell.
     # The command line may overrule that keyword, but not a run that leaves the group.
@@ -1115,6 +1538,20 @@ def execute(args, cp, comm, MPI, initialization_seconds, initial_affinity=None):
                          + (group_note or 'manual movements and molecular dynamics use no symmetry'))
     symmetry = (args.symmetry if args.symmetry is not None and (keeps_group or args.symmetry == 'off')
                 else ('auto' if use_symmetry else 'off'))
+    # Foldblock_Side_Length 2 of a cluster: the group of its domain of whole blocks on PARSEC 1.5's grid without
+    # shift (PARSEC_FOLDBLOCK_SYMMETRY=auto, SCF/symmetry_off_inputs.py; off: no group, as before).  Polarizability
+    # (refused above) and point charges (refused by the driver under MPI) keep their groups in main.py only.
+    # (kept_group_reasons gives none for a relaxation whose Move_Flag the group of the atoms does not respect, and for
+    # spinors.)
+    from ..SCF.symmetry_off_inputs import (kept_group_note, kept_group_reasons, kept_group_warnings,
+                                           read_settings as symmetry_off_settings)
+    symmetry_off_settings()
+    kept_reasons = kept_group_reasons(translation)
+    if symmetry == 'off' and args.symmetry != 'off' and kept_reasons == ('foldblock',):
+        symmetry = 'auto'
+        restart_notes = [*restart_notes, kept_group_note(kept_reasons)]
+    else:
+        kept_reasons = ()
     # A periodic cell (a bulk cell at Gamma, the rest was refused above): the parser keeps no point group for a cell
     # (use_symmetry: its forces are not symmetrized), but the driver looks for the point group of the cell about its
     # origin (PARSEC_PERIODIC_SYMMETRY) and solves its sectors, also for forces and a relaxation, or one sector of
@@ -1122,9 +1559,46 @@ def execute(args, cp, comm, MPI, initialization_seconds, initial_affinity=None):
     if periodic:
         symmetry = _periodic_solver_symmetry(translation, args.symmetry, symmetry,
                                              supercell=_found_supercell is not None)
+    # Forces or moves of a cell averaged over the group of its sectors: the cell keeps its sectors below the size floor
+    # of one process too (PARSEC_PERIODIC_SECTOR_FLOOR applies to an SCF alone; --serial-control), as on main.py.
+    sector_forces = bool(periodic and symmetry != 'off' and (
+        getattr(translation, 'compute_forces', False) or getattr(translation, 'relaxation', None) is not None
+        or getattr(translation, 'molecular_dynamics', None) is not None)
+        and _periodic_sector_forces_refusal(translation, supercell=_found_supercell is not None) is None)
     # Forces are symmetrized where the calculation itself uses the group; those of a cell are decided once it is
     # prepared (_periodic_force_symmetry).
     symmetrize_forces = keeps_group and symmetry != 'off'
+    if periodic and translation.problem.scf.spin_polarized and not args.serial_control:
+        # Both channels of a spin cell take the abelian sectors of its group on the ranks, never the shared sector of
+        # the identity: a cell that is prepared without a detection has none. Refused here, before any preparation;
+        # the driver refuses a cell whose detection finds none right after it (spin_cell_group_refusal).
+        from parsec_python.acceleration.driver import spin_cell_group_refusal
+        from parsec_python.acceleration.Symmetry import periodic_symmetry_setting
+
+        if symmetry == 'off':
+            reason = _periodic_sector_forces_refusal(translation, supercell=_found_supercell is not None)
+            raise ValueError(spin_cell_group_refusal(
+                'it is prepared without symmetry' + (f' ({symmetry_note or reason})' if symmetry_note or reason
+                                                     else '')))
+        if periodic_symmetry_setting() == 'off':
+            raise ValueError(spin_cell_group_refusal('PARSEC_PERIODIC_SYMMETRY=off'))
+    from parsec_python.acceleration.experimental.mpi_scf import (single_sector_layout_refusal,
+                                                                 single_sector_node_layout_setting)
+
+    # (read in every run, so that a value it does not know is refused)
+    single_sector_node_layout_setting()
+    if periodic and not args.serial_control:
+        # A cell under PARSEC_PERIODIC_SYMMETRY=off is one sector of the identity: with one rank per node on several
+        # nodes it would lie on the first GPU of each node (the driver refuses a cell or cluster whose detection
+        # finds no group in the same way, after the detection), unless nested sharing spreads it over every GPU
+        # of every node (a CHEBFF first solve, PARSEC_MPI_NESTED_SHARING other than off: nested_sharing_applies).
+        from parsec_python.acceleration.Symmetry import periodic_symmetry_setting
+
+        if periodic_symmetry_setting() == 'off':
+            layout_refusal = single_sector_layout_refusal(1, size, len(args.devices), gpu_per_rank=shared_ranks,
+                                                          exchange=hybrid, divided=first_solve_divides)
+            if layout_refusal is not None:
+                raise ValueError(layout_refusal)
     if symmetry == 'off' and not args.serial_control and not one_sector:
         # The ranks of this runner divide the symmetry sectors. A cell names why its forces or moves take one
         # sector of the identity.
@@ -1160,7 +1634,7 @@ def execute(args, cp, comm, MPI, initialization_seconds, initial_affinity=None):
             try:
                 output.mkdir(parents=True, exist_ok=True)
                 relaxed, mlff_notes = relax_initial_structure(
-                    translation, output, restarted=translation.problem is not problem_of_input,
+                    translation, output, restarted=restarted,
                     progress=None if args.quiet else print)
                 outcome = ('done', np.array([atom.position for atom in relaxed.problem.atoms]), mlff_notes)
             except Exception as error:
@@ -1178,6 +1652,9 @@ def execute(args, cp, comm, MPI, initialization_seconds, initial_affinity=None):
         context.shared_ritz_route = 'block'
         # One GPU per rank: more ranks than the sectors of a symmetric run share them in groups.
         context.gpu_per_rank = shared_ranks
+        # The GPUs of each rank: with one rank per node, the ranks of a group share bases over all of them
+        # (PARSEC_MPI_NESTED_SHARING, Eigensolvers/mpi_nested_basis.py).
+        context.node_devices = len(args.devices)
         # A CHEBFF first solve divides each shared basis among the ranks of its group, so that a group may solve
         # several sectors one after another where that balances the ranks better (PARSEC_SECTOR_PLACEMENT=size,
         # experimental/mpi_scf.sector_rank_plan); after another one every rank holds the whole bases of its group.
@@ -1211,12 +1688,17 @@ def execute(args, cp, comm, MPI, initialization_seconds, initial_affinity=None):
     log_manager = _RunLog(log_path if rank == 0 else None, quiet=args.quiet or rank != 0)
     with log_manager as log, ExitStack() as leaving:
         if rank == 0:
-            reporter = AcceleratedTextReporter(log.write, translation, symmetry_mode=symmetry)
+            # (A kept fold-block group: the symmetry block of PARSEC 1.5 for the input, as in acceleration.cli.)
+            reporter = AcceleratedTextReporter(log.write, translation,
+                                               symmetry_mode=None if kept_reasons else symmetry)
+            if _found_supercell is not None and _trim_route.cell_files:
+                # PARSEC_KPOINT_SUPERCELL=auto: the energy lines of the cell of the input, as the k-points give them
+                reporter.reference.cells_in_report = int(np.prod(_found_supercell[1]))
             # The reporter may run a host thread beside the SCF, which its report ends: it ends here on every
             # other way out.
             leaving.callback(reporter.close)
             reporter.header()
-            for warning in translation.warnings:
+            for warning in kept_group_warnings(translation.warnings, kept_reasons):
                 log.write(f'WARNING: {warning}')
             if symmetry_note is not None:
                 log.write(f'WARNING: {symmetry_note}')
@@ -1230,6 +1712,8 @@ def execute(args, cp, comm, MPI, initialization_seconds, initial_affinity=None):
                     else 'MPI symmetry sectors and the exchange of a hybrid on every GPU' if hybrid
                     else 'MPI symmetry sectors shared by groups of ranks' if shared_ranks and symmetry != 'off'
                     else 'one sector shared by the ranks' if shared_ranks else 'MPI symmetry sectors')
+            # Whether ranks of several GPUs share a sector is known once the sectors are configured: the line of
+            # _nested_sharing_line after the preparation says so.
             if periodic and not args.serial_control:
                 mode = ('a periodic cell at the Gamma point: the sectors of its point group or one sector of the '
                         'identity' + (', shared by the ranks' if shared_ranks else ''))
@@ -1260,10 +1744,16 @@ def execute(args, cp, comm, MPI, initialization_seconds, initial_affinity=None):
             leaving.enter_context(periodic_ionic_scope(translation))
         preparation_started = time.perf_counter()
         options = {} if context is None else {'mpi_context': context}
+        if sector_forces:
+            options['sector_forces'] = True
         cp, system, device_records, sampler, cuda_contexts = _prepare_on_devices(
             cp, args.devices,
             lambda: prepare_single_point(translation.problem, backend=args.backend, symmetry=symmetry,
-                                         symmetry_cache_directory=cache, **options),
+                                         symmetry_cache_directory=cache,
+                                         # the fixed atoms of a relaxation that keeps the subgroup respecting
+                                         # Move_Flag, a species of their own for the detection
+                                         # (PARSEC_MOVE_FLAG_SUBGROUP=auto; None otherwise), alike on every rank
+                                         symmetry_fixed_atoms=symmetry_fixed_atoms(translation), **options),
             memory)
         cuda_initialization_seconds = cuda_contexts['seconds']
         system.materialize_final_wavefunctions = False
@@ -1274,6 +1764,8 @@ def execute(args, cp, comm, MPI, initialization_seconds, initial_affinity=None):
         solver = getattr(system.backend, 'symmetry_eigensolver', None)
         if context is not None and (solver is None or not (context.owned_sectors or context.exchange)):
             raise RuntimeError('MPI full SCF requires the configured symmetry-sector eigensolver')
+        # The groups that the ranks attached over all their GPUs (every rank, where sectors are shared that way).
+        nested_attachment = _nested_attachment(comm, context, solver)
         if rank == 0:
             # Ranks that share sectors after a CHEBDAV first solve each hold the whole basis: say so.
             shared_note = _shared_first_solve_note(
@@ -1283,6 +1775,22 @@ def execute(args, cp, comm, MPI, initialization_seconds, initial_affinity=None):
             placement_line = _placement_line(context)
             if placement_line is not None:
                 log.write(placement_line)
+            nested_line = _nested_sharing_line(context, len(args.devices), nested_attachment)
+            if nested_line is not None:
+                log.write(nested_line)
+        if (translation.compute_forces or translation.relaxation is not None
+                or translation.molecular_dynamics is not None):
+            # A group that PARSEC_SYMMETRY_ATOM_TOLERANCE took beyond the 1e-6 bohr of the forces and moves in the
+            # sectors: refused here, before the SCF, on every rank alike (the root decides), not by the forces after it.
+            from parsec_python.acceleration.Forces.sector_symmetry import sector_force_tolerance_refusal
+
+            tolerance_refusal = (sector_force_tolerance_refusal(
+                system, moves=translation.relaxation is not None or translation.molecular_dynamics is not None)
+                if rank == 0 else None)
+            if comm.size > 1:
+                tolerance_refusal = comm.bcast(tolerance_refusal, root=0)
+            if tolerance_refusal is not None:
+                raise ValueError(tolerance_refusal)
         if periodic and (translation.compute_forces or translation.relaxation is not None
                          or translation.molecular_dynamics is not None):
             # The sectors of a point group complete the forces over its full group (every rank decides alike).
@@ -1318,6 +1826,9 @@ def execute(args, cp, comm, MPI, initialization_seconds, initial_affinity=None):
             if context is not None:
                 system.orbital_density_builder = MPISymmetryDensityBuilder(system.orbital_density_builder, context, solver)
             reporter.setup(system)
+            # Restart_Run: the stored potential of parsec.dat starts the first SCF loop, with the restart lines of
+            # main.py in parsec.out (_restart_rules decided before the preparation what this runner takes).
+            restart = _load_restart_start(translation, system, log)
             def iteration(item):
                 reporter.iteration(item)
                 # A record without an iteration number (a spin run that leaves the symmetry sectors) has none.
@@ -1326,12 +1837,15 @@ def execute(args, cp, comm, MPI, initialization_seconds, initial_affinity=None):
                     memory.append(_observe_memory(cp, args.devices, f'iteration_{label}'))
             scf_started = time.perf_counter()
             forces = outcome = dynamics = None
-            moves = _ionic_backend_of(translation, ionic_backend, translation.potential_extrapolation)
+            moves = _ionic_backend_of(translation, ionic_backend, translation.potential_extrapolation, restart)
             if periodic and symmetry != 'off' and (translation.compute_forces or translation.relaxation is not None):
                 # The line of main.py for the forces of a cell in the sectors of its point group; G of a relaxation
                 # is kept for its first structure by the ionic backend.
                 line = _periodic_sector_forces_line(system, moves.symmetry_operations(system)
                                                     if symmetrize_forces else None)
+                if line is not None:
+                    log.write(line)
+                line = _fortran_sector_forces_line(system)
                 if line is not None:
                     log.write(line)
             # Diagnostic: PARSEC_PROFILE_IONIC=<file> profiles the ionic loop of the root rank (cProfile, main
@@ -1357,20 +1871,28 @@ def execute(args, cp, comm, MPI, initialization_seconds, initial_affinity=None):
                     result = outcome.result
                     forces = outcome.records[-1].forces
                 elif translation.compute_forces:
-                    result, forces = run_single_point_with_forces(system, _ionic_backend_of(translation, ionic_backend),
-                                                                  reporter, symmetrize=symmetrize_forces)
+                    result, forces = run_single_point_with_forces(
+                        system, _ionic_backend_of(translation, ionic_backend, restart=restart), reporter,
+                        symmetrize=symmetrize_forces)
                 else:
-                    result = run_scf(system, callback=iteration)
+                    result = run_scf(system, callback=iteration, **({} if restart is None else {'warm_start': restart}))
                 if profiler is not None:
                     profiler.disable()
                     profiler.dump_stats(profile_path)
                 _synchronize(cp, args.devices)
                 scf_completed = time.perf_counter()
+                # The solver of the last structure: a spin run whose guard fired holds that of its full grid
+                # (PARSEC_SPIN_FALLBACK_SHARED), which the record below describes.
+                last_system = (outcome.system if outcome is not None
+                               else dynamics.system if dynamics is not None else system)
+                solver = getattr(getattr(last_system, 'backend', None), 'symmetry_eigensolver', None) or solver
             finally:
                 if context is not None:
                     context.stop_workers()
         else:
-            context.worker_loop(solver, system.orbital_density_builder)
+            # (the solver of a preparation made again during the loop: the shared full grid of a spin run that left
+            # its sectors, PARSEC_SPIN_FALLBACK_SHARED)
+            solver = context.worker_loop(solver, system.orbital_density_builder) or solver
         _synchronize(cp, args.devices)
         worker_completed_at = time.perf_counter()
         memory.append(_observe_memory(cp, args.devices, 'after_scf_or_worker_loop'))
@@ -1386,7 +1908,15 @@ def execute(args, cp, comm, MPI, initialization_seconds, initial_affinity=None):
             scf_seconds = scf_completed-scf_started-check_seconds
             if forces is None:
                 reporter.finish(result, scf_seconds)
+            if _found_supercell is not None and getattr(getattr(result, 'energies', None), 'total', None) is not None:
+                # the mesh solved as its supercell: the energy of the cell of the input closes the report
+                for line in _per_cell_lines(result.energies.total, _found_supercell[1], _mesh_atoms,
+                                            per_cell_report=_trim_route.cell_files):
+                    log.write(line)
             reporting_completed = time.perf_counter()
+            hint = _nested_groups_note(context, solver)
+            if hint is not None:
+                log.write(hint)
             log.write(f' Pre-SCF setup/reporting wall time [sec] : {scf_started-started:11.6f}')
             log.write(f' Post-SCF finalization/reporting [sec] : {reporting_completed-scf_completed+check_seconds:11.6f}')
             reported_seconds = time.perf_counter()-started
@@ -1409,10 +1939,29 @@ def execute(args, cp, comm, MPI, initialization_seconds, initial_affinity=None):
                 domain=domain,
                 first_iteration_diagonalization_seconds=float(result.history[0].diagonalization_seconds) if result.history else 0.0,
                 wall_time_stack_seconds=_stack_phases(result, scf_seconds, reported_seconds, check_seconds))
+            if _found_supercell is not None:
+                # a k-point mesh solved as its supercell: under auto (cell_files) energies_ry and electron_count are
+                # those of the input cell, as the energy lines of parsec.out, and the supercell's are kept here; under
+                # on both stay the supercell's, as before; the iteration history is the supercell's either way
+                _cells = int(np.prod(_found_supercell[1]))
+                root_report['kpoint_mesh_supercell'] = dict(
+                    repeats=[int(value) for value in _found_supercell[1]], cells=_cells,
+                    cell_total_energy_ry=float(result.energies.total) / _cells,
+                    supercell_energies_ry=asdict(result.energies),
+                    supercell_electron_count=float(result.electron_count),
+                    cell_files=bool(_trim_route.cell_files))
+                if _trim_route.cell_files:
+                    root_report['energies_ry'] = asdict(_energies_per_cell(result.energies, _cells))
+                    root_report['electron_count'] = float(result.electron_count) / _cells
+            # PARSEC_STANDARD_ORIENTATION: forces and positions in the frame of the input, as parsec.out has them
+            orientation = getattr(translation, 'standard_orientation', None)
             if forces is not None:
+                from parsec_python.Input.standard_orientation import forces_to_reference
+                reported_forces = forces_to_reference(forces, orientation)
                 # Forces of the last structure in Ry/bohr; for a relaxation every structure that was computed.
-                root_report['forces'] = dict(total=forces.total.tolist(), net=forces.net_force.tolist(),
-                    maximum=forces.maximum, symmetry_operations=forces.symmetry_operations, seconds=forces.seconds,
+                root_report['forces'] = dict(total=reported_forces.total.tolist(),
+                    net=reported_forces.net_force.tolist(), maximum=forces.maximum,
+                    symmetry_operations=forces.symmetry_operations, seconds=forces.seconds,
                     phase_seconds=forces.phase_seconds)
             if dynamics is not None:
                 root_report['molecular_dynamics'] = dict(
@@ -1432,10 +1981,13 @@ def execute(args, cp, comm, MPI, initialization_seconds, initial_affinity=None):
                                 force_seconds=item.forces.seconds,
                                 force_phase_seconds=item.forces.phase_seconds) for item in outcome.records],
                     step_timings=outcome.timings,
-                    final_positions_bohr=outcome.positions.tolist())
+                    final_positions_bohr=(outcome.positions if orientation is None
+                                          else orientation.to_reference(outcome.positions)).tolist())
             archive_started = time.perf_counter()
-            save_result_archive(archive_path, result, include_wavefunctions=False, forces=forces, relaxation=outcome,
-                                dynamics=dynamics)
+            # PARSEC_KPOINT_SUPERCELL=auto: the archive of the cell of the input (acceleration.cli does the same)
+            save_result_archive(archive_path, _cell_result_view(result, _mesh_problem, _found_supercell[1])
+                                if _found_supercell is not None and _trim_route.cell_files else result,
+                                include_wavefunctions=False, forces=forces, relaxation=outcome, dynamics=dynamics)
             root_report['archive_write_seconds_excluded_from_reported'] = time.perf_counter()-archive_started
             root_report['archive_sha256'] = _digest(archive_path)
             log.write(f'Result archive: {archive_path}')
@@ -1511,6 +2063,11 @@ def execute(args, cp, comm, MPI, initialization_seconds, initial_affinity=None):
                                      ritz_route=shared_ritz_route(group.ritz_route),
                                      separate_row_blocks=int(getattr(group, 'separate_row_blocks', 0)),
                                      seconds=dict(group.seconds), exchanged_bytes=group.exchanged_bytes))
+            if getattr(group, 'local_devices', None) is not None and len(group.local_devices) > 1:
+                # A share spread over the GPUs of this rank (Eigensolvers/mpi_nested_basis.py): ranks counts the
+                # virtual ranks (MPI ranks times GPUs), and the bytes that left this rank for other ranks.
+                shared_state[-1].update(nested=True, devices=list(group.local_devices),
+                                        mpi_ranks=int(group.hub.ranks), remote_bytes=int(group.remote_bytes))
     # What became of the host thread that made the estimates of the radius search beside the SCF of the root
     # (PARSEC_DOMAIN_REPORT_THREAD): a dict, and none for a rank or a run without that thread.
     radius_thread = getattr(reporter, 'radius_thread_record', None)
@@ -1555,6 +2112,8 @@ def execute(args, cp, comm, MPI, initialization_seconds, initial_affinity=None):
         orbital_memory_allocator=getattr(solver, 'memory_allocator_policy', None),
         # Which recurrence kernels the stencils of the sectors of the rank launch (PARSEC_CUPY_STENCIL_KERNEL).
         orbital_sector_stencil_kernel=getattr(solver, 'stencil_kernel', None),
+        # One-byte or two-byte coefficient codes of the stencils of the sectors of the rank (PARSEC_SECTOR_PALETTE_CODES).
+        orbital_sector_coefficient_codes=getattr(solver, 'coefficient_codes', None),
         # What the Ritz steps of the shared sector bases of the rank ran side by side, and how their pieces
         # travelled (PARSEC_CUPY_RITZ_PIPELINE, PARSEC_CUPY_EXCHANGE_STRIDED); None where the rank shares none.
         orbital_sector_ritz_pipeline=getattr(solver, 'ritz_pipeline', None),
@@ -1603,7 +2162,7 @@ def execute(args, cp, comm, MPI, initialization_seconds, initial_affinity=None):
                 'result.domain is the sphere of the run (null for a box, and for an input with a radius under PARSEC_DOMAIN_REPORT=0, which also leaves after_scf out of every run): rule_version, radius_from (input or default rule), radius_bohr, the outermost atom and the vacuum beyond it, and, where the default rule chose the radius, boundary_sphere_radius and hartree_boundary_tolerance, the values of the two input lines that give this domain again, with set_by. wall_estimate_ry is the estimate before the SCF of the energy the sphere adds, from the free atoms: an estimate and not a bound, and meaningless with extra_electrons above zero; its parts by species and the source and charge of every free-atom density are beside it. boundary holds the estimate of the energy that the Hartree boundary values of the plan in use leave: about_ry and bound_ry, null where the plan lies outside the calibration (plan says why); the order, tolerance and tail they belong to are in result.hartree_boundary. after_scf is the estimate from the final density: status (estimated, not converged or no fit), the shell sums, energy_ry, decay_per_bohr, fit_rms and rough, and the radius and tolerance that would meet the wall share of domain_energy_tolerance_ry. The backend details hold the same under domain_*. per_rank[].domain_rule_seconds is what the default rule took in the parser of a rank, the loading of the pseudopotentials included; that of the root is inside reported_program_seconds, and all are zero for an input with a radius.',
                 'per_rank[].domain_report_thread is what became of the host thread of the root that makes, while the SCF runs, the estimates of the omitted potential that the radius search of result.domain.after_scf can ask for (PARSEC_DOMAIN_REPORT_THREAD, on by default): estimates is how many it made, seconds its wall time from its start to its end, the waits for the interpreter included, and failure the text of what it raised or of what kept it from starting, null where nothing did. It is null for the other ranks and where no thread was to run: PARSEC_DOMAIN_REPORT_THREAD=0, a run without after_scf, a box, a Hartree boundary tolerance of the input or none, and the direct sum. after_scf is the same with and without the thread apart from its seconds: estimates there counts what the search asked for, read or made, and radius_seconds is short where the search read them. A thread that failed or made fewer estimates than the search asked for leaves the search to make them, in radius_seconds as before.',
                 'With PARSEC_HARTREE_BOUNDARY_CHECK the check runs after the last SCF step and before run_scf returns. Its seconds are hartree_boundary_check_seconds: outside scf_seconds, inside post_scf_finalization_reporting_seconds and reported_program_seconds, and a phase of their own in the stack. Its device arrays are inside the GPU memory peak, so a run that is measured for time or memory leaves the check off.',
-                'MPI uses NumPy host fields only; MPICH_GPU_SUPPORT_ENABLED=0. CUDA context initialization is inside preparation and reported program time.',
+                'The SCF fields go through MPI as NumPy host arrays. mpi_transport names those alone: the orbital exchanges of bases that ranks share pass device arrays where per_rank[].distributed_state[].transport says cuda (MPICH_GPU_SUPPORT_ENABLED=1: --rank-per-gpu, one rank per node with nested sharing under PARSEC_MPI_NESTED_SHARING where the MPI library has its GPU transport layer, libmpi_gtl_cuda, else host-staged; a hybrid exchange; PARSEC_MPI_SHARED_TRANSPORT=host stages them through the host), otherwise MPICH_GPU_SUPPORT_ENABLED=0. CUDA context initialization is inside preparation and reported program time.',
                 'Where cuda_context_initialization_overlapped is true (PARSEC_OVERLAP_CUDA_CONTEXTS, the default) a thread created the contexts beside the static preparation: cuda_context_initialization_seconds_in_preparation is the time of that thread, not a stage of preparation_seconds, and once the contexts existed it started the GPU memory sampler and took the first memory observation, during the preparation.',
                 'cuda_context_driver_devices lists the devices whose context that thread created through the CUDA driver library, outside the interpreter lock (PARSEC_CUDA_CONTEXT_CREATION=driver, the default), and cuda_context_driver_seconds is its time inside those calls, a part of the thread time. A device is missing where the library could not be used or numbers the devices otherwise: CuPy then created its context with the lock held, as with PARSEC_CUDA_CONTEXT_CREATION=runtime and as without the overlap, where the list is empty.',
                 'With that overlap the GPU ionic sums of the root (PARSEC_IONIC_BACKEND=cupy, on their own thread by default) can reach a device before the context thread does. The context is then created inside ionic_setup_seconds, and initial_free_bytes and the first memory observation of that device can include the arrays of the sums. PARSEC_OVERLAP_CUDA_CONTEXTS=0 gives the figures of the contexts alone.',
@@ -1657,6 +2216,7 @@ def _build_parser():
 
 
 def main(argv=None):
+    global _NESTED_TRANSPORT_NOTE
     args = _build_parser().parse_args(argv)
     if os.environ.get('PARSEC_MEMORY_CENSUS'):
         # A diagnostic: count the device arrays of every thread from the start (memory_census.py).
@@ -1672,12 +2232,16 @@ def main(argv=None):
     # pass device arrays to MPI unless PARSEC_MPI_SHARED_TRANSPORT=host.
     # The exchange of a hybrid functional moves orbitals between the ranks too, as device arrays unless
     # PARSEC_MPI_EXCHANGE_TRANSPORT=host (SCF/hybrid_mpi.py); a serial control has one rank.
+    # One rank per node on several nodes shares bases over the GPUs of each rank where nested sharing applies
+    # (PARSEC_MPI_NESTED_SHARING, a CHEBFF first solve): device arrays too, unless PARSEC_MPI_SHARED_TRANSPORT=host
+    # or the MPI library has no GPU transport layer (decided below, once mpi4py is loaded and before MPI_Init).
+    nested_launch = _nested_launch(args)
     shared_launch = _ranks_per_node_of_launch() > 1
+    shared_setting = os.environ.get('PARSEC_MPI_SHARED_TRANSPORT', 'auto').strip().lower()
     exchange_launch = (not args.serial_control and _input_has_hybrid(args.input)
                        and os.environ.get('PARSEC_MPI_EXCHANGE_TRANSPORT', 'auto').strip().lower() != 'host')
     os.environ['MPICH_GPU_SUPPORT_ENABLED'] = (
-        '1' if (shared_launch and os.environ.get('PARSEC_MPI_SHARED_TRANSPORT', 'auto').strip().lower() != 'host')
-        or exchange_launch else '0')
+        '1' if (shared_launch and shared_setting != 'host') or exchange_launch else '0')
     os.environ['PARSEC_CUPY_DEVICES'] = ','.join(map(str, args.devices))
     if args.serial_control:
         _keep_former_routes(os.environ)
@@ -1688,6 +2252,12 @@ def main(argv=None):
     from mpi4py import MPI
     if MPI.Is_initialized():
         raise RuntimeError('MPI was initialized before the runner configured its host-field transport')
+    if os.environ['MPICH_GPU_SUPPORT_ENABLED'] != '1':
+        # Cray MPICH reads the flag in MPI_Init; its GTL library, where linked, is mapped by now.
+        flag, _NESTED_TRANSPORT_NOTE = _nested_gpu_support(
+            nested_launch, shared_setting, nested_launch and _gpu_transport_layer_loaded())
+        if flag is not None:
+            os.environ['MPICH_GPU_SUPPORT_ENABLED'] = flag
     provided = MPI.Init_thread(required=MPI.THREAD_FUNNELED)
     comm = MPI.COMM_WORLD
     try:

@@ -22,7 +22,12 @@ import parsec_python.acceleration.driver as driver_module
 # require_cupy of MPIRolePreparationTests.prepare (test_fast_grid, test_hartree_boundary and
 # test_scf_host_work borrow it), it kept the stand-in CuPy for the rest of the process: the
 # known test_gpu_fields failures of the [f-h] shard (2026-11-08).  Import it before any patch.
+# Forces.local_device did the same from 2026-11-20 (the local-force tests of the [f-h]
+# and [s-z] shards), so it is imported here too, and prepare() hands every module that took the
+# stand-in back the real function (_restore_require_cupy) for modules imported lazily later.
 import parsec_python.acceleration.Hartree.cupy_direct_boundary  # noqa: F401
+import parsec_python.acceleration.Forces.local_device  # noqa: F401
+import parsec_python.acceleration.backends.cupy as _cupy_backend
 from parsec_python.acceleration.backends.cupy import cupy_available
 from parsec_python.acceleration.backends.cupy import CuPyTimingStats
 from parsec_python.acceleration.backends.native import native_available
@@ -990,6 +995,23 @@ class HartreeLinearBackendChoiceTests(unittest.TestCase):
                 self.assertTrue(report(selection).startswith(label), report(selection))
 
 
+_REAL_REQUIRE_CUPY = _cupy_backend.require_cupy
+
+
+def _restore_require_cupy(stand_in) -> None:
+    """Give the real ``require_cupy`` back to modules that bound ``stand_in``.
+
+    A module that ``prepare_single_point`` imports for the first time while
+    ``backends.cupy.require_cupy`` is patched binds the stand-in by name and
+    would keep it for the rest of the process.
+    """
+
+    for module in list(sys.modules.values()):
+        name = getattr(module, "__name__", "") or ""
+        if name.startswith("parsec_python") and getattr(module, "require_cupy", None) is stand_in:
+            module.require_cupy = _REAL_REQUIRE_CUPY
+
+
 class MPIRolePreparationTests(unittest.TestCase):
     """Which components each MPI rank prepares, without CUDA or the extension."""
 
@@ -1191,9 +1213,12 @@ class MPIRolePreparationTests(unittest.TestCase):
                     driver_module.os.environ.pop(name, None)
             options = {} if mpi_context is None else {"mpi_context": mpi_context}
             doubles.problem = object()
-            doubles.system = driver_module.prepare_single_point(
-                doubles.problem, backend="auto", **options
-            )
+            try:
+                doubles.system = driver_module.prepare_single_point(
+                    doubles.problem, backend="auto", **options
+                )
+            finally:
+                _restore_require_cupy(doubles.require_cupy)
         return doubles
 
     def test_stand_in_input_is_prepared_whatever_boundary_the_shell_names(self) -> None:
@@ -1393,8 +1418,12 @@ class MPIRolePreparationTests(unittest.TestCase):
     def test_sector_solver_is_handed_the_filter_plan_of_the_prepared_input(self) -> None:
         # What the input fixes of the filter work reaches the constructor of
         # the sector eigensolver on the root, on a sector worker and without
-        # a sector context, made from the system the rank prepared.
-        plan = object()
+        # a sector context, made from the system the rank prepared (without
+        # one also the placement of the sectors on the GPUs reads it:
+        # PARSEC_CUPY_SECTOR_PLACEMENT, so it is a plan).
+        from parsec_python.acceleration.backends.implicit_stencil import FilterPlan
+
+        plan = FilterPlan(states=8, buffer=4, applications=10)
         for context in (
             None,
             SimpleNamespace(rank=0, root=0, size=2),
@@ -1912,10 +1941,15 @@ class IonicFieldOverlapTests(unittest.TestCase):
         ]
 
     def test_overlap_needs_the_switch_and_gpu_ionic_fields(self) -> None:
+        from parsec_python.acceleration.backends.cupy import cupy_available
+
+        # Unset: auto (since 2026-11-19), the GPU builders where CuPy finds a device.
+        unset = bool(cupy_available()) and os.environ.get("PARSEC_DEVICE", "auto").strip().lower() != "cpu"
         for environment, expected in (
-            ({}, False),
+            ({}, unset),
             ({"PARSEC_IONIC_BACKEND": "native"}, False),
-            ({"PARSEC_OVERLAP_IONIC_SETUP": "1"}, False),
+            ({"PARSEC_OVERLAP_IONIC_SETUP": "1"}, unset),
+            ({"PARSEC_IONIC_BACKEND": "auto", "PARSEC_OVERLAP_IONIC_SETUP": "0"}, False),
             # Unset is on.
             ({"PARSEC_IONIC_BACKEND": "cupy"}, True),
             ({"PARSEC_IONIC_BACKEND": "CuPy", "PARSEC_OVERLAP_IONIC_SETUP": " 1 "}, True),

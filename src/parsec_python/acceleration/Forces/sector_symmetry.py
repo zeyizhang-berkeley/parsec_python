@@ -35,6 +35,118 @@ ATOM_TOLERANCE = 1.0e-7
 MOVE_TOLERANCE = 1.0e-6
 
 
+_FORTRAN_SECTOR_FORCES_SWITCH = "PARSEC_FORTRAN_SECTOR_FORCES"
+
+
+def fortran_sector_forces_setting() -> str:
+    """``PARSEC_FORTRAN_SECTOR_FORCES``: ``auto`` (the default) or ``off``.
+
+    ``auto`` (since 2026-11-19) lets the forces, the relaxations by an optimizer and the restarts of a bulk cell at
+    the Gamma point on the Fortran-derived routines (``Use_Fortran_Routines``, chosen by the input or by the parser
+    for Cubic_Spline forces, an FHI pseudopotential, a core correction, ``Restart_Run``, another mixer or eigensolver,
+    a double grid, ``Dynamic_Diag_Tol``) keep the sectors of the point group of the cell, as those of the default
+    routines do under ``PARSEC_PERIODIC_SECTOR_FORCES=auto``: the terms of those routines (their Ewald sum, their
+    local terms with the self-consistency and core-correction terms, of splines or the double grid) read the fields
+    the sectors expand to the full grid, their nonlocal term is contracted in the sectors with the gradients of the
+    projectors with their lattice images, and the total is averaged over the group of those routines and that of the
+    sectors (:func:`fortran_force_operations`).  ``off`` keeps every forces or moving run of those routines on the
+    full grid, bit for bit as before.  Read by the command line before the preparation, so that a value it does not
+    know is refused before the SCF.
+    """
+
+    import os
+
+    value = os.environ.get(_FORTRAN_SECTOR_FORCES_SWITCH, "auto").strip().lower() or "auto"
+    if value not in {"auto", "off"}:
+        raise ValueError(f"{_FORTRAN_SECTOR_FORCES_SWITCH} must be auto or off, not {value!r}")
+    return value
+
+
+def _operation_key(operation) -> tuple:
+    """What an atom operation does to the atoms and the forces: its matrix (to 1e-9) and its permutation."""
+
+    matrix = np.round(np.asarray(operation.matrix, dtype=np.float64), 9) + 0.0
+    return tuple(matrix.reshape(-1).tolist()) + tuple(np.asarray(operation.image, dtype=np.int64).tolist())
+
+
+def _composed(first, second):
+    """The operation ``second`` after ``first`` (:class:`~parsec_python.Forces.periodic.PeriodicAtomSymmetryOperation`).
+
+    ``R_1 (r_a - tau_1) = r_(p_1 a)`` and ``R_2 (r_b - tau_2) = r_(p_2 b)`` modulo the lattice give
+    ``R_2 R_1 (r_a - tau_1 - R_1^T tau_2) = r_(p_2 p_1 a)``.
+    """
+
+    from dataclasses import replace
+
+    matrix = np.asarray(second.matrix, dtype=np.float64) @ np.asarray(first.matrix, dtype=np.float64)
+    image = np.asarray(second.image, dtype=np.int64)[np.asarray(first.image, dtype=np.int64)]
+    translation = np.zeros(3)
+    if getattr(first, "translation", None) is not None:
+        translation = translation + np.asarray(first.translation, dtype=np.float64)
+    if getattr(second, "translation", None) is not None:
+        translation = translation + np.asarray(first.matrix, dtype=np.float64).T @ np.asarray(
+            second.translation, dtype=np.float64
+        )
+    return replace(
+        first,
+        matrix=matrix,
+        image=image,
+        translation=None if not np.any(np.abs(translation) > 1.0e-12) else translation,
+    )
+
+
+#: Operations at most in the group :func:`fortran_force_operations` generates (48 rotations of a cubic lattice times
+#: the pure translations of a supercell of several thousand atoms stay far below it).
+_GENERATED_LIMIT = 200_000
+
+
+def fortran_force_operations(routine_operations, sector_operations):
+    """The group the forces and moved atoms of a cell of the Fortran-derived routines in sectors are averaged over.
+
+    ``routine_operations`` are those the routines average over on the full grid
+    (:func:`parsec_python.Forces.periodic.periodic_force_operations`: the space group the problem carries, else the
+    point operations about the origin that keep the lattice, the grid and the atoms), ``sector_operations`` the group
+    of the sectors (:func:`sector_symmetry_operations`: ``G`` of a point group, ``H`` of Abelian sectors, with their
+    translations), which the moved atoms must keep (:func:`check_sector_atoms`).  Both are groups of symmetries of the
+    structure, so the group they generate is one too, and the average over it keeps the forces of the density the SCF
+    used: the operations of the routines themselves (the same average as on the full grid, operation for operation)
+    where they hold those of the sectors, those of the sectors where they hold the routines', the group both generate
+    otherwise (the routines' first, then the products).  ``routine_operations`` alone without sectors.
+    """
+
+    routine = tuple(routine_operations or ())
+    sectors = tuple(sector_operations or ())
+    if not sectors:
+        return routine
+    if not routine:
+        return sectors
+    routine_keys = {_operation_key(operation) for operation in routine}
+    sector_keys = {_operation_key(operation) for operation in sectors}
+    if sector_keys <= routine_keys:
+        return routine
+    if routine_keys <= sector_keys:
+        return sectors
+    generators = routine + tuple(operation for operation in sectors if _operation_key(operation) not in routine_keys)
+    found = list(generators)
+    keys = {_operation_key(operation) for operation in found}
+    cursor = 0
+    while cursor < len(found):
+        element = found[cursor]
+        cursor += 1
+        for generator in generators:
+            product = _composed(element, generator)
+            key = _operation_key(product)
+            if key not in keys:
+                if len(found) >= _GENERATED_LIMIT:
+                    raise ValueError(
+                        "the operations of the Fortran-derived routines and of the sectors generate more than "
+                        f"{_GENERATED_LIMIT} operations"
+                    )
+                keys.add(key)
+                found.append(product)
+    return tuple(found)
+
+
 def sector_reduction(system):
     """The :class:`PointGroupReduction` of the sectors of ``system``, or ``None`` (no sectors, or an Abelian group)."""
 
@@ -274,7 +386,7 @@ def check_sector_atoms(reduction, atoms, grid, lattice_vectors=None, *, toleranc
     the nearest atom of its species.
     """
 
-    from ..Symmetry.axis_reflection import _QUERY_WORKERS, _folded, _lattice_period, _matching_tree
+    from ..Symmetry.axis_reflection import _folded, _lattice_period, _matching_tree, _query_workers
 
     atoms = tuple(atoms)
     if not atoms:
@@ -307,7 +419,7 @@ def check_sector_atoms(reduction, atoms, grid, lattice_vectors=None, *, toleranc
             if shift is not None:
                 image = image + np.asarray(shift, dtype=np.float64) * steps
             queries = image if period is None else _folded(image, period)
-            distances, nearest = trees[symbol].query(queries, k=1, workers=_QUERY_WORKERS)
+            distances, nearest = trees[symbol].query(queries, k=1, workers=_query_workers(queries.shape[0]))
             worst = int(np.argmax(distances))
             if not distances[worst] <= tolerance:
                 atom = int(members[worst])
@@ -366,13 +478,89 @@ def check_sector_atoms(reduction, atoms, grid, lattice_vectors=None, *, toleranc
         )
 
 
+def sector_force_tolerance_refusal(system, *, moves: bool = True, atom_tolerance: float | None = None) -> str | None:
+    """Why the forces (and, with ``moves``, the moves) of a prepared ``system`` would stop on the group of its
+    sectors (or, for the moves, on the group its atoms must keep), or ``None``.
+
+    ``PARSEC_SYMMETRY_ATOM_TOLERANCE`` (``atom_tolerance`` where given) above :data:`MOVE_TOLERANCE` lets the
+    detection take operations that carry the atoms onto each other only within that tolerance.  The SCF then runs,
+    but the forces of its sectors match the atoms to :data:`MOVE_TOLERANCE` and raise ``ValueError`` after the whole
+    SCF: the operations of the nonlocal term (:func:`sector_force_operations`, else :func:`abelian_orbit_operations`),
+    the wedge sums of the local forces of a cluster (``local_device.sector_atom_images`` under
+    ``PARSEC_LOCAL_FORCE_SUMS=wedge``, the default) and, with ``moves`` (a relaxation or molecular dynamics), the moved
+    atoms (:func:`check_sector_atoms` for a cell, ``sector_atom_images`` for a cluster, as the driver's
+    ``move_atoms``).  The moves are checked against the group the driver's ``move_atoms`` checks,
+    ``system.move_symmetry_reduction``: a cluster keeps the group it detected where its orbitals take the full grid
+    (``Spin_Symmetry_Sectors: off``, main.py's spin ``Restart_Run``, the stabilizer policy off), so its relaxation is
+    checked here even without sectors; a system without that attribute is checked against the group of its sectors.
+    A caller that will compute forces asks this after the preparation and refuses the run before its SCF.  The checks
+    are those of the forces and moves themselves, so the runs refused here are those that stopped after their SCF
+    before, and a structure accepted here passes them later.  ``None`` at a tolerance of :data:`MOVE_TOLERANCE` or
+    less (the default 1e-7 bohr: every operation taken maps the atoms within it, and nothing is checked), and for a
+    system whose forces and moves keep no group.
+    """
+
+    from ..Symmetry.axis_reflection import symmetry_atom_tolerance
+
+    tolerance = symmetry_atom_tolerance() if atom_tolerance is None else float(atom_tolerance)
+    if not tolerance > MOVE_TOLERANCE:
+        return None
+
+    def nontrivial(reduction):
+        return reduction if reduction is not None and int(getattr(reduction, "group_order", 1)) > 1 else None
+
+    sectors = getattr(getattr(system, "backend", None), "symmetry_eigensolver", None)
+    reduction = nontrivial(getattr(getattr(sectors, "decomposition", None), "reduction", None))
+    moved = nontrivial(getattr(system, "move_symmetry_reduction", reduction)) if moves else None
+    if reduction is None and moved is None:
+        return None
+    cell = getattr(getattr(system, "input", None), "periodic_cell", None)
+    atoms = tuple(system.atoms)
+    checking = reduction
+    try:
+        wedge_checked = False
+        if reduction is not None:
+            if sector_force_operations(system) is None:
+                abelian_orbit_operations(system)
+            if cell is None:
+                from .local_device import local_force_sums_setting, sector_atom_images
+
+                if local_force_sums_setting() == "wedge":
+                    sector_atom_images(reduction, atoms, tolerance=MOVE_TOLERANCE)
+                    wedge_checked = True
+            else:
+                abelian_cell_operations(system)
+        if moved is not None and not (wedge_checked and moved is reduction):
+            checking = moved
+            if cell is None:
+                from .local_device import sector_atom_images
+
+                sector_atom_images(moved, atoms, tolerance=MOVE_TOLERANCE)
+            else:
+                check_sector_atoms(moved, atoms, system.grid, np.asarray(cell.lattice_vectors, dtype=np.float64))
+    except ValueError as error:
+        operations = getattr(checking, "full_operations", None)
+        order = int(checking.group_order) if operations is None else int(np.asarray(operations).shape[0])
+        return (
+            f"PARSEC_SYMMETRY_ATOM_TOLERANCE={tolerance:g} bohr gave this calculation a group of {order} operations "
+            f"that carries the atoms onto each other only to more than the {MOVE_TOLERANCE:g} bohr that its forces, "
+            "relaxations and molecular dynamics require, so they would stop after the SCF "
+            f"({error}). Refused before the SCF: symmetrize the positions onto the group, or leave "
+            "PARSEC_SYMMETRY_ATOM_TOLERANCE at its default (1e-7 bohr) for a run with forces"
+        )
+    return None
+
+
 __all__ = [
     "ATOM_TOLERANCE",
     "MOVE_TOLERANCE",
     "abelian_cell_operations",
     "abelian_orbit_operations",
     "check_sector_atoms",
+    "fortran_force_operations",
+    "fortran_sector_forces_setting",
     "sector_force_operations",
+    "sector_force_tolerance_refusal",
     "sector_group_operations",
     "sector_reduction",
     "sector_symmetry_operations",

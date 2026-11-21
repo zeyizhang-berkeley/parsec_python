@@ -5,9 +5,11 @@ times the phases +-1 and the ratios sqrt(m_row / m_column) of its orbit sizes, a
 holds two points of one orbit.  A cube whose orbits differ in size, an even repeat of a smaller cell on n = 2 mod 4
 points per edge, needs more at the default order 12: Si 2x2x2 at Grid_Spacing 0.6 (34^3 points) 295 values in the
 weighted sectors of its point group and in the commuting group with translations, where the build of the stencils
-stopped the run with PaletteOverflow.  The driver bounds every periodic sector cell (``sector_palette_bounds``),
-counts where the bound exceeds the palette and steps down to a group whose stencils fit, the commuting signed
-permutations about the origin here (``PARSEC_SECTOR_PALETTE_LADDER``).
+stopped the run with PaletteOverflow.  The driver bounds every periodic sector cell (``sector_palette_bounds``) and
+counts where the bound exceeds 256 values.  Since the second change of 2026-11-19 such a sector codes its coefficients
+in two bytes and the cell keeps its group (``PARSEC_SECTOR_PALETTE_CODES=auto``, tests/test_sector_palette_codes.py);
+under ``off`` the driver steps down to a group whose stencils fit in one byte, the commuting signed permutations about
+the origin here (``PARSEC_SECTOR_PALETTE_LADDER``).  The ladder tests below run under ``off``.
 
 The model tests (CPU) compare the bound with the count and the builder; the SCF tests (A100) the energies of the
 ladder with the full grid.
@@ -173,13 +175,19 @@ class BoundTests(unittest.TestCase):
 
 
 class LadderTests(unittest.TestCase):
-    """Si 2x2x2 (64 atoms) at Grid_Spacing 0.6 and the default order 12: 34^3 points, three orbit sizes."""
+    """Si 2x2x2 (64 atoms) at Grid_Spacing 0.6 and the default order 12: 34^3 points, three orbit sizes; one-byte
+    codes (``PARSEC_SECTOR_PALETTE_CODES=off``)."""
 
     @classmethod
     def setUpClass(cls) -> None:
         cls.grid = _grid((2 * _SILICON_SIDE,) * 3, spacing=0.6, order=12)
         cls.atoms = _diamond(_SILICON_SIDE, 2, "Si")
         cls.groups = _groups(cls.grid, cls.atoms)
+
+    def setUp(self) -> None:
+        patcher = mock.patch.dict(os.environ, {"PARSEC_SECTOR_PALETTE_CODES": "off"})
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def _check(self, reduction):
         from parsec_python.acceleration import driver
@@ -211,7 +219,11 @@ class LadderTests(unittest.TestCase):
                 self.assertLessEqual(max(int(s.coefficient_palette.size) for s in stencils), PALETTE_CAPACITY)
             else:
                 self.assertIsNone(checked)
-                self.assertIn(f"more than the {PALETTE_CAPACITY} of their palette (Expansion_Order 12)", refusal)
+                self.assertIn(
+                    f"more than the {PALETTE_CAPACITY} of their palette (Expansion_Order 12, "
+                    "PARSEC_SECTOR_PALETTE_CODES=off)",
+                    refusal,
+                )
         self.assertIn("need 295 distinct coefficients", self._check(weighted)[1])
 
     def test_the_operator_builder_says_why(self) -> None:
@@ -299,19 +311,34 @@ class PaletteLadderSCFTests(unittest.TestCase):
 
     def test_si_2x2x2_at_the_default_order(self) -> None:
         # 34^3 points, order 12: the weighted sectors (295 values) and the commuting group with translations (295)
-        # do not fit, D2 about the origin does; the build of the stencils stopped the run before 2026-11-19
+        # do not fit one byte; the build of the stencils stopped the run before 2026-11-19.  The default codes them
+        # in two bytes and keeps the weighted sectors (PARSEC_SECTOR_PALETTE_CODES=auto); under off D2 about the
+        # origin fits (the ladder), and with the ladder off as well the full grid.
         problem = silicon_supercell(2, 0.6)
         self.assertEqual(problem.grid.expansion_order, 12)
-        sectors, details = self._run(problem, {})
+        wide, wide_details = self._run(problem, {})
+        self.assertIn(
+            "need 295 distinct coefficients and code them in two bytes (PARSEC_SECTOR_PALETTE_CODES=auto)",
+            wide_details["symmetry_detection"],
+        )
+        self.assertIn("the orbitals use the one-dimensional sectors of a subgroup", wide_details["symmetry_detection"])
+        self.assertNotIn("PARSEC_SECTOR_PALETTE_LADDER", wide_details["symmetry_detection"])
+        self.assertIn("two bytes", wide_details["orbital_sector_coefficient_codes"])
+        self.assertIn("largest palette 295 values", wide_details["orbital_sector_coefficient_codes"])
+        sectors, details = self._run(problem, {"PARSEC_SECTOR_PALETTE_CODES": "off"})
         detection = details["symmetry_detection"]
         self.assertIn("PARSEC_SECTOR_PALETTE_LADDER=auto", detection)
         self.assertIn("need 295 distinct coefficients", detection)
         self.assertIn("the sectors of the 4 commuting signed permutations about the origin", detection)
         self.assertIn("PARSEC_SECTOR_PALETTE_LADDER=auto", details.get("symmetry_full_grid_note", ""))
         self.assertNotIn("full grid", details["orbital_symmetry"])
-        kept, kept_details = self._run(problem, {"PARSEC_SECTOR_PALETTE_LADDER": "off"})
+        self.assertEqual(details["orbital_sector_coefficient_codes"].split(";")[0], "one byte")
+        kept, kept_details = self._run(
+            problem, {"PARSEC_SECTOR_PALETTE_LADDER": "off", "PARSEC_SECTOR_PALETTE_CODES": "off"}
+        )
         self.assertIn("fell back to full grid", kept_details["symmetry_detection"])
         full, _ = self._run(problem, {"PARSEC_PERIODIC_SYMMETRY": "off"})
+        self._assert_same(wide, full, "Si 2x2x2 in the weighted sectors, two-byte codes")
         self._assert_same(sectors, full, "Si 2x2x2 in the sectors of D2")
         self._assert_same(kept, full, "Si 2x2x2 on the full grid")
 

@@ -30,7 +30,7 @@ from .cupy_projectors import (
     projection_reduction,
     projector_block_columns,
 )
-from .cupy_stencil_major import _CUDA_SOURCE as _STENCIL_SOURCE
+from .cupy_stencil_major import _CUDA_SOURCE as _STENCIL_SOURCE, code_source
 
 
 _MIXED_FILTER_SETTINGS = {
@@ -126,25 +126,38 @@ _PROJECTION_KERNEL = {
     "parallel6": 3,
     "parallel6_groups": 4,
 }
-_KERNEL_CACHE: dict[int, tuple[Any, ...]] = {}
+_KERNEL_CACHE: dict[Any, tuple[Any, ...]] = {}
 _KERNEL_LOCK = Lock()
 
 
-def _kernels(cp: Any) -> tuple[Any, ...]:
-    """Compile the invariant FP32 recurrence kernels once per CUDA device."""
+def _source(codes_dtype: Any = np.uint8) -> str:
+    """The FP32 source for stencil codes of ``codes_dtype``: :data:`_SOURCE` for one-byte codes."""
+
+    return code_source(_SOURCE, codes_dtype)
+
+
+def _kernels(cp: Any, codes_dtype: Any = np.uint8) -> tuple[Any, ...]:
+    """Compile the invariant FP32 recurrence kernels once per CUDA device (and code width).
+
+    A sector stencil of two-byte codes (``PARSEC_SECTOR_PALETTE_CODES``) has
+    its own module, the same source with that one parameter type changed,
+    under the key ``(device, "uint16")``.
+    """
 
     device_id = int(cp.cuda.Device().id)
+    wide = np.dtype(codes_dtype) == np.uint16
+    key = (device_id, "uint16") if wide else device_id
     with _KERNEL_LOCK:
-        kernels = _KERNEL_CACHE.get(device_id)
+        kernels = _KERNEL_CACHE.get(key)
         if kernels is None:
             module = cp.RawModule(
-                code=_SOURCE,
+                code=_source(codes_dtype),
                 options=("--std=c++11",),
                 name_expressions=_KERNEL_NAMES,
             )
             compile_cupy_raw(module)
             kernels = tuple(module.get_function(name) for name in _KERNEL_NAMES)
-            _KERNEL_CACHE[device_id] = kernels
+            _KERNEL_CACHE[key] = kernels
     return kernels
 
 
@@ -235,7 +248,8 @@ class CuPyMixedPrecisionRecurrence:
             self.parallel_projection, block_columns
         )
 
-        kernels = _kernels(cp)
+        codes_dtype = self.coefficient_codes.dtype
+        kernels = _kernels(cp, codes_dtype)
         self.recurrence_kernel = kernels[0]
         # As in the FP64 projection: the kernels of the launches of every
         # width, by the names of :func:`cupy_projectors.projection_kernels`.
@@ -249,7 +263,7 @@ class CuPyMixedPrecisionRecurrence:
         # The FP32 kernels are compiled from the FP64 sources, so their
         # parameter lists move with those.  The launches name their values
         # and are ordered by these declarations.
-        self.recurrence_parameters = kernel_parameters(_SOURCE, _KERNEL_NAMES[0])
+        self.recurrence_parameters = kernel_parameters(_source(codes_dtype), _KERNEL_NAMES[0])
         self.projection_parameters = {
             name: kernel_parameters(_SOURCE, _KERNEL_NAMES[index])
             for name, index in selected.items()

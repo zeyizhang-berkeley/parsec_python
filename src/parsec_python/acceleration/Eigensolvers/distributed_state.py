@@ -77,6 +77,7 @@ from .chebff import (
 )
 from .chebyshev import FilterBlock, subspace_filter_blocks, uniform_filter_blocks
 from .distributed_filter import DistributedFilter, _pool, block_partitions, starting_sigmas
+from .irrep_projection import orthonormal_in_unit
 from .lapack_random import LapackRandom
 from .orthogonalize import orthonormalize_complete_subspace
 from .rayleigh_ritz import (
@@ -1808,6 +1809,57 @@ class DistributedBasis:
             layout,
         )
 
+    def column_array(self, columns, device: int | None = None):
+        """The columns ``columns`` of the basis as one Fortran-ordered ``N x k`` array, in the order given.
+
+        On the host where ``device`` is ``None``, else on that device.  Each
+        device copies the columns it holds (:attr:`layout`); nothing else is
+        allocated beside the result and those pieces.  For an export of the
+        orbitals of a sector whose devices share its basis (one process with
+        several GPUs, ``Eigensolvers/symmetry.CuPySymmetryOrbitals``).
+        """
+
+        cp, _ = require_cupy()
+        wanted = np.asarray(columns, dtype=np.int64).ravel()
+        holder = np.full(wanted.size, -1, dtype=np.int64)
+        offsets = np.zeros(wanted.size, dtype=np.int64)
+        for index, part in enumerate(self.layout.parts):
+            base = 0
+            for start, stop in part:
+                inside = (wanted >= start) & (wanted < stop)
+                holder[inside] = index
+                offsets[inside] = base + wanted[inside] - start
+                base += stop - start
+        if np.any(holder < 0):
+            raise IndexError("a requested column is not a column of this basis")
+        # The blocks were last written on the streams of the device threads of the group.
+        for owner in self.group.devices:
+            cp.cuda.Device(int(owner)).synchronize()
+        rows = int(self.shape[0])
+        if device is None:
+            out = np.empty((rows, wanted.size), dtype=np.float64, order="F")
+        else:
+            with cp.cuda.Device(int(device)):
+                out = cp.empty((rows, wanted.size), dtype=cp.float64, order="F")
+        for index, (owner, block) in enumerate(zip(self.group.devices, self.blocks, strict=True)):
+            positions = np.flatnonzero(holder == index)
+            if not positions.size:
+                continue
+            with cp.cuda.Device(int(owner)):
+                piece = cp.asfortranarray(block[:, cp.asarray(offsets[positions])])
+                cp.cuda.get_current_stream().synchronize()
+                if device is None:
+                    out[:, positions] = cp.asnumpy(piece)
+                    continue
+            with cp.cuda.Device(int(device)):
+                if int(owner) != int(device):
+                    moved = cp.empty(piece.shape, dtype=cp.float64, order="F")
+                    moved.data.copy_from_device(piece.data, piece.nbytes)
+                    piece = moved
+                out[:, cp.asarray(positions)] = piece
+                cp.cuda.get_current_stream().synchronize()
+        return out
+
     def take(self) -> list:
         """Hand the blocks to the caller and forget them."""
 
@@ -3023,6 +3075,9 @@ class SectorDeviceGroup:
             partitions = self._whole_block_partitions(basis.layout, blocks)
         sigmas = starting_sigmas(blocks, lower, upper, reset, reference)
         owner = self._operator(self.owner)
+        # A unit of irreducible representations: every device projects the columns it filtered onto them
+        # (irrep_projection.project_filtered; the projector acts on the rows of each column).
+        projection = getattr(owner, "irrep_projection", None)
         cp.cuda.get_current_stream().synchronize()
         potential = cp.asnumpy(owner.effective_potential)
         layout = self.layout = basis.layout
@@ -3043,9 +3098,10 @@ class SectorDeviceGroup:
                 local.extend(FilterBlock(b.start + shift, b.stop + shift, b.degree) for b in blocks[first:last])
                 starts.extend(sigmas[first:last])
                 offset = local[-1].stop
-            return self._worker.graphs[device].apply(
+            filtered = self._worker.graphs[device].apply(
                 block, tuple(local), lower, upper, reference, reset, initial_sigma=starts, out=block
             )
+            return filtered if projection is None else projection.apply(filtered)
 
         return DistributedBasis(self, self._timed("filter", run), layout)
 
@@ -4190,7 +4246,9 @@ class SectorDeviceGroup:
                 "too large to orthonormalize on one device"
             ) from error
         filtered.take()
-        basis = orthonormalize_complete_subspace(full, rng=generator).basis
+        # A unit of irreducible representations keeps the gathered basis in their range (columns drawn for
+        # dependent ones projected back, irrep_projection.orthonormal_in_unit).
+        basis = orthonormal_in_unit(operator, orthonormalize_complete_subspace(full, rng=generator), generator)
         del full
         result = rayleigh_ritz(operator, basis, compute_residuals=False)
         del basis

@@ -18,7 +18,9 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext
 from dataclasses import replace
+import os
 from pathlib import Path
+import os
 import shutil
 import tempfile
 from types import SimpleNamespace
@@ -318,18 +320,54 @@ class RunnerDecisionTests(unittest.TestCase):
             "band structure": replace(cell, compute_forces=True,
                                       problem=replace(cell.problem, bands=object())),
         }
-        fortran = cases["Fortran-derived routines"]
-        # The moves of the Fortran-derived routines stay refused, on one sector of the identity too.
+        fortran = cases.pop("Fortran-derived routines")
+        # The forces and optimizer relaxations of the Fortran-derived routines run in the sectors under
+        # PARSEC_FORTRAN_SECTOR_FORCES=auto (the default since 2026-11-19); their moves outside the group stay refused,
+        # on one sector of the identity too, and so does everything of theirs under off, as before.
+        with mock.patch.dict(os.environ, {"PARSEC_FORTRAN_SECTOR_FORCES": "auto"}):
+            refuse(fortran)
+            refuse(replace(fortran, relaxation=bfgs, movable=(True,) * atoms))
+            # a spin-polarized cell of those routines stays with main.py, and so does a Restart_Run (the runner reads
+            # no parsec.dat); each refusal names its reason
+            spin = replace(fortran, problem=replace(
+                fortran.problem, scf=replace(fortran.problem.scf, spin_polarized=True)))
+            with self.assertRaisesRegex(ValueError, "Fortran-derived routines.*spin-polarized cell.*main.py"):
+                refuse(spin)
+            for case in (replace(fortran, restart_run=True),
+                         replace(fortran, restart_run=True, relaxation=bfgs, movable=(True,) * atoms)):
+                with self.assertRaisesRegex(ValueError, "Fortran-derived routines.*Restart_Run.*no parsec.dat.*main.py"):
+                    refuse(case)
+            for case, reason in ((replace(fortran, molecular_dynamics=object()),
+                                  "molecular dynamics: molecular dynamics uses no symmetry"),
+                                 (replace(fortran, relaxation=SimpleNamespace(method="manual")),
+                                  "manual movements use no symmetry"),
+                                 (replace(fortran, relaxation=bfgs, movable=(False,) + (True,) * (atoms - 1)),
+                                  "Move_Flag fixes atoms")):
+                with self.subTest(reason=reason), self.assertRaisesRegex(ValueError, f"keep the full grid.*{reason}"):
+                    refuse(case)
+                with self.assertRaises(ValueError) as caught:
+                    refuse(case)
+                self.assertNotIn("take the default routines", str(caught.exception))
         cases["molecular dynamics of a periodic cell on the Fortran-derived routines"] = replace(
             fortran, molecular_dynamics=object())
+        cases["manual movements of a periodic cell on the Fortran-derived routines"] = replace(
+            fortran, relaxation=SimpleNamespace(method="manual"))
         for message, case in cases.items():
-            with self.subTest(message=message), self.assertRaisesRegex(ValueError, message):
+            with self.subTest(message=message), self.assertRaisesRegex(
+                ValueError, "Fortran-derived routines" if "Fortran" in message else message
+            ):
                 refuse(case)
+        with mock.patch.dict(os.environ, {"PARSEC_FORTRAN_SECTOR_FORCES": "off"}):
+            for case in (fortran, replace(fortran, relaxation=bfgs, movable=(True,) * atoms)):
+                with self.assertRaisesRegex(
+                    ValueError, r"Fortran-derived routines.*take the default routines \(PARSEC_FORTRAN_SECTOR_FORCES=off\)"
+                ):
+                    refuse(case)
         with self.assertRaisesRegex(ValueError, "supercell of a k-point mesh.*main.py --mpi"):
             refuse(replace(cell, compute_forces=True), supercell=True)
         # A supercell without forces runs as before; an SCF alone on the Fortran routines too.
         refuse(cell, supercell=True)
-        refuse(replace(cases["Fortran-derived routines"], compute_forces=False))
+        refuse(replace(fortran, compute_forces=False))
 
     def test_the_solver_of_a_cell_keeps_its_point_group_where_the_atoms_do(self) -> None:
         decide = mpi_full_scf._periodic_solver_symmetry
@@ -342,11 +380,14 @@ class RunnerDecisionTests(unittest.TestCase):
             self.assertEqual(decide(translation, "on", "off"), "on")
             self.assertEqual(decide(translation, "off", "off"), "off")
         self.assertEqual(decide(replace(forces, ignore_symmetry=True), None, "off"), "off")
+        # PARSEC_MOVE_FLAG_SUBGROUP=auto (the default): fixed atoms keep the sectors of their subgroup
+        fixed = replace(relaxation, movable=(True,) * (atoms - 1) + (False,))
+        self.assertEqual(decide(fixed, None, "off"), "auto")
         for leaves, name, reason in (
                 (replace(forces, molecular_dynamics=object()), "molecular dynamics", "molecular dynamics uses no symmetry"),
                 (replace(forces, relaxation=SimpleNamespace(method="manual")), "a relaxation", "manual movements"),
-                (replace(relaxation, movable=(True,) * (atoms - 1) + (False,)), "a relaxation", "Move_Flag fixes atoms")):
-            with self.subTest(reason=reason):
+                (fixed, "a relaxation", "Move_Flag fixes atoms")):
+            with self.subTest(reason=reason), mock.patch.dict(os.environ, {"PARSEC_MOVE_FLAG_SUBGROUP": "off"}):
                 self.assertEqual(decide(leaves, None, "off"), "off")
                 self.assertEqual(decide(leaves, None, "auto"), "off")
                 with self.assertRaisesRegex(
@@ -480,8 +521,11 @@ class RunnerDecisionTests(unittest.TestCase):
         self.assertEqual(prepared["scope"], [True])
         self.assertIsInstance(prepared["mpi_context"], MPISectorContext)
         self.assertIsNotNone(prepared["mpi_context"].command_observer)
+        # forces averaged over the group of the sectors: below the size floor too (PARSEC_PERIODIC_SECTOR_FLOOR)
+        self.assertIs(prepared["sector_forces"], True)
         relaxation = self._prepare_through_the_runner("Minimization: bfgs\nMovement_Num: 2\n", ranks=2)
         self.assertEqual(relaxation["symmetry"], "auto")
+        self.assertIs(relaxation["sector_forces"], True)
 
     def test_the_moves_outside_the_group_take_one_sector_of_the_identity_where_the_ranks_share_it(self) -> None:
         dynamics = ("Molecular_Dynamics: .true.\nTinit: 300\nT_Final: 300\nT_Step: 0\nTime_Step: 20\n"
@@ -490,19 +534,26 @@ class RunnerDecisionTests(unittest.TestCase):
         for name, added, species, environment in (
                 ("molecular dynamics", dynamics, "", None),
                 ("a manual relaxation", "Minimization: manual\nMovement_Num: 1\n", "", None),
-                ("fixed atoms", bfgs, " Move_Flag: 7\n", None),
+                ("fixed atoms", bfgs, " Move_Flag: 7\n", {"PARSEC_MOVE_FLAG_SUBGROUP": "off"}),
                 ("forces under off", "", "", {"PARSEC_PERIODIC_SECTOR_FORCES": "off"}),
                 ("a relaxation under off", bfgs, "", {"PARSEC_PERIODIC_SECTOR_FORCES": "off"})):
             with self.subTest(name=name):
                 prepared = self._prepare_through_the_runner(added, species=species, environment=environment)
                 # One rank: one sector of the identity (the driver's single sector in the context of the runner).
                 self.assertEqual(prepared["symmetry"], "off")
+                self.assertNotIn("sector_forces", prepared)
                 self.assertIsInstance(prepared["mpi_context"], MPISectorContext)
         # One rank on each of two nodes does not divide one sector: refused by name before the preparation.
         with self.assertRaisesRegex(ValueError, "molecular dynamics uses no symmetry"):
             self._prepare_through_the_runner(dynamics, ranks=2)
-        with self.assertRaisesRegex(ValueError, r"no point-group symmetry \(Move_Flag fixes atoms\)"):
-            self._prepare_through_the_runner(bfgs, species=" Move_Flag: 7\n", ranks=2)
+        with self.assertRaisesRegex(ValueError, r"no point-group symmetry \(Move_Flag fixes atoms"):
+            self._prepare_through_the_runner(
+                bfgs, species=" Move_Flag: 7\n", ranks=2, environment={"PARSEC_MOVE_FLAG_SUBGROUP": "off"}
+            )
+        # PARSEC_MOVE_FLAG_SUBGROUP=auto: the fixed atoms keep the sectors of their subgroup, on every rank
+        prepared = self._prepare_through_the_runner(bfgs, species=" Move_Flag: 7\n")
+        self.assertEqual(prepared["symmetry"], "auto")
+        self.assertEqual(prepared["symmetry_fixed_atoms"], (False,) * 7 + (True,))
         with self.assertRaisesRegex(ValueError, r"no point-group symmetry \(PARSEC_PERIODIC_SECTOR_FORCES=off\)"):
             self._prepare_through_the_runner(environment={"PARSEC_PERIODIC_SECTOR_FORCES": "off"}, ranks=2)
         with self.assertRaisesRegex(ValueError, "PARSEC_PERIODIC_SECTOR_FORCES must be auto or off"):

@@ -2281,8 +2281,19 @@ class SinglePointInput:
     kpoint_time_reversal: bool = False
     """Whether the SCF runs the pairs ``k``, ``-k`` of the equal-weight mesh ``kpoints`` (one point of each with
     twice the weight, :func:`~parsec_python.Grid.kpoints.time_reversal_reduced`): set by the input reader for the
-    whole mesh that forces and moving atoms of scalar or collinear-spin orbitals keep
-    (``PARSEC_KPOINT_TIME_REVERSAL``)."""
+    whole mesh that forces and moving atoms of scalar or collinear-spin orbitals or of non-magnetic spin-orbit
+    coupling keep (``PARSEC_KPOINT_TIME_REVERSAL``, ``PARSEC_SOC_KPOINT_WEDGE``)."""
+    hybrid_kpoint_wedge: bool = False
+    """Whether the Monkhorst-Pack mesh of a hybrid single point runs as its irreducible wedge under the operations of
+    ``space_group`` that map the mesh onto itself and the grid's finite-difference operators onto themselves (and time
+    reversal), with the density symmetrized over them, its semilocal start included: set by the input reader under
+    ``PARSEC_HYBRID_KPOINT_WEDGE=on`` (:func:`parsec_python.Grid.kpoints.hybrid_wedge_group`,
+    :func:`parsec_python.SCF.hybrid_periodic.hybrid_mesh_stars`).  ``False``: the time-reversal pairs of the mesh."""
+    hybrid_kpoint_wedge_deferred: object | None = None
+    """The wedge a hybrid single point takes after its semilocal start (``PARSEC_HYBRID_KPOINT_WEDGE=auto``, a
+    :class:`parsec_python.Grid.kpoints.DeferredHybridWedge`): the input is that of the time-reversal pairs (``off``),
+    and the Fock loop moves to the wedge where the start fills every state to 0 or 1
+    (:meth:`parsec_python.SCF.hybrid_periodic.BlochExchange.after_start`).  ``None``: no such wedge."""
     bands: BandStructureSettings | None = None
     """Non-self-consistent band structure to compute after the SCF (periodic
     systems only); see :class:`BandStructureSettings`."""
@@ -2530,6 +2541,29 @@ class HybridEnergyBreakdown(EnergyBreakdown):
 
 
 @dataclass(frozen=True)
+class HybridMeshRouteRecord:
+    """The mesh the Fock loop of a hybrid single point runs on after its semilocal start
+    (``PARSEC_HYBRID_KPOINT_WEDGE=auto``, :meth:`parsec_python.SCF.hybrid_periodic.BlochExchange.after_start`).
+
+    ``route`` ``wedge``: the start filled every state to 0 or 1, and the Fock loop runs on the ``points``
+    representatives of the irreducible wedge of the ``mesh_points`` mesh under ``operations`` operations (the start
+    ran on its ``pairs_points`` time-reversal pairs); ``pairs``: ``partly_filled`` states of the start lay within
+    ``tolerance`` of neither 0 nor 1 (the largest ``min(f, 1 - f)`` is ``largest_fractional_occupation``), and the
+    run keeps the pairs, as ``off`` (``points`` the k-points of the wedge ``on`` would run, 0 where unknown), or the
+    wedge could not be made (``reason``).  It is no SCF iteration and carries no levels of its own."""
+
+    route: str
+    points: int
+    mesh_points: int
+    pairs_points: int
+    operations: int
+    partly_filled: int
+    largest_fractional_occupation: float
+    tolerance: float
+    reason: str = ""
+
+
+@dataclass(frozen=True)
 class SpinSectorFallbackRecord:
     """A spin-polarized loop in the symmetry sectors left them (``Spin_Symmetry_Sectors``).
 
@@ -2553,8 +2587,16 @@ class SpinSectorFallbackRecord:
     measure: str = "largest min(f, 1-f)"
     # ``spin``: the sectors of a cluster (Spin_Symmetry_Sectors), the run starts again on the full grid;
     # ``kpoint``: the sectors of the k-points of a periodic loop (PARSEC_KPOINT_SECTOR_GUARD), the loop starts
-    # again with one task per k-point.
+    # again with one task per k-point; ``weighted``: the weighted sectors of a subgroup (a spin guard that fired, or
+    # occup.in with unequal occupations of partners), the run starts again in the sectors of the abelian group;
+    # ``spin_flip``: a loop of a system prepared with PARSEC_SPIN_FLIP_SYMMETRY=auto solves both channels
+    # (SCF.spin_polarized: ``reason`` why, ``largest_fractional_occupation`` the deviation that ``measure`` names,
+    # against ``tolerance``; ``measure`` empty where the reason has none), said before the loop starts.
     route: str = "spin"
+    # Where the full grid of the ``spin`` route goes (the accelerated driver's plan, PARSEC_SPIN_FALLBACK_SHARED):
+    # ``on the full grid of one device (...)``, ``as one sector of the identity whose basis ... share (...)``, or
+    # ``none`` where no layout fits and the run stops; empty where no plan was made (the reference solver).
+    layout: str = ""
 
 
 @dataclass(frozen=True)
@@ -2771,7 +2813,11 @@ class SpinChannelResult:
     fields of the same names of :class:`SinglePointResult`.
     ``electron_count`` is the sum of the occupations (``totel`` of
     ``flevel.f90``).  ``eigensolver_state`` is the buffered eigensubspace of
-    the channel.
+    the channel.  ``sector_states``: where the weighted symmetry sectors of
+    a subgroup solved the channel (the lists above then hold every partner
+    of a weighted state), the states they solved as ``(representations,
+    occupations times weights, weights)``, as
+    :attr:`SinglePointResult.sector_states`; ``None`` otherwise.
     """
 
     eigenvalues: np.ndarray
@@ -2785,6 +2831,7 @@ class SpinChannelResult:
     next_effective_potential: np.ndarray
     electron_count: float
     eigensolver_state: object | None = None
+    sector_states: tuple | None = None
 
 
 @dataclass(frozen=True)

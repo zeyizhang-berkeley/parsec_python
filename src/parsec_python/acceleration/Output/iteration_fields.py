@@ -14,9 +14,14 @@ where the file holds wavefunctions, and drops them where it holds none.
 Nothing of the eigensolver state changes, but for sector bases that hold the
 opt-in Ritz hand-over (``PARSEC_CUPY_RITZ_HANDOVER``), which are rotated into
 their Ritz vectors first, as for the final orbitals.  A basis that several
-devices share cannot be exported as one host array (as for the final
-orbitals): the file of such an iteration holds no wavefunctions, and the
-log says so once.
+devices of one process share (``PARSEC_CUPY_SECTOR_PLACEMENT=size``, or the
+shared full grid of a spin fallback, ``PARSEC_SPIN_FALLBACK_SHARED``) is
+exported by the columns each device holds
+(:meth:`..Eigensolvers.distributed_state.DistributedBasis.column_array`).
+A basis that the ranks of an MPI run share, and the sectors of other MPI
+ranks, cannot be exported as one host array (as for the final orbitals):
+the file of such an iteration holds no wavefunctions, and the log says so
+once.
 """
 
 from __future__ import annotations
@@ -55,8 +60,8 @@ def host_wavefunctions(system, wavefunctions):
         else:
             host = cp.asnumpy(wavefunctions)
     except RuntimeError:
-        # A sector basis that several devices share (or the sectors of other
-        # MPI ranks): parsec.dat then notes that it keeps no orbitals.
+        # The sectors of other MPI ranks: parsec.dat then notes that it keeps
+        # no orbitals.
         return None
     synchronize()
     return np.asarray(host, dtype=np.float64)

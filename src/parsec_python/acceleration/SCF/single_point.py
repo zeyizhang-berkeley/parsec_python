@@ -50,6 +50,15 @@ class AcceleratedPreparedSinglePointSystem:
     # are ``None`` where the preparation does not support moving atoms.
     geometry_updater: Callable[..., object] | None = None
     projector_gradients: Callable[[], object] | None = None
+    # The point group the moved atoms must keep: the reduction the
+    # preparation detected, which ``geometry_updater`` checks every new
+    # structure against (``Forces.local_device.sector_atom_images`` for a
+    # cluster, ``Forces.sector_symmetry.check_sector_atoms`` for a cell in
+    # sectors).  A cluster keeps it where its orbitals take the full grid,
+    # so it can differ from the reduction of the symmetry sectors; read by
+    # ``Forces.sector_symmetry.sector_force_tolerance_refusal``.  ``None``
+    # without a group.
+    move_symmetry_reduction: object | None = None
     # Stage, thread, start and end of every stage of the preparation, in
     # seconds from its entry and in the order of the starts.  Stages of
     # different threads overlap: a timeline, not a sum.
@@ -75,6 +84,10 @@ class AcceleratedPreparedSinglePointSystem:
     # sectors goes back to the full grid when its occupations are
     # fractional (driver._SpinSectorFallback); ``None`` everywhere else.
     spin_sector_fallback: object | None = None
+    # PARSEC_SPIN_FLIP_SYMMETRY=auto: the operation that carries the up channel
+    # onto the down channel (.spin_flip.SpinFlipOperation); the spin loop then
+    # solves the up channel alone.  ``None`` everywhere else.
+    spin_flip: object | None = None
     # A meta-GGA: its orbital term in the device Hamiltonians and tau where
     # the orbitals are (Hamiltonian.meta_gga_device.DeviceMetaGGA); ``None``
     # without a meta-GGA and on the CPU backends, which add the host term.
@@ -198,6 +211,41 @@ class AcceleratedPreparedSinglePointSystem:
             return tau, tuple(components)
         reduced = self._vector_fields().reduce(np.stack(components))
         return tau, tuple(scalar.field(np.ascontiguousarray(row)) for row in reduced)
+
+    @property
+    def evaluate_meta_gga_start_xc(self):
+        """The reference system's PBE of the start density of a meta-GGA loop, in the layout of the SCF's fields.
+
+        A periodic cell has this hook (``SCF.pbc``, with its zero-average shift); on the orbits of the sectors
+        (``PARSEC_GAMMA_META_GGA_SECTORS``) the density is expanded for it and the potential reduced again, as the
+        loop does for a system without the hook (``SCF.meta_gga.MetaGGALoop.start_xc``).  A system without it
+        (a cluster) has no such attribute here either, and the full grid takes the hook itself.
+        """
+
+        return self._start_xc_hook("evaluate_meta_gga_start_xc", ("potential",))
+
+    @property
+    def evaluate_meta_gga_start_spin_xc(self):
+        """The spin counterpart of :attr:`evaluate_meta_gga_start_xc` (both channels)."""
+
+        return self._start_xc_hook("evaluate_meta_gga_start_spin_xc", ("potential_up", "potential_down"))
+
+    def _start_xc_hook(self, name: str, potentials: tuple[str, ...]):
+        hook = getattr(self.reference, name, None)
+        if not callable(hook):
+            # (raised here, __getattr__ looks in the reference, which has none either)
+            raise AttributeError(name)
+        scalar = self.scalar_field_adapter
+        if scalar is None:
+            return hook
+
+        def evaluate(*densities):
+            from dataclasses import replace
+
+            result = hook(*(scalar.to_full(density) for density in densities))
+            return replace(result, **{field: scalar.from_full(getattr(result, field)) for field in potentials})
+
+        return evaluate
 
     def _vector_fields(self):
         from ..Hamiltonian.meta_gga_device import orbit_vector_fields

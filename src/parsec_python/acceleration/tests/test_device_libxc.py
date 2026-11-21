@@ -283,7 +283,9 @@ class DeviceLibxcSCFTests(unittest.TestCase):
             reference, system, accelerated, _ = self.inputs.both(problem, symmetry=symmetry)
             self.assertTrue(reference.converged and accelerated.converged)
             self.assertAlmostEqual(accelerated.energies.total, reference.energies.total, delta=tolerance, msg=symmetry)
-            np.testing.assert_allclose(accelerated.eigenvalues, reference.eigenvalues, atol=1e-6)
+            # (the weighted sectors of D4h, PARSEC_ORBITAL_GROUP_LIBXC=auto, list every partner of the last level)
+            count = np.asarray(reference.eigenvalues).size
+            np.testing.assert_allclose(accelerated.eigenvalues[:count], reference.eigenvalues, atol=1e-6)
 
     def test_spin_polarized_atom(self) -> None:
         for sectors in ("off", "auto"):

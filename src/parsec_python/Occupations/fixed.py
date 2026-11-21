@@ -232,12 +232,183 @@ def fixed_occupations(
     )
 
 
+#: Largest difference between the ``occup.in`` entries of the partners of one weighted state that counts as equal.
+PARTNER_OCCUPATION_TOLERANCE = 1.0e-12
+
+#: Levels (Ry) of two solved states that may be partners of one level (their sectors hold a representation of the
+#: full group whose partners several solved states share) closer than this count as one level.  The potential of the
+#: weighted sectors keeps the full group, so such partners differ by the error of the eigensolver alone; the width of
+#: the exact multiplets of the spin guard (``acceleration/SCF/spin_sectors.MULTIPLET_WIDTH``).
+PARTNER_LEVEL_WIDTH = 1.0e-4
+
+
+class UnequalPartnerOccupations(ValueError):
+    """``occup.in`` gives the partners of one state of weighted sectors different occupations.
+
+    The one-dimensional sectors of a subgroup with weights hold one state for ``w`` degenerate partners and give
+    them one occupation, and average the density over the full group, which gives the partners of a level that
+    several solved states share (the e of Td in two sectors of D2d) the mean of their occupations; the file asks
+    for a state that breaks the symmetry of those partners.  ``first`` is the position (from one) of the first
+    partner in the list of the file, ``entries`` the entries of the partners (zero past ``States_Num``),
+    ``energy`` the level (Ry), ``positions`` the positions of every partner where they are not consecutive.  The
+    accelerated driver starts such a run again in the sectors of the abelian group.
+    """
+
+    def __init__(self, first: int, entries, energy: float, channel: str | None = None, positions=None) -> None:
+        self.first = int(first)
+        self.entries = tuple(float(value) for value in entries)
+        self.energy = float(energy)
+        self.channel = channel
+        self.positions = (
+            tuple(range(self.first, self.first + len(self.entries)))
+            if positions is None
+            else tuple(int(position) for position in positions)
+        )
+        where = "" if channel is None else f" of the {channel} channel"
+        consecutive = self.positions == tuple(range(self.first, self.first + len(self.entries)))
+        listed = (
+            f"{self.first} to {self.first + len(self.entries) - 1}"
+            if consecutive
+            else ", ".join(str(position) for position in self.positions)
+        )
+        super().__init__(
+            f"occup.in gives the {len(self.entries)} degenerate partners{where} at {self.energy:.6f} Ry (states "
+            f"{listed} counted with their partners) the unequal "
+            f"occupations {', '.join(f'{value:g}' for value in self.entries)}: the weighted symmetry sectors give "
+            "every partner of a level one occupation (PARSEC_ORBITAL_GROUP_OCCUPATIONS=off keeps the abelian sectors)"
+        )
+
+
+def _shared_levels(eigenvalues: np.ndarray, partners, width: float) -> list[list[int]]:
+    """Groups of two or more solved states that may be partners of one level (ascending state indices).
+
+    Two states are joined where their levels lie within ``width`` and their partner masks share a bit (a
+    representation of the full group that both sectors hold and whose partners several solved states share);
+    the groups are the connected components of that relation.
+    """
+
+    masks = [int(mask) for mask in partners]
+    candidates = [index for index, mask in enumerate(masks) if mask]
+    parent = {index: index for index in candidates}
+
+    def root(index: int) -> int:
+        while parent[index] != index:
+            parent[index] = parent[parent[index]]
+            index = parent[index]
+        return index
+
+    for position, first in enumerate(candidates):
+        for second in candidates[position + 1 :]:
+            if eigenvalues[second] - eigenvalues[first] > width:
+                break
+            if masks[first] & masks[second]:
+                parent[root(second)] = root(first)
+    groups: dict[int, list[int]] = {}
+    for index in candidates:
+        groups.setdefault(root(index), []).append(index)
+    return [members for members in groups.values() if len(members) > 1]
+
+
+def partner_occupations(
+    eigenvalues: np.ndarray,
+    weights: np.ndarray,
+    occupations: Sequence[float],
+    *,
+    channel: str | None = None,
+    partners: Sequence[int] | None = None,
+) -> np.ndarray:
+    """The ``occup.in`` occupation of every state of weighted sectors, in ``[0, 1]`` per partner.
+
+    ``eigenvalues`` are the sorted levels of the solved states and ``weights`` their weights ``w`` (the degenerate
+    partners each stands for).  Counted with their partners they are the levels of the full grid, in order, so the
+    ``n``-th entry of ``occupations`` (the list of the file, ``States_Num`` long) goes to the ``n``-th partner: a
+    state of weight ``w`` takes ``w`` consecutive entries, zero past the end of the list (the partners of the last
+    multiplet beyond ``States_Num``).  Raises :class:`UnequalPartnerOccupations` where those entries differ by more
+    than :data:`PARTNER_OCCUPATION_TOLERANCE`.
+
+    ``partners`` (one integer per state, a bit mask: ``CuPySymmetryEigvalResult.state_partners``): the
+    representations of the full group held by the sector of each state whose partners several solved states share.
+    Degenerate states (within :data:`PARTNER_LEVEL_WIDTH`) whose masks share a bit may be partners of one level,
+    whose entries must then be equal as well: the density of the weighted sectors is averaged over the full group,
+    which would give each of them the mean.  An accidental degeneracy where the entries change only sends the run
+    to the abelian sectors.  A level that the end of the list cuts with its last partners past the solved states
+    is not seen (the full grid keeps an arbitrary combination of such partners).
+    """
+
+    eigenvalues = np.asarray(eigenvalues, dtype=float)
+    weights = np.asarray(weights)
+    if eigenvalues.ndim != 1 or eigenvalues.size == 0:
+        raise ValueError("eigenvalues must be a nonempty one-dimensional array")
+    if np.any(np.diff(eigenvalues) < 0):
+        raise ValueError("eigenvalues must be sorted")
+    if weights.shape != eigenvalues.shape or np.any(weights < 1) or np.any(weights != np.rint(weights)):
+        raise ValueError("one positive integer weight per state is needed")
+    repeats = np.rint(weights).astype(np.int64)
+    values = np.asarray(occupations, dtype=float)
+    stops = np.cumsum(repeats)
+    starts = stops - repeats
+    if int(stops[-1]) < values.size:
+        raise ValueError(
+            f"{values.size} fixed occupations were given for the {int(stops[-1])} computed states "
+            "(partners counted)"
+        )
+    padded = np.zeros(int(stops[-1]), dtype=float)
+    padded[: values.size] = values
+    result = padded[starts].copy()
+    for state in np.flatnonzero(repeats > 1):
+        block = padded[starts[state] : stops[state]]
+        if float(np.ptp(block)) > PARTNER_OCCUPATION_TOLERANCE:
+            raise UnequalPartnerOccupations(int(starts[state]) + 1, block, float(eigenvalues[state]), channel)
+    if partners is not None:
+        if len(partners) != eigenvalues.size:
+            raise ValueError("one partner mask per state is needed")
+        for group in _shared_levels(eigenvalues, partners, PARTNER_LEVEL_WIDTH):
+            block = np.concatenate([padded[starts[state] : stops[state]] for state in group])
+            if float(np.ptp(block)) > PARTNER_OCCUPATION_TOLERANCE:
+                positions = [int(position) + 1 for state in group for position in range(starts[state], stops[state])]
+                raise UnequalPartnerOccupations(
+                    positions[0], block, float(eigenvalues[group[0]]), channel, positions=positions
+                )
+    return result
+
+
+def weighted_fixed_occupations(
+    eigenvalues: np.ndarray,
+    weights: np.ndarray,
+    electron_count: float,
+    occupations: Sequence[float],
+    *,
+    partners: Sequence[int] | None = None,
+) -> OccupationResult:
+    """:func:`fixed_occupations` for the states of weighted symmetry sectors (:func:`partner_occupations`).
+
+    The returned occupations are per partner (without the weights), as those of
+    :func:`parsec_python.Occupations.weighted_fermi_occupations`; ``electron_count`` of the result counts every
+    partner.  The electrons of the file are checked as :func:`fixed_occupations` checks them.  ``partners``: the
+    partner masks of the states (:func:`partner_occupations`).
+    """
+
+    values = np.array(occupations, dtype=float)
+    check_fixed_occupations(values, electron_count)
+    per_state = partner_occupations(eigenvalues, weights, values, partners=partners)
+    return OccupationResult(
+        fermi_level=float("nan"),
+        occupations=per_state,
+        electron_count=float(2.0 * np.dot(np.asarray(weights, dtype=float), per_state)),
+    )
+
+
 __all__ = [
     "ELECTRON_COUNT_TOLERANCE",
     "OccupationFile",
+    "PARTNER_LEVEL_WIDTH",
+    "PARTNER_OCCUPATION_TOLERANCE",
     "SpinOccupationFile",
+    "UnequalPartnerOccupations",
     "check_fixed_occupations",
     "fixed_occupations",
+    "partner_occupations",
     "read_occupation_file",
     "read_spin_occupation_file",
+    "weighted_fixed_occupations",
 ]

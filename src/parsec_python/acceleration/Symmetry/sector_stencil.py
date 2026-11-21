@@ -23,7 +23,11 @@ for element.  That fixes three things:
   their full-grid column, as ``reduce_sector_csr`` adds them, and a sum that is
   exactly zero is dropped;
 * slots follow ascending sector column and the palette ascending IEEE bit
-  pattern, as :func:`build_stencil_major_metadata` produces them.
+  pattern, as :func:`build_stencil_major_metadata` produces them;
+* the codes are one byte each where the palette of a sector has at most 256
+  values and two bytes where it has more (``PARSEC_SECTOR_PALETTE_CODES``;
+  the native kernel codes in one byte, and NumPy's builder builds such a
+  sector in its place).
 
 Two implementations exist.  The C++/OpenMP kernel ``build_sector_stencil``
 is used when the installed extension has it.  The NumPy one needs no
@@ -46,7 +50,15 @@ import scipy.sparse as sp
 
 from parsec_python.Grid import RealSpaceGrid
 
-from ..backends.cupy_stencil_major import PALETTE_CAPACITY, PaletteOverflow, StencilMajorHostMetadata
+from ..backends.cupy_stencil_major import (
+    PALETTE_CAPACITY,
+    WIDE_PALETTE_CAPACITY,
+    PaletteOverflow,
+    StencilMajorHostMetadata,
+    sector_code_dtype,
+    sector_palette_capacity,
+    sector_palette_codes_setting,
+)
 from .representations import (
     ReflectionRepresentationDecomposition,
     operator_build_workers,
@@ -262,6 +274,17 @@ def _native_sector_stencil(
     )
 
 
+def _wide(stencil: StencilMajorHostMetadata) -> StencilMajorHostMetadata:
+    """``stencil`` with two-byte codes (``PARSEC_SECTOR_PALETTE_CODES=on``): the same values, palette and order."""
+
+    return StencilMajorHostMetadata(
+        shape=stencil.shape,
+        neighbors=stencil.neighbors,
+        coefficient_codes=stencil.coefficient_codes.astype(np.uint16),
+        coefficient_palette=stencil.coefficient_palette,
+    )
+
+
 def _padded_lookup(grid: RealSpaceGrid, width: int, wrap: bool = False) -> np.ndarray:
     """Row lookup with ``width`` inactive layers on every side.
 
@@ -399,9 +422,14 @@ def _numpy_sector_stencil(
     palette_only: bool = False,
     orbit_mask: np.ndarray | None = None,
     classes: tuple[np.ndarray, np.ndarray | None] | None = None,
+    codes: str | None = None,
 ) -> StencilMajorHostMetadata | np.ndarray:
     """The packed stencil of one sector; ``palette_only``: the distinct coefficients of it instead, as ascending
     IEEE bit patterns (uint64; the stencil before its codes and its audit, :func:`sector_palette_sizes`).
+
+    ``codes``: the value of ``PARSEC_SECTOR_PALETTE_CODES`` the stencil is coded for (``None``: the environment's):
+    one-byte codes where its palette has at most :data:`PALETTE_CAPACITY` values and the value is not ``on``,
+    two-byte codes otherwise, :class:`PaletteOverflow` beyond the capacity of the value (``off``: 256).
 
     ``orbit_mask`` (with ``palette_only``; a flag per orbit of the reduction): only the rows of the flagged orbits,
     and every value of the table of the sector besides (each stencil value times ``+-1`` times ``sqrt(m_row /
@@ -568,28 +596,32 @@ def _numpy_sector_stencil(
     slot_count = int(row_widths.max(initial=0))
     if slot_count < 1:
         raise ValueError("finite-difference operator contains no entries")
-    if palette_bits.size > PALETTE_CAPACITY:
+    # one byte per code where the palette fits 256 values, two where it does not (PARSEC_SECTOR_PALETTE_CODES)
+    setting = sector_palette_codes_setting() if codes is None else codes
+    capacity = sector_palette_capacity(setting)
+    if palette_bits.size > capacity:
         raise PaletteOverflow(
-            f"finite-difference operator has more than {PALETTE_CAPACITY} coefficients "
+            f"finite-difference operator has more than {capacity} coefficients "
             f"({palette_bits.size} in sector {representation})"
         )
-    code_of_id = np.zeros(table_ids + 1, dtype=np.uint8)
+    code_dtype = sector_code_dtype(palette_bits.size, setting)
+    code_of_id = np.zeros(table_ids + 1, dtype=code_dtype)
     code_of_id[:table_ids] = np.minimum(
         np.searchsorted(palette_bits, table_bits), palette_bits.size - 1
     )
-    codes = code_of_id[value_ids[:slot_count]]
+    slot_codes = code_of_id[value_ids[:slot_count]]
     if merged_rows:
         merged_codes = np.searchsorted(
             palette_bits, all_values.view(np.uint64)
-        ).astype(np.uint8)
+        ).astype(code_dtype)
         merged_codes[all_targets < 0] = 0
-        codes[:, all_rows] = merged_codes[:, :slot_count].T
+        slot_codes[:, all_rows] = merged_codes[:, :slot_count].T
     if slot_count < slots:
         neighbors = neighbors[:slot_count].copy()
     metadata = StencilMajorHostMetadata(
         shape=(size, size),
         neighbors=neighbors,
-        coefficient_codes=codes,
+        coefficient_codes=slot_codes,
         coefficient_palette=palette_bits.view(np.float64),
     )
     # The former route audits every reduced matrix.
@@ -640,19 +672,33 @@ def build_sector_stencils(
     built: list[StencilMajorHostMetadata | None] = [
         None
     ] * decomposition.representation_count
+    # read once for every sector of the call (PARSEC_SECTOR_PALETTE_CODES)
+    codes = sector_palette_codes_setting()
+    width = int(grid.settings.expansion_order) // 2
     if native is not None:
-        # The kernel is an OpenMP loop over the rows of one sector.
+        # The kernel is an OpenMP loop over the rows of one sector.  It codes in one byte: a sector of more than 256
+        # coefficients is built by NumPy's builder, the same arrays with two-byte codes, where the setting allows them
+        # (a cluster; none measured: at most 229 values, Td at order 20).
+        padded = None
         for index in wanted:
-            built[index] = _native_sector_stencil(
-                native, grid, decomposition, index
-            )
+            try:
+                stencil = _native_sector_stencil(native, grid, decomposition, index)
+            except ValueError as error:
+                if f"more than {PALETTE_CAPACITY} coefficients" not in str(error) or codes == "off":
+                    raise
+                if padded is None:
+                    padded = _padded_lookup(grid, width, wrap)
+                stencil = _numpy_sector_stencil(grid, decomposition, index, padded, codes=codes)
+            else:
+                if codes == "on":
+                    stencil = _wide(stencil)
+            built[index] = stencil
         return tuple(built)
 
-    width = int(grid.settings.expansion_order) // 2
     padded = _padded_lookup(grid, width, wrap)
 
     def assemble(index: int) -> StencilMajorHostMetadata:
-        return _numpy_sector_stencil(grid, decomposition, index, padded)
+        return _numpy_sector_stencil(grid, decomposition, index, padded, codes=codes)
 
     workers = operator_build_workers(len(wanted))
     if workers == 1:
@@ -693,7 +739,9 @@ def sector_palette_sizes(
     """The number of distinct coefficients of the stencil of every requested sector (NumPy's builder, as
     :func:`build_sector_stencils` packs them, without the codes and the audit); ``None`` for a sector not requested.
 
-    The palette of a packed stencil holds :data:`PALETTE_CAPACITY` values.  The table of a sector's entries has
+    The palette of a packed stencil holds :data:`PALETTE_CAPACITY` values in one-byte codes, and
+    :data:`WIDE_PALETTE_CAPACITY` in the two-byte codes a sector of more takes (``PARSEC_SECTOR_PALETTE_CODES=auto``;
+    ``off``: one byte alone).  The table of a sector's entries has
     every stencil value (``1 + M`` on a cube, up to ``1 + 3M`` where the steps differ, :func:`axis_stencil_values`)
     times the phase ``+-1`` times the ratio ``sqrt(m_row / m_column)`` of the multiplicities of two orbits; the rows
     whose stencil holds two points of one orbit add them into sums besides.  A cube whose orbits differ in size (an
@@ -807,6 +855,7 @@ def sector_palette_bounds(
 
 __all__ = [
     "PALETTE_CAPACITY",
+    "WIDE_PALETTE_CAPACITY",
     "PaletteOverflow",
     "SectorStencilUnavailable",
     "axis_stencil_values",

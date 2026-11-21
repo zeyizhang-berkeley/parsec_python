@@ -182,15 +182,27 @@ class DeviceBlochExchange(BlochExchange):
             description=str(describe()) if callable(describe) else "",
         )
         self.volume_element = float(box.volume_element)
+        self._place_tasks()
+        self._device_part = (
+            f"; W = V_x U by cuFFT on {len(self.devices)} GPU(s), ACE of every k-point on the GPU of its eigensolver"
+        )
+        self.description = f"{self.description}{self._device_part}"
+        self._channels: dict[int, tuple] = {}
+
+    def _place_tasks(self) -> None:
         tasks = self.k_points.shape[0] * (2 if self.spin_polarized else 1)
         workers = max(1, min(len(self.devices), tasks))
         # Worker i of the pool runs on devices[i] and owns the tasks i::workers (Parallel/pool.py).
         self.owners = _Owners(tuple(self.devices[index % workers] for index in range(workers)))
-        self.description = (
-            f"{self.description}; W = V_x U by cuFFT on {len(self.devices)} GPU(s), "
-            "ACE of every k-point on the GPU of its eigensolver"
-        )
-        self._channels: dict[int, tuple] = {}
+
+    def _take_wedge(self, plan) -> None:
+        """The wedge of an insulating start (``PARSEC_HYBRID_KPOINT_WEDGE=auto``): its tasks on the workers of the
+        pool of its k-points, the channels of the pairs forgotten."""
+
+        super()._take_wedge(plan)
+        self._place_tasks()
+        self.description = f"{self.description}{self._device_part}"
+        self._channels = {}
 
     # -- the SCF loops ------------------------------------------------------
 
@@ -264,6 +276,13 @@ class DeviceBlochExchange(BlochExchange):
                 block = _on_device(cp, np.ascontiguousarray(block) if array_module(block) is np else block, device)
             blocks.append(block)
         values = tuple(np.asarray(item, dtype=np.float64) for item in occupations)
+        if self.stars is not None:
+            # the irreducible wedge of the mesh (PARSEC_HYBRID_KPOINT_WEDGE): the points of the mesh are the images
+            # of the representatives (V_xc.bloch_exchange.MeshStars)
+            return BlochOrbitalSet(
+                self.k_points, self.k_weights, tuple(blocks), values, float(spin_weight),
+                np.asarray(self.stars.partners, dtype=bool), int(self.stars.mesh_size), self.stars,
+            )
         partners = time_reversal_partners(self.k_points, self.box.reciprocal)
         return BlochOrbitalSet(
             self.k_points,
@@ -414,7 +433,7 @@ class DeviceBlochExchange(BlochExchange):
                 with cp.cuda.Device(int(block.device.id)):
                     copy = cp.array(block[:, cp.asarray(occupied)], dtype=cp.complex128, copy=True)
                 channel[t] = DeviceBlochOccupiedBlock(
-                    copy, np.array(np.asarray(values)[occupied]), 2.0 if orbital_set.partners[t] else 1.0
+                    copy, np.array(np.asarray(values)[occupied]), float(orbital_set.point_counts[t])
                 )
             blocks.append(channel)
         return blocks

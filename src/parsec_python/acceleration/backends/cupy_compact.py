@@ -107,8 +107,12 @@ def _compiled_kernel(cp: Any) -> Any:
     return kernel
 
 
-def _coefficient_palette(values: np.ndarray) -> tuple[np.ndarray, np.ndarray] | None:
-    """Return an exact float64 bit-pattern palette and uint8 codes."""
+def _coefficient_palette(values: np.ndarray, capacity: int = 256) -> tuple[np.ndarray, np.ndarray] | None:
+    """Return an exact float64 bit-pattern palette and its codes, or ``None`` beyond ``capacity`` values.
+
+    The codes are ``uint8`` where the palette has at most 256 values; ``uint16`` beyond that, where a ``capacity``
+    above 256 allows it (the stencil of a symmetry sector, ``PARSEC_SECTOR_PALETTE_CODES``; its caller sets the dtype).
+    """
 
     data = np.ascontiguousarray(values, dtype=np.float64)
     # Operate on IEEE-754 bits so +0/-0 and any other bit-distinct float64
@@ -124,7 +128,7 @@ def _coefficient_palette(values: np.ndarray) -> tuple[np.ndarray, np.ndarray] | 
     stride = max(1, bits.size // 1_000_000)
     palette = np.unique(bits[::stride])
     while True:
-        if palette.size > 256:
+        if palette.size > int(capacity):
             return None
         codes = np.searchsorted(palette, bits)
         np.minimum(codes, palette.size - 1, out=codes)
@@ -132,7 +136,8 @@ def _coefficient_palette(values: np.ndarray) -> tuple[np.ndarray, np.ndarray] | 
         if missing.size == 0:
             break
         palette = np.union1d(palette, bits[missing[:1_000_000]])
-    return palette.view(np.float64), codes.astype(np.uint8, copy=False).reshape(data.shape)
+    code_dtype = np.uint8 if palette.size <= 256 else np.uint16
+    return palette.view(np.float64), codes.astype(code_dtype, copy=False).reshape(data.shape)
 
 
 class CuPyCompactFiniteDifference:

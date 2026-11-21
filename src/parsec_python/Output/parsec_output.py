@@ -169,6 +169,16 @@ def slab_recentring_lines(translation) -> list[str]:
     ]
 
 
+def standard_orientation_lines(translation) -> list[str]:
+    """The map between the frame of the input and the calculation frame (``PARSEC_STANDARD_ORIENTATION=on``).
+
+    Nothing where the switch is off or left the atoms as PARSEC places them.
+    """
+
+    orientation = getattr(translation, "standard_orientation", None)
+    return [] if orientation is None else orientation.report_lines()
+
+
 def density_symmetrization_lines(reports) -> list[str]:
     """What ``parsec.F90`` and ``symm_scalar`` print for each density.
 
@@ -189,9 +199,66 @@ def density_symmetrization_lines(reports) -> list[str]:
     return lines
 
 
+def hybrid_mesh_route_lines(record) -> list[str]:
+    """``parsec.out`` lines of a :class:`parsec_python.models.HybridMeshRouteRecord`
+    (``PARSEC_HYBRID_KPOINT_WEDGE=auto``)."""
+
+    if record.route == "wedge":
+        return [
+            "",
+            f" NOTE: hybrid k-point mesh: the semilocal start ({record.pairs_points} time-reversal pairs of the "
+            f"{record.mesh_points}-point mesh)",
+            f"       fills every state to 0 or 1 (largest min(f, 1-f) = {record.largest_fractional_occupation:.1E}, "
+            f"partly filled from {record.tolerance:.0E}): an insulator.",
+            f"       The Fock loop runs on the irreducible wedge of {record.points} k-points ({record.operations} "
+            "operations and time reversal;",
+            "       the exchange reaches the other points through the images of their Bloch factors).",
+            "       PARSEC_HYBRID_KPOINT_WEDGE=off keeps the pairs.",
+            "",
+        ]
+    reason = getattr(record, "reason", "")
+    if reason:
+        return [
+            "",
+            f" NOTE: hybrid k-point mesh: the irreducible wedge is not taken ({reason});",
+            f"       the run keeps the {record.pairs_points} time-reversal pairs of the "
+            f"{record.mesh_points}-point mesh.",
+            "",
+        ]
+    wedge = f"the irreducible wedge of {record.points} k-points" if record.points else "the irreducible wedge"
+    return [
+        "",
+        f" NOTE: hybrid k-point mesh: the semilocal start has {record.partly_filled} partly filled state(s) at the "
+        "Fermi level",
+        f"       (largest min(f, 1-f) = {record.largest_fractional_occupation:.3E}, partly filled from "
+        f"{record.tolerance:.0E}): the run keeps the {record.pairs_points} time-reversal pairs of the "
+        f"{record.mesh_points}-point mesh,",
+        "       whose Fock loop may break the crystal symmetry at such levels (equivalent k-points filled unequally).",
+        f"       PARSEC_HYBRID_KPOINT_WEDGE=on runs {wedge}, the symmetric state.",
+        "",
+    ]
+
+
 def spin_sector_fallback_lines(record) -> list[str]:
     """``parsec.out`` lines of a :class:`parsec_python.models.SpinSectorFallbackRecord`."""
 
+    if getattr(record, "route", "spin") == "spin_flip":
+        # PARSEC_SPIN_FLIP_SYMMETRY=auto: this loop solves both channels (SCF/spin_polarized.py).
+        measured = (
+            [
+                f"       ({record.measure} = {record.largest_fractional_occupation:.3E}, "
+                f"allowed {record.tolerance:.1E})."
+            ]
+            if record.measure
+            else []
+        )
+        return [
+            "",
+            f" NOTE: PARSEC_SPIN_FLIP_SYMMETRY: {record.reason};",
+            "       this SCF loop solves both spin channels.",
+            *measured,
+            "",
+        ]
     if getattr(record, "route", "spin") == "kpoint":
         return [
             "",
@@ -203,13 +270,37 @@ def spin_sector_fallback_lines(record) -> list[str]:
             *(f"       {line}" for line in record.multiplets),
             "",
         ]
+    if getattr(record, "route", "spin") == "weighted":
+        return [
+            "",
+            f" NOTE: weighted symmetry sectors: {record.reason} after {record.stage}",
+            f"       ({record.measure} = {record.largest_fractional_occupation:.3E}).",
+            "       The one-dimensional sectors of a subgroup with weights give every partner of a degenerate level",
+            "       one occupation; the calculation starts again in the sectors of the abelian group",
+            "       (PARSEC_ORBITAL_GROUP_SPIN=off or PARSEC_ORBITAL_GROUP_OCCUPATIONS=off start there).",
+            *(f"       {line}" for line in record.multiplets),
+            "",
+        ]
+    # Where the full grid goes (the accelerated driver's SpinFallbackPlan, PARSEC_SPIN_FALLBACK_SHARED): one device,
+    # one sector of the identity that several GPUs or ranks share, or none (the run stops with an error).
+    layout = getattr(record, "layout", "")
+    where = (
+        ["       the calculation starts again on the full grid (Spin_Symmetry_Sectors: off)."]
+        if not layout
+        else ["       its full grid fits no device here, and the run stops (PARSEC_SPIN_FALLBACK_SHARED)."]
+        if layout == "none"
+        else [
+            f"       the calculation starts again {layout};",
+            "       its forces and any later structure are computed there.",
+        ]
+    )
     return [
         "",
         f" NOTE: Spin_Symmetry_Sectors: {getattr(record, 'reason', 'fractional occupations')} after {record.stage}",
         f"       ({getattr(record, 'measure', 'largest min(f, 1-f)')} = {record.largest_fractional_occupation:.3E}, "
         f"kept only below {record.tolerance:.0E}).",
         "       The symmetry sectors cannot hold a density that breaks the point group of the atoms;",
-        "       the calculation starts again on the full grid (Spin_Symmetry_Sectors: off).",
+        *where,
         *(f"       {line}" for line in record.multiplets),
         "",
     ]
@@ -1618,6 +1709,9 @@ class ParsecTextReporter:
         self.write = write
         self.translation = translation
         self.problem = translation.problem
+        # A k-point mesh solved as the Gamma point of its supercell of this many cells (PARSEC_KPOINT_SUPERCELL=auto,
+        # SCF/kpoint_supercell.py): the energy lines give the energies of one cell of the input, as the k-points.
+        self.cells_in_report = 1
         self._previous_total: float | None = None
         self._diagonalization_total = 0.0
         self._hartree_total = 0.0
@@ -1646,6 +1740,31 @@ class ParsecTextReporter:
         )
         # Two spin channels change the header and the report of every step.
         self._spin = bool(getattr(self.problem.scf, "spin_polarized", False))
+
+    def _orientation(self):
+        """The :class:`~parsec_python.Input.standard_orientation.StandardOrientation` of the run, or ``None``."""
+
+        return getattr(self.translation, "standard_orientation", None)
+
+    def _reported_positions(self, positions) -> np.ndarray:
+        """Positions of the calculation frame as reported: in the frame of the input (``PARSEC_STANDARD_ORIENTATION``)."""
+
+        orientation = self._orientation()
+        positions = np.asarray(positions, dtype=float).reshape(-1, 3)
+        return positions if orientation is None else orientation.to_reference(positions)
+
+    def _reported_vectors(self, vectors) -> np.ndarray:
+        """Forces of the calculation frame as reported (:meth:`_reported_positions`)."""
+
+        orientation = self._orientation()
+        return vectors if orientation is None else orientation.vectors_to_reference(vectors)
+
+    def _reported_forces(self, forces):
+        """A force result of the calculation frame as reported (:meth:`_reported_positions`)."""
+
+        from ..Input.standard_orientation import forces_to_reference
+
+        return forces_to_reference(forces, self._orientation())
 
     def _complex_wavefunctions(self) -> bool:
         scf = self.problem.scf
@@ -2091,11 +2210,11 @@ class ParsecTextReporter:
                     "    x [bohr]          y [bohr]          z [bohr]",
                 ]
             )
-            for atom in atoms:
+            for position in self._reported_positions([atom.position for atom in atoms]):
                 lines.append(
-                    f" {atom.position[0]:16.9f}"
-                    f" {atom.position[1]:16.9f}"
-                    f" {atom.position[2]:16.9f}"
+                    f" {position[0]:16.9f}"
+                    f" {position[1]:16.9f}"
+                    f" {position[2]:16.9f}"
                 )
             # Only for a species with ldaplusu_u/ldaplusu_j.
             lines.extend(hubbard_parameter_lines(specification))
@@ -2143,6 +2262,8 @@ class ParsecTextReporter:
                 *hubbard_setup_lines(system),
                 # initial.f90:201-228, only for a slab it re-centred along z.
                 *slab_recentring_lines(self.translation),
+                # PARSEC_STANDARD_ORIENTATION=on, only where it moved the atoms.
+                *standard_orientation_lines(self.translation),
                 "",
                 # The symmetry block of symmetries.f90 (parsec.F90 l.464-492),
                 # for the report: the space group the run uses where it has one
@@ -2285,6 +2406,10 @@ class ParsecTextReporter:
         level = int(getattr(translation, "output_level", 1))
         if group is not None and (group.ignored or not group.crystal_system):
             return [*space_group_lines(group), ""]
+        if mode.info == 2 and not mode.suppressed and periodicity == 2 and group is not None and group.order > 1:
+            # the group of a slab's Monkhorst-Pack mesh (PARSEC_SLAB_MESH_SYMMETRY auto or full), where PARSEC 1.5
+            # searches none: printed as the search with k-points (ierr = 1) would print it
+            return [*space_group_lines(group, info=1, norot=-1, output_level=level), ""]
         if mode.info == 2:
             from ..Grid.space_group import identity_space_group
 
@@ -2345,7 +2470,7 @@ class ParsecTextReporter:
                     forces = forces + point_charge_forces(atoms, potentials, charges)
         except (ValueError, NotImplementedError):
             return []
-        forces = np.asarray(forces, dtype=float)
+        forces = self._reported_vectors(np.asarray(forces, dtype=float))
         lines = [
             "",
             " Forces from ion-ion interaction:",
@@ -2354,8 +2479,8 @@ class ParsecTextReporter:
             "                       [bohr]                             [Ry/bohr]            ",
             "",
         ]
-        for index, (atom, force) in enumerate(zip(atoms, forces), start=1):
-            position = np.asarray(atom.position, dtype=float)
+        positions = self._reported_positions([atom.position for atom in atoms])
+        for index, (position, force) in enumerate(zip(positions, forces), start=1):
             # gfortran does not write the trailing 1x of format 20.
             lines.append(
                 (
@@ -2478,6 +2603,7 @@ class ParsecTextReporter:
         # (The spinor records also carry diagonalization_seconds now: test the type.)
         from ..models import (
             ExchangeLoopIteration,
+            HybridMeshRouteRecord,
             SelfConsistentSOCIteration,
             SpinSectorFallbackRecord,
         )
@@ -2488,6 +2614,10 @@ class ParsecTextReporter:
         if isinstance(step, SpinSectorFallbackRecord):
             # Spin_Symmetry_Sectors: the sector run is not kept.
             self.write("\n".join(spin_sector_fallback_lines(step)))
+            return
+        if isinstance(step, HybridMeshRouteRecord):
+            # PARSEC_HYBRID_KPOINT_WEDGE=auto: the mesh of the Fock loop after the semilocal start.
+            self.write("\n".join(hybrid_mesh_route_lines(step)))
             return
         if isinstance(step, ExchangeLoopIteration):
             # An outer (Fock) iteration of a hybrid functional.
@@ -2507,6 +2637,12 @@ class ParsecTextReporter:
         self._mixing_energy_total += getattr(step, "mixing_energy_seconds", 0.0)
         energies = step.energies
         atom_count = len(self.problem.atoms)
+        if self.cells_in_report != 1:
+            # the supercell of a k-point mesh: the energies (and atoms) of one cell of the input
+            from ..SCF.kpoint_supercell import energies_per_cell
+
+            energies = energies_per_cell(energies, self.cells_in_report)
+            atom_count //= self.cells_in_report
         energy_per_atom_ev = (
             energies.total * RYDBERG_TO_EV / max(atom_count, 1)
         )
@@ -2887,7 +3023,9 @@ class ParsecTextReporter:
             lines.extend(
                 [
                     *force_report_lines(
-                        forces, self.translation.output_level, periodic=self._crystal_report
+                        self._reported_forces(forces),
+                        self.translation.output_level,
+                        periodic=self._crystal_report,
                     ),
                     f"Time for forces [sec] : {forces.seconds:11.2f}",
                     "",
@@ -2925,7 +3063,12 @@ class ParsecTextReporter:
         ):
             return []
         self.last_dipole = cluster_dipole_moment(density, grid, atoms, pseudopotentials)
-        return ["", *dipole_report_lines(self.last_dipole, self.problem.scf.net_charge)]
+        # PARSEC_STANDARD_ORIENTATION: printed about the origin of the frame of the input; the archive keeps the
+        # moment of the calculation frame, with its grid.
+        from ..Input.standard_orientation import dipole_to_reference
+
+        reported = dipole_to_reference(self.last_dipole, self._orientation())
+        return ["", *dipole_report_lines(reported, self.problem.scf.net_charge)]
 
     def _extended_driver_dipole_lines(self, density, atoms) -> list[str]:
         """:meth:`_dipole_lines` with the grid of the prepared system."""
@@ -2970,10 +3113,13 @@ class ParsecTextReporter:
         k-points (``SpinSectorFallbackRecord``, the symmetry guard) has no
         levels of its own: its lines, as :meth:`iteration` writes them.
         """
-        from ..models import SpinSectorFallbackRecord
+        from ..models import HybridMeshRouteRecord, SpinSectorFallbackRecord
 
         if isinstance(step, SpinSectorFallbackRecord):
             self.write("\n".join(spin_sector_fallback_lines(step)))
+            return
+        if isinstance(step, HybridMeshRouteRecord):
+            self.write("\n".join(hybrid_mesh_route_lines(step)))
             return
         energies = step.energies
         atom_count = len(self.problem.atoms)
@@ -3245,6 +3391,21 @@ class ParsecTextReporter:
                 f"   {'Test 3, fractional levels':28s} : {detail['kpoint_guard_fractional_share']:12.4E}"
                 f"   (largest w_k min(f, 1-f); {SPIN_SECTOR_OCCUPATION_TOLERANCE:.0E})"
             )
+        # the inner loops of the Fock loop of a hybrid (PARSEC_KPOINT_SECTOR_GUARD_FOCK): the last one tested
+        if "kpoint_guard_fock_loops" in detail:
+            loops = int(detail["kpoint_guard_fock_loops"])
+            final = "at the final criterion" if detail.get("kpoint_guard_fock_exact") else "at a looser criterion"
+            if "kpoint_guard_fock_density_asymmetry" in detail:
+                lines.append(
+                    f"   {'Test 2, last Fock loop':28s} : {detail['kpoint_guard_fock_density_asymmetry']:12.4E}"
+                    f"   ({DENSITY_SYMMETRY_TOLERANCE:.0E}; {loops} inner loop(s) tested, the last {final},"
+                    f" {int(detail.get('kpoint_guard_fock_tightenings', 0))} tightening(s))"
+                )
+            if "kpoint_guard_fock_fractional_share" in detail:
+                lines.append(
+                    f"   {'Test 3, last Fock loop':28s} : {detail['kpoint_guard_fock_fractional_share']:12.4E}"
+                    f"   ({SPIN_SECTOR_OCCUPATION_TOLERANCE:.0E})"
+                )
         return lines
 
     def finish_spin_polarized(
@@ -3308,7 +3469,9 @@ class ParsecTextReporter:
             ]
         return [
             *force_report_lines(
-                forces, self.translation.output_level, periodic=self._crystal_report
+                self._reported_forces(forces),
+                self.translation.output_level,
+                periodic=self._crystal_report,
             ),
             f"Time for forces [sec] : {forces.seconds:11.2f}",
             "",

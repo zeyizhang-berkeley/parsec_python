@@ -29,8 +29,9 @@ from ..models import AcceleratedSinglePointResult
 # report do. So is the recurrence kernel of the filter that the stencils were
 # built with (PARSEC_CUPY_STENCIL_KERNEL), which an unset variable does not
 # show, and what the Ritz steps of the sectors handed over
-# (PARSEC_CUPY_RITZ_HANDOVER). Everything remains in backend_info; this
-# allowlist controls text presentation only.
+# (PARSEC_CUPY_RITZ_HANDOVER), and the GPUs of the sectors of one process
+# with several (PARSEC_CUPY_SECTOR_PLACEMENT). Everything remains in
+# backend_info; this allowlist controls text presentation only.
 _SUMMARY_DETAIL_KEYS = frozenset({
     "symmetry_cache_directory",
     "finite_difference_builder",
@@ -42,6 +43,7 @@ _SUMMARY_DETAIL_KEYS = frozenset({
     "gpu_stencil_kernel",
     "orbital_sector_stencil_kernel",
     "orbital_sector_ritz_handover",
+    "orbital_sector_placement",
     "orbital_symmetry",
     "hartree_symmetry",
 })
@@ -357,9 +359,11 @@ class AcceleratedTextReporter:
                 f"{details['ionic_setup_seconds']}, wait at its join [sec] = "
                 f"{details['ionic_setup_wait_seconds']}.\n",
             )
-        # Weighted sectors of a larger subgroup (Symmetry/orbital_groups.py): the symmetry block of the
-        # reference above lists PARSEC's Abelian subgroup, the orbitals use the group this line names.
-        weighted = str(details.get("symmetry_detection", "")).startswith("exact point group")
+        # Weighted sectors of a larger subgroup (Symmetry/orbital_groups.py), of a cluster or of a cell (whose group
+        # may hold translations: "exact group of"): the symmetry block of the reference above lists PARSEC's Abelian
+        # subgroup, the orbitals use the group this line names.
+        detection = str(details.get("symmetry_detection", ""))
+        weighted = detection.startswith(("exact point group", "exact group of"))
         if weighted:
             lines.insert(
                 0,
@@ -373,7 +377,16 @@ class AcceleratedTextReporter:
                 # (driver._cluster_full_grid_notes): at every output level.
                 lines.append(f" NOTE: {value}")
                 continue
-            if detailed or key in _SUMMARY_DETAIL_KEYS or (weighted and key == "symmetry_detection"):
+            if key == "spin_flip_symmetry":
+                # PARSEC_SPIN_FLIP_SYMMETRY=auto (driver._spin_flip_route): whether the down channel is taken as the
+                # image of the up channel, a constraint of the state, at every output level.
+                lines.append(f" NOTE: PARSEC_SPIN_FLIP_SYMMETRY={value}")
+                continue
+            # symmetry_detection, the group the orbitals use (or why they use none), at every output level since
+            # 2026-11-19: before, Output_Level 1 named only the weighted sectors of a point group without
+            # translations, so the group of a cell with translations, an abelian group and a group lost or reduced
+            # (a defect off the origin, the palette ladder) went unseen.
+            if detailed or key in _SUMMARY_DETAIL_KEYS or key == "symmetry_detection":
                 lines.append(f" {key} = {value}")
         if not detailed:
             lines.append(" Detailed backend settings: set Output_Level: 2")

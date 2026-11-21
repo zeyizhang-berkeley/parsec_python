@@ -28,6 +28,7 @@ without allocating the full nonlocal image.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import os
 from threading import Lock
 from typing import Any
 
@@ -48,10 +49,87 @@ from .stencil_pipeline import (
 # The kernels read every coefficient through a one-byte code (``unsigned char`` here and in cupy_compact,
 # implicit_stencil and stencil_pipeline): a packed stencil holds at most this many distinct values.
 PALETTE_CAPACITY = 256
+# A symmetry sector's stencil may code its coefficients in two bytes instead (``unsigned short``,
+# PARSEC_SECTOR_PALETTE_CODES): at most this many.
+WIDE_PALETTE_CAPACITY = 65536
+SECTOR_PALETTE_CODES_SWITCH = "PARSEC_SECTOR_PALETTE_CODES"
+_SECTOR_PALETTE_CODES = {
+    "": "auto", "auto": "auto",
+    "on": "on", "1": "on", "true": "on", "yes": "on",
+    "off": "off", "0": "off", "false": "off", "no": "off",
+}
+# The parameter of the codes in both kernels of ``_CUDA_SOURCE`` and of the sources derived from it.
+NARROW_CODES = "const unsigned char* __restrict__ coefficient_codes"
+WIDE_CODES = "const unsigned short* __restrict__ coefficient_codes"
+
+
+def sector_palette_codes_setting() -> str:
+    """``PARSEC_SECTOR_PALETTE_CODES``: ``auto`` (the default, also unset or empty), ``on`` or ``off``.
+
+    The codes by which the packed stencil of a symmetry sector names its coefficients.  ``auto``: one byte where the
+    sector has at most :data:`PALETTE_CAPACITY` distinct coefficients, as before, two bytes (up to
+    :data:`WIDE_PALETTE_CAPACITY`) where it has more: an even repeat of a cubic cell on ``n = 2 mod 4`` points per
+    edge (orbits of several sizes; Si 2x2x2 at Grid_Spacing 0.6 needs 295 at the default order 12) or a cell whose
+    grid steps differ between the axes at a high order keeps the sectors of its group, where one byte sends it down
+    the palette ladder (``PARSEC_SECTOR_PALETTE_LADDER``).  ``on``: two bytes in every sector stencil, the same
+    coefficients in the same order (a measurement setting: the same bits as ``auto``).  ``off``: one byte in every
+    stencil, as before 2026-11-19, and the ladder for a cell beyond it.  ``1/true/yes`` mean ``on`` and
+    ``0/false/no`` ``off``; any other value is an error.
+    """
+
+    raw = os.environ.get(SECTOR_PALETTE_CODES_SWITCH, "auto").strip().lower()
+    try:
+        return _SECTOR_PALETTE_CODES[raw]
+    except KeyError:
+        raise ValueError(f"{SECTOR_PALETTE_CODES_SWITCH} must be auto, on or off, not {raw!r}") from None
+
+
+def sector_palette_capacity(setting: str | None = None) -> int:
+    """The most distinct coefficients a sector stencil may have under ``setting`` (default: the environment)."""
+
+    setting = sector_palette_codes_setting() if setting is None else setting
+    return PALETTE_CAPACITY if setting == "off" else WIDE_PALETTE_CAPACITY
+
+
+def sector_code_dtype(palette_size: int, setting: str | None = None) -> np.dtype:
+    """The dtype of the codes of a sector stencil of ``palette_size`` coefficients under ``setting``.
+
+    ``uint8`` where one byte holds them and ``setting`` is not ``on``, ``uint16`` otherwise;
+    :class:`PaletteOverflow` beyond :func:`sector_palette_capacity`.
+    """
+
+    setting = sector_palette_codes_setting() if setting is None else setting
+    capacity = sector_palette_capacity(setting)
+    if int(palette_size) > capacity:
+        raise PaletteOverflow(f"finite-difference operator has more than {capacity} coefficients")
+    if setting == "on" or int(palette_size) > PALETTE_CAPACITY:
+        return np.dtype(np.uint16)
+    return np.dtype(np.uint8)
+
+
+def code_source(source: str, codes_dtype: Any) -> str:
+    """``source`` (``_CUDA_SOURCE`` or one derived from it) for codes of ``codes_dtype``: itself for ``uint8``."""
+
+    dtype = np.dtype(codes_dtype)
+    if dtype == np.uint8:
+        return source
+    if dtype != np.uint16:
+        raise ValueError(f"stencil coefficient codes must be uint8 or uint16, not {dtype}")
+    if source.count(NARROW_CODES) != 2:
+        raise RuntimeError("production stencil ABI changed")
+    return source.replace(NARROW_CODES, WIDE_CODES)
+
+
+def _checked_codes(codes: Any) -> np.ndarray:
+    """``codes`` as ``uint16`` where they are, else as ``uint8`` (the conversion of before)."""
+
+    codes = np.asarray(codes)
+    return codes if codes.dtype == np.uint16 else np.asarray(codes, dtype=np.uint8)
 
 
 class PaletteOverflow(ValueError):
-    """A stencil has more distinct coefficients than its palette holds (:data:`PALETTE_CAPACITY`).
+    """A stencil has more distinct coefficients than its palette holds (:data:`PALETTE_CAPACITY`, or
+    :data:`WIDE_PALETTE_CAPACITY` for the two-byte codes of a symmetry sector).
 
     A ``ValueError``, as before; not a ``SectorStencilUnavailable`` of the direct sector builder, whose CSR route packs
     the same values into the same palette.
@@ -281,7 +359,7 @@ _KERNEL_CACHE: dict[Any, Any] = {}
 _KERNEL_CACHE_LOCK = Lock()
 
 
-def _compiled_kernels(cp: Any, slot_count: int) -> StencilKernels:
+def _compiled_kernels(cp: Any, slot_count: int, codes_dtype: Any = np.uint8) -> StencilKernels:
     """Compile each device's invariant stencil kernels exactly once.
 
     Every full-grid or representation operator uses the same CUDA source and
@@ -292,15 +370,20 @@ def _compiled_kernels(cp: Any, slot_count: int) -> StencilKernels:
     (:func:`.stencil_pipeline.compiled_kernels`): the former pair is kept per
     device, as it always was, and the recurrence kernel of
     ``PARSEC_CUPY_STENCIL_KERNEL=pipelined`` per device and slot count beside
-    it, or why it could not be built.
+    it, or why it could not be built.  A stencil of two-byte codes
+    (``codes_dtype`` ``uint16``, :func:`sector_palette_codes_setting`) has
+    kernels of its own, compiled from the same source with that one parameter
+    type changed, under the key ``(device, "uint16")``.
     """
 
+    wide = np.dtype(codes_dtype) == np.uint16
+    device = int(cp.cuda.Device().id)
     return compiled_kernels(
         cp,
         _KERNEL_CACHE,
         _KERNEL_CACHE_LOCK,
-        int(cp.cuda.Device().id),
-        _CUDA_SOURCE,
+        (device, "uint16") if wide else device,
+        code_source(_CUDA_SOURCE, codes_dtype),
         0,
         slot_count,
         stencil_kernel_setting(),
@@ -310,8 +393,15 @@ def _compiled_kernels(cp: Any, slot_count: int) -> StencilKernels:
 
 def _stencil_major_metadata(
     matrix: sp.spmatrix,
+    codes: str | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Transpose canonical CSR rows into contiguous per-slot arrays."""
+    """Transpose canonical CSR rows into contiguous per-slot arrays.
+
+    ``codes``: ``None`` codes the coefficients in one byte, as always; a value
+    of ``PARSEC_SECTOR_PALETTE_CODES`` (the stencil of a symmetry sector,
+    reduced from the full-grid matrix) codes them as that value says
+    (:func:`sector_code_dtype`).
+    """
 
     host = sp.csr_matrix(matrix, dtype=np.float64)
     host.sum_duplicates()
@@ -320,10 +410,12 @@ def _stencil_major_metadata(
         raise ValueError("finite-difference operator must be square")
     if host.shape[0] > np.iinfo(np.int32).max:
         raise ValueError("stencil-major CUDA storage requires int32 grid rows")
-    encoded = _coefficient_palette(host.data)
+    capacity = PALETTE_CAPACITY if codes is None else sector_palette_capacity(codes)
+    encoded = _coefficient_palette(host.data, capacity)
     if encoded is None:
-        raise PaletteOverflow(f"finite-difference operator has more than {PALETTE_CAPACITY} coefficients")
+        raise PaletteOverflow(f"finite-difference operator has more than {capacity} coefficients")
     palette, csr_codes = encoded
+    code_dtype = np.dtype(np.uint8) if codes is None else sector_code_dtype(palette.size, codes)
 
     row_count = int(host.shape[0])
     row_widths = np.diff(host.indptr)
@@ -334,7 +426,7 @@ def _stencil_major_metadata(
     # C-order (slot, row) arrays flatten exactly as slot*row_count + row,
     # giving coalesced reads to adjacent CUDA row threads.
     neighbors = np.full((slot_count, row_count), -1, dtype=np.int32)
-    codes = np.zeros((slot_count, row_count), dtype=np.uint8)
+    slot_codes = np.zeros((slot_count, row_count), dtype=code_dtype)
     row_starts = host.indptr[:-1]
     for slot in range(slot_count):
         active = row_widths > slot
@@ -342,13 +434,19 @@ def _stencil_major_metadata(
         neighbors[slot, active] = host.indices[positions].astype(
             np.int32, copy=False
         )
-        codes[slot, active] = csr_codes[positions]
-    return neighbors, codes, palette
+        slot_codes[slot, active] = csr_codes[positions]
+    return neighbors, slot_codes, palette
 
 
 @dataclass(frozen=True)
 class StencilMajorHostMetadata:
-    """GPU-ready host representation of one canonical stencil matrix."""
+    """GPU-ready host representation of one canonical stencil matrix.
+
+    The codes are one byte each (``uint8``, a palette of at most 256
+    coefficients) or, for a symmetry sector that needs more, two
+    (``uint16``, at most 65536; ``PARSEC_SECTOR_PALETTE_CODES``).  Codes of
+    any other dtype are converted to ``uint8``, as before.
+    """
 
     shape: tuple[int, int]
     neighbors: np.ndarray
@@ -360,13 +458,14 @@ class StencilMajorHostMetadata:
         if rows < 1 or rows != columns:
             raise ValueError("stencil metadata shape must be positive and square")
         neighbors = np.asarray(self.neighbors, dtype=np.int32)
-        codes = np.asarray(self.coefficient_codes, dtype=np.uint8)
+        codes = _checked_codes(self.coefficient_codes)
         palette = np.asarray(self.coefficient_palette, dtype=np.float64)
         if neighbors.ndim != 2 or neighbors.shape[1] != rows:
             raise ValueError("stencil neighbor metadata has an invalid shape")
         if codes.shape != neighbors.shape:
             raise ValueError("stencil coefficient codes do not match neighbors")
-        if palette.ndim != 1 or not 1 <= palette.size <= 256:
+        capacity = WIDE_PALETTE_CAPACITY if codes.dtype == np.uint16 else PALETTE_CAPACITY
+        if palette.ndim != 1 or not 1 <= palette.size <= capacity:
             raise ValueError("stencil coefficient palette has an invalid shape")
         active_codes = codes[neighbors >= 0]
         if active_codes.size and int(active_codes.max()) >= palette.size:
@@ -377,7 +476,7 @@ class StencilMajorHostMetadata:
         object.__setattr__(
             self,
             "coefficient_codes",
-            np.ascontiguousarray(codes, dtype=np.uint8),
+            np.ascontiguousarray(codes),
         )
         object.__setattr__(
             self,
@@ -401,11 +500,18 @@ class StencilMajorHostMetadata:
 
 def build_stencil_major_metadata(
     matrix: sp.spmatrix,
+    *,
+    codes: str | None = None,
 ) -> StencilMajorHostMetadata:
-    """Create exact GPU-ready metadata from one canonical sparse matrix."""
+    """Create exact GPU-ready metadata from one canonical sparse matrix.
+
+    ``codes``: ``None`` (one-byte codes, as always) or the value of
+    ``PARSEC_SECTOR_PALETTE_CODES`` for the stencil of a symmetry sector
+    (:func:`sector_code_dtype`).
+    """
 
     host = sp.csr_matrix(matrix, dtype=np.float64)
-    neighbors, codes, palette = _stencil_major_metadata(host)
+    neighbors, codes, palette = _stencil_major_metadata(host, codes)
     return StencilMajorHostMetadata(
         shape=tuple(map(int, host.shape)),
         neighbors=neighbors,
@@ -461,7 +567,7 @@ class CuPyStencilMajorFiniteDifference:
             self.neighbors = device_neighbors
         self.coefficient_codes = cp.asarray(codes)
         self.coefficient_palette = cp.asarray(palette, dtype=cp.float64)
-        self.hold_kernels(_compiled_kernels(cp, self.slot_count))
+        self.hold_kernels(_compiled_kernels(cp, self.slot_count, codes.dtype))
 
     def hold_kernels(self, kernels: StencilKernels | tuple[Any, Any, Any]) -> None:
         """Keep the apply, recurrence and former recurrence kernels of the stencil.
@@ -552,10 +658,17 @@ class CuPyStencilMajorFiniteDifference:
         return self.stencil_kernel_setting
 
     @property
+    def code_bytes(self) -> int:
+        """The bytes of each coefficient code: 1, or 2 for a sector stencil of more than 256 coefficients."""
+
+        return int(self.coefficient_codes.dtype.itemsize)
+
+    @property
     def storage_mode(self) -> str:
+        wide = self.code_bytes == 2
         if hasattr(self, "implicit_statistics"):
-            return f"implicit_affine_tile_{self.implicit_statistics['tile']}"
-        return "stencil_major_int32_neighbors_uint8_coefficient_palette"
+            return f"implicit_affine_tile_{self.implicit_statistics['tile']}" + ("_uint16_codes" if wide else "")
+        return f"stencil_major_int32_neighbors_{'uint16' if wide else 'uint8'}_coefficient_palette"
 
     @property
     def stencil_kernel_attributes(self) -> dict[str, dict[str, int]]:
@@ -817,8 +930,14 @@ class CuPyStencilMajorFiniteDifference:
 
 __all__ = [
     "PALETTE_CAPACITY",
+    "SECTOR_PALETTE_CODES_SWITCH",
+    "WIDE_PALETTE_CAPACITY",
     "CuPyStencilMajorFiniteDifference",
     "PaletteOverflow",
     "StencilMajorHostMetadata",
     "build_stencil_major_metadata",
+    "code_source",
+    "sector_code_dtype",
+    "sector_palette_capacity",
+    "sector_palette_codes_setting",
 ]

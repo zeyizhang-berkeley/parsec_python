@@ -4,7 +4,7 @@
   PARSEC-PYTHON - Modular real-space DFT program
   PARSEC-like report; Python real-space implementation
 
- starting run on 08-Nov-2026 04:15:21 -0800
+ starting run on 20-Nov-2026 14:41:04 -0800
  input file: examples/0d_meta_gga/NH3/tpss/parsec.in
 
  =================================================================
@@ -173,17 +173,19 @@ WARNING: Use_LibXC: PARSEC 1.5 evaluates the first SCF iteration of every libxc 
 
  Setup timings [sec]
  --------------------------------------------------
- Pseudopotential loading       :     0.012606
- Grid-domain construction      :     0.039979
- Finite-difference construction:     0.010893
- Local ionic potential setup   :     0.044374
- Nonlocal ionic projector setup:     0.009938
- Initial valence-density setup :     0.014623
- Core-density setup            :     0.000988
- Ion-ion energy setup           :     0.000147
- Hartree boundary estimate/tail :     0.058109
- Preparation wall time          :     0.191844
+ Pseudopotential loading       :     0.013498
+ Grid-domain construction      :     0.042745
+ Finite-difference construction:     0.011240
+ Local ionic potential setup   :     0.444265
+ Nonlocal ionic projector setup:     0.009240
+ Initial valence-density setup :     0.026712
+ Core-density setup            :     0.001758
+ Ion-ion energy setup           :     0.000214
+ Hartree boundary estimate/tail :     0.061710
+ Preparation wall time          :     0.138633
  --------------------------------------------------
+
+ The local ionic, density and ion-ion setups above ran on a thread beside the symmetry and sector setup and are not part of the preparation wall time.  Thread [sec] = 0.473231, wait at its join [sec] = 0.000029.
 
  The reference setup above describes the constructed full grid.  The GPU orbital solve is decomposed into the exact symmetry representations reported below.
 
@@ -195,6 +197,7 @@ WARNING: Use_LibXC: PARSEC 1.5 evaluates the first SCF iteration of every libxc 
  Device            = CUDA:0 (NVIDIA A100-SXM4-80GB)
  gpu_stencil_kernel = deferred_to_symmetry_sector_operators
  gpu_later_subspace_filter_precision = deferred_to_symmetry_sector_operators
+ symmetry_detection = exact Cartesian axis-reflection subgroup detected
  symmetry_cache_directory = disabled
  orbital_symmetry = CuPy real one-dimensional reflection representations
  finite_difference_builder = C++17 compressed-grid CSR builder (exact stencil parity)
@@ -206,18 +209,18 @@ WARNING: Use_LibXC: PARSEC 1.5 evaluates the first SCF iteration of every libxc 
  hartree_symmetry = normalized Cartesian axis-reflection wedge
  native_openmp_max_threads = 16
  Detailed backend settings: set Output_Level: 2
- Backend initialization [sec] =     0.193072
+ Backend initialization [sec] =     0.106380
 
  Execution resources:
  --------------------
  Device            = GPU (gpu, --gpus)
  GPUs              = 1 of 1 visible, index 0; --gpus 1
- CPU threads       = 16 of 128 CPUs allowed (affinity of the process); OMP_NUM_THREADS=16
+ CPU threads       = 16 of 32 CPUs allowed (affinity of the process); OMP_NUM_THREADS=16
 
  SCF iter #   1
 
- Diagonalization time [sec] :       2.55,      tdiag_sum =        2.55
- Iteration time [sec]       :       3.06
+ Diagonalization time [sec] :       1.40,      tdiag_sum =        1.40
+ Iteration time [sec]       :       1.63
 
  Eigensolver residual max [Ry] :   4.2547e-03
 
@@ -236,7 +239,7 @@ WARNING: Use_LibXC: PARSEC 1.5 evaluates the first SCF iteration of every libxc 
 
  Max and min values of charge density [e/bohr^3]:   8.1806E-01   4.4490E-15
 
- Hartree potential time [sec]:       0.13
+ Hartree potential time [sec]:       0.12
 
    Eigenvalue Energy             =         -10.40391976 [Ry]
    Hartree Energy                =          39.47978432 [Ry]
@@ -253,8 +256,8 @@ WARNING: Use_LibXC: PARSEC 1.5 evaluates the first SCF iteration of every libxc 
 
  SCF iter #   2
 
- Diagonalization time [sec] :       0.42,      tdiag_sum =        2.97
- Iteration time [sec]       :       0.70
+ Diagonalization time [sec] :       0.26,      tdiag_sum =        1.65
+ Iteration time [sec]       :       0.47
 
  Fermi level at    -0.3641 [Ry]
 
@@ -289,8 +292,8 @@ WARNING: Use_LibXC: PARSEC 1.5 evaluates the first SCF iteration of every libxc 
 
  SCF iter #   3
 
- Diagonalization time [sec] :       0.26,      tdiag_sum =        3.23
- Iteration time [sec]       :       0.51
+ Diagonalization time [sec] :       0.25,      tdiag_sum =        1.91
+ Iteration time [sec]       :       0.48
 
  Fermi level at    -0.3139 [Ry]
 
@@ -321,12 +324,12 @@ WARNING: Use_LibXC: PARSEC 1.5 evaluates the first SCF iteration of every libxc 
    Total Energy =           -23.47351939 [Ry]
    Energy/atom  =           -79.84400253 [eV]
 
-  0-  3    SRE of pot. & charge weighted pot =   1.0975813067   0.0754774677
+  0-  3    SRE of pot. & charge weighted pot =   1.0975813066   0.0754774677
 
  SCF iter #   4
 
- Diagonalization time [sec] :       0.26,      tdiag_sum =        3.49
- Iteration time [sec]       :       0.51
+ Diagonalization time [sec] :       0.25,      tdiag_sum =        2.16
+ Iteration time [sec]       :       0.49
 
  Fermi level at    -0.3358 [Ry]
 
@@ -343,7 +346,7 @@ WARNING: Use_LibXC: PARSEC 1.5 evaluates the first SCF iteration of every libxc 
 
  Max and min values of charge density [e/bohr^3]:   6.9096E-01   2.9160E-12
 
- Hartree potential time [sec]:       0.13
+ Hartree potential time [sec]:       0.12
 
    Eigenvalue Energy             =          -7.62022125 [Ry]
    Hartree Energy                =          36.41503316 [Ry]
@@ -361,8 +364,8 @@ WARNING: Use_LibXC: PARSEC 1.5 evaluates the first SCF iteration of every libxc 
 
  SCF iter #   5
 
- Diagonalization time [sec] :       0.26,      tdiag_sum =        3.76
- Iteration time [sec]       :       0.52
+ Diagonalization time [sec] :       0.25,      tdiag_sum =        2.41
+ Iteration time [sec]       :       0.50
 
  Fermi level at    -0.3238 [Ry]
 
@@ -379,7 +382,7 @@ WARNING: Use_LibXC: PARSEC 1.5 evaluates the first SCF iteration of every libxc 
 
  Max and min values of charge density [e/bohr^3]:   6.7308E-01   3.1148E-12
 
- Hartree potential time [sec]:       0.13
+ Hartree potential time [sec]:       0.12
 
    Eigenvalue Energy             =          -7.33204355 [Ry]
    Hartree Energy                =          36.05979047 [Ry]
@@ -397,17 +400,17 @@ WARNING: Use_LibXC: PARSEC 1.5 evaluates the first SCF iteration of every libxc 
 
  SCF iter #   6
 
- Diagonalization time [sec] :       0.26,      tdiag_sum =        4.02
- Iteration time [sec]       :       0.52
+ Diagonalization time [sec] :       0.25,      tdiag_sum =        2.67
+ Iteration time [sec]       :       0.50
 
  Fermi level at    -0.3224 [Ry]
 
    State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
     1        -1.5704931910       -21.3678162586    1.0000        1
-    2        -0.8284185799       -11.2712975144    1.0000        1
+    2        -0.8284185799       -11.2712975145    1.0000        1
     3        -0.8277747746       -11.2625380279    1.0000        2
-    4        -0.4384595069        -5.9655923583    1.0000        1
+    4        -0.4384595069        -5.9655923584    1.0000        1
     5        -0.0395171619        -0.5376626014    0.0000        1
     6         0.0617535886         0.8402069758    0.0000        2
     7         0.0631321877         0.8589639189    0.0000        1
@@ -433,8 +436,8 @@ WARNING: Use_LibXC: PARSEC 1.5 evaluates the first SCF iteration of every libxc 
 
  SCF iter #   7
 
- Diagonalization time [sec] :       0.26,      tdiag_sum =        4.28
- Iteration time [sec]       :       0.51
+ Diagonalization time [sec] :       0.25,      tdiag_sum =        2.92
+ Iteration time [sec]       :       0.50
 
  Fermi level at    -0.3238 [Ry]
 
@@ -447,11 +450,11 @@ WARNING: Use_LibXC: PARSEC 1.5 evaluates the first SCF iteration of every libxc 
     5        -0.0386850643        -0.5263412473    0.0000        1
     6         0.0640579935         0.8715602483    0.0000        2
     7         0.0648067706         0.8817479598    0.0000        1
-    8         0.0837806358         1.1399025747    0.0000        1
+    8         0.0837806358         1.1399025748    0.0000        1
 
  Max and min values of charge density [e/bohr^3]:   6.6884E-01   2.0718E-13
 
- Hartree potential time [sec]:       0.13
+ Hartree potential time [sec]:       0.12
 
    Eigenvalue Energy             =          -7.42363893 [Ry]
    Hartree Energy                =          36.01224069 [Ry]
@@ -469,7 +472,7 @@ WARNING: Use_LibXC: PARSEC 1.5 evaluates the first SCF iteration of every libxc 
 
  SCF iter #   8
 
- Diagonalization time [sec] :       0.26,      tdiag_sum =        4.54
+ Diagonalization time [sec] :       0.25,      tdiag_sum =        3.18
  Iteration time [sec]       :       0.51
 
  Fermi level at    -0.3228 [Ry]
@@ -505,8 +508,8 @@ WARNING: Use_LibXC: PARSEC 1.5 evaluates the first SCF iteration of every libxc 
 
  SCF iter #   9
 
- Diagonalization time [sec] :       0.26,      tdiag_sum =        4.81
- Iteration time [sec]       :       0.52
+ Diagonalization time [sec] :       0.25,      tdiag_sum =        3.43
+ Iteration time [sec]       :       0.51
 
  Fermi level at    -0.3233 [Ry]
 
@@ -514,7 +517,7 @@ WARNING: Use_LibXC: PARSEC 1.5 evaluates the first SCF iteration of every libxc 
 
     1        -1.5826034528       -21.5325860586    1.0000        1
     2        -0.8382633573       -11.4052435873    1.0000        1
-    3        -0.8382352154       -11.4048606933    1.0000        2
+    3        -0.8382352154       -11.4048606932    1.0000        2
     4        -0.4511962276        -6.1388856334    1.0000        1
     5        -0.0383316933        -0.5215333526    0.0000        1
     6         0.0643713037         0.8758230834    0.0000        1
@@ -541,21 +544,21 @@ WARNING: Use_LibXC: PARSEC 1.5 evaluates the first SCF iteration of every libxc 
 
  SCF iter #  10
 
- Diagonalization time [sec] :       0.26,      tdiag_sum =        5.07
- Iteration time [sec]       :       0.53
+ Diagonalization time [sec] :       0.25,      tdiag_sum =        3.68
+ Iteration time [sec]       :       0.51
 
  Fermi level at    -0.3233 [Ry]
 
    State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
-    1        -1.5842798660       -21.5553950013    1.0000        1
-    2        -0.8396961763       -11.4247382355    1.0000        2
-    3        -0.8396653311       -11.4243185614    1.0000        1
-    4        -0.4530034635        -6.1634745232    1.0000        1
+    1        -1.5842798660       -21.5553950012    1.0000        1
+    2        -0.8396961763       -11.4247382353    1.0000        2
+    3        -0.8396653311       -11.4243185612    1.0000        1
+    4        -0.4530034635        -6.1634745230    1.0000        1
     5        -0.0381375800        -0.5188922860    0.0000        1
-    6         0.0646079505         0.8790428531    0.0000        1
-    7         0.0651057789         0.8858162071    0.0000        2
-    8         0.0849095511         1.1552623698    0.0000        1
+    6         0.0646079505         0.8790428530    0.0000        1
+    7         0.0651057789         0.8858162070    0.0000        2
+    8         0.0849095511         1.1552623697    0.0000        1
 
  Max and min values of charge density [e/bohr^3]:   6.6396E-01   3.5035E-13
 
@@ -573,25 +576,25 @@ WARNING: Use_LibXC: PARSEC 1.5 evaluates the first SCF iteration of every libxc 
    Total Energy =           -23.48447014 [Ry]
    Energy/atom  =           -79.88125097 [eV]
 
-  0- 10    SRE of pot. & charge weighted pot =   0.2750686789   0.0037729081
+  0- 10    SRE of pot. & charge weighted pot =   0.2750686795   0.0037729081
 
  SCF iter #  11
 
- Diagonalization time [sec] :       0.26,      tdiag_sum =        5.33
+ Diagonalization time [sec] :       0.25,      tdiag_sum =        3.94
  Iteration time [sec]       :       0.51
 
  Fermi level at    -0.3228 [Ry]
 
    State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
-    1        -1.5849335810       -21.5642893157    1.0000        1
+    1        -1.5849335810       -21.5642893158    1.0000        1
     2        -0.8403646022       -11.4338327052    1.0000        1
     3        -0.8403531236       -11.4336765294    1.0000        2
     4        -0.4538435801        -6.1749049822    1.0000        1
     5        -0.0380178871        -0.5172637686    0.0000        1
-    6         0.0648342400         0.8821217020    0.0000        1
-    7         0.0654534774         0.8905469234    0.0000        2
-    8         0.0856987039         1.1659994252    0.0000        1
+    6         0.0648342399         0.8821217019    0.0000        1
+    7         0.0654534774         0.8905469233    0.0000        2
+    8         0.0856987039         1.1659994251    0.0000        1
 
  Max and min values of charge density [e/bohr^3]:   6.6326E-01   3.4672E-13
 
@@ -609,25 +612,25 @@ WARNING: Use_LibXC: PARSEC 1.5 evaluates the first SCF iteration of every libxc 
    Total Energy =           -23.48451288 [Ry]
    Energy/atom  =           -79.88139634 [eV]
 
-  0- 11    SRE of pot. & charge weighted pot =   0.2161284286   0.0042636223
+  0- 11    SRE of pot. & charge weighted pot =   0.2161284299   0.0042636223
 
  SCF iter #  12
 
- Diagonalization time [sec] :       0.26,      tdiag_sum =        5.60
- Iteration time [sec]       :       0.51
+ Diagonalization time [sec] :       0.25,      tdiag_sum =        4.19
+ Iteration time [sec]       :       0.50
 
  Fermi level at    -0.3216 [Ry]
 
    State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
-    1        -1.5912064616       -21.6496368748    1.0000        1
-    2        -0.8458362895       -11.5082793873    1.0000        2
-    3        -0.8457603766       -11.5072465318    1.0000        1
-    4        -0.4606600876        -6.2676490200    1.0000        1
+    1        -1.5912064616       -21.6496368757    1.0000        1
+    2        -0.8458362895       -11.5082793881    1.0000        2
+    3        -0.8457603766       -11.5072465326    1.0000        1
+    4        -0.4606600877        -6.2676490209    1.0000        1
     5        -0.0368815153        -0.5018025211    0.0000        1
-    6         0.0675321934         0.9188295168    0.0000        1
-    7         0.0677205913         0.9213928215    0.0000        2
-    8         0.0893776471         1.2160543914    0.0000        1
+    6         0.0675321934         0.9188295170    0.0000        1
+    7         0.0677205913         0.9213928216    0.0000        2
+    8         0.0893776472         1.2160543917    0.0000        1
 
  Max and min values of charge density [e/bohr^3]:   6.6524E-01   4.5687E-13
 
@@ -645,29 +648,29 @@ WARNING: Use_LibXC: PARSEC 1.5 evaluates the first SCF iteration of every libxc 
    Total Energy =           -23.48451248 [Ry]
    Energy/atom  =           -79.88139498 [eV]
 
-  0- 12    SRE of pot. & charge weighted pot =   0.1320836213   0.0089882675
+  0- 12    SRE of pot. & charge weighted pot =   0.1320836239   0.0089882677
 
  SCF iter #  13
 
- Diagonalization time [sec] :       0.26,      tdiag_sum =        5.86
- Iteration time [sec]       :       0.52
+ Diagonalization time [sec] :       0.25,      tdiag_sum =        4.44
+ Iteration time [sec]       :       0.50
 
  Fermi level at    -0.3223 [Ry]
 
    State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
-    1        -1.5844586249       -21.5578271584    1.0000        1
-    2        -0.8399439535       -11.4281094424    1.0000        1
-    3        -0.8398983758       -11.4274893212    1.0000        2
-    4        -0.4534034354        -6.1689164617    1.0000        1
-    5        -0.0377099386        -0.5130738829    0.0000        1
-    6         0.0650392273         0.8849107185    0.0000        1
-    7         0.0658482522         0.8959181495    0.0000        2
-    8         0.0861964626         1.1727718315    0.0000        1
+    1        -1.5844586248       -21.5578271578    1.0000        1
+    2        -0.8399439535       -11.4281094420    1.0000        1
+    3        -0.8398983757       -11.4274893207    1.0000        2
+    4        -0.4534034354        -6.1689164611    1.0000        1
+    5        -0.0377099386        -0.5130738830    0.0000        1
+    6         0.0650392273         0.8849107182    0.0000        1
+    7         0.0658482522         0.8959181493    0.0000        2
+    8         0.0861964626         1.1727718311    0.0000        1
 
  Max and min values of charge density [e/bohr^3]:   6.6229E-01   2.2147E-13
 
- Hartree potential time [sec]:       0.13
+ Hartree potential time [sec]:       0.12
 
    Eigenvalue Energy             =          -7.43540878 [Ry]
    Hartree Energy                =          35.92776654 [Ry]
@@ -681,12 +684,12 @@ WARNING: Use_LibXC: PARSEC 1.5 evaluates the first SCF iteration of every libxc 
    Total Energy =           -23.48454623 [Ry]
    Energy/atom  =           -79.88150976 [eV]
 
-  0- 13    SRE of pot. & charge weighted pot =   0.2316576491   0.0059050027
+  0- 13    SRE of pot. & charge weighted pot =   0.2316576515   0.0059050027
 
  SCF iter #  14
 
- Diagonalization time [sec] :       0.27,      tdiag_sum =        6.13
- Iteration time [sec]       :       0.53
+ Diagonalization time [sec] :       0.25,      tdiag_sum =        4.70
+ Iteration time [sec]       :       0.50
 
  Fermi level at    -0.3217 [Ry]
 
@@ -697,7 +700,7 @@ WARNING: Use_LibXC: PARSEC 1.5 evaluates the first SCF iteration of every libxc 
     3        -0.8426084485       -11.4643620290    1.0000        2
     4        -0.4567343087        -6.2142356568    1.0000        1
     5        -0.0372014907        -0.5061560419    0.0000        1
-    6         0.0663305008         0.9024795278    0.0000        1
+    6         0.0663305008         0.9024795277    0.0000        1
     7         0.0669226597         0.9105363240    0.0000        2
     8         0.0880506734         1.1979998518    0.0000        1
 
@@ -717,12 +720,12 @@ WARNING: Use_LibXC: PARSEC 1.5 evaluates the first SCF iteration of every libxc 
    Total Energy =           -23.48456681 [Ry]
    Energy/atom  =           -79.88157977 [eV]
 
-  0- 14    SRE of pot. & charge weighted pot =   0.0646565294   0.0003693229
+  0- 14    SRE of pot. & charge weighted pot =   0.0646565296   0.0003693229
 
  SCF iter #  15
 
- Diagonalization time [sec] :       0.26,      tdiag_sum =        6.39
- Iteration time [sec]       :       0.51
+ Diagonalization time [sec] :       0.25,      tdiag_sum =        4.95
+ Iteration time [sec]       :       0.50
 
  Fermi level at    -0.3216 [Ry]
 
@@ -731,8 +734,8 @@ WARNING: Use_LibXC: PARSEC 1.5 evaluates the first SCF iteration of every libxc 
     1        -1.5877899188       -21.6031520777    1.0000        1
     2        -0.8428309994       -11.4673900121    1.0000        1
     3        -0.8428163038       -11.4671900667    1.0000        2
-    4        -0.4569826441        -6.2176144595    1.0000        1
-    5        -0.0371241564        -0.5051038476    0.0000        1
+    4        -0.4569826441        -6.2176144594    1.0000        1
+    5        -0.0371241564        -0.5051038477    0.0000        1
     6         0.0664696368         0.9043725845    0.0000        1
     7         0.0670756621         0.9126180435    0.0000        2
     8         0.0883406938         1.2019458120    0.0000        1
@@ -753,11 +756,11 @@ WARNING: Use_LibXC: PARSEC 1.5 evaluates the first SCF iteration of every libxc 
    Total Energy =           -23.48457247 [Ry]
    Energy/atom  =           -79.88159903 [eV]
 
-  0- 15    SRE of pot. & charge weighted pot =   0.0505208600   0.0001704943
+  0- 15    SRE of pot. & charge weighted pot =   0.0505208604   0.0001704943
 
  SCF iter #  16
 
- Diagonalization time [sec] :       0.26,      tdiag_sum =        6.65
+ Diagonalization time [sec] :       0.25,      tdiag_sum =        5.21
  Iteration time [sec]       :       0.50
 
  Fermi level at    -0.3213 [Ry]
@@ -789,24 +792,24 @@ WARNING: Use_LibXC: PARSEC 1.5 evaluates the first SCF iteration of every libxc 
    Total Energy =           -23.48457564 [Ry]
    Energy/atom  =           -79.88160982 [eV]
 
-  0- 16    SRE of pot. & charge weighted pot =   0.0144890830   0.0005924056
+  0- 16    SRE of pot. & charge weighted pot =   0.0144890832   0.0005924056
 
  SCF iter #  17
 
- Diagonalization time [sec] :       0.26,      tdiag_sum =        6.91
- Iteration time [sec]       :       0.51
+ Diagonalization time [sec] :       0.25,      tdiag_sum =        5.46
+ Iteration time [sec]       :       0.50
 
  Fermi level at    -0.3213 [Ry]
 
    State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
-    1        -1.5881038202       -21.6074229567    1.0000        1
-    2        -0.8431257988       -11.4714009932    1.0000        1
-    3        -0.8430999496       -11.4710492937    1.0000        2
-    4        -0.4573117761        -6.2220925630    1.0000        1
-    5        -0.0370564748        -0.5041829855    0.0000        1
+    1        -1.5881038202       -21.6074229568    1.0000        1
+    2        -0.8431257988       -11.4714009933    1.0000        1
+    3        -0.8430999496       -11.4710492938    1.0000        2
+    4        -0.4573117761        -6.2220925631    1.0000        1
+    5        -0.0370564748        -0.5041829854    0.0000        1
     6         0.0666600242         0.9069629572    0.0000        1
-    7         0.0672677161         0.9152310923    0.0000        2
+    7         0.0672677162         0.9152310924    0.0000        2
     8         0.0888484251         1.2088539026    0.0000        1
 
  Max and min values of charge density [e/bohr^3]:   6.6256E-01   1.6586E-13
@@ -825,29 +828,29 @@ WARNING: Use_LibXC: PARSEC 1.5 evaluates the first SCF iteration of every libxc 
    Total Energy =           -23.48457795 [Ry]
    Energy/atom  =           -79.88161768 [eV]
 
-  0- 17    SRE of pot. & charge weighted pot =   0.0104223851   0.0000572106
+  0- 17    SRE of pot. & charge weighted pot =   0.0104223858   0.0000572107
 
  SCF iter #  18
 
- Diagonalization time [sec] :       0.25,      tdiag_sum =        7.16
- Iteration time [sec]       :       0.49
+ Diagonalization time [sec] :       0.24,      tdiag_sum =        5.70
+ Iteration time [sec]       :       0.50
 
  Fermi level at    -0.3213 [Ry]
 
    State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
-    1        -1.5881143664       -21.6075664464    1.0000        1
+    1        -1.5881143664       -21.6075664465    1.0000        1
     2        -0.8431429864       -11.4716348448    1.0000        1
     3        -0.8431156073       -11.4712623294    1.0000        2
-    4        -0.4573256804        -6.2222817430    1.0000        1
+    4        -0.4573256805        -6.2222817431    1.0000        1
     5        -0.0370840477        -0.5045581358    0.0000        1
     6         0.0666211569         0.9064341368    0.0000        1
-    7         0.0672453945         0.9149273885    0.0000        2
-    8         0.0888687457         1.2091303802    0.0000        1
+    7         0.0672453945         0.9149273886    0.0000        2
+    8         0.0888687457         1.2091303803    0.0000        1
 
  Max and min values of charge density [e/bohr^3]:   6.6249E-01   1.5421E-13
 
- Hartree potential time [sec]:       0.13
+ Hartree potential time [sec]:       0.12
 
    Eigenvalue Energy             =          -7.46339728 [Ry]
    Hartree Energy                =          35.93925578 [Ry]
@@ -861,25 +864,25 @@ WARNING: Use_LibXC: PARSEC 1.5 evaluates the first SCF iteration of every libxc 
    Total Energy =           -23.48457914 [Ry]
    Energy/atom  =           -79.88162170 [eV]
 
-  0- 18    SRE of pot. & charge weighted pot =   0.0094695952   0.0001820746
+  0- 18    SRE of pot. & charge weighted pot =   0.0094695948   0.0001820746
 
  SCF iter #  19
 
- Diagonalization time [sec] :       0.25,      tdiag_sum =        7.41
- Iteration time [sec]       :       0.50
+ Diagonalization time [sec] :       0.24,      tdiag_sum =        5.94
+ Iteration time [sec]       :       0.49
 
  Fermi level at    -0.3213 [Ry]
 
    State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
-    1        -1.5881532145       -21.6080950061    1.0000        1
-    2        -0.8431768074       -11.4720950062    1.0000        1
+    1        -1.5881532145       -21.6080950062    1.0000        1
+    2        -0.8431768074       -11.4720950063    1.0000        1
     3        -0.8431504622       -11.4717365589    1.0000        2
     4        -0.4573678688        -6.2228557493    1.0000        1
     5        -0.0370905600        -0.5046467413    0.0000        1
-    6         0.0666113945         0.9063013117    0.0000        1
+    6         0.0666113945         0.9063013118    0.0000        1
     7         0.0672435253         0.9149019564    0.0000        2
-    8         0.0888822185         1.2093136891    0.0000        1
+    8         0.0888822186         1.2093136892    0.0000        1
 
  Max and min values of charge density [e/bohr^3]:   6.6237E-01   1.4390E-13
 
@@ -897,25 +900,25 @@ WARNING: Use_LibXC: PARSEC 1.5 evaluates the first SCF iteration of every libxc 
    Total Energy =           -23.48457991 [Ry]
    Energy/atom  =           -79.88162435 [eV]
 
-  0- 19    SRE of pot. & charge weighted pot =   0.0145917264   0.0002490688
+  0- 19    SRE of pot. & charge weighted pot =   0.0145917259   0.0002490688
 
  SCF iter #  20
 
- Diagonalization time [sec] :       0.25,      tdiag_sum =        7.65
- Iteration time [sec]       :       0.50
+ Diagonalization time [sec] :       0.24,      tdiag_sum =        6.18
+ Iteration time [sec]       :       0.49
 
  Fermi level at    -0.3212 [Ry]
 
    State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
-    1        -1.5882101852       -21.6088701372    1.0000        1
-    2        -0.8432264477       -11.4727704027    1.0000        1
-    3        -0.8432011906       -11.4724267585    1.0000        2
-    4        -0.4574283791        -6.2236790399    1.0000        1
+    1        -1.5882101852       -21.6088701375    1.0000        1
+    2        -0.8432264478       -11.4727704030    1.0000        1
+    3        -0.8432011906       -11.4724267588    1.0000        2
+    4        -0.4574283791        -6.2236790402    1.0000        1
     5        -0.0370926119        -0.5046746587    0.0000        1
-    6         0.0666162816         0.9063678042    0.0000        1
-    7         0.0672512160         0.9150065950    0.0000        2
-    8         0.0889168262         1.2097845546    0.0000        1
+    6         0.0666162816         0.9063678043    0.0000        1
+    7         0.0672512160         0.9150065951    0.0000        2
+    8         0.0889168263         1.2097845548    0.0000        1
 
  Max and min values of charge density [e/bohr^3]:   6.6234E-01   1.3282E-13
 
@@ -933,25 +936,25 @@ WARNING: Use_LibXC: PARSEC 1.5 evaluates the first SCF iteration of every libxc 
    Total Energy =           -23.48458043 [Ry]
    Energy/atom  =           -79.88162611 [eV]
 
-  0- 20    SRE of pot. & charge weighted pot =   0.0160711890   0.0002420007
+  0- 20    SRE of pot. & charge weighted pot =   0.0160711872   0.0002420007
 
  SCF iter #  21
 
- Diagonalization time [sec] :       0.25,      tdiag_sum =        7.90
- Iteration time [sec]       :       0.45
+ Diagonalization time [sec] :       0.24,      tdiag_sum =        6.42
+ Iteration time [sec]       :       0.44
 
  Fermi level at    -0.3213 [Ry]
 
    State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
-    1        -1.5880022174       -21.6060405688    1.0000        1
-    2        -0.8430419058       -11.4702595625    1.0000        1
-    3        -0.8430134769       -11.4698727646    1.0000        2
-    4        -0.4572035841        -6.2206205241    1.0000        1
-    5        -0.0371097688        -0.5049080918    0.0000        1
+    1        -1.5880022173       -21.6060405686    1.0000        1
+    2        -0.8430419058       -11.4702595623    1.0000        1
+    3        -0.8430134769       -11.4698727645    1.0000        2
+    4        -0.4572035841        -6.2206205239    1.0000        1
+    5        -0.0371097688        -0.5049080917    0.0000        1
     6         0.0665341112         0.9052498098    0.0000        1
-    7         0.0671912972         0.9141913515    0.0000        2
-    8         0.0887686076         1.2077679215    0.0000        1
+    7         0.0671912972         0.9141913516    0.0000        2
+    8         0.0887686076         1.2077679214    0.0000        1
 
  Max and min values of charge density [e/bohr^3]:   6.6219E-01   1.2032E-13
 
@@ -969,25 +972,25 @@ WARNING: Use_LibXC: PARSEC 1.5 evaluates the first SCF iteration of every libxc 
    Total Energy =           -23.48458065 [Ry]
    Energy/atom  =           -79.88162684 [eV]
 
-  0- 21    SRE of pot. & charge weighted pot =   0.0434475021   0.0007398903
+  0- 21    SRE of pot. & charge weighted pot =   0.0434475042   0.0007398903
 
  SCF iter #  22
 
- Diagonalization time [sec] :       0.25,      tdiag_sum =        8.15
- Iteration time [sec]       :       0.46
+ Diagonalization time [sec] :       0.24,      tdiag_sum =        6.66
+ Iteration time [sec]       :       0.45
 
  Fermi level at    -0.3213 [Ry]
 
    State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
-    1        -1.5882018880       -21.6087572471    1.0000        1
-    2        -0.8432160155       -11.4726284632    1.0000        1
-    3        -0.8431900283       -11.4722748877    1.0000        2
-    4        -0.4574218816        -6.2235906372    1.0000        1
+    1        -1.5882018879       -21.6087572470    1.0000        1
+    2        -0.8432160155       -11.4726284631    1.0000        1
+    3        -0.8431900283       -11.4722748876    1.0000        2
+    4        -0.4574218816        -6.2235906371    1.0000        1
     5        -0.0371389173        -0.5053046814    0.0000        1
     6         0.0665211272         0.9050731530    0.0000        1
     7         0.0671797303         0.9140339740    0.0000        2
-    8         0.0888050081         1.2082631798    0.0000        1
+    8         0.0888050081         1.2082631797    0.0000        1
 
  Max and min values of charge density [e/bohr^3]:   6.6221E-01   1.1391E-13
 
@@ -1005,12 +1008,12 @@ WARNING: Use_LibXC: PARSEC 1.5 evaluates the first SCF iteration of every libxc 
    Total Energy =           -23.48458098 [Ry]
    Energy/atom  =           -79.88162796 [eV]
 
-  0- 22    SRE of pot. & charge weighted pot =   0.0368430844   0.0004281350
+  0- 22    SRE of pot. & charge weighted pot =   0.0368430859   0.0004281350
 
  SCF iter #  23
 
- Diagonalization time [sec] :       0.25,      tdiag_sum =        8.40
- Iteration time [sec]       :       0.47
+ Diagonalization time [sec] :       0.24,      tdiag_sum =        6.90
+ Iteration time [sec]       :       0.46
 
  Fermi level at    -0.3213 [Ry]
 
@@ -1018,16 +1021,16 @@ WARNING: Use_LibXC: PARSEC 1.5 evaluates the first SCF iteration of every libxc 
 
     1        -1.5884725250       -21.6124394809    1.0000        1
     2        -0.8434537635       -11.4758632159    1.0000        1
-    3        -0.8434341730       -11.4755966708    1.0000        2
+    3        -0.8434341730       -11.4755966709    1.0000        2
     4        -0.4577205908        -6.2276548149    1.0000        1
-    5        -0.0371656565        -0.5056684888    0.0000        1
+    5        -0.0371656565        -0.5056684889    0.0000        1
     6         0.0665330589         0.9052354929    0.0000        1
     7         0.0671862522         0.9141227104    0.0000        2
-    8         0.0889059702         1.2096368499    0.0000        1
+    8         0.0889059702         1.2096368498    0.0000        1
 
  Max and min values of charge density [e/bohr^3]:   6.6225E-01   1.1066E-13
 
- Hartree potential time [sec]:       0.13
+ Hartree potential time [sec]:       0.12
 
    Eigenvalue Energy             =          -7.46616210 [Ry]
    Hartree Energy                =          35.93817172 [Ry]
@@ -1041,12 +1044,12 @@ WARNING: Use_LibXC: PARSEC 1.5 evaluates the first SCF iteration of every libxc 
    Total Energy =           -23.48458117 [Ry]
    Energy/atom  =           -79.88162863 [eV]
 
-  0- 23    SRE of pot. & charge weighted pot =   0.0171836163   0.0000953059
+  0- 23    SRE of pot. & charge weighted pot =   0.0171836166   0.0000953059
 
  SCF iter #  24
 
- Diagonalization time [sec] :       0.23,      tdiag_sum =        8.63
- Iteration time [sec]       :       0.48
+ Diagonalization time [sec] :       0.22,      tdiag_sum =        7.13
+ Iteration time [sec]       :       0.47
 
  Fermi level at    -0.3213 [Ry]
 
@@ -1077,11 +1080,11 @@ WARNING: Use_LibXC: PARSEC 1.5 evaluates the first SCF iteration of every libxc 
    Total Energy =           -23.48458126 [Ry]
    Energy/atom  =           -79.88162894 [eV]
 
-  0- 24    SRE of pot. & charge weighted pot =   0.0170713006   0.0000454716
+  0- 24    SRE of pot. & charge weighted pot =   0.0170713010   0.0000454716
 
  SCF iter #  25
 
- Diagonalization time [sec] :       0.22,      tdiag_sum =        8.85
+ Diagonalization time [sec] :       0.21,      tdiag_sum =        7.34
  Iteration time [sec]       :       0.46
 
  Fermi level at    -0.3212 [Ry]
@@ -1099,7 +1102,7 @@ WARNING: Use_LibXC: PARSEC 1.5 evaluates the first SCF iteration of every libxc 
 
  Max and min values of charge density [e/bohr^3]:   6.6221E-01   1.0307E-13
 
- Hartree potential time [sec]:       0.13
+ Hartree potential time [sec]:       0.12
 
    Eigenvalue Energy             =          -7.46585742 [Ry]
    Hartree Energy                =          35.93752332 [Ry]
@@ -1113,11 +1116,11 @@ WARNING: Use_LibXC: PARSEC 1.5 evaluates the first SCF iteration of every libxc 
    Total Energy =           -23.48458132 [Ry]
    Energy/atom  =           -79.88162912 [eV]
 
-  0- 25    SRE of pot. & charge weighted pot =   0.0018807170   0.0000588073
+  0- 25    SRE of pot. & charge weighted pot =   0.0018807168   0.0000588073
 
  SCF iter #  26
 
- Diagonalization time [sec] :       0.20,      tdiag_sum =        9.05
+ Diagonalization time [sec] :       0.20,      tdiag_sum =        7.53
  Iteration time [sec]       :       0.45
 
  Fermi level at    -0.3212 [Ry]
@@ -1153,8 +1156,8 @@ WARNING: Use_LibXC: PARSEC 1.5 evaluates the first SCF iteration of every libxc 
 
  SCF iter #  27
 
- Diagonalization time [sec] :       0.19,      tdiag_sum =        9.23
- Iteration time [sec]       :       0.44
+ Diagonalization time [sec] :       0.18,      tdiag_sum =        7.71
+ Iteration time [sec]       :       0.43
 
  Fermi level at    -0.3212 [Ry]
 
@@ -1189,7 +1192,7 @@ WARNING: Use_LibXC: PARSEC 1.5 evaluates the first SCF iteration of every libxc 
 
  SCF iter #  28
 
- Diagonalization time [sec] :       0.19,      tdiag_sum =        9.42
+ Diagonalization time [sec] :       0.18,      tdiag_sum =        7.89
  Iteration time [sec]       :       0.43
 
  Fermi level at    -0.3212 [Ry]
@@ -1202,12 +1205,12 @@ WARNING: Use_LibXC: PARSEC 1.5 evaluates the first SCF iteration of every libxc 
     4        -0.4577269301        -6.2277410656    1.0000        1
     5        -0.0371505854        -0.5054634350    0.0000        1
     6         0.0665781421         0.9058488859    0.0000        1
-    7         0.0672260168         0.9146637396    0.0000        2
+    7         0.0672260168         0.9146637395    0.0000        2
     8         0.0890450146         1.2115286601    0.0000        1
 
  Max and min values of charge density [e/bohr^3]:   6.6219E-01   1.0112E-13
 
- Hartree potential time [sec]:       0.13
+ Hartree potential time [sec]:       0.12
 
    Eigenvalue Energy             =          -7.46621547 [Ry]
    Hartree Energy                =          35.93759490 [Ry]
@@ -1225,7 +1228,7 @@ WARNING: Use_LibXC: PARSEC 1.5 evaluates the first SCF iteration of every libxc 
 
  SCF iter #  29
 
- Diagonalization time [sec] :       0.19,      tdiag_sum =        9.61
+ Diagonalization time [sec] :       0.18,      tdiag_sum =        8.07
  Iteration time [sec]       :       0.43
 
  Fermi level at    -0.3212 [Ry]
@@ -1243,7 +1246,7 @@ WARNING: Use_LibXC: PARSEC 1.5 evaluates the first SCF iteration of every libxc 
 
  Max and min values of charge density [e/bohr^3]:   6.6219E-01   1.0063E-13
 
- Hartree potential time [sec]:       0.13
+ Hartree potential time [sec]:       0.12
 
    Eigenvalue Energy             =          -7.46618556 [Ry]
    Hartree Energy                =          35.93753736 [Ry]
@@ -1261,7 +1264,7 @@ WARNING: Use_LibXC: PARSEC 1.5 evaluates the first SCF iteration of every libxc 
 
  SCF iter #  30
 
- Diagonalization time [sec] :       0.19,      tdiag_sum =        9.79
+ Diagonalization time [sec] :       0.18,      tdiag_sum =        8.25
  Iteration time [sec]       :       0.43
 
  Fermi level at    -0.3212 [Ry]
@@ -1297,7 +1300,7 @@ WARNING: Use_LibXC: PARSEC 1.5 evaluates the first SCF iteration of every libxc 
 
  SCF iter #  31
 
- Diagonalization time [sec] :       0.19,      tdiag_sum =        9.98
+ Diagonalization time [sec] :       0.18,      tdiag_sum =        8.44
  Iteration time [sec]       :       0.43
 
  Fermi level at    -0.3212 [Ry]
@@ -1306,7 +1309,7 @@ WARNING: Use_LibXC: PARSEC 1.5 evaluates the first SCF iteration of every libxc 
 
     1        -1.5884683377       -21.6123825096    1.0000        1
     2        -0.8434593214       -11.4759388347    1.0000        1
-    3        -0.8434397595       -11.4756726805    1.0000        2
+    3        -0.8434397595       -11.4756726804    1.0000        2
     4        -0.4577219832        -6.2276737588    1.0000        1
     5        -0.0371528302        -0.5054939776    0.0000        1
     6         0.0665730022         0.9057789531    0.0000        1
@@ -1333,7 +1336,7 @@ WARNING: Use_LibXC: PARSEC 1.5 evaluates the first SCF iteration of every libxc 
 
  SCF iter #  32
 
- Diagonalization time [sec] :       0.19,      tdiag_sum =       10.17
+ Diagonalization time [sec] :       0.18,      tdiag_sum =        8.62
  Iteration time [sec]       :       0.43
 
  Fermi level at    -0.3212 [Ry]
@@ -1347,7 +1350,7 @@ WARNING: Use_LibXC: PARSEC 1.5 evaluates the first SCF iteration of every libxc 
     5        -0.0371534550        -0.5055024781    0.0000        1
     6         0.0665721185         0.9057669298    0.0000        1
     7         0.0672204295         0.9145877197    0.0000        2
-    8         0.0890370930         1.2114208800    0.0000        1
+    8         0.0890370930         1.2114208799    0.0000        1
 
  Max and min values of charge density [e/bohr^3]:   6.6217E-01   9.9668E-14
 
@@ -1365,11 +1368,11 @@ WARNING: Use_LibXC: PARSEC 1.5 evaluates the first SCF iteration of every libxc 
    Total Energy =           -23.48458143 [Ry]
    Energy/atom  =           -79.88162952 [eV]
 
-  0- 32    SRE of pot. & charge weighted pot =   0.0034234112   0.0000274157
+  0- 32    SRE of pot. & charge weighted pot =   0.0034234114   0.0000274158
 
  SCF iter #  33
 
- Diagonalization time [sec] :       0.19,      tdiag_sum =       10.35
+ Diagonalization time [sec] :       0.18,      tdiag_sum =        8.80
  Iteration time [sec]       :       0.43
 
  Fermi level at    -0.3212 [Ry]
@@ -1378,8 +1381,8 @@ WARNING: Use_LibXC: PARSEC 1.5 evaluates the first SCF iteration of every libxc 
 
     1        -1.5884685756       -21.6123857453    1.0000        1
     2        -0.8434594929       -11.4759411686    1.0000        1
-    3        -0.8434398884       -11.4756744340    1.0000        2
-    4        -0.4577221367        -6.2276758469    1.0000        1
+    3        -0.8434398884       -11.4756744339    1.0000        2
+    4        -0.4577221367        -6.2276758468    1.0000        1
     5        -0.0371538767        -0.5055082154    0.0000        1
     6         0.0665716694         0.9057608196    0.0000        1
     7         0.0672198125         0.9145793256    0.0000        2
@@ -1401,11 +1404,11 @@ WARNING: Use_LibXC: PARSEC 1.5 evaluates the first SCF iteration of every libxc 
    Total Energy =           -23.48458144 [Ry]
    Energy/atom  =           -79.88162955 [eV]
 
-  0- 33    SRE of pot. & charge weighted pot =   0.0039799674   0.0000329117
+  0- 33    SRE of pot. & charge weighted pot =   0.0039799677   0.0000329117
 
  SCF iter #  34
 
- Diagonalization time [sec] :       0.19,      tdiag_sum =       10.54
+ Diagonalization time [sec] :       0.18,      tdiag_sum =        8.98
  Iteration time [sec]       :       0.43
 
  Fermi level at    -0.3212 [Ry]
@@ -1441,8 +1444,8 @@ WARNING: Use_LibXC: PARSEC 1.5 evaluates the first SCF iteration of every libxc 
 
  SCF iter #  35
 
- Diagonalization time [sec] :       0.19,      tdiag_sum =       10.73
- Iteration time [sec]       :       0.44
+ Diagonalization time [sec] :       0.18,      tdiag_sum =        9.16
+ Iteration time [sec]       :       0.43
 
  Fermi level at    -0.3212 [Ry]
 
@@ -1450,12 +1453,12 @@ WARNING: Use_LibXC: PARSEC 1.5 evaluates the first SCF iteration of every libxc 
 
     1        -1.5884678908       -21.6123764284    1.0000        1
     2        -0.8434590358       -11.4759349494    1.0000        1
-    3        -0.8434394653       -11.4756686775    1.0000        2
+    3        -0.8434394653       -11.4756686776    1.0000        2
     4        -0.4577215290        -6.2276675789    1.0000        1
     5        -0.0371546361        -0.5055185480    0.0000        1
     6         0.0665711091         0.9057531961    0.0000        1
     7         0.0672187667         0.9145650963    0.0000        2
-    8         0.0890381572         1.2114353595    0.0000        1
+    8         0.0890381572         1.2114353596    0.0000        1
 
  Max and min values of charge density [e/bohr^3]:   6.6216E-01   9.9225E-14
 
@@ -1473,11 +1476,11 @@ WARNING: Use_LibXC: PARSEC 1.5 evaluates the first SCF iteration of every libxc 
    Total Energy =           -23.48458145 [Ry]
    Energy/atom  =           -79.88162959 [eV]
 
-  0- 35    SRE of pot. & charge weighted pot =   0.0048041751   0.0000453688
+  0- 35    SRE of pot. & charge weighted pot =   0.0048041748   0.0000453688
 
  SCF iter #  36
 
- Diagonalization time [sec] :       0.19,      tdiag_sum =       10.91
+ Diagonalization time [sec] :       0.18,      tdiag_sum =        9.34
  Iteration time [sec]       :       0.43
 
  Fermi level at    -0.3212 [Ry]
@@ -1513,7 +1516,7 @@ WARNING: Use_LibXC: PARSEC 1.5 evaluates the first SCF iteration of every libxc 
 
  SCF iter #  37
 
- Diagonalization time [sec] :       0.19,      tdiag_sum =       11.10
+ Diagonalization time [sec] :       0.18,      tdiag_sum =        9.52
  Iteration time [sec]       :       0.43
 
  Fermi level at    -0.3212 [Ry]
@@ -1521,17 +1524,17 @@ WARNING: Use_LibXC: PARSEC 1.5 evaluates the first SCF iteration of every libxc 
    State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
     1        -1.5884731406       -21.6124478567    1.0000        1
-    2        -0.8434638471       -11.4760004105    1.0000        1
-    3        -0.8434442710       -11.4757340625    1.0000        2
-    4        -0.4577273642        -6.2277469714    1.0000        1
+    2        -0.8434638471       -11.4760004106    1.0000        1
+    3        -0.8434442710       -11.4757340626    1.0000        2
+    4        -0.4577273642        -6.2277469715    1.0000        1
     5        -0.0371555555        -0.5055310566    0.0000        1
     6         0.0665716210         0.9057601614    0.0000        1
     7         0.0672185559         0.9145622285    0.0000        2
-    8         0.0890423868         1.2114929067    0.0000        1
+    8         0.0890423868         1.2114929068    0.0000        1
 
  Max and min values of charge density [e/bohr^3]:   6.6215E-01   9.9212E-14
 
- Hartree potential time [sec]:       0.13
+ Hartree potential time [sec]:       0.12
 
    Eigenvalue Energy             =          -7.46621725 [Ry]
    Hartree Energy                =          35.93722461 [Ry]
@@ -1545,25 +1548,25 @@ WARNING: Use_LibXC: PARSEC 1.5 evaluates the first SCF iteration of every libxc 
    Total Energy =           -23.48458146 [Ry]
    Energy/atom  =           -79.88162962 [eV]
 
-  0- 37    SRE of pot. & charge weighted pot =   0.0047814143   0.0000456394
+  0- 37    SRE of pot. & charge weighted pot =   0.0047814135   0.0000456394
 
  SCF iter #  38
 
- Diagonalization time [sec] :       0.19,      tdiag_sum =       11.29
+ Diagonalization time [sec] :       0.18,      tdiag_sum =        9.70
  Iteration time [sec]       :       0.43
 
  Fermi level at    -0.3212 [Ry]
 
    State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
-    1        -1.5884655826       -21.6123450242    1.0000        1
-    2        -0.8434570273       -11.4759076220    1.0000        1
-    3        -0.8434373237       -11.4756395382    1.0000        2
-    4        -0.4577185510        -6.2276270615    1.0000        1
-    5        -0.0371553052        -0.5055276513    0.0000        1
+    1        -1.5884655826       -21.6123450238    1.0000        1
+    2        -0.8434570273       -11.4759076216    1.0000        1
+    3        -0.8434373236       -11.4756395378    1.0000        2
+    4        -0.4577185510        -6.2276270610    1.0000        1
+    5        -0.0371553052        -0.5055276512    0.0000        1
     6         0.0665705640         0.9057457791    0.0000        1
     7         0.0672173953         0.9145464368    0.0000        2
-    8         0.0890379513         1.2114325584    0.0000        1
+    8         0.0890379513         1.2114325581    0.0000        1
 
  Max and min values of charge density [e/bohr^3]:   6.6214E-01   9.9067E-14
 
@@ -1581,25 +1584,25 @@ WARNING: Use_LibXC: PARSEC 1.5 evaluates the first SCF iteration of every libxc 
    Total Energy =           -23.48458147 [Ry]
    Energy/atom  =           -79.88162963 [eV]
 
-  0- 38    SRE of pot. & charge weighted pot =   0.0062258414   0.0000636897
+  0- 38    SRE of pot. & charge weighted pot =   0.0062258470   0.0000636897
 
  SCF iter #  39
 
- Diagonalization time [sec] :       0.19,      tdiag_sum =       11.47
+ Diagonalization time [sec] :       0.18,      tdiag_sum =        9.88
  Iteration time [sec]       :       0.43
 
  Fermi level at    -0.3212 [Ry]
 
    State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
-    1        -1.5884763965       -21.6124921551    1.0000        1
-    2        -0.8434669111       -11.4760420988    1.0000        1
-    3        -0.8434473329       -11.4757757217    1.0000        2
-    4        -0.4577312311        -6.2277995844    1.0000        1
+    1        -1.5884763965       -21.6124921556    1.0000        1
+    2        -0.8434669111       -11.4760420992    1.0000        1
+    3        -0.8434473329       -11.4757757222    1.0000        2
+    4        -0.4577312312        -6.2277995850    1.0000        1
     5        -0.0371563662        -0.5055420872    0.0000        1
-    6         0.0665718098         0.9057627293    0.0000        1
-    7         0.0672180990         0.9145560118    0.0000        2
-    8         0.0890453366         1.2115330407    0.0000        1
+    6         0.0665718098         0.9057627294    0.0000        1
+    7         0.0672180990         0.9145560119    0.0000        2
+    8         0.0890453366         1.2115330411    0.0000        1
 
  Max and min values of charge density [e/bohr^3]:   6.6214E-01   9.9099E-14
 
@@ -1617,25 +1620,25 @@ WARNING: Use_LibXC: PARSEC 1.5 evaluates the first SCF iteration of every libxc 
    Total Energy =           -23.48458147 [Ry]
    Energy/atom  =           -79.88162964 [eV]
 
-  0- 39    SRE of pot. & charge weighted pot =   0.0048568726   0.0000486805
+  0- 39    SRE of pot. & charge weighted pot =   0.0048568664   0.0000486804
 
  SCF iter #  40
 
- Diagonalization time [sec] :       0.19,      tdiag_sum =       11.66
+ Diagonalization time [sec] :       0.18,      tdiag_sum =       10.06
  Iteration time [sec]       :       0.43
 
  Fermi level at    -0.3212 [Ry]
 
    State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
-    1        -1.5884795736       -21.6125353829    1.0000        1
-    2        -0.8434698186       -11.4760816573    1.0000        1
-    3        -0.8434502589       -11.4758155324    1.0000        2
-    4        -0.4577350485        -6.2278515224    1.0000        1
+    1        -1.5884795737       -21.6125353833    1.0000        1
+    2        -0.8434698186       -11.4760816578    1.0000        1
+    3        -0.8434502589       -11.4758155328    1.0000        2
+    4        -0.4577350485        -6.2278515229    1.0000        1
     5        -0.0371568329        -0.5055484372    0.0000        1
-    6         0.0665720578         0.9057661035    0.0000        1
-    7         0.0672180126         0.9145548358    0.0000        2
-    8         0.0890475383         1.2115629965    0.0000        1
+    6         0.0665720578         0.9057661036    0.0000        1
+    7         0.0672180126         0.9145548359    0.0000        2
+    8         0.0890475383         1.2115629968    0.0000        1
 
  Max and min values of charge density [e/bohr^3]:   6.6214E-01   9.8745E-14
 
@@ -1653,29 +1656,29 @@ WARNING: Use_LibXC: PARSEC 1.5 evaluates the first SCF iteration of every libxc 
    Total Energy =           -23.48458147 [Ry]
    Energy/atom  =           -79.88162965 [eV]
 
-  0- 40    SRE of pot. & charge weighted pot =   0.0046703751   0.0000459193
+  0- 40    SRE of pot. & charge weighted pot =   0.0046703693   0.0000459192
 
  SCF iter #  41
 
- Diagonalization time [sec] :       0.19,      tdiag_sum =       11.84
- Iteration time [sec]       :       0.39
+ Diagonalization time [sec] :       0.18,      tdiag_sum =       10.24
+ Iteration time [sec]       :       0.38
 
  Fermi level at    -0.3212 [Ry]
 
    State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
-    1        -1.5884852097       -21.6126120668    1.0000        1
-    2        -0.8434749573       -11.4761515744    1.0000        1
-    3        -0.8434554775       -11.4758865355    1.0000        2
-    4        -0.4577419250        -6.2279450832    1.0000        1
-    5        -0.0371574944        -0.5055574367    0.0000        1
-    6         0.0665724870         0.9057719437    0.0000        1
-    7         0.0672180912         0.9145559058    0.0000        2
-    8         0.0890511079         1.2116115632    0.0000        1
+    1        -1.5884852098       -21.6126120677    1.0000        1
+    2        -0.8434749574       -11.4761515753    1.0000        1
+    3        -0.8434554775       -11.4758865363    1.0000        2
+    4        -0.4577419251        -6.2279450843    1.0000        1
+    5        -0.0371574944        -0.5055574368    0.0000        1
+    6         0.0665724870         0.9057719439    0.0000        1
+    7         0.0672180913         0.9145559060    0.0000        2
+    8         0.0890511079         1.2116115639    0.0000        1
 
  Max and min values of charge density [e/bohr^3]:   6.6214E-01   9.8467E-14
 
- Hartree potential time [sec]:       0.13
+ Hartree potential time [sec]:       0.12
 
    Eigenvalue Energy             =          -7.46631514 [Ry]
    Hartree Energy                =          35.93717748 [Ry]
@@ -1689,29 +1692,29 @@ WARNING: Use_LibXC: PARSEC 1.5 evaluates the first SCF iteration of every libxc 
    Total Energy =           -23.48458147 [Ry]
    Energy/atom  =           -79.88162966 [eV]
 
-  0- 41    SRE of pot. & charge weighted pot =   0.0041008595   0.0000379804
+  0- 41    SRE of pot. & charge weighted pot =   0.0041008477   0.0000379803
 
  SCF iter #  42
 
- Diagonalization time [sec] :       0.19,      tdiag_sum =       12.03
- Iteration time [sec]       :       0.40
+ Diagonalization time [sec] :       0.18,      tdiag_sum =       10.42
+ Iteration time [sec]       :       0.39
 
  Fermi level at    -0.3212 [Ry]
 
    State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
-    1        -1.5884954445       -21.6127513187    1.0000        1
-    2        -0.8434841392       -11.4762765008    1.0000        1
-    3        -0.8434645210       -11.4760095800    1.0000        2
-    4        -0.4577534135        -6.2281013934    1.0000        1
+    1        -1.5884954445       -21.6127513192    1.0000        1
+    2        -0.8434841392       -11.4762765012    1.0000        1
+    3        -0.8434645210       -11.4760095805    1.0000        2
+    4        -0.4577534135        -6.2281013940    1.0000        1
     5        -0.0371585621        -0.5055719644    0.0000        1
-    6         0.0665730822         0.9057800423    0.0000        1
-    7         0.0672183292         0.9145591440    0.0000        2
-    8         0.0890558360         1.2116758930    0.0000        1
+    6         0.0665730823         0.9057800425    0.0000        1
+    7         0.0672183293         0.9145591441    0.0000        2
+    8         0.0890558360         1.2116758935    0.0000        1
 
  Max and min values of charge density [e/bohr^3]:   6.6214E-01   9.8295E-14
 
- Hartree potential time [sec]:       0.13
+ Hartree potential time [sec]:       0.12
 
    Eigenvalue Energy             =          -7.46639504 [Ry]
    Hartree Energy                =          35.93721846 [Ry]
@@ -1725,25 +1728,25 @@ WARNING: Use_LibXC: PARSEC 1.5 evaluates the first SCF iteration of every libxc 
    Total Energy =           -23.48458148 [Ry]
    Energy/atom  =           -79.88162966 [eV]
 
-  0- 42    SRE of pot. & charge weighted pot =   0.0032413692   0.0000209775
+  0- 42    SRE of pot. & charge weighted pot =   0.0032413606   0.0000209774
 
  SCF iter #  43
 
- Diagonalization time [sec] :       0.19,      tdiag_sum =       12.22
+ Diagonalization time [sec] :       0.18,      tdiag_sum =       10.61
  Iteration time [sec]       :       0.41
 
  Fermi level at    -0.3212 [Ry]
 
    State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
-    1        -1.5885077225       -21.6129183714    1.0000        1
-    2        -0.8434953588       -11.4764291533    1.0000        1
+    1        -1.5885077225       -21.6129183713    1.0000        1
+    2        -0.8434953588       -11.4764291532    1.0000        1
     3        -0.8434756001       -11.4761603199    1.0000        2
-    4        -0.4577675961        -6.2282943597    1.0000        1
+    4        -0.4577675961        -6.2282943596    1.0000        1
     5        -0.0371591485        -0.5055799425    0.0000        1
-    6         0.0665752417         0.9058094230    0.0000        1
-    7         0.0672199717         0.9145814915    0.0000        2
-    8         0.0890650984         1.2118019154    0.0000        1
+    6         0.0665752417         0.9058094231    0.0000        1
+    7         0.0672199717         0.9145814916    0.0000        2
+    8         0.0890650984         1.2118019156    0.0000        1
 
  Max and min values of charge density [e/bohr^3]:   6.6214E-01   9.8154E-14
 
@@ -1761,24 +1764,24 @@ WARNING: Use_LibXC: PARSEC 1.5 evaluates the first SCF iteration of every libxc 
    Total Energy =           -23.48458148 [Ry]
    Energy/atom  =           -79.88162967 [eV]
 
-  0- 43    SRE of pot. & charge weighted pot =   0.0014687827   0.0000028639
+  0- 43    SRE of pot. & charge weighted pot =   0.0014687793   0.0000028639
 
  SCF iter #  44
 
- Diagonalization time [sec] :       0.19,      tdiag_sum =       12.41
+ Diagonalization time [sec] :       0.18,      tdiag_sum =       10.79
  Iteration time [sec]       :       0.42
 
  Fermi level at    -0.3212 [Ry]
 
    State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
-    1        -1.5885059432       -21.6128941621    1.0000        1
-    2        -0.8434941814       -11.4764131329    1.0000        1
-    3        -0.8434744865       -11.4761451688    1.0000        2
+    1        -1.5885059432       -21.6128941622    1.0000        1
+    2        -0.8434941814       -11.4764131330    1.0000        1
+    3        -0.8434744865       -11.4761451689    1.0000        2
     4        -0.4577662647        -6.2282762442    1.0000        1
-    5        -0.0371579372        -0.5055634616    0.0000        1
+    5        -0.0371579372        -0.5055634617    0.0000        1
     6         0.0665779020         0.9058456193    0.0000        1
-    7         0.0672220934         0.9146103582    0.0000        2
+    7         0.0672220934         0.9146103581    0.0000        2
     8         0.0890717520         1.2118924431    0.0000        1
 
  Max and min values of charge density [e/bohr^3]:   6.6214E-01   9.7781E-14
@@ -1797,25 +1800,25 @@ WARNING: Use_LibXC: PARSEC 1.5 evaluates the first SCF iteration of every libxc 
    Total Energy =           -23.48458148 [Ry]
    Energy/atom  =           -79.88162967 [eV]
 
-  0- 44    SRE of pot. & charge weighted pot =   0.0005080192   0.0000035904
+  0- 44    SRE of pot. & charge weighted pot =   0.0005080188   0.0000035903
 
  SCF iter #  45
 
- Diagonalization time [sec] :       0.19,      tdiag_sum =       12.59
+ Diagonalization time [sec] :       0.18,      tdiag_sum =       10.97
  Iteration time [sec]       :       0.43
 
  Fermi level at    -0.3212 [Ry]
 
    State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
-    1        -1.5885081572       -21.6129242854    1.0000        1
-    2        -0.8434962579       -11.4764413855    1.0000        1
-    3        -0.8434765351       -11.4761730415    1.0000        2
-    4        -0.4577687388        -6.2283099058    1.0000        1
+    1        -1.5885081572       -21.6129242853    1.0000        1
+    2        -0.8434962579       -11.4764413853    1.0000        1
+    3        -0.8434765351       -11.4761730413    1.0000        2
+    4        -0.4577687387        -6.2283099056    1.0000        1
     5        -0.0371581237        -0.5055659989    0.0000        1
     6         0.0665784970         0.9058537150    0.0000        1
-    7         0.0672223771         0.9146142181    0.0000        2
-    8         0.0890742946         1.2119270372    0.0000        1
+    7         0.0672223771         0.9146142180    0.0000        2
+    8         0.0890742946         1.2119270371    0.0000        1
 
  Max and min values of charge density [e/bohr^3]:   6.6214E-01   9.7543E-14
 
@@ -1833,18 +1836,18 @@ WARNING: Use_LibXC: PARSEC 1.5 evaluates the first SCF iteration of every libxc 
    Total Energy =           -23.48458148 [Ry]
    Energy/atom  =           -79.88162968 [eV]
 
-  0- 45    SRE of pot. & charge weighted pot =   0.0001837300   0.0000009221
+  0- 45    SRE of pot. & charge weighted pot =   0.0001837312   0.0000009221
 
 Self-consistency convergence achieved.
 
-Time for self-consistent field [sec] :      25.42,    tdiag_sum =       12.59
-Time spent on Hartree potential [sec] :        5.86
+Time for self-consistent field [sec] :      23.04,    tdiag_sum =       10.97
+Time spent on Hartree potential [sec] :        5.64
 
  Tot. charge (user input) [e] =   0.00000000
  Tot. charge (computed) [e] =   0.00000000
  Dipole components [Debye]:
  x-component =  -0.00006793
- y-component =   0.00000000
+ y-component =  -0.00000000
  z-component =  -1.50673310
 
  Density at the sphere: the sphere adds an estimated 1.9E-06 Ry to the total energy (decay constant 0.70 /bohr: a factor 10 per 0.87 ang)
@@ -1856,24 +1859,24 @@ Time spent on Hartree potential [sec] :        5.86
 
  Initial Hamiltonian component timings [sec]
  --------------------------------------------------
- Finite-difference (-nabla^2) :     0.010893
- V_ion diagonal/local         :     0.044374
- V_ion nonlocal projectors    :     0.009938
- Initial V_xc (LIBXC:MGGA_X_TPSS+MGGA_C_TPSS)             :     0.716803
- Component subtotal             :     0.782007
+ Finite-difference (-nabla^2) :     0.011240
+ V_ion diagonal/local         :     0.444265
+ V_ion nonlocal projectors    :     0.009240
+ Initial V_xc (LIBXC:MGGA_X_TPSS+MGGA_C_TPSS)             :     0.710829
+ Component subtotal             :     1.175575
  --------------------------------------------------
 
  SCF timing analysis [sec]
  --------------------------------------------------
- Initial Hartree potential      :     0.416675
- Initial exchange-correlation   :     0.716803
- Hamiltonian binding subtotal  :     0.226111
- Diagonalization subtotal       :    12.592507
- Occupation/density subtotal   :     1.651509
- Hartree potential subtotal     :     5.858493
- Exchange-correlation subtotal  :     0.654787
- Mixing/energy subtotal         :     2.681651
- SCF wall time                   :    25.251423
+ Initial Hartree potential      :     0.184401
+ Initial exchange-correlation   :     0.710829
+ Hamiltonian binding subtotal  :     0.171980
+ Diagonalization subtotal       :    10.966998
+ Occupation/density subtotal   :     1.740391
+ Hartree potential subtotal     :     5.644914
+ Exchange-correlation subtotal  :     0.424207
+ Mixing/energy subtotal         :     2.811468
+ SCF wall time                   :    22.886559
  --------------------------------------------------
 
 Forces and MPI statistics
@@ -1889,28 +1892,28 @@ are not calculated by this Python single-point implementation.
  Total H application time [sec] =     0.000000
  Average H application [sec] =     0.000000
  Local-potential updates =           45
- Local update time [sec] =     0.034015
+ Local update time [sec] =     0.036278
  Per-H device timing = disabled (would synchronize every recurrence)
  GPU initial-eigensolver calls =            2
- GPU initial-eigensolver synchronized time [sec] =     2.544418
+ GPU initial-eigensolver synchronized time [sec] =     1.389715
  GPU SUBSPACE calls =           88
- GPU SUBSPACE synchronized time [sec] =     9.907811
+ GPU SUBSPACE synchronized time [sec] =     9.441877
  GPU representation scheduler batches =           45
- GPU representation scheduler wall time [sec] =    12.462475
+ GPU representation scheduler wall time [sec] =    10.841566
  Final active states by representation = 10 8
- Requested-eigenpair download [sec] =     0.003843
+ Requested-eigenpair download [sec] =     0.004017
  GPU density builds =           90
- GPU density build/download [sec] =     0.065095
- Final wavefunction download [sec] =     0.145969
+ GPU density build/download [sec] =     0.072471
+ Final wavefunction download [sec] =     0.136526
  Accelerated Hartree solves =           46
- Accelerated Hartree total [sec] =     6.272963
- Hartree boundary/RHS [sec] =     0.380319
- Hartree linear solve [sec] =     5.860323
+ Accelerated Hartree total [sec] =     5.827320
+ Hartree boundary/RHS [sec] =     0.157730
+ Hartree linear solve [sec] =     5.635771
  Host-to-device time [sec] =     0.000000
- Device kernel time [sec] =    12.452229
- Device-to-host time [sec] =     0.003843
- Pre-SCF setup/reporting wall time [sec] :   11.047179
- Post-SCF finalization/reporting [sec] :    0.060746
- Total accelerated Python wall time [sec] :       36.55
+ Device kernel time [sec] =    10.831592
+ Device-to-host time [sec] =     0.004017
+ Pre-SCF setup/reporting wall time [sec] :   10.520311
+ Post-SCF finalization/reporting [sec] :    0.035792
+ Total accelerated Python wall time [sec] :       33.60
  parsec.dat: examples/0d_meta_gga/NH3/tpss/parsec.dat (potential and density of 1 spin channel(s) on 1793776 points, 4 wavefunction(s))
 Text log: examples/0d_meta_gga/NH3/tpss/parsec.out

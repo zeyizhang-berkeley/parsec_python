@@ -27,6 +27,8 @@ from parsec_python.V_ion import NonlocalProjectorOperator
 from ..backends.cupy_stencil_major import (
     StencilMajorHostMetadata,
     build_stencil_major_metadata,
+    sector_palette_capacity,
+    sector_palette_codes_setting,
 )
 
 from .representations import (
@@ -179,11 +181,13 @@ def _direct_sector_stencils(
     for an operator handed over as a matrix, and for an input the direct
     builder does not cover.
 
-    A stencil with more coefficients than its palette holds stops the run with :class:`PaletteOverflow` from either
-    builder (the native kernel's ValueError is turned into one), not through the CSR route, whose packing would refuse
-    the same values after forming the full-grid matrix; the driver checks the stencils of a periodic cell before
-    (``_sector_palette_check``), so that only a cluster can reach it here (none measured: at most 227 values, Td at
-    order 20 on an unshifted grid).
+    A sector of more than 256 coefficients takes two-byte codes (``PARSEC_SECTOR_PALETTE_CODES=auto``; the native
+    kernel codes in one byte, and NumPy's builder builds such a sector of a cluster in its place).  A stencil with
+    more coefficients than its palette holds (256 under ``off``, 65536 otherwise) stops the run with
+    :class:`PaletteOverflow` from either builder (the native kernel's ValueError is turned into one), not through the
+    CSR route, whose packing would refuse the same values after forming the full-grid matrix; the driver checks the
+    stencils of a periodic cell before (``_sector_palette_check``), so that only a cluster can reach it here (none
+    measured: at most 229 values, Td at order 20 on an unshifted grid).
     """
 
     from ..Laplacian import DeferredNativeNegativeLaplacian
@@ -197,9 +201,12 @@ def _direct_sector_stencils(
     )
 
     def overflow(error: Exception) -> PaletteOverflow:
+        capacity = sector_palette_capacity()
         return PaletteOverflow(
-            f"{error}: the sector stencils of this calculation need more coefficients than the {PALETTE_CAPACITY} of "
-            "their palette; a lower Expansion_Order or PARSEC_ORBITAL_GROUP=abelian (PARSEC_PERIODIC_SYMMETRY=off for "
+            f"{error}: the sector stencils of this calculation need more coefficients than the {capacity} of "
+            "their palette; "
+            + ("PARSEC_SECTOR_PALETTE_CODES=auto (two-byte codes), " if capacity == PALETTE_CAPACITY else "")
+            + "a lower Expansion_Order or PARSEC_ORBITAL_GROUP=abelian (PARSEC_PERIODIC_SYMMETRY=off for "
             "a periodic cell) avoids it"
         )
 
@@ -237,7 +244,8 @@ def _direct_sector_stencils(
     except SectorStencilUnavailable:
         return None, "csr"
     except ValueError as error:
-        # PaletteOverflow of NumPy's builder, std::invalid_argument of the native kernel
+        # PaletteOverflow of NumPy's builder, std::invalid_argument of the native kernel (under
+        # PARSEC_SECTOR_PALETTE_CODES=off: otherwise NumPy's builder takes such a sector)
         if isinstance(error, PaletteOverflow) or f"more than {PALETTE_CAPACITY} coefficients" in str(error):
             raise overflow(error) from error
         raise
@@ -275,6 +283,10 @@ def _cache_key(
 ) -> str:
     digest = hashlib.sha256()
     digest.update(f"parsec-reflection-operators-v{_CACHE_FORMAT}".encode("ascii"))
+    if sector_palette_codes_setting() == "on":
+        # two-byte codes in every stencil: an entry of its own (auto and off code a palette of up to 256 values in
+        # one byte, as the entries of before; a larger one in two bytes, under auto alone: _load_bundle)
+        digest.update(b"two-byte-codes\0")
     if kinetic_key_seed is None:
         if kinetic is None:
             raise ValueError("kinetic matrix is required without an exact key seed")
@@ -306,6 +318,26 @@ def _cache_key(
     return digest.hexdigest()
 
 
+def _codes_fit_setting(dtype, palette_size: int, setting: str) -> bool:
+    """Whether codes of ``dtype`` for a palette of ``palette_size`` values are those ``setting`` gives
+    (``PARSEC_SECTOR_PALETTE_CODES``): one byte up to 256 values and two above, two in every stencil under ``on``,
+    none above 256 under ``off`` (whose build is to stop as before).  A cached stencil that does not fit is rebuilt."""
+
+    wide = setting == "on" or int(palette_size) > 256
+    return np.dtype(dtype) == (np.uint16 if wide else np.uint8) and not (wide and setting == "off")
+
+
+def _bundle_fits_setting(bundle: "ReducedOperatorBundle") -> bool:
+    """:func:`_codes_fit_setting` for every stencil of a resident bundle."""
+
+    setting = sector_palette_codes_setting()
+    return all(
+        _codes_fit_setting(stencil.coefficient_codes.dtype, stencil.coefficient_palette.size, setting)
+        for stencil in bundle.stencil_metadata
+        if stencil is not None
+    )
+
+
 def _load_bundle(
     path: Path,
     decomposition: ReflectionRepresentationDecomposition,
@@ -334,7 +366,11 @@ def _load_bundle(
 
         metadata: list[StencilMajorHostMetadata] = []
         nonlocals: list[NonlocalProjectorOperator] = []
+        codes_setting = sector_palette_codes_setting()
         for index in range(count):
+            codes = np.asarray(archive[f"s{index}_codes"])
+            if not _codes_fit_setting(codes.dtype, int(archive[f"s{index}_palette"].shape[0]), codes_setting):
+                raise ValueError("cached stencil codes do not match PARSEC_SECTOR_PALETTE_CODES")
             stencil = StencilMajorHostMetadata(
                 shape=tuple(
                     int(value) for value in archive[f"s{index}_shape"]
@@ -347,9 +383,7 @@ def _load_bundle(
                     ),
                     dtype=np.int32,
                 ),
-                coefficient_codes=np.asarray(
-                    archive[f"s{index}_codes"], dtype=np.uint8
-                ),
+                coefficient_codes=codes,
                 coefficient_palette=np.asarray(
                     archive[f"s{index}_palette"], dtype=np.float64
                 ),
@@ -527,6 +561,9 @@ def load_or_build_reduced_operators(
             remembered = _MEMORY_BUNDLES.get(memory_key)
             if remembered is not None:
                 _MEMORY_BUNDLES.move_to_end(memory_key)
+        if remembered is not None and not _bundle_fits_setting(remembered):
+            # two-byte codes of an earlier run under PARSEC_SECTOR_PALETTE_CODES=off: built again
+            remembered = None
         if remembered is not None:
             return ReducedOperatorBundle(
                 stencil_metadata=remembered.stencil_metadata,
@@ -593,9 +630,11 @@ def load_or_build_reduced_operators(
         built = [index for index, laplacian in enumerate(laplacians) if laplacian is not None]
         workers = operator_build_workers(len(built))
         packed: list[StencilMajorHostMetadata | None] = [None] * len(laplacians)
+        # one-byte codes, or two where PARSEC_SECTOR_PALETTE_CODES says (as the direct builders code them)
+        codes = sector_palette_codes_setting()
         if workers == 1:
             for index in built:
-                packed[index] = build_stencil_major_metadata(laplacians[index])
+                packed[index] = build_stencil_major_metadata(laplacians[index], codes=codes)
         else:
             # The sectors are independent and the packing is NumPy array work
             # that releases the interpreter lock.
@@ -606,7 +645,7 @@ def load_or_build_reduced_operators(
                 for index, item in zip(
                     built,
                     executor.map(
-                        lambda index: build_stencil_major_metadata(laplacians[index]),
+                        lambda index: build_stencil_major_metadata(laplacians[index], codes=codes),
                         built,
                     ),
                 ):

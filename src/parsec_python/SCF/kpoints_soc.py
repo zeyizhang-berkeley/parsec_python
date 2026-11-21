@@ -17,8 +17,10 @@ As in :mod:`kpoints`, each pooled eigenvalue is one already-SOC-split
 spinor state holding at most one electron, so equal weights give
 ``degeneracy = weight`` (not ``2*weight`` as in the non-SOC :mod:`kpoints`,
 since spin is already folded into each 2-component eigenvector); unequal
-weights (Fortran's irreducible wedge, a weighted list) weight every level by
-its k-point (:mod:`~parsec_python.SCF.kpoint_weights`).  With
+weights (Fortran's irreducible wedge, a weighted list, and on the default
+routines the wedge or the time-reversal pairs of a mesh,
+``PARSEC_SOC_KPOINT_WEDGE``) weight every level, and its force, by its
+k-point (:mod:`~parsec_python.SCF.kpoint_weights`).  With
 ``Symmetrize_Charge_Density`` the new densities are averaged over the space
 group (``symm_scalar``) before the Hartree potential.
 
@@ -259,13 +261,24 @@ class SpinorForceExtras:
     both spin components and the spin-orbit term, :func:`parsec_python.Forces.spin_orbit.spinor_nonlocal_forces`) is
     accumulated from the orbitals of each k-point by a last pass after the SCF loop, once the occupations of that
     last step are known (:meth:`set_occupations`).  A device k-point solver calls this with the orbitals on its
-    device; the overlaps are formed there and only the ``(atoms, 3)`` result comes back.
+    device; the overlaps are formed there and only the ``(atoms, 3)`` result comes back.  The occupations of a
+    k-point are weighted by ``weight``, or by its own entry of ``k_weights`` where the weights differ (an irreducible
+    wedge or the time-reversal pairs of a mesh, ``PARSEC_SOC_KPOINT_WEDGE``), as its density is.
     """
 
-    def __init__(self, system, k_points: np.ndarray, weight: float, operators_for, compute_forces: bool) -> None:
+    def __init__(
+        self,
+        system,
+        k_points: np.ndarray,
+        weight: float,
+        operators_for,
+        compute_forces: bool,
+        k_weights: np.ndarray | None = None,
+    ) -> None:
         self.system = system
         self.k_points = k_points
         self.weight = float(weight)
+        self.k_weights = None if k_weights is None else np.asarray(k_weights, dtype=float)
         self.operators_for = operators_for
         self.compute_forces = bool(compute_forces)
         self.atom_count = len(system.atoms)
@@ -302,7 +315,8 @@ class SpinorForceExtras:
             gradients,
             spin_orbit,
             vectors,
-            self.weight * np.asarray(self.final_occupations[task], dtype=float),
+            (self.weight if self.k_weights is None else float(self.k_weights[task]))
+            * np.asarray(self.final_occupations[task], dtype=float),
             self.atom_count,
             xp=xp,
         )
@@ -365,9 +379,10 @@ def _spinor_solver(
     tasks: int | None = None,
     weight: float = 1.0,
     compute_forces: bool = False,
+    k_weights: np.ndarray | None = None,
 ) -> tuple[object, SpinorForceExtras]:
     """Parallel solver of the spinor Bloch problems, one task per k-point, and its ``extras`` (see
-    :class:`SpinorForceExtras`).
+    :class:`SpinorForceExtras`; ``k_weights`` are the weights of unequally weighted k-points for the force).
 
     The Bloch-phase nonlocal and spin-orbit projectors of a k-point are built
     once, by the worker that owns it.  ``potentials`` carries ``V`` (the local
@@ -393,7 +408,7 @@ def _spinor_solver(
             xc_field=potentials.get("field"),
         )
 
-    extras = SpinorForceExtras(system, k_points, weight, operators_for, compute_forces)
+    extras = SpinorForceExtras(system, k_points, weight, operators_for, compute_forces, k_weights)
     solver = make_kpoint_solver(
         KPointJob(
             k_points.shape[0] if tasks is None else tasks,
@@ -441,10 +456,11 @@ def run_self_consistent_soc_kpoints(
     A solver that cannot export its subspaces (the row-distributed MPI one) starts the eigenproblems cold.
 
     ``compute_forces`` also returns the nonlocal force (``result.nonlocal_forces``): the orbitals of a k-point are not
-    kept, so it is accumulated from them in a last pass after the SCF loop (see :class:`SpinorForceExtras`).
+    kept, so it is accumulated from them in a last pass after the SCF loop (see :class:`SpinorForceExtras`), each
+    k-point with its own weight.
 
-    ``weights`` must all be equal, exactly as in
-    :func:`~parsec_python.SCF.kpoints.run_scf_kpoints`.  At least one
+    ``weights`` are equal (a whole mesh) or not (an irreducible wedge or the time-reversal pairs of a mesh,
+    :mod:`.kpoint_weights`), as in :func:`~parsec_python.SCF.kpoints.run_scf_kpoints`.  At least one
     species in ``system.input.pseudopotentials`` must have
     ``SpeciesPotential.spin_orbit=True`` with a matching relativistic POTRE
     file; an all-empty SOC projector set at every k-point would just be an
@@ -492,11 +508,10 @@ def run_self_consistent_soc_kpoints(
             "density": (weighting.of_k(task) / dV) * (weighted[:rows] + weighted[rows:])
         }
 
-    if compute_forces and not weighting.uniform:
-        raise NotImplementedError(
-            "the nonlocal force of a spinor k-point run accumulated in the SCF step (compute_forces, Andrew "
-            "Grieder's ionic loops) needs equal k-point weights"
-        )
+    # Unequal weights (the irreducible wedge or the time-reversal pairs of a mesh of non-magnetic spin-orbit coupling
+    # on the default routines, PARSEC_SOC_KPOINT_WEDGE) weight the force of every k-point by its own weight, as its
+    # density; the forces of a wedge are completed over its group afterwards
+    # (Forces.periodic.reduced_kpoint_operations).
     solver, extras = _spinor_solver(
         system,
         k_points,
@@ -504,6 +519,7 @@ def run_self_consistent_soc_kpoints(
         accumulate,
         weight=weighting.weight if weighting.uniform else 1.0,
         compute_forces=compute_forces,
+        k_weights=None if weighting.uniform else weighting.weights,
     )
     mixer = make_mixer(system.input.mixing)
     filter_degree = system.input.eigensolver.filter_degree

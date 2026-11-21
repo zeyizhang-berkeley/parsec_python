@@ -60,7 +60,12 @@ delivered to the owners at the end.
 The Gamma point of a cell (real orbitals) takes the device loop of
 isolated systems (:func:`parsec_python.acceleration.Hamiltonian.exchange_device.apply_device_exchange`)
 with :class:`DevicePeriodicPairSolvers` in place of the Kronecker solver:
-real-to-complex FFTs of the real pair densities times ``K(G)``.
+real-to-complex FFTs of the real pair densities times ``K(G)``; the sector
+orbitals of a cell whose sectors carry half-cell translations take the
+classes of those translations, complex FFTs of the reduced box times the
+kernel on the sublattice of each class
+(:meth:`DevicePeriodicPairSolvers.solve_translation_classes`,
+:mod:`.exchange_translations`).
 
 Nothing here prints or opens files.
 """
@@ -464,6 +469,10 @@ class DevicePeriodicPairSolvers:
         # first make none (a pool made per build made them again in every build).
         self._executors: dict[int, ThreadPoolExecutor] = {}
         self._chunks: dict[int, int] = {}
+        # The kernels of the translation classes per device (solve_translation_classes) and the reduced box of the
+        # latest build in such classes (describe).
+        self._class_kernels: dict = {}
+        self._translation_label = ""
         import weakref
 
         weakref.finalize(self, _shutdown, self._executors)
@@ -511,8 +520,11 @@ class DevicePeriodicPairSolvers:
 
     def describe(self, paths=None) -> str:
         """The solver, and the builds of ``paths`` (counts by path, :meth:`record_path`; default: those since the
-        last :meth:`take_paths`) that took the tiles of the symmetry sectors because the pooled full-grid block did
-        not fit the device (``PARSEC_CUPY_EXCHANGE_POOL=auto``): how many of the builds of sector orbitals."""
+        last :meth:`take_paths`) of sector orbitals: those that took the tiles of the symmetry sectors because the
+        pooled full-grid block did not fit the device (``PARSEC_CUPY_EXCHANGE_POOL=auto``), those in the classes of
+        their half-cell translations (``PARSEC_CUPY_EXCHANGE_TRANSLATIONS=auto``) and those whose coset blocks did not
+        fit the device: how many of the builds of sector orbitals.  Without builds of the translation classes or
+        coset blocks that did not fit, the text of before."""
 
         paths = self._paths if paths is None else paths
         shape = "x".join(str(value) for value in self.box.fft_shape)
@@ -523,18 +535,42 @@ class DevicePeriodicPairSolvers:
             text += f"; {self._label}"
         text += f"; devices take tiles of {self.batch_size}-column orbital blocks"
         fallback = int(paths.get("pool-fallback", 0))
+        translations = int(paths.get("translations", 0))
+        unfit = int(paths.get("translations-unfit", 0))
+        builds = fallback + translations + int(paths.get("pool", 0))
         if fallback > 0:
             # PARSEC_CUPY_EXCHANGE_POOL=auto: builds of sector orbitals whose full-grid block did not fit its device
-            builds = fallback + int(paths.get("pool", 0))
             text += (
                 f" (of the symmetry sectors in {fallback} of {builds} builds, where the full-grid block of the "
                 "orbitals did not fit the device)"
             )
+        if translations > 0:
+            # PARSEC_CUPY_EXCHANGE_TRANSLATIONS=auto: sector orbitals in the classes of their half-cell translations
+            with self._lock:
+                label = self._translation_label
+            text += (
+                f"; the pair densities of the symmetry-sector orbitals in the classes of their {label}"
+                + ("" if translations == builds else f" (in {translations} of {builds} builds)")
+            )
+        if unfit > 0:
+            # ... and the builds whose coset blocks did not fit: they took the pooled block or the tiles above
+            text += (
+                f"; the coset blocks of the half-cell translations of the sector orbitals did not fit the device in "
+                f"{unfit} of {builds} builds"
+            )
         return text
 
+    def note_translations(self, label: str) -> None:
+        """The translations and reduced box of a build in translation classes, for :meth:`describe`."""
+
+        with self._lock:
+            self._translation_label = str(label)
+
     def record_path(self, path: str) -> None:
-        """Count a build that took ``path``: ``"pool"`` (the pooled full-grid block of sector orbitals) or
-        ``"pool-fallback"`` (their sector tiles: the block did not fit), ``"full"`` (the tiles of one block)."""
+        """Count a build that took ``path``: ``"translations"`` (the classes of the half-cell translations of sector
+        orbitals), ``"pool"`` (their pooled full-grid block) or ``"pool-fallback"`` (their sector tiles: the block did
+        not fit), ``"full"`` (the tiles of one block); ``"translations-unfit"`` beside ``"pool"`` or
+        ``"pool-fallback"``: the coset blocks of the translation classes did not fit."""
 
         with self._lock:
             self._paths[str(path)] += 1
@@ -605,6 +641,61 @@ class DevicePeriodicPairSolvers:
         del spectrum
         potentials = self.box.from_box(cp, values)
         return cp.asfortranarray(potentials.reshape(count, self.box.points).T)
+
+    # ----- the translation classes of sector orbitals (real orbitals) ---------
+
+    def _even_kernel(self, cp):
+        """``K(G)`` of ``q = 0`` on the whole FFT box (current device): the half spectrum of :meth:`solve` extended
+        evenly (``K(-G) = K(G)``), so that a class solve uses the values the real-to-complex path uses."""
+
+        half = self.cache.half(cp)
+        shape = self.box.fft_shape
+        last = shape[2] // 2 + 1
+        full = cp.empty(shape, dtype=cp.float64)
+        full[..., :last] = half
+        if last < shape[2]:
+            first = (-cp.arange(shape[0], dtype=cp.int64)) % shape[0]
+            second = (-cp.arange(shape[1], dtype=cp.int64)) % shape[1]
+            third = shape[2] - cp.arange(last, shape[2], dtype=cp.int64)
+            full[..., last:] = half[first[:, None, None], second[None, :, None], third[None, None, :]]
+        return full
+
+    def translation_kernel(self, cp, layout, parity: int):
+        """``K(2k + t)`` of the class ``parity`` on the reduced box of ``layout`` (current device, kept for the run):
+        the frequencies of the class, every other one along a halved axis
+        (:class:`.exchange_translations.TranslationLayout`)."""
+
+        device = int(cp.cuda.Device().id)
+        key = (device, tuple(layout.shape), int(layout.halved), int(parity))
+        with self._lock:
+            found = self._class_kernels.get(key)
+        if found is None:
+            if tuple(layout.shape) != self.box.fft_shape or not self.box.identity:
+                raise ValueError("translation classes need the FFT box of the grid itself (a bulk cell)")
+            full = self._even_kernel(cp)
+            found = cp.ascontiguousarray(full[layout.kernel_slices(parity)])
+            del full
+            with self._lock:
+                self._class_kernels[key] = found
+        return found
+
+    def solve_translation_classes(self, cp, boxes, classes, layout) -> None:
+        """Potentials of the twisted class densities ``boxes`` (``(classes, rows, |E|)`` complex, two real densities
+        a row; :func:`.exchange_translations.translation_densities`), in place: per class ``t`` the FFT of the
+        reduced box, times ``K(2k + t)``, and back (numpy's conventions on the reduced box)."""
+
+        import cupyx.scipy.fft as cufft
+
+        shape = tuple(int(value) for value in layout.reduced_shape)
+        axes = (1, 2, 3)
+        for index, parity in enumerate(classes):
+            view = boxes[index].reshape((-1,) + shape)
+            spectrum = cufft.fftn(view, axes=axes, overwrite_x=True)
+            spectrum *= self.translation_kernel(cp, layout, parity)[None]
+            values = cufft.ifftn(spectrum, axes=axes, overwrite_x=True)
+            if values.data.ptr != view.data.ptr:
+                view[...] = values
+            del spectrum, values
 
     # ----- the complex chunk of the k-point loop ------------------------------
 
@@ -790,6 +881,9 @@ class DeviceBlochChannel:
     mesh_size: int
     volume_element: float
     devices: tuple
+    # the irreducible wedge of the mesh (PARSEC_HYBRID_KPOINT_WEDGE, V_xc.bloch_exchange.MeshStars), None for a mesh
+    # reduced by time reversal only
+    stars: object = None
 
     @property
     def representatives(self) -> int:
@@ -799,13 +893,19 @@ class DeviceBlochChannel:
         return np.flatnonzero(np.asarray(self.occupations[rep]) > OCCUPATION_THRESHOLD)
 
     def sources(self):
-        """``(rep, k', conjugate)`` of every point of the mesh: the representative, then its partner."""
+        """``(rep, k', conjugate, operation)`` of every point of the mesh: the representative, then its partner
+        (``operation`` -1), then on a wedge the images under the operations of the grid (their rows permuted)."""
 
+        if self.stars is not None:
+            return [
+                (int(rep), np.asarray(k_source, dtype=np.float64), bool(conjugate), int(operation))
+                for rep, operation, conjugate, k_source in self.stars.sources
+            ]
         found = []
         for rep in range(self.representatives):
-            found.append((rep, np.asarray(self.k_points[rep], dtype=np.float64), False))
+            found.append((rep, np.asarray(self.k_points[rep], dtype=np.float64), False, -1))
             if bool(self.partners[rep]):
-                found.append((rep, -np.asarray(self.k_points[rep], dtype=np.float64), True))
+                found.append((rep, -np.asarray(self.k_points[rep], dtype=np.float64), True, -1))
         return found
 
 
@@ -828,7 +928,11 @@ def device_bloch_channel(orbital_set, volume_element: float) -> DeviceBlochChann
     if not (k_points.shape[0] == weights.size == partners.size == len(occupations) == count):
         raise ValueError("one k-point, weight, partner flag and occupation set per representative is needed")
     mesh_size = int(orbital_set.mesh_size)
-    if mesh_size != int(count + np.count_nonzero(partners)):
+    stars = getattr(orbital_set, "stars", None)
+    if stars is not None:
+        if mesh_size != len(stars.sources):
+            raise ValueError("the images of the representatives do not make up the mesh")
+    elif mesh_size != int(count + np.count_nonzero(partners)):
         raise ValueError("the representatives and their partners do not make up the mesh")
     devices = []
     for vectors, values in zip(orbitals, occupations):
@@ -845,6 +949,7 @@ def device_bloch_channel(orbital_set, volume_element: float) -> DeviceBlochChann
         mesh_size=mesh_size,
         volume_element=float(volume_element),
         devices=tuple(devices),
+        stars=stars,
     )
 
 
@@ -942,16 +1047,18 @@ def pair_symmetry_setting() -> bool:
     return value == "on"
 
 
-def _symmetric(channel, target: int, conjugate: bool) -> bool:
+def _symmetric(channel, target: int, conjugate: bool, operation: int = -1) -> bool:
     """Whether the pairs of an occupied target of ``target`` with a source are paired with their partners.
 
     Always for a source of the mesh point itself (the partner pair has the
     potential ``conj(w)``); for the partner ``-k`` of a representative only
     when the target has a partner too (the partner pair's source is then
-    ``-k_target``, a point of the sum with the same density and ``q``).
+    ``-k_target``, a point of the sum with the same density and ``q``); never
+    for the image of a representative under an operation of the grid (a
+    wedge's star, whose columns are no targets).
     """
 
-    return (not conjugate) or bool(channel.partners[target])
+    return operation < 0 and ((not conjugate) or bool(channel.partners[target]))
 
 
 def _tile_cost(channel, tile: _Tile, sources, counts, symmetric: bool) -> int:
@@ -959,11 +1066,11 @@ def _tile_cost(channel, tile: _Tile, sources, counts, symmetric: bool) -> int:
 
     width = int(tile.columns.size)
     total = 0
-    for rep, _k, conjugate in sources:
+    for rep, _k, conjugate, operation in sources:
         count = counts[rep]
         if not count:
             continue
-        if tile.start is None or not symmetric or not _symmetric(channel, tile.rep, conjugate):
+        if tile.start is None or not symmetric or not _symmetric(channel, tile.rep, conjugate, operation):
             total += width * count
         elif rep > tile.rep:
             total += width * count
@@ -980,6 +1087,11 @@ def planned_bloch_exchange_bytes(channel: DeviceBlochChannel, solvers: DevicePer
     sources = 16 * points * sum(int(channel.occupied(rep).size) for rep in range(channel.representatives))
     if pair_symmetry_setting():
         sources *= 2  # the W of the occupied states that partner pairs reach, as large as the copies
+    if getattr(channel, "stars", None) is not None:
+        # the image of the occupied columns of one representative under an operation of the grid (a wedge's star),
+        # with the gather of its rows
+        sources += 16 * points * max((int(channel.occupied(rep).size) for rep in range(channel.representatives)),
+                                     default=0) + 8 * points * len(channel.stars.gathers)
     work = solvers.tile_bytes(TILE_COLUMNS) + solvers.cache.array_bytes
     needed = {int(device): sources + work for device in devices}
     for rep in range(channel.representatives):
@@ -1144,6 +1256,16 @@ def apply_device_bloch_exchange(
             pending: list = []
             # W of the occupied states of every representative that partner pairs reach, on this device.
             partners: dict = {}
+            # the gathers of the operations of a wedge's stars on this device (the rows of P_g u)
+            gathers: dict = {}
+
+            def image_rows(rep: int, operation: int):
+                """The occupied rows of ``rep`` under ``operation`` (``P_g u``), made for one tile at a time."""
+
+                found = gathers.get(operation)
+                if found is None:
+                    found = gathers[operation] = cp.asarray(channel.stars.gathers[operation])
+                return cp.take(copies[rep][0], found, axis=1)
 
             def partner_rows(rep: int):
                 found = partners.get(rep)
@@ -1161,13 +1283,18 @@ def apply_device_bloch_exchange(
                     target_weights = cp.asarray(
                         np.asarray(channel.occupations[tile.rep])[tile.columns] / float(channel.mesh_size)
                     )
-                for rep, k_source, conjugate in sources:
+                for rep, k_source, conjugate, operation in sources:
                     if rep not in copies:
                         continue
                     source_rows, weights = copies[rep]
                     keywords = dict(conjugate=conjugate, inverse_volume=inverse_volume, timing=pending)
                     q = k_target - k_source
-                    if target_weights is None or not _symmetric(channel, tile.rep, conjugate):
+                    if operation >= 0:
+                        # an image of the representative (a wedge's star): its rows permuted, no partner pairs
+                        image = image_rows(rep, operation)
+                        solved[device] += solvers.accumulate_bloch(cp, q, targets, image, weights, rows, **keywords)
+                        del image
+                    elif target_weights is None or not _symmetric(channel, tile.rep, conjugate):
                         solved[device] += solvers.accumulate_bloch(
                             cp, q, targets, source_rows, weights, rows, **keywords
                         )
@@ -1203,7 +1330,7 @@ def apply_device_bloch_exchange(
                 del targets, rows
             for rep, values in partners.items():
                 deliver(rep, np.asarray(occupied[rep], dtype=np.int64), values)
-            del copies, partners
+            del copies, partners, gathers
 
     try:
         solvers.run_on_devices(run, devices)

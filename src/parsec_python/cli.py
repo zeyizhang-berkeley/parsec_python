@@ -934,8 +934,13 @@ def start_output_files(files: RunOutputFiles, translation, system, log, *, k_sam
     files.start()
 
 
-def load_restart_start(translation, system, log, directory: Path, *, k_sampling=None):
-    """``Restart_Run``: the warm start of the first SCF loop, ``None`` without it."""
+def load_restart_start(translation, system, log, directory: Path, *, k_sampling=None, fields_out=None):
+    """``Restart_Run``: the warm start of the first SCF loop, ``None`` without it.
+
+    ``fields_out``, a list, receives the :class:`parsec_python.SCF.restart.RestartFields` read (the
+    accelerated CLI tests their densities against the point group of the atoms without reading the file
+    again).
+    """
 
     if not translation.restart_run:
         return None
@@ -944,6 +949,8 @@ def load_restart_start(translation, system, log, directory: Path, *, k_sampling=
         from .SCF.restart import load_wfndat_restart, wfndat_report_lines
 
         restart, warm_start = load_wfndat_restart(directory / "wfn.dat", system)
+        if fields_out is not None:
+            fields_out.append(restart.fields)
         log.write("\n".join(wfndat_report_lines(restart)))
         if getattr(translation.problem.eigensolver, "fixed_state_count", False):
             from .SCF.restart import check_fixed_state_count
@@ -963,6 +970,8 @@ def load_restart_start(translation, system, log, directory: Path, *, k_sampling=
         # restart_run.F90 with stype(2) = 2: the two spin components.
         spinors=bool(scf.self_consistent_spin_orbit and not scf.noncollinear),
     )
+    if fields_out is not None:
+        fields_out.append(fields)
     log.write("\n".join(restart_report_lines(fields)))
     if getattr(translation.problem.eigensolver, "fixed_state_count", False):
         from .SCF.restart import check_fixed_state_count
@@ -1008,8 +1017,12 @@ def _write_band_outputs(band_result, reporter, directory: Path, start: float) ->
     reporter.band_structure(band_result, files, time.perf_counter() - start)
 
 
-def _run_band_structure(system, translation, result, reporter, directory: Path) -> None:
-    """Fortran ``calc_bands``: bands along the ``bandstruc`` path after the SCF."""
+def _run_band_structure(system, translation, result, reporter, directory: Path, *, symmetry=None) -> None:
+    """Fortran ``calc_bands``: bands along the ``bandstruc`` path after the SCF.
+
+    ``symmetry``: the operations of the potential of an accelerated Gamma-cell SCF in sectors
+    (``SCF.bands.solve_kpoint_bands``); ``None`` here.
+    """
     bands = translation.problem.bands
     if bands is None:
         return
@@ -1032,6 +1045,7 @@ def _run_band_structure(system, translation, result, reporter, directory: Path) 
         fermi_level=result.fermi_level,
         number_of_states=np.asarray(eigenvalues).size // k_count,
         callback=_band_progress(reporter),
+        symmetry=symmetry,
     )
     _write_band_outputs(band_result, reporter, directory, start)
 
@@ -1907,6 +1921,7 @@ def _run_polarizability(
     iteration_state_callback=None,
     warm_start_builder=None,
     compute_forces=None,
+    field_loop=None,
 ):
     """The seven field loops of ``Polarizability``, reported, with ``polar.dat``.
 
@@ -1926,7 +1941,13 @@ def _run_polarizability(
     (``run_scf`` and the k-point runner); a given ``scf_runner`` carries its
     own.  ``compute_forces(system, result, symmetrize=, operations=)``
     replaces the forces of the reference backend (the accelerated CLI gives
-    those of its driver).
+    those of its driver).  ``field_loop`` replaces
+    :func:`parsec_python.SCF.polarizability.run_polarizability` (the
+    accelerated loops in the sectors of the group each field keeps,
+    ``acceleration/SCF/symmetry_off_inputs.py``): it may report the loops out
+    of the order of ``polar.f90`` and give loops that are images of a solved
+    one (``after_run(index, None, None, record, source=, operation=)``); the
+    lines of ``polar.dat`` keep that order.
     """
 
     from .Output.polarizability_output import (
@@ -1943,6 +1964,16 @@ def _run_polarizability(
     with path.open("w", encoding="utf-8") as stream:
         stream.write(polar_header(system.atoms, list(system.pseudopotentials), field))
         stream.flush()
+        # The line of every loop, written in the order of polar.f90 (a field_loop may finish them out of it).
+        pending: dict[int, str] = {}
+        written = [0]
+
+        def write_line(index: int, line: str) -> None:
+            pending[index] = line
+            while written[0] in pending:
+                stream.write(pending.pop(written[0]))
+                written[0] += 1
+            stream.flush()
 
         def before_run(index, direction):
             log.write(
@@ -1952,7 +1983,20 @@ def _run_polarizability(
             log.write()
             clock["start"] = time.perf_counter()
 
-        def after_run(index, run_system, result, record):
+        def after_run(index, run_system, result, record, *, source=None, operation=None):
+            if result is None:
+                # A loop that is the image of the solved loop ``source`` under ``operation``: not solved.
+                matrix = "" if operation is None else " " + str(np.rint(np.asarray(operation)).astype(int).tolist())
+                log.write(
+                    f" Polarizability run {index + 1} of 7: field {field:.5f} along {names[index]}: the image of "
+                    f"run {source + 1} ({names[source]}) under the operation{matrix} of the atoms, not solved: "
+                    f"total energy {record.total_energy:.8f} Ry, dipole "
+                    + " ".join(f"{value:.6f}" for value in np.asarray(record.dipole.dipole_debye))
+                    + " Debye"
+                )
+                log.write()
+                write_line(index, polar_run_line(record.direction, record.total_energy, record.dipole.dipole_debye))
+                return
             elapsed = time.perf_counter() - clock["start"]
             forces = None
             if index == 6 and translation.compute_forces:
@@ -1971,10 +2015,7 @@ def _run_polarizability(
                     finish_report(result, elapsed, forces=forces)
             else:
                 reporter.finish(result, elapsed, forces=forces)
-            stream.write(
-                polar_run_line(record.direction, record.total_energy, record.dipole.dipole_debye)
-            )
-            stream.flush()
+            write_line(index, polar_run_line(record.direction, record.total_energy, record.dipole.dipole_debye))
 
         extra = {}
         if scf_runner is not None:
@@ -2012,7 +2053,7 @@ def _run_polarizability(
                         iteration_state_callback=iteration_state_callback,
                     )
                 }
-        polarization, _, result = run_polarizability(
+        polarization, _, result = (run_polarizability if field_loop is None else field_loop)(
             system,
             field,
             callback=reporter.iteration if iteration_report is None else iteration_report,
@@ -2020,6 +2061,8 @@ def _run_polarizability(
             after_run=after_run,
             **extra,
         )
+        if pending or written[0] != 7:
+            raise RuntimeError("the polarizability did not finish its seven field loops in order")
         stream.write(polar_summary(polarization))
     log.write(f" Polarizability results: {path}")
     return polarization, result, clock.get("forces")
@@ -2194,22 +2237,45 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(f"Input error: {error}", file=sys.stderr)
             return 2
 
-    # PARSEC_SUPERCELL_KPOINTS=auto: a Gamma-point cell that repeats a smaller one, solved as that cell with the
-    # Gamma-centred k-point mesh of the repeats (SCF/kpoint_supercell.py; the same energies, the Bloch kinetic term)
+    # PARSEC_SUPERCELL_KPOINTS=auto: a Gamma-point cell that repeats a smaller one, solved as a cell of it with a
+    # Gamma-centred k-point mesh that divides the repeats (PARSEC_SUPERCELL_KPOINTS_MESH), reduced to the wedge of the
+    # cell's operations (PARSEC_SUPERCELL_KPOINTS_WEDGE): SCF/kpoint_supercell.py and SCF/supercell_mesh.py, the same
+    # energies with the Bloch kinetic term
     import dataclasses as _dataclasses
 
-    from .SCF.kpoint_supercell import describe as _describe_bloch_cells, kpoints_of_supercell as _bloch_cells
+    from .SCF.supercell_mesh import supercell_mesh_route as _supercell_mesh_route
 
-    _found_cells = _bloch_cells(translation.problem)
+    _supercell_route_notes: list[str] = []
+    try:
+        _found_cells = _supercell_mesh_route(translation, notes=_supercell_route_notes)
+    except ValueError as error:
+        print(f"Input error: {error}", file=sys.stderr)
+        return 2
+    # why a cell that repeats a smaller one stays at the Gamma point (its smallest cell too small for the stencil)
+    _found_cells_notes = [f" NOTE: {note}" for note in _supercell_route_notes]
+    for _note in _supercell_route_notes:
+        print(f"NOTE: {_note}")
     if _found_cells is not None:
-        translation = _dataclasses.replace(translation, problem=_found_cells[0])
+        translation = _dataclasses.replace(translation, problem=_found_cells.problem)
         # the mesh reproduces the supercell with the Bloch kinetic term
         import os as _os
 
         _os.environ["PARSEC_KPOINT_KINETIC"] = "bloch"
-        print(_describe_bloch_cells("cell", _found_cells[1]))
+        print(_found_cells.describe())
+        _found_cells_notes = [f" NOTE: {_found_cells.describe()}", *(f" NOTE: {note}" for note in _found_cells.notes)]
 
     is_periodic = translation.problem.periodic_cell is not None
+    if is_periodic:
+        # The switches of the k-point sectors of the k-point loops and of the detection of their cell group
+        # (acceleration/SCF/kpoint_sectors.py: PARSEC_SYMMETRY_ATOM_TOLERANCE, PARSEC_PERIODIC_DEFECT_CENTRE, ...),
+        # read here so that a value they do not know is refused before the run and not at the setup of its solver.
+        from parsec_python.acceleration.SCF.kpoint_sectors import check_kpoint_sector_switches
+
+        try:
+            check_kpoint_sector_switches()
+        except ValueError as error:
+            print(f"Input error: {error}", file=sys.stderr)
+            return 2
     if (
         getattr(translation, "polarizability_field", None) is not None
         and getattr(translation, "energy_refinement", None) is not None
@@ -2263,7 +2329,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             restarted=translation.problem is not problem_of_input,
             progress=None if arguments.quiet else print,
         )
-        restart_notes = [*restart_notes, *mlff_notes]
+        # PARSEC_SUPERCELL_KPOINTS=auto: what was solved, in parsec.out too
+        restart_notes = [*restart_notes, *mlff_notes, *_found_cells_notes]
+        # PARSEC_SYMMETRIZE_POSITIONS=on: the positions averaged over the group found within
+        # PARSEC_SYMMETRY_ATOM_TOLERANCE, before anything reads them (off, the default: as given).
+        from .Forces.position_symmetry import symmetrize_input_positions
+
+        translation, position_notes = symmetrize_input_positions(translation)
+        restart_notes = [*restart_notes, *position_notes]
         use_symmetry, symmetry_note = symmetry_decision(translation)
         # AFM_Scan: one folder per scan or part of a scan.
         scan_folder_note = None

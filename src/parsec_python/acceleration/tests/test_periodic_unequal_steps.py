@@ -276,10 +276,13 @@ class StencilTests(unittest.TestCase):
 
 
 class PaletteTests(unittest.TestCase):
-    """The palette of a packed stencil holds 256 coefficients (one-byte codes).  Such a cell has two or three times the
-    shell values of a cube, each times the phases and multiplicity ratios of a sector: Si stretched along z at order 18
-    needs 262 in one sector, where the build of the stencils stopped the run (C2 of review 5).  The driver counts them
-    first and keeps such a cell on the full grid."""
+    """The palette of a packed stencil holds 256 coefficients in one-byte codes.  Such a cell has two or three times
+    the shell values of a cube, each times the phases and multiplicity ratios of a sector: Si stretched along z at order
+    18 needs 306 in one sector, where the build of the stencils stopped the run (C2 of review 5).  The driver counts
+    them first; since 2026-11-19 such a sector codes them in two bytes (PARSEC_SECTOR_PALETTE_CODES=auto), and under
+    ``off`` the cell steps down the ladder (tests/test_sector_palette.py) or keeps the full grid."""
+
+    off = {"PARSEC_SECTOR_PALETTE_CODES": "off"}
 
     sides = (10.26, 10.26, 12.0)
 
@@ -312,35 +315,72 @@ class PaletteTests(unittest.TestCase):
         self.assertEqual(asked, [reduction])
 
     def test_a_cell_beyond_the_palette_keeps_the_full_grid(self) -> None:
+        # PARSEC_SECTOR_PALETTE_CODES=off: one-byte codes, as before 2026-11-19
         grid, reduction, decomposition = self._sectors(0.5, 18)
         self.assertTrue(unequal_step_grid(grid))
         self.assertIsInstance(reduction, PointGroupReduction)
         sizes = sector_palette_sizes(grid, decomposition, wrap=True)
         self.assertGreater(max(sizes), PALETTE_CAPACITY)
-        # Both routes of the stencils refuse it with one error, a ValueError as before; not SectorStencilUnavailable,
-        # which would send the direct build to the CSR route.
-        with self.assertRaises(PaletteOverflow) as caught:
-            build_sector_stencils(grid, decomposition, implementation="numpy", wrap=True)
-        self.assertIsInstance(caught.exception, ValueError)
-        self.assertNotIsInstance(caught.exception, SectorStencilUnavailable)
         from parsec_python.acceleration.backends.cupy_stencil_major import build_stencil_major_metadata
 
         worst = int(np.argmax(sizes))
+        reduced = _reduce(decomposition, build_negative_laplacian(grid))[worst]
+        with mock.patch.dict(os.environ, self.off):
+            # Both routes of the stencils refuse it with one error, a ValueError as before; not
+            # SectorStencilUnavailable, which would send the direct build to the CSR route.
+            with self.assertRaises(PaletteOverflow) as caught:
+                build_sector_stencils(grid, decomposition, implementation="numpy", wrap=True)
+            self.assertIsInstance(caught.exception, ValueError)
+            self.assertNotIsInstance(caught.exception, SectorStencilUnavailable)
+            with self.assertRaises(PaletteOverflow):
+                build_stencil_major_metadata(reduced, codes="off")
+            (checked, refusal), asked = self._check(grid, reduction)
+            self.assertIsNone(checked)
+            self.assertIn(f"need {max(sizes)} distinct coefficients, more than the {PALETTE_CAPACITY}", refusal)
+            self.assertIn("PARSEC_SECTOR_PALETTE_CODES=off", refusal)
+            self.assertEqual(asked, [reduction])
+        # a full-grid operator codes in one byte under every setting
         with self.assertRaises(PaletteOverflow):
-            build_stencil_major_metadata(_reduce(decomposition, build_negative_laplacian(grid))[worst])
+            build_stencil_major_metadata(reduced)
+
+    def test_a_cell_beyond_one_byte_codes_in_two(self) -> None:
+        # the default (PARSEC_SECTOR_PALETTE_CODES=auto): the sectors over 256 values code them in two bytes, the
+        # others in one, and every stencil is that of the reduced full-grid matrix (both routes, the same arrays)
+        grid, reduction, decomposition = self._sectors(0.5, 18)
+        sizes = sector_palette_sizes(grid, decomposition, wrap=True)
+        stencils = build_sector_stencils(grid, decomposition, implementation="numpy", wrap=True)
+        self.assertEqual(sizes, tuple(int(stencil.coefficient_palette.size) for stencil in stencils))
+        from parsec_python.acceleration.backends.cupy_stencil_major import build_stencil_major_metadata
+
+        reduced = _reduce(decomposition, build_negative_laplacian(grid))
+        for size, stencil, matrix in zip(sizes, stencils, reduced, strict=True):
+            self.assertEqual(stencil.coefficient_codes.dtype, np.uint16 if size > PALETTE_CAPACITY else np.uint8)
+            packed = build_stencil_major_metadata(matrix, codes="auto")
+            np.testing.assert_array_equal(packed.neighbors, stencil.neighbors)
+            if not _native_reduction():
+                # SciPy's reduction adds the entries of one sector column in another order: the values to round-off
+                np.testing.assert_allclose(packed.to_csr().toarray(), stencil.to_csr().toarray(), rtol=0, atol=1e-12)
+                continue
+            self.assertEqual(packed.coefficient_codes.dtype, stencil.coefficient_codes.dtype)
+            np.testing.assert_array_equal(packed.coefficient_codes, stencil.coefficient_codes)
+            np.testing.assert_array_equal(
+                packed.coefficient_palette.view(np.uint64), stencil.coefficient_palette.view(np.uint64)
+            )
         (checked, refusal), asked = self._check(grid, reduction)
-        self.assertIsNone(checked)
-        self.assertIn(f"need {max(sizes)} distinct coefficients, more than the {PALETTE_CAPACITY}", refusal)
+        self.assertIsNone(refusal)
+        self.assertIs(checked[0], reduction)
+        self.assertEqual(checked[2], max(sizes))
         self.assertEqual(asked, [reduction])
 
     def test_cubes_are_checked_too(self) -> None:
-        # since 2026-11-19 (tests/test_sector_palette.py): a cube whose orbits differ in size overflows too
+        # since 2026-11-19 (tests/test_sector_palette.py): a cube whose orbits differ in size overflows one byte too
         cube = _grid((10.26,) * 3, 0.5, order=18)
         self.assertFalse(unequal_step_grid(cube))
         reduction = _detect(cube, _stretched_diamond((10.26,) * 3))
         self.assertGreater(reduction.group_order, 1)
         sizes = sector_palette_sizes(cube, ReflectionRepresentationDecomposition.build(cube, reduction), wrap=True)
-        (checked, refusal), asked = self._check(cube, reduction)
+        with mock.patch.dict(os.environ, self.off):
+            (checked, refusal), asked = self._check(cube, reduction)
         self.assertEqual(asked, [reduction])
         if max(sizes) <= PALETTE_CAPACITY:
             self.assertIsNone(refusal)
@@ -505,22 +545,31 @@ class UnequalStepSCFTests(unittest.TestCase):
 
     def test_a_cell_beyond_the_palette_keeps_the_full_grid(self) -> None:
         # Order 18 on 20 x 20 x 22 points: one sector stencil needs 306 coefficients (PaletteTests), where the build
-        # of the stencils stopped the run.  The ladder of 2026-11-19 (tests/test_sector_palette.py): the commuting
-        # group with translations needs 307, the mirrors about the origin fit; PARSEC_SECTOR_PALETTE_LADDER=off: the
-        # full grid, and the identity sector the MPI runs take then, as before.
+        # of the stencils stopped the run.  Since 2026-11-19 it codes them in two bytes and keeps the weighted
+        # sectors (PARSEC_SECTOR_PALETTE_CODES=auto).  Under off, the ladder of 2026-11-19
+        # (tests/test_sector_palette.py): the commuting group with translations needs 307, the mirrors about the
+        # origin fit; PARSEC_SECTOR_PALETTE_LADDER=off as well: the full grid, and the identity sector the MPI runs
+        # take then, as before.
         problem = tetragonal_silicon(12.0, 0.5)
         problem = replace(problem, grid=replace(problem.grid, expansion_order=18))
-        lower, lower_details, _ = self._run(problem, {})
+        wide, wide_details, _ = self._run(problem, {})
+        self.assertIn("need 306 distinct coefficients and code them in two bytes", wide_details["symmetry_detection"])
+        self.assertTrue(wide_details["symmetry_detection"].startswith("exact group of"))
+        self.assertIn("the orbitals use the one-dimensional sectors of a subgroup", wide_details["symmetry_detection"])
+        self.assertIn("two bytes", wide_details["orbital_sector_coefficient_codes"])
+        codes_off = {"PARSEC_SECTOR_PALETTE_CODES": "off"}
+        lower, lower_details, _ = self._run(problem, codes_off)
         self.assertIn("need 306 distinct coefficients", lower_details["symmetry_detection"])
         self.assertIn("PARSEC_SECTOR_PALETTE_LADDER=auto", lower_details["symmetry_detection"])
         self.assertTrue(lower_details["symmetry_detection"].startswith("exact Cartesian axis-reflection subgroup"))
-        off = {"PARSEC_SECTOR_PALETTE_LADDER": "off"}
+        off = dict(codes_off, PARSEC_SECTOR_PALETTE_LADDER="off")
         kept, details, _ = self._run(problem, off)
         self.assertIn("fell back to full grid", details["symmetry_detection"])
         self.assertIn(f"more than the {PALETTE_CAPACITY} of their palette", details["symmetry_detection"])
         identity, identity_details, _ = self._run(problem, dict(off, PARSEC_CUPY_SINGLE_SECTOR="on"))
         self.assertIn("one sector of the identity", identity_details["symmetry_detection"])
         full, _, _ = self._run(problem, {"PARSEC_PERIODIC_SYMMETRY": "off"})
+        self._assert_same(wide, full, "beyond one byte, the weighted sectors in two-byte codes")
         self._assert_same(lower, full, "beyond the palette, the mirrors about the origin")
         self._assert_same(kept, full, "beyond the palette")
         self._assert_same(identity, full, "beyond the palette, identity sector")

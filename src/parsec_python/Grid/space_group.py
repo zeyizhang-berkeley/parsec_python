@@ -1314,6 +1314,157 @@ def find_wire_slab_space_group(lattice_vectors, periodicity: int, radius: float,
     return grid_preserving_operations(group, periodicity)
 
 
+SLAB_MESH_SYMMETRY_ENV = "PARSEC_SLAB_MESH_SYMMETRY"
+
+
+def slab_mesh_symmetry_setting() -> str:
+    """``PARSEC_SLAB_MESH_SYMMETRY``: the space group of a slab with a Monkhorst-Pack mesh (Fortran-derived routines).
+
+    PARSEC 1.5 searches no symmetry for a slab (``parsec.F90:470-486``, ``ierr = 2``) unless a band structure,
+    spin-orbit coupling or an NSCF run asks for it, so a slab mesh is reduced by time reversal alone (h-BN with
+    ``Monkhorst_Pack_Grid 6 6 1``: 20 points).  ``auto`` (the default) gives a slab of scalar or collinear-spin
+    orbitals with a native LDA or GGA and a Monkhorst-Pack mesh (a ``Monkhorst_Pack_Shift`` block, or PARSEC 1.5's
+    zero shift without it) the operations of its group that map its grid and its mesh onto themselves
+    (:func:`slab_mesh_subgroup`) and whose lattice matrix is a signed permutation of the two in-plane directions (and
+    ``z``): the finite differences along the lattice directions map onto each other, so the Hamiltonian of every
+    k-point follows them to round-off.  The mesh is reduced to their irreducible wedge with time reversal, the
+    density symmetrized with them and the forces averaged over them, as for a wire (h-BN 6 x 6 x 1: 13 points; every
+    operation of a rectangular or square slab).  Every point of the time-reversal wedge of ``off`` is then exactly
+    (not modulo a reciprocal vector) an image of its representative, so the levels are those of ``off`` to round-off
+    (:func:`slab_mesh_wedge_exactness`); a four-fold rotation without a diagonal mirror (S4, C4, C4h) on a mesh
+    through the zone boundary fails that test and the slab keeps time reversal alone, as does a group that would
+    reduce no point.  Where the mesh has a component 1/2, the averaged density of such a point takes images that
+    differ from the point of ``off`` by a reciprocal vector: a difference of second order in the error of the finite
+    differences.  Operations that reverse ``z`` are dropped where charged sheets are not symmetric about ``z = 0``.
+    The grid is that of ``off`` (no operation whose fractional translation would change the counts of
+    ``adjust_step`` is kept).
+
+    ``full`` keeps the three- and six-fold rotations of a hexagonal slab (and the mirrors that are no signed
+    permutation) as well (h-BN: 7 points).  They map the grid points onto points, but the first derivatives of the
+    Bloch term ``-2 i k . nabla`` are differences along the two lattice directions of the plane only, so the
+    Hamiltonian of a k-point other than Gamma follows such a rotation only up to the error of those differences
+    (PARSEC's wedge of a hexagonal bulk cell takes them the same way): the wedge differs from the whole mesh by an
+    amount that vanishes with the grid (A100, order 12: h-BN 6 x 6 x 1 at 0.15 bohr -1.8e-7 Ry, graphene 9 x 9 x 1
+    at 0.25 bohr 3.0e-6 Ry, silicene 6 x 6 x 1 at 0.30 bohr -2e-8 Ry; a two-atom h-BN slab 3 x 3 x 1 at 0.45 bohr
+    and order 6: 5.1e-4 Ry).  ``off``: no search, as before.
+    """
+
+    import os
+
+    value = os.environ.get(SLAB_MESH_SYMMETRY_ENV, "auto").strip().lower() or "auto"
+    if value not in ("auto", "full", "off"):
+        raise ValueError(f"{SLAB_MESH_SYMMETRY_ENV} must be auto, full or off, got {value!r}")
+    return value
+
+
+def slab_mesh_subgroup(
+    group: SpaceGroup,
+    counts,
+    shift,
+    confined_planes,
+    *,
+    exact: bool = False,
+    reverse_z: bool = True,
+    tolerance: float = 1.0e-6,
+):
+    """The operations of a slab group that map the slab grid onto itself without changing it.
+
+    ``group`` is the group of :func:`find_wire_slab_space_group` (no translation along ``z``, no matrix that mixes
+    ``z`` with the plane); ``counts`` and ``shift`` are the points and the shift (grid steps) along the two periodic
+    directions of the grid built without fractional translations, ``confined_planes`` the ``z`` of its planes.  An
+    operation is kept when its in-plane part maps the points ``f = (i + s)/n`` of the plane onto such points (its
+    fractional translation a whole number of steps, :func:`grid_commensurability_problem` restricted to the plane)
+    and, where it reverses ``z``, the planes are symmetric about ``z = 0`` and ``reverse_z`` allows it (``False``
+    where an external potential such as charged sheets is not symmetric about ``z = 0``); with ``exact`` also only
+    where its in-plane matrix is a signed permutation (the finite differences along the lattice directions map onto
+    each other).  The operations that map a grid onto itself form a group, and so do the signed permutations and
+    the operations that keep ``z`` among them.  Returns ``(subgroup, dropped)``.
+    """
+
+    counts = np.asarray(counts, dtype=np.float64).reshape(-1)[:2]
+    shift = np.asarray(shift, dtype=np.float64).reshape(-1)[:2]
+    planes = np.sort(np.asarray(confined_planes, dtype=np.float64).reshape(-1))
+    scale = max(float(np.max(np.abs(planes))) if planes.size else 1.0, 1.0)
+    planes_symmetric = bool(
+        planes.size and np.max(np.abs(planes + planes[::-1])) <= tolerance * scale
+    )
+    corners = np.array([[a, b] for a in (0, 1) for b in (0, 1)], dtype=np.float64)
+    fractional = (corners + shift) / counts
+    kept = []
+    for index, (matrix, translation) in enumerate(zip(group.rotation_matrices, group.translation_vectors)):
+        if np.any(matrix[:2, 2] != 0) or np.any(matrix[2, :2] != 0) or abs(float(translation[2])) > tolerance:
+            continue
+        if matrix[2, 2] == -1 and not (planes_symmetric and reverse_z):
+            continue
+        plane = np.abs(matrix[:2, :2])
+        if exact and not (np.all(plane.sum(axis=0) == 1) and np.all(plane.sum(axis=1) == 1)):
+            continue
+        mapped = (fractional - translation[:2]) @ matrix[:2, :2].T.astype(np.float64)
+        target = mapped * counts - shift
+        if np.max(np.abs(target - np.rint(target))) <= tolerance:
+            kept.append(index)
+    dropped = group.order - len(kept)
+    if dropped == 0:
+        return group, 0
+    last = group.translations[kept[-1]]
+    return (
+        SpaceGroup(
+            rotations=tuple(group.rotations[index] for index in kept),
+            translations=tuple(group.translations[index] for index in kept),
+            cartesian_rotations=tuple(group.cartesian_rotations[index] for index in kept),
+            labels=tuple(group.labels[index] for index in kept),
+            crystal_system=group.crystal_system,
+            full_holohedry=False,
+            lattice_operations=group.lattice_operations,
+            candidate_numbers=tuple(group.candidate_numbers[index] for index in kept),
+            symmorphic=not (abs(last[0]) + abs(last[1]) + abs(last[2]) > SYMMETRY_TOLERANCE),
+            ignored=group.ignored,
+        ),
+        dropped,
+    )
+
+
+def slab_mesh_wedge_exactness(
+    lattice_vectors, dimensions, shift, reciprocal_rotations, *, tolerance: float = 1.0e-8
+) -> tuple[bool, int, int]:
+    """Whether a group's wedge of a Monkhorst-Pack mesh computes the k-points of the time-reversal wedge exactly.
+
+    Returns ``(exact, wedge_count, pair_count)``: the points of the wedge of ``reciprocal_rotations`` with time
+    reversal and of time reversal alone (:func:`parsec_python.Grid.kpoints.irreducible_monkhorst_pack`, which
+    represents a star by its first mesh point folded into ``(-1/2, 1/2]``).  The finite-difference Bloch operator is
+    not invariant under ``k -> k + G``, so a point of the time-reversal wedge has the levels of its representative in
+    the group's wedge to round-off only where it is exactly ``+-G_R k`` of an operation, not modulo a reciprocal
+    vector; ``exact`` says that every point is.  Under signed permutations of the lattice directions it fails for a
+    four-fold rotation without a diagonal mirror on a mesh through the zone boundary (a component 1/2): its star joins
+    two time-reversal pairs, such as ``(1/2, 1/4)`` and ``(1/4, 1/2)``, whose folded points are images of each other
+    only modulo a reciprocal vector (A100, a square S4 slab of four carbon atoms at 0.45 bohr and order 6 on the
+    unshifted 4 x 4 x 1 mesh: 2.4e-5 Ry).  With a diagonal mirror, or on a mesh without such points, every point is
+    an exact image.  Both wedges are those the run takes (cached, :func:`~parsec_python.Grid.kpoints.kpoint_sampling_details`).
+    """
+
+    from .kpoints import _cached_irreducible_monkhorst_pack
+
+    lattice = tuple(tuple(float(value) for value in row) for row in np.asarray(lattice_vectors, dtype=float))
+    dims = tuple(int(value) for value in dimensions)
+    shifts = tuple(float(value) for value in shift)
+    rotations = np.asarray(reciprocal_rotations, dtype=np.int64).reshape(-1, 3, 3)
+    pairs = _cached_irreducible_monkhorst_pack(lattice, dims, shifts, None, True)
+    wedge = _cached_irreducible_monkhorst_pack(
+        lattice, dims, shifts, tuple(tuple(tuple(int(v) for v in row) for row in matrix) for matrix in rotations), True
+    )
+    pair_index = np.asarray(pairs.grid_map).reshape(-1)
+    wedge_index = np.asarray(wedge.grid_map).reshape(-1)
+    # (wedge points, operations, 3): the exact images G_R k of every representative
+    images = np.einsum("rij,kj->kri", rotations.astype(np.float64), np.asarray(wedge.fractional, dtype=np.float64))
+    for star in range(wedge.count):
+        members = np.asarray(pairs.fractional, dtype=np.float64)[np.unique(pair_index[wedge_index == star])]
+        candidates = np.concatenate([images[star], -images[star]])
+        distance = np.max(np.abs(members[:, None, :] - candidates[None, :, :]), axis=2)
+        if np.any(np.min(distance, axis=1) > tolerance):
+            return False, wedge.count, pairs.count
+    return True, wedge.count, pairs.count
+
+
 def confined_grid_symmetry(grid, group: SpaceGroup) -> PeriodicGridSymmetry:
     """The operations of ``group`` as permutations of a wire or slab grid.
 
@@ -1373,6 +1524,10 @@ __all__ = [
     "snapped_translation",
     "space_group_with_search",
     "skipped_space_group",
+    "SLAB_MESH_SYMMETRY_ENV",
+    "slab_mesh_subgroup",
+    "slab_mesh_symmetry_setting",
+    "slab_mesh_wedge_exactness",
     "grid_preserving_operations",
     "fortran_anint",
     "fortran_nint",

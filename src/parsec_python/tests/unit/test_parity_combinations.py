@@ -112,23 +112,32 @@ class WireSlabDosRestartShiftTest(_Directory):
         DOS_MP_Shift (usrinputfile.F90 l.1188-1193); its group comes from the
         wire/slab search, not from the bulk one."""
 
+        from unittest import mock
+
         shutil.copy(HYDROGEN, self.directory / "H_POTRE.DAT")
-        translation = parse_parsec_input(
-            self.write(
-                _H2_SLAB.format(
-                    extra=(
-                        "Create_DOS: .true.\nRestart_Run: .true.\n"
-                        "begin DOS_MP_Grid\n 4 4\nend DOS_MP_Grid\n"
-                        "begin DOS_MP_Shift\n 0.5 0.5\nend DOS_MP_Shift"
-                    )
+        path = self.write(
+            _H2_SLAB.format(
+                extra=(
+                    "Create_DOS: .true.\nRestart_Run: .true.\n"
+                    "begin DOS_MP_Grid\n 4 4\nend DOS_MP_Grid\n"
+                    "begin DOS_MP_Shift\n 0.5 0.5\nend DOS_MP_Shift"
                 )
             )
         )
-        problem = translation.problem
+        with mock.patch.dict(os.environ, {"PARSEC_SLAB_MESH_SYMMETRY": "off"}):
+            problem = parse_parsec_input(path).problem
         self.assertEqual(problem.monkhorst_pack_shift, (0.5, 0.5, 0.0))
         self.assertEqual(problem.monkhorst_pack_dimensions, (4, 4, 1))
         # A slab without bands, spin-orbit or NSCF: PARSEC skips its symmetry.
         self.assertEqual(problem.space_group.order, 1)
+        # PARSEC_SLAB_MESH_SYMMETRY=auto (the default): the operations of the slab's group that keep its grid and
+        # the DOS mesh, the same mesh and shift
+        with mock.patch.dict(os.environ, {"PARSEC_SLAB_MESH_SYMMETRY": "auto"}):
+            searched = parse_parsec_input(path).problem
+        self.assertEqual(searched.monkhorst_pack_shift, (0.5, 0.5, 0.0))
+        self.assertEqual(searched.monkhorst_pack_dimensions, (4, 4, 1))
+        self.assertGreater(searched.space_group.order, 1)
+        self.assertEqual(searched.grid, problem.grid)
 
 
 _AU_ATOM = """\

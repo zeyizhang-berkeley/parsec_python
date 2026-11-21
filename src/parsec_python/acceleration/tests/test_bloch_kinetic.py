@@ -139,7 +139,205 @@ class MeshAndSupercellTests(unittest.TestCase):
             with mock.patch.dict(os.environ, {"PARSEC_KPOINT_KINETIC": "gradient"}):
                 self.assertIsNotNone(transforms.supercell_of_trim_mesh(mesh))
                 self.assertIsNone(transforms.kpoints_of_supercell(supercell))
-        self.assertIsNone(transforms.supercell_of_trim_mesh(mesh))  # off by default
+        # auto by default since 2026-11-19 (the supercell where it applies); off keeps the k-points
+        self.assertIsNotNone(transforms.supercell_of_trim_mesh(mesh))
+        with mock.patch.dict(os.environ, {"PARSEC_KPOINT_SUPERCELL": "off"}):
+            self.assertIsNone(transforms.supercell_of_trim_mesh(mesh))
+
+
+@unittest.skipUnless(cupy_available(), "CUDA runtime is unavailable")
+class DefaultTrimRouteTests(unittest.TestCase):
+    """``PARSEC_KPOINT_SUPERCELL=auto`` (the default) on the command line: a single point of silicon with the
+    Gamma-centred 2 x 2 x 2 mesh in a process of one GPU runs as the Gamma point of the supercell, reports the
+    energies of the cell in its energy lines (those of the k-points with the Bloch form), writes the ``parsec.dat``
+    and the result archive of the cell, which a ``Restart_Run`` (the k-points) and ``--bands-from`` read, takes a
+    charged cell and a restarted structure as the k-points do, keeps the k-points with several GPUs in the process,
+    and ``off`` keeps the k-points."""
+
+    @staticmethod
+    def _environment(switches):
+        from pathlib import Path
+
+        environment = {key: value for key, value in os.environ.items()
+                       if key not in ("PARSEC_KPOINT_SUPERCELL", "PARSEC_KPOINT_KINETIC", "PARSEC_CUPY_DEVICES",
+                                      "PARSEC_KPOINT_SUPERCELL_GPUS")}
+        # the 8-atom cube is below the floor of the default route (PARSEC_KPOINT_SUPERCELL_MINIMUM, 2^24 entries)
+        environment["PARSEC_KPOINT_SUPERCELL_MINIMUM"] = "0"
+        # one GPU in the process: the default route keeps the k-points with more (PARSEC_KPOINT_SUPERCELL_GPUS)
+        environment["PARSEC_CUPY_DEVICES"] = "0"
+        for name, value in switches.items():
+            if value is None:
+                environment.pop(name, None)
+            else:
+                environment[name] = value
+        source = str(Path(__file__).resolve().parents[3])
+        environment["PYTHONPATH"] = source + os.pathsep + environment.get("PYTHONPATH", "")
+        return environment
+
+    def _call(self, directory, switches, arguments=("parsec.in",)):
+        import subprocess
+        import sys
+
+        completed = subprocess.run([sys.executable, "-m", "parsec_python", *arguments], cwd=directory,
+                                   env=self._environment(switches), capture_output=True, text=True)
+        self.assertEqual(completed.returncode, 0, completed.stdout[-3000:] + completed.stderr[-3000:])
+        return completed
+
+    def _run(self, directory, switches, *, restart: bool = False, fortran: bool = False, charge: int = 0,
+             arguments=()):
+        import re
+
+        from parsec_python.tests.unit.test_kpoint_supercell_route import _silicon_input
+
+        if not (directory / "parsec.in").is_file():
+            _silicon_input(directory, spacing=0.64125, order=12)
+        text = (directory / "parsec.in").read_text()
+        text = re.sub(r"(?im)^ *Restart_run:.*$", f" Restart_run: {'.true.' if restart else '.false.'}", text)
+        text = re.sub(r"(?im)^ *Net_charges:.*$", f" Net_charges: {charge}", text)
+        if fortran and "Use_Fortran_Routines" not in text:
+            text = text.replace(" Restart_run:", " Use_Fortran_Routines: .true.\n Restart_run:", 1)
+        (directory / "parsec.in").write_text(text)
+        completed = self._call(directory, switches, ("parsec.in", *arguments))
+        out = (directory / "parsec.out").read_text()
+        totals = [float(value) for value in re.findall(r"Total Energy =\s+(-?\d+\.\d+)", out)]
+        cell = re.findall(r"Total energy of the input cell .*= +(-?\d+\.\d+)", out)
+        return completed.stdout, out, totals, (float(cell[-1]) if cell else None)
+
+    @staticmethod
+    def _supercell_total(out):
+        import re
+
+        found = re.findall(r"Total energy of the supercell of 8 cells .*= +(-?\d+\.\d+)", out)
+        return float(found[-1]) if found else None
+
+    @staticmethod
+    def _electrons(out):
+        import re
+
+        return float(re.findall(r"Number of electrons =\s+(-?\d+\.\d+)", out)[-1])
+
+    def _bands_from(self, directory):
+        """``--bands-from`` of the archive of the run in ``directory`` with the input of the cell and a path."""
+        from parsec_python.Output.bands import load_band_structure_archive
+
+        path = ("begin bandstruc\n1 -0.25 0.0 0.0  0.25 0.0 0.0  left-right\nend bandstruc\n"
+                "bandstruc_points 2\n")
+        (directory / "bands.in").write_text((directory / "parsec.in").read_text() + path)
+        completed = self._call(directory, {}, ("bands.in", "--bands-from", "parsec_python_results.npz", "--quiet"))
+        self.assertIn("no SCF", (directory / "parsec_bands.out").read_text(), completed.stdout[-2000:])
+        return load_band_structure_archive(directory / "parsec_python_bands.npz")
+
+    def test_the_default_route_and_its_files(self) -> None:
+        import tempfile
+        from pathlib import Path
+
+        from parsec_python.Output.parsec_dat import read_parsec_dat
+
+        folder = Path(tempfile.mkdtemp(prefix="parsec_trim_cli_"))
+        stdout, out, totals, per_cell = self._run(folder / "auto", {})
+        self.assertIn("supercell of 8 cells", stdout)
+        self.assertIn("supercell of 8 cells", out)
+        self.assertIsNotNone(per_cell)
+        # the energy lines are those of the cell, the supercell's total closes the report
+        self.assertAlmostEqual(per_cell, totals[-1], places=7)
+        self.assertAlmostEqual(self._supercell_total(out), 8.0 * per_cell, places=6)
+        self.assertEqual(self._electrons(out), 8 * 32.0)
+        data = read_parsec_dat(folder / "auto" / "parsec.dat", wavefunctions=False)
+        self.assertEqual(int(data.ndim), 16 ** 3)
+        self.assertEqual(len(data.levels[0]), 8)
+        with np.load(folder / "auto" / "parsec_python_results.npz") as archive:
+            self.assertEqual(archive["atom_coordinates_bohr"].shape, (8, 3))
+            self.assertEqual(archive["output_effective_potential_ry"].size, 16 ** 3)
+            self.assertAlmostEqual(float(archive["energy_total_ry"]), per_cell, places=7)
+        # the k-points with the Bloch form: the same energy per cell
+        _, _, bloch, none = self._run(folder / "bloch", {"PARSEC_KPOINT_SUPERCELL": "off",
+                                                         "PARSEC_KPOINT_KINETIC": "bloch"})
+        self.assertIsNone(none)
+        self.assertAlmostEqual(per_cell, bloch[-1], delta=2.0e-7)
+        # --bands-from of the cell's input reads the archive of either: the same bands
+        bands = self._bands_from(folder / "auto")
+        reference = self._bands_from(folder / "bloch")
+        np.testing.assert_allclose(bands.eigenvalues, reference.eigenvalues, atol=2.0e-6)
+        self.assertAlmostEqual(bands.fermi_level, reference.fermi_level, delta=2.0e-6)
+        # off: the k-points with the gradient form, 3.2e-5 Ry per atom above (2.7e-5 by the estimate)
+        stdout_off, _, gradient, _ = self._run(folder / "off", {"PARSEC_KPOINT_SUPERCELL": "off"})
+        self.assertNotIn("supercell", stdout_off)
+        self.assertGreater(gradient[-1] - per_cell, 0.0)
+        self.assertLess((gradient[-1] - per_cell) / 8.0, 1.0e-4)
+        # Restart_Run of the cell from the file of the supercell: the k-points on the Fortran-derived routines (which
+        # a Restart_Run selects), from the converged density: the energy of that route from the start, in fewer
+        # iterations
+        _, _, fortran, _ = self._run(folder / "fortran", {}, fortran=True)
+        stdout_restart, _, restarted, _ = self._run(folder / "auto", {}, restart=True)
+        self.assertIn("Restart_Run", stdout_restart)
+        self.assertAlmostEqual(restarted[-1], fortran[-1], delta=2.0e-6)
+        self.assertLess(len(restarted), len(fortran))
+
+    def test_a_charged_cell_and_a_restarted_structure(self) -> None:
+        import tempfile
+        from pathlib import Path
+
+        from parsec_python.Input import parse_parsec_input
+        from parsec_python.tests.unit.test_kpoint_supercell_route import _silicon_input
+
+        folder = Path(tempfile.mkdtemp(prefix="parsec_trim_cli_"))
+        bloch = {"PARSEC_KPOINT_SUPERCELL": "off", "PARSEC_KPOINT_KINETIC": "bloch"}
+        # Net_Charges is the charge of one cell: the supercell holds 8 x 31 electrons, the energy that of the
+        # k-points with the Bloch form
+        stdout, out, totals, per_cell = self._run(folder / "charged", {}, charge=1)
+        self.assertIn("supercell of 8 cells", stdout)
+        self.assertEqual(self._electrons(out), 8 * 31.0)
+        _, out_k, charged, _ = self._run(folder / "charged_k", bloch, charge=1)
+        self.assertEqual(self._electrons(out_k), 31.0)
+        self.assertAlmostEqual(per_cell, charged[-1], delta=2.0e-7)
+        self.assertAlmostEqual(per_cell, totals[-1], places=7)
+        # --restart-from of a structure of the cell: the supercell is made of its atoms
+        directory = folder / "moved"
+        _silicon_input(directory, spacing=0.64125, order=12)
+        atoms = parse_parsec_input(directory / "parsec.in").problem.atoms
+        angstrom = 0.529177210903
+        rows = [f"Si {(x + (0.1 if index == 0 else 0.0)) * angstrom:.10f} {y * angstrom:.10f} {z * angstrom:.10f}"
+                for index, (x, y, z) in enumerate(atom.position for atom in atoms)]
+        (directory / "cell.xyz").write_text("\n".join([str(len(rows)), "moved", *rows]) + "\n")
+        (folder / "moved_k").mkdir()
+        for name in ("Si_POTRE.DAT", "cell.xyz"):
+            (folder / "moved_k" / name).write_bytes((directory / name).read_bytes())
+        # the k-points without the space group of the input's atoms, which the moved atom breaks (the k-points keep
+        # that group after a restart and would reduce the mesh and average the density with it), on the grid of the
+        # input (Ignore_Symmetry alone would put a point on the origin)
+        (folder / "moved_k" / "parsec.in").write_text(
+            (directory / "parsec.in").read_text()
+            + " Ignore_Symmetry: .true.\n begin Grid_Shift\n 0.5 0.5 0.5\n end Grid_Shift\n"
+        )
+        stdout, out, totals, moved = self._run(directory, {}, arguments=("--restart-from", "cell.xyz"))
+        self.assertIn("supercell of 8 cells", stdout)
+        self.assertIn("cell.xyz", out)
+        _, _, moved_k, _ = self._run(folder / "moved_k", bloch, arguments=("--restart-from", "cell.xyz"))
+        self.assertAlmostEqual(moved, moved_k[-1], delta=2.0e-7)
+        # the moved atom raises the energy (the restart was applied; about 1.3 mRy, harmonic in the displacement)
+        _, _, still, _ = self._run(folder / "still", bloch)
+        self.assertGreater(moved - still[-1], 1.0e-4)
+
+    def test_several_gpus_keep_the_kpoints(self) -> None:
+        import tempfile
+        from pathlib import Path
+
+        from parsec_python.acceleration.backends.cupy import cupy_device_count
+        from parsec_python.tests.unit.test_kpoint_supercell_route import _silicon_input
+
+        folder = Path(tempfile.mkdtemp(prefix="parsec_trim_cli_"))
+        _silicon_input(folder, spacing=0.64125, order=12)
+        if cupy_device_count() > 1:
+            # every visible GPU (the default of PARSEC_CUPY_DEVICES): the pools of the k-points divide them
+            completed = self._call(folder, {"PARSEC_CUPY_DEVICES": None}, ("parsec.in", "--dry-run"))
+            self.assertIn("GPUs in one process", completed.stdout)
+            completed = self._call(folder, {"PARSEC_CUPY_DEVICES": "0,1"}, ("parsec.in", "--dry-run"))
+            self.assertIn("2 GPUs in one process", completed.stdout)
+            completed = self._call(folder, {"PARSEC_CUPY_DEVICES": "0,1", "PARSEC_KPOINT_SUPERCELL_GPUS": "2"},
+                                   ("parsec.in", "--dry-run"))
+            self.assertIn("supercell of 8 cells", completed.stdout)
+        completed = self._call(folder, {"PARSEC_CUPY_DEVICES": "0"}, ("parsec.in", "--gpus", "1", "--dry-run"))
+        self.assertIn("supercell of 8 cells", completed.stdout)
 
 
 @unittest.skipUnless(cupy_available(), "CUDA runtime is unavailable")

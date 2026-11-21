@@ -244,12 +244,14 @@ level of the hydronium oxygen relative to the water molecule of the 2022 set:
 
 The stored energies are from first calculations (no cache, no restart) in
 double precision on A100 GPUs with 80 GB (Perlmutter, one run per GPU, solver
-defaults). One job of 85 minutes on 16 GPUs ran them all:
+defaults). One job of 85 minutes on 16 GPUs ran them all; the 16 atoms ran
+again with the code of 20 November 2026 (one A100 per run, two runs side by
+side on one node), with the same totals:
 
 | set | runs | all runs | median run | shortest | longest |
 |---|---:|---:|---:|---:|---:|
 | 2022, 54 molecules | 108 | 2.6 GPU hours | 60 s | 19 s (CO) | 509 s (B(OC2H5)3) |
-| 2022, atoms of Table 1 | 16 | 0.2 GPU hours | 47 s | 22 s (O ion) | 108 s (B atom, polarized) |
+| 2022, atoms of Table 1 | 16 | 0.06 GPU hours | 14 s | 10 s (N ion) | 22 s (B atom, polarized) |
 | 2022, protonated water | 40 | 14.1 GPU hours | 871 s | 59 s (H3O+(H2O)1) | 3426 s (H3O+(H2O)20) |
 | 2024, 21 molecules | 60 | 1.7 GPU hours | 83 s | 28 s (H2S) | 464 s (P(CF3)3) |
 

@@ -197,10 +197,46 @@ class SymmetryModeResolutionTests(unittest.TestCase):
         self.assertEqual(resolved, "off")
 
     def test_soc_rejects_explicit_on(self) -> None:
-        with self.assertRaises(ValueError):
+        with self.assertRaises(ValueError) as caught:
             _resolve_symmetry_mode(
                 "on", False, accelerated_self_consistent_soc=True
             )
+        # the message names the switch that gives the reduction, not --symmetry off
+        self.assertIn("PARSEC_SOC_SECTORS", str(caught.exception))
+        self.assertNotIn("--symmetry off", str(caught.exception))
+
+    def test_soc_accepts_explicit_on_with_the_sectors(self) -> None:
+        # the scalar machinery stays off; the spinor loop solves the double-group sectors
+        for sectors in ("kramers", "on"):
+            with self.subTest(sectors=sectors):
+                resolved = _resolve_symmetry_mode(
+                    "on", False, accelerated_self_consistent_soc=True, soc_sectors=sectors
+                )
+                self.assertEqual(resolved, "off")
+        with self.assertRaises(ValueError):
+            _resolve_symmetry_mode(
+                "on", False, accelerated_self_consistent_soc=True, soc_sectors="off"
+            )
+
+    def test_soc_symmetry_choice(self) -> None:
+        from parsec_python.acceleration.cli import _soc_symmetry_choice
+
+        # (mode before the choice, --symmetry, Ignore_Symmetry, switch) -> (solver mode, sectors allowed, report mode)
+        cases = (
+            (("auto", None, False, "off"), ("off", True, "auto")),
+            (("auto", None, False, "kramers"), ("off", True, "auto")),
+            (("off", None, True, "kramers"), ("off", False, "off")),
+            (("off", "off", False, "kramers"), ("off", False, "off")),
+            # the command line overrides Ignore_Symmetry, as in every other run
+            (("on", "on", True, "kramers"), ("off", True, "on")),
+            (("auto", "auto", True, "on"), ("off", True, "auto")),
+        )
+        for arguments, expected in cases:
+            with self.subTest(arguments=arguments):
+                self.assertEqual(_soc_symmetry_choice(*arguments), expected)
+        for ignore in (False, True):
+            with self.assertRaises(ValueError):
+                _soc_symmetry_choice("on", "on", ignore, "off")
 
     def test_ignore_symmetry_input_flag_does_not_bypass_the_soc_rejection(self) -> None:
         # Ignore_Symmetry=true only changes the *unset* default; an explicit

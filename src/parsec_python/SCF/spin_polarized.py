@@ -73,6 +73,7 @@ from .single_point import (
     PreparedSinglePointSystem,
     SCFWarmStart,
     _number_of_states,
+    _public_states,
     dispersion_after_convergence,
     dispersion_wanted,
     eigval_settings_for,
@@ -97,23 +98,56 @@ SPIN_NAMES = ("up", "down")
 START_LEVEL_WINDOW = 3.0e-2
 
 
-def _spin_occupations(eigenvalues, system, settings):
-    """One Fermi level for both channels (or the occupations of ``occup.in``)."""
+def _spin_occupations(eigenvalues, system, settings, weights=None, partners=None):
+    """One Fermi level for both channels (or the occupations of ``occup.in``).
 
+    ``weights``: the state weights of both channels where the symmetry
+    sectors of a subgroup with weights solve them (one partner of some
+    degenerate levels, acceleration/Symmetry/orbital_groups.py), ``None``
+    otherwise.  The occupations returned are then per partner.
+    ``partners``: with ``weights``, the partner masks of the states of both
+    channels (``state_partners`` of the sector eigensolver, or ``None``),
+    which ``occup.in`` must fill alike where they share a level.
+    """
+
+    keywords = {} if weights is None else {"weights": weights}
     if settings.fixed_occupations is None:
         return spin_fermi_occupations(
             eigenvalues[0],
             eigenvalues[1],
             system.electron_count,
             settings.fermi_temperature_kelvin,
+            **keywords,
         )
+    if weights is not None and partners is not None and any(item is not None for item in partners):
+        keywords["partners"] = tuple(partners)
     return spin_fixed_occupations(
         eigenvalues[0],
         eigenvalues[1],
         system.electron_count,
         settings.fixed_occupations,
         settings.fixed_occupations_down,
+        **keywords,
     )
+
+
+def _channel_state_weights(weights):
+    """Both channels' state weights, or ``None`` where the channels have none (the full grid, abelian sectors)."""
+
+    if weights[0] is None and weights[1] is None:
+        return None
+    if weights[0] is None or weights[1] is None:
+        raise RuntimeError("the two spin channels were solved in sectors of different kinds")
+    return (np.asarray(weights[0], dtype=np.float64), np.asarray(weights[1], dtype=np.float64))
+
+
+def _weighted_occupations(occupation_result, weights):
+    """The occupations of the loop: per partner times the weights (electrons per solved state)."""
+
+    occupations = list(occupation_result.occupations)
+    if weights is None:
+        return occupations
+    return [np.asarray(filled, dtype=np.float64) * weight for filled, weight in zip(occupations, weights)]
 
 
 def _channel_solvers(eigenproblem_solver) -> tuple[Callable[..., object], ...]:
@@ -169,7 +203,15 @@ class SpinOrbitalBlocks:
 
         host = np.empty(self.shape, dtype=np.float64)
         column = 0
-        for block in self.blocks:
+        for index, block in enumerate(self.blocks):
+            fill = getattr(block, "fill_from", None)
+            if index == 1 and callable(fill) and getattr(block, "source", None) is self.blocks[0]:
+                # The down channel as the image of the up channel
+                # (PARSEC_SPIN_FLIP_SYMMETRY): from its columns just written.
+                count = int(self.blocks[0].shape[1])
+                fill(host[:, :count], host[:, column : column + count])
+                column += count
+                continue
             export = getattr(block, "to_full_host", None)
             download = getattr(block, "get", None)
             values = (
@@ -190,6 +232,10 @@ class SpinOrbitalBlocks:
         if callable(getattr(up, "to_full_device", None)):
             # The orbitals of the symmetry sectors: each channel expands itself.
             up, down = up.to_full_device(), down.to_full_device()
+        elif callable(getattr(down, "to_full_device", None)):
+            # The down channel as the image of the up channel's device matrix
+            # (PARSEC_SPIN_FLIP_SYMMETRY).
+            down = down.to_full_device()
         library = sys.modules.get(type(up).__module__.split(".")[0])
         stack = getattr(library, "hstack", None)
         if stack is None:
@@ -210,6 +256,100 @@ def _join_orbitals(up, down):
         count = up.shape[1]
         return joined, (joined[:, :count], joined[:, count:])
     return SpinOrbitalBlocks(up, down), (up, down)
+
+
+def _spin_flip_of(system, *, exchange_term, meta, hubbard_projectors, ionic_potential):
+    """``(operation, refusal)``: the spin-flip operation the loop takes the down channel from, or why not.
+
+    ``system.spin_flip`` is attached by the accelerated driver with
+    ``PARSEC_SPIN_FLIP_SYMMETRY=auto``
+    (:mod:`parsec_python.acceleration.SCF.spin_flip`).  It is not taken with
+    an exchange operator, a meta-GGA, LDA+U or ``Symmetrize_Charge_Density``,
+    whose terms read the orbitals or fields of each channel, nor where it no
+    longer maps the atoms of this structure onto their partners or the local
+    ionic potential of this loop (``ionic_potential``, as the loop keeps it:
+    point charges, the field of a ``Polarizability`` loop) onto itself.
+    ``refusal`` is ``None`` where the system has no operation or the loop
+    takes it, else ``(reason, measure, value, bound)`` for the note of
+    :func:`_spin_flip_record`.
+    """
+
+    flip = getattr(system, "spin_flip", None)
+    if flip is None:
+        return None, None
+    for condition, reason in (
+        (exchange_term is not None, "an exchange operator (a hybrid functional)"),
+        (meta is not None, "a meta-GGA"),
+        (hubbard_projectors is not None, "LDA+U"),
+        (getattr(system, "density_symmetry", None) is not None, "Symmetrize_Charge_Density"),
+    ):
+        if condition:
+            return None, (reason, "", float("nan"), float("nan"))
+    deviation_of = getattr(flip, "atom_deviation", None)
+    if callable(deviation_of):
+        deviation = deviation_of(system.atoms)
+        if not deviation <= flip.tolerance:
+            return None, (
+                f"the operation {flip.description} no longer carries the atoms of this structure onto their partners",
+                "largest distance [bohr]",
+                deviation,
+                float(flip.tolerance),
+            )
+    check = getattr(flip, "ionic_potential_check", None)
+    if callable(check):
+        deviation, bound = check(ionic_potential)
+        if not deviation <= bound:
+            return None, (
+                f"the operation {flip.description} does not map the local ionic potential of this loop onto itself "
+                "(point charges, the field of a Polarizability loop or another external term)",
+                "largest deviation [Ry]",
+                deviation,
+                bound,
+            )
+    return flip, None
+
+
+def _spin_flip_record(refusal):
+    """The note (:class:`parsec_python.models.SpinSectorFallbackRecord`, ``route`` ``spin_flip``) of a loop that
+    solves both channels although the prepared system has a spin-flip operation."""
+
+    from ..models import SpinSectorFallbackRecord
+
+    reason, measure, value, bound = refusal
+    return SpinSectorFallbackRecord(
+        stage="the start of the SCF loop",
+        largest_fractional_occupation=float(value),
+        tolerance=float(bound),
+        reason=reason,
+        measure=measure,
+        route="spin_flip",
+    )
+
+
+def _take_flipped_channel(flip, eigenvalues, wavefunctions, representations, states, weights=None,
+                          partners=None) -> None:
+    """The down channel of a step as the image of the up channel (PARSEC_SPIN_FLIP_SYMMETRY).
+
+    ``H_down = U_g H_up U_g^-1``: the same levels, the orbitals
+    ``psi_up(g^-1 r)`` (formed where they are read) in the images of the up
+    channel's sectors; no subspace of its own.  (with the weighted
+    sectors of spin channels, PARSEC_ORBITAL_GROUP_SPIN) The state weights and
+    partner masks of the down channel (``weights``, ``partners``: the lists of
+    both channels, where the loop keeps them) are those of the up channel: the
+    image of a level of the up channel is a level of the down channel with the
+    same partners, in the image sector, whose weight ``d / m`` the operation
+    keeps; before, the down channel had none and the loop stopped ("solved in
+    sectors of different kinds").
+    """
+
+    eigenvalues[1] = np.array(eigenvalues[0], dtype=np.float64, copy=True)
+    wavefunctions[1] = flip.down_orbitals(wavefunctions[0])
+    representations[1] = flip.down_representations(representations[0])
+    states[1] = flip.channel_state()
+    if weights is not None:
+        weights[1] = None if weights[0] is None else np.array(weights[0], copy=True)
+    if partners is not None:
+        partners[1] = partners[0]
 
 
 def run_spin_scf(
@@ -307,6 +447,16 @@ def run_spin_scf(
     level_detail = None
     solvers = _channel_solvers(eigenproblem_solver)
     ionic_potential = to_internal(system.ionic_potential)
+    # PARSEC_SPIN_FLIP_SYMMETRY (acceleration/SCF/spin_flip.py): the down
+    # channel is the image of the up channel under an operation of the atoms
+    # that exchanges the partner labels, and only the up channel is solved.
+    flip, flip_refusal = _spin_flip_of(
+        system,
+        exchange_term=exchange_term,
+        meta=meta,
+        hubbard_projectors=hubbard_projectors,
+        ionic_potential=ionic_potential,
+    )
     volume_element = system.grid.volume_element
     number_of_states = _number_of_states(system)
     settings = system.input.scf
@@ -363,6 +513,31 @@ def run_spin_scf(
         ]
         states = warm_start.eigensolver_state
         eigval_states = [None, None] if states is None else list(states)
+        # The down channel of a loop that took it from the up channel has no
+        # subspace of its own (PARSEC_SPIN_FLIP_SYMMETRY).
+        eigval_states = [
+            None if getattr(state, "spin_flip_channel", False) else state for state in eigval_states
+        ]
+        if flip is not None:
+            # A warm start keeps the route only where its down potential is
+            # the image of its up potential (that of a loop that took it, to
+            # the rounding), not where it continues a state that breaks the
+            # operation (Restart_Run of such a state): that one is solved in
+            # both channels from its own potentials.
+            deviation, bound = flip.warm_start_check(input_potentials[0], input_potentials[1])
+            if deviation <= bound:
+                input_potentials[1] = flip.down_field(input_potentials[0])
+            else:
+                flip_refusal = (
+                    f"the down potential of the warm start (Restart_Run, the structure before) is not the image of "
+                    f"its up potential under the operation {flip.description}",
+                    "largest deviation [Ry]",
+                    deviation,
+                    bound,
+                )
+                flip = None
+    if flip_refusal is not None and callback is not None:
+        callback(_spin_flip_record(flip_refusal))
 
     # The mixer a warm start carries (the Fock loop's Exx_Mixer_History), else a new one.
     # Mixing_Preconditioner: kerker filters the charge part of the joined
@@ -399,6 +574,10 @@ def run_spin_scf(
         np.empty(0, dtype=np.int32),
         np.empty(0, dtype=np.int32),
     ]
+    # The state weights of the weighted sectors of a subgroup (one partner of some degenerate levels), per channel.
+    state_weights: list[np.ndarray | None] = [None, None]
+    # and the partner masks of their states (CuPySymmetryEigvalResult.state_partners), which occup.in fills alike
+    state_partners: list[tuple | None] = [None, None]
     wavefunctions: list[object] = [np.empty((grid_size, 0)), np.empty((grid_size, 0))]
     densities: list[np.ndarray] = [np.empty(0), np.empty(0)]
     electrons = (0.0, 0.0)
@@ -450,6 +629,13 @@ def run_spin_scf(
             )
         solver_counts: list[tuple[int, int] | None] = []
         for spin in range(2):
+            if spin == 1 and flip is not None:
+                _take_flipped_channel(flip, eigenvalues, wavefunctions, representations, eigval_states,
+                                      state_weights, state_partners)
+                solver_counts.append(solver_counts[0])
+                if residual_maxima:
+                    residual_maxima.append(residual_maxima[0])
+                continue
             binding_start = time.perf_counter()
             if meta is not None and meta.kinetic_potential(spin) is not None:
                 # A meta-GGA hybrid: the orbital term and the fixed exchange operator.
@@ -515,6 +701,8 @@ def run_spin_scf(
             diagonalization_seconds += time.perf_counter() - diagonalization_start
             eigenvalues[spin] = np.asarray(eigensolution.eigenvalues, dtype=np.float64)
             wavefunctions[spin] = eigensolution.vectors
+            state_weights[spin] = getattr(eigensolution, "state_weights", None)
+            state_partners[spin] = getattr(eigensolution, "state_partners", None)
             sector_labels = getattr(eigensolution, "representations", None)
             representations[spin] = (
                 np.ones(eigenvalues[spin].size, dtype=np.int32)
@@ -533,8 +721,11 @@ def run_spin_scf(
 
         # 3. One Fermi level for both channels, then the density of each.
         occupations_density_start = time.perf_counter()
-        occupation_result = _spin_occupations(eigenvalues, system, settings)
-        occupations = list(occupation_result.occupations)
+        # Weighted sectors: each state counts for its partners (its weight) in the Fermi level, the
+        # occupations, the density and the band energy, as in run_scf.
+        weights = _channel_state_weights(state_weights)
+        occupation_result = _spin_occupations(eigenvalues, system, settings, weights, state_partners)
+        occupations = _weighted_occupations(occupation_result, weights)
         electrons = occupation_result.electrons
         fermi_level = occupation_result.fermi_level
         start_report = getattr(scalar_field_adapter, "start_spectrum_report", None)
@@ -559,6 +750,10 @@ def run_spin_scf(
                 window = fermi_level + START_LEVEL_WINDOW
                 diagonalization_start = time.perf_counter()
                 for spin in range(2):
+                    if spin == 1 and flip is not None:
+                        _take_flipped_channel(flip, eigenvalues, wavefunctions, representations, eigval_states,
+                                              state_weights, state_partners)
+                        continue
                     if meta is not None and meta.kinetic_potential(spin) is not None:
                         hamiltonian = system.hamiltonian(
                             input_potentials[spin],
@@ -588,6 +783,8 @@ def run_spin_scf(
                     eigval_states[spin] = eigensolution.state
                     eigenvalues[spin] = np.asarray(eigensolution.eigenvalues, dtype=np.float64)
                     wavefunctions[spin] = eigensolution.vectors
+                    state_weights[spin] = getattr(eigensolution, "state_weights", None)
+                    state_partners[spin] = getattr(eigensolution, "state_partners", None)
                     sector_labels = getattr(eigensolution, "representations", None)
                     representations[spin] = (
                         np.ones(eigenvalues[spin].size, dtype=np.int32)
@@ -602,11 +799,16 @@ def run_spin_scf(
                     else np.inf
                     for new, old in zip(eigenvalues, previous)
                 )
-                occupation_result = _spin_occupations(eigenvalues, system, settings)
-                occupations = list(occupation_result.occupations)
+                weights = _channel_state_weights(state_weights)
+                occupation_result = _spin_occupations(eigenvalues, system, settings, weights, state_partners)
+                occupations = _weighted_occupations(occupation_result, weights)
                 electrons = occupation_result.electrons
                 fermi_level = occupation_result.fermi_level
         for spin in range(2):
+            if spin == 1 and flip is not None:
+                # rho_down(r) = rho_up(g^-1 r): one gather of the up channel's values.
+                densities[1] = flip.down_field(densities[0])
+                continue
             if orbital_density_builder is None:
                 densities[spin] = spin_density_from_orbitals(
                     wavefunctions[spin], occupations[spin], volume_element
@@ -628,24 +830,28 @@ def run_spin_scf(
         )
         symmetrization = ()
         density_symmetry = getattr(system, "density_symmetry", None)
-        if density_symmetry is not None and reduced:
+        # A group that brings its own method averages the channels of an accelerated loop that keeps one value per
+        # symmetry orbit (acceleration/SCF/density_symmetry.py, PARSEC_SYMMETRIZED_DENSITY_SECTORS=auto).
+        symmetrize_own = getattr(density_symmetry, "symmetrize_density", None)
+        if density_symmetry is not None and reduced and not callable(symmetrize_own):
             raise NotImplementedError(
                 "Symmetrize_Charge_Density is not implemented for spin channels in the symmetry sectors"
             )
         if density_symmetry is not None:
             # Symmetrize_Charge_Density: symm_scalar of newrho.F90 for the
             # total density and for each channel (isp = 1, 2, 3).
-            _, total_report = symmetrize_density(
-                densities[0] + densities[1], density_symmetry, volume_element
-            )
+            def symmetrized(field):
+                if callable(symmetrize_own):
+                    return symmetrize_own(field, volume_element)
+                return symmetrize_density(field, density_symmetry, volume_element)
+
+            _, total_report = symmetrized(densities[0] + densities[1])
             reports = [total_report]
             for spin in range(2):
-                densities[spin], report = symmetrize_density(
-                    densities[spin], density_symmetry, volume_element
-                )
+                densities[spin], report = symmetrized(densities[spin])
                 reports.append(report)
                 if taus is not None:
-                    taus[spin], _ = symmetrize_density(taus[spin], density_symmetry, volume_element)
+                    taus[spin], _ = symmetrized(taus[spin])
                     meta.symmetrize_gradient(spin, density_symmetry)
             symmetrization = tuple(reports)
         density = densities[0] + densities[1]
@@ -767,6 +973,15 @@ def run_spin_scf(
         mixing_energy_seconds = time.perf_counter() - mixing_energy_start
         mixing_energy_total += mixing_energy_seconds
 
+        # Weighted sectors: every partner of a weighted state, as the full grid lists them (run_scf).
+        public = [
+            _public_states(
+                eigenvalues[spin], occupations[spin], representations[spin], wavefunctions[spin], state_weights[spin]
+            )
+            for spin in range(2)
+        ]
+        # The record holds the channels end to end in two halves: as many levels of each (at least States_Num).
+        listed = min(len(public[0][0]), len(public[1][0]))
         diagnostic = SCFIteration(
             iteration=iteration,
             weighted_residual=metrics.weighted,
@@ -775,13 +990,13 @@ def run_spin_scf(
             hartree_residual=hartree.residual_norm,
             energies=energies,
             eigenvalues=tuple(
-                float(value) for values in eigenvalues for value in values
+                float(value) for values in public for value in values[0][:listed]
             ),
             occupations=tuple(
-                float(value) for values in occupations for value in values
+                float(value) for values in public for value in values[1][:listed]
             ),
             representations=tuple(
-                int(value) for values in representations for value in values
+                int(value) for values in public for value in values[2][:listed]
             ),
             fermi_level=float(fermi_level),
             density_minimum=(
@@ -826,10 +1041,10 @@ def run_spin_scf(
 
             iteration_channels = tuple(
                 SpinChannelResult(
-                    eigenvalues=eigenvalues[spin],
-                    occupations=occupations[spin],
-                    wavefunctions=wavefunctions[spin],
-                    representations=representations[spin],
+                    eigenvalues=public[spin][0],
+                    occupations=public[spin][1],
+                    wavefunctions=public[spin][3],
+                    representations=public[spin][2],
                     density=to_public(densities[spin]),
                     xc_potential=to_public(xc_potentials[spin]),
                     input_effective_potential=to_public(last_input_potentials[spin]),
@@ -842,9 +1057,9 @@ def run_spin_scf(
             iteration_state_callback(
                 SCFIterationFields(
                     iteration=iteration,
-                    eigenvalues=np.concatenate(eigenvalues),
-                    occupations=np.concatenate(occupations),
-                    representations=np.concatenate(representations),
+                    eigenvalues=np.concatenate([values[0] for values in public]),
+                    occupations=np.concatenate([values[1] for values in public]),
+                    representations=np.concatenate([values[2] for values in public]),
                     wavefunctions=None,
                     density=to_public(density),
                     next_effective_potential=0.5
@@ -927,15 +1142,32 @@ def run_spin_scf(
         total_seconds=time.perf_counter() - scf_start,
         **({} if level_detail is None else {"detail": level_detail}),
     )
+    # Weighted sectors: the lists of every partner of a weighted state (run_scf), and the states the
+    # sectors solved with their occupations times their weights (the nonlocal forces of the sectors).
+    public = [
+        _public_states(
+            eigenvalues[spin], occupations[spin], representations[spin], wavefunctions[spin], state_weights[spin]
+        )
+        for spin in range(2)
+    ]
     # The orbitals are stored once: host channels are views of the joined
     # array, device channels the blocks the backend returned.
-    stacked, channel_orbitals = _join_orbitals(wavefunctions[0], wavefunctions[1])
+    stacked, channel_orbitals = _join_orbitals(public[0][3], public[1][3])
     channels = tuple(
         SpinChannelResult(
-            eigenvalues=eigenvalues[spin],
-            occupations=occupations[spin],
+            eigenvalues=public[spin][0],
+            occupations=public[spin][1],
             wavefunctions=channel_orbitals[spin],
-            representations=representations[spin],
+            representations=public[spin][2],
+            sector_states=(
+                None
+                if state_weights[spin] is None
+                else (
+                    np.asarray(representations[spin]),
+                    np.asarray(occupations[spin]),
+                    np.asarray(state_weights[spin], dtype=np.int64),
+                )
+            ),
             density=densities[spin],
             xc_potential=xc_potentials[spin],
             input_effective_potential=last_input_potentials[spin],
@@ -964,14 +1196,14 @@ def run_spin_scf(
         output_effective_potential=0.5 * (output_potentials[0] + output_potentials[1]),
         next_effective_potential=0.5 * (mixed_potentials[0] + mixed_potentials[1]),
         nonlocal_operator=system.nonlocal_operator,
-        eigenvalues=np.concatenate(eigenvalues),
-        occupations=np.concatenate(occupations),
+        eigenvalues=np.concatenate([values[0] for values in public]),
+        occupations=np.concatenate([values[1] for values in public]),
         wavefunctions=stacked,
         fermi_level=fermi_level,
         energies=energies,
         history=history,
         timings=run_timings,
-        representations=np.concatenate(representations),
+        representations=np.concatenate([values[2] for values in public]),
         atomic_reference_correction=system.atomic_reference_correction,
         eigensolver_state=tuple(eigval_states),
         spin=channels,

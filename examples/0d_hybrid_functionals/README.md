@@ -24,7 +24,7 @@ Settings of every input: grid spacing 0.16 bohr, sphere = largest atom distance 
 
 With the adaptive inner criterion the PBE start of a spin-unpolarized hybrid stops at a residual of 1e-4 Ry. The energy its log prints for the start (the last `Total Energy` before `Fock loop`, with the note that it is the energy of a start) is therefore not a converged PBE energy: here it lies 4.0e-08 to 1.4e-05 Ry above the energy of the `pbe` input (benzene the most). E_PBE in the tables below is always the energy of the `pbe` input. The O2 start (spin-polarized) runs to `Convergence_Criterion`: its printed energy equals E_PBE to the printed digits.
 
-The logs of the `pbe` inputs of H2, N2, CO and CH4 are of 19 November 2026. These molecules have the point groups D4h, C4v and Td on the grid, and since 15 November (Td) and 18 November 2026 (D4h, C4v; `PARSEC_ORBITAL_GROUP_MAX_COST` 0.75) a semilocal run solves the weighted one-dimensional sectors of a larger subgroup instead of the abelian group (`src/parsec_python/acceleration/README.md`, "Weighted sectors of a larger subgroup"). Their total energies are those of the abelian route to the printed digits, so E_PBE and every dE below are unchanged; the CO HOMO moved by 0.02 meV (the last printed digit). The PBE runs took 5 to 6 s (Timings; 6 to 11 s in the logs of 7 November); H2 needed 36 SCF iterations instead of 20 and took 4.7 to 5.3 s against 3.9 s with `PARSEC_ORBITAL_GROUP=abelian` on the same node, CO 36 instead of 32. The hybrids keep the abelian group: their logs are those of 7 November 2026.
+The logs are of 20 November 2026. Their energies, iteration counts, Fock energies and levels are those of the logs before them (7 November for the hybrids and the `pbe` inputs of H2O, benzene and O2, 19 November for the other `pbe` inputs) to the printed digits, except the iteration count of the O2 `pbe` input below. H2, N2, CO and CH4 have the point groups D4h, C4v and Td on the grid, and since 15 November (Td) and 18 November 2026 (D4h, C4v; `PARSEC_ORBITAL_GROUP_MAX_COST` 0.75) a semilocal run solves the weighted one-dimensional sectors of a larger subgroup instead of the abelian group (`src/parsec_python/acceleration/README.md`, "Weighted sectors of a larger subgroup"). Since 19 November 2026 (`PARSEC_ORBITAL_GROUP_SPIN` and `PARSEC_ORBITAL_GROUP_OCCUPATIONS` auto) the spin-polarized O2 `pbe` input with its `occup.in` takes them too (D4h, the six sectors of a subgroup of 8): it needs 38 SCF iterations instead of 29 on the abelian route, with the same total energy, and its HOMOs moved by 0.01 / 0.02 meV (below the printed digits). Their total energies are those of the abelian route to the printed digits, so E_PBE and every dE below are unchanged; the CO HOMO moved by 0.02 meV (the last printed digit). The PBE runs took 5 to 6 s (Timings; 6 to 11 s in the logs of 7 November); H2 needed 36 SCF iterations instead of 20 and took 4.7 to 5.3 s against 3.9 s with `PARSEC_ORBITAL_GROUP=abelian` on the same node, CO 36 instead of 32. The difference is not a defect of the weighted route: its mixer and norms take the orbit multiplicities (the algebra of the full grid), both routes agree at the first step (total energy within 1e-8 Ry, every term within 1e-6 Ry) and part at the second, where one Chebyshev filter pass per sector, from sector blocks of other sizes, leaves densities that differ by about 1e-5 (Hartree energy 3.4e-5 Ry); the PBE potential carries that difference on (LDA: 24 steps on both routes), and near the criterion of 1e-6 Ry the charge-weighted potential error of the weighted run drifts at 1-3e-6 Ry for several steps. Small changes move the count by up to ten steps either way (A100, 2026-11-19, weighted against abelian: `States_Num` 8 20 and 20 steps, 12 21 and 20; `Grid_Spacing` 0.17 24 and 25; `Diag_Tolerance` 1e-8 25 and 19; `Convergence_Criterion` 1e-7 31 and 22; CH4 36 steps with the even first counts of the sectors, 30 with `PARSEC_WEIGHTED_FIRST_SHARE=orbitals`), always with the same energies. The hybrids keep the abelian group, the PBE start of the O2 hybrids included (29 SCF iterations as before).
 
 ## PBE level
 
@@ -76,11 +76,11 @@ dE = E_hyb - E_PBE (Ry), each code at its own discretization (this code: the `pb
 | b3lyp | O2 (triplet) | -0.04263789 | -0.04254443 | -9.3e-05 | -2.52868134 | -2.52872814 | -8.7539 / -12.7440 | -8.7531 / -12.7432 |
 | b3lyp5 | H2 | -0.01329455 | -0.01329778 | +3.2e-06 | -0.26253393 | -0.26255086 | -11.7248 | -11.7240 |
 | b3lyp5 | H2O | +0.00680291 | +0.00685061 | -4.8e-05 | -1.57282084 | -1.57284672 | -8.7279 | -8.7270 |
-| b3lyp5 | CH4 | +0.01252589 | +0.01252528 | +6.1e-07 | -1.18329651 | -1.18331869 | -10.6854 | -10.6848 |
+| b3lyp5 | CH4 | +0.01252590 | +0.01252528 | +6.2e-07 | -1.18329651 | -1.18331869 | -10.6854 | -10.6848 |
 | b3lyp5 | CO | +0.03569400 | +0.03572351 | -3.0e-05 | -1.87060470 | -1.87061573 | -10.4739 | -10.4735 |
 | b3lyp5 | N2 | +0.05162333 | +0.05166384 | -4.1e-05 | -1.79284423 | -1.79284712 | -11.9236 | -11.9233 |
-| b3lyp5 | C6H6 | +0.20188216 | +0.20186172 | +2.0e-05 | -4.58619463 | -4.58623198 | -6.9456 | -6.9449 |
-| b3lyp5 | O2 (triplet) | +0.04403612 | +0.04412960 | -9.3e-05 | -2.52847706 | -2.52852392 | -8.6678 / -12.6415 | -8.6670 / -12.6407 |
+| b3lyp5 | C6H6 | +0.20188217 | +0.20186172 | +2.0e-05 | -4.58619463 | -4.58623198 | -6.9456 | -6.9449 |
+| b3lyp5 | O2 (triplet) | +0.04403613 | +0.04412960 | -9.3e-05 | -2.52847706 | -2.52852392 | -8.6678 / -12.6415 | -8.6670 / -12.6407 |
 | b3pw91 | H2 | -0.02627809 | -0.02628176 | +3.7e-06 | -0.26358859 | -0.26360699 | -11.7624 | -11.7617 |
 | b3pw91 | H2O | -0.06939934 | -0.06941150 | +1.2e-05 | -1.57582525 | -1.57585112 | -8.7469 | -8.7463 |
 | b3pw91 | CH4 | -0.07562034 | -0.07563168 | +1.1e-05 | -1.18510379 | -1.18512474 | -10.7570 | -10.7565 |
@@ -186,15 +186,15 @@ Wall time of `main.py` (program wall, PBE start included) on one A100 of a share
 
 | molecule | grid points | PBE (s) | hybrids (s) | HF (s) | QE, hybrids and HF (s) |
 |---|---|---|---|---|---|
-| H2 | 1,252,368 | 6 | 9-17 | 11 | 53-158 |
-| H2O | 1,568,208 | 12 | 14-23 | 22 | 86-294 |
-| CH4 | 1,788,656 | 6 | 15-27 | 24 | 95-283 |
-| CO | 1,387,496 | 6 | 15-22 | 18 | 114-299 |
-| N2 | 1,376,312 | 5 | 12-21 | 14 | 99-258 |
-| C6H6 | 3,241,288 | 13 | 33-52 | 38 | 404-744 |
-| O2 (triplet) | 1,413,968 | 14 | 25-31 | 29 | 257-654 |
+| H2 | 1,252,368 | 5 | 8-17 | 10 | 53-158 |
+| H2O | 1,568,208 | 9 | 13-22 | 19 | 86-294 |
+| CH4 | 1,788,656 | 5 | 13-25 | 21 | 95-283 |
+| CO | 1,387,496 | 6 | 13-20 | 16 | 114-299 |
+| N2 | 1,376,312 | 5 | 11-20 | 13 | 99-258 |
+| C6H6 | 3,241,288 | 11 | 31-51 | 35 | 404-744 |
+| O2 (triplet) | 1,413,968 | 12 | 24-28 | 28 | 257-654 |
 
-Outer Fock iterations to an estimated exchange error below 1e-8 Ry: 3-4 for PBE0, HSE and B3*, 6-7 for HF (QE, whose loop runs to 1e-10 Ry and starts the libxc hybrids from the functional without its exact exchange and HF from Slater exchange: 4-6 and 10-16). The table gives outer iterations / inner SCF iterations of the Fock loop (summed over its outer iterations); the PBE start takes 13-29 SCF iterations before them, the `pbe` input 24-44. The exact exchange itself (pair solves and ACE builds) is 0.3-21.8 s of a run.
+Outer Fock iterations to an estimated exchange error below 1e-8 Ry: 3-4 for PBE0, HSE and B3*, 6-7 for HF (QE, whose loop runs to 1e-10 Ry and starts the libxc hybrids from the functional without its exact exchange and HF from Slater exchange: 4-6 and 10-16). The table gives outer iterations / inner SCF iterations of the Fock loop (summed over its outer iterations); the PBE start takes 13-29 SCF iterations before them, the `pbe` input 24-44. The exact exchange itself (pair solves and ACE builds) is 0.4-19.9 s of a run.
 
 | molecule | pbe0 | hse06 | hse03 | b3lyp | b3lyp5 | b3pw91 | hf |
 |---|---|---|---|---|---|---|---|

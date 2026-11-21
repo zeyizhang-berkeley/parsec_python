@@ -568,6 +568,7 @@ def build_periodic_projector_gradients(
     k_point: np.ndarray | None = None,
     *,
     radial_slopes: str = "interpolant",
+    atom_indices=None,
 ) -> NonlocalProjectorGradients:
     """``grad beta_q`` of the periodic projectors of ``build_nonlocal_projectors``.
 
@@ -585,11 +586,17 @@ def build_periodic_projector_gradients(
     with the distance clamped to ``rs(2)`` also in ``d/|d|``, as the forces of
     an isolated system do.  That reproduces Fortran's nonlocal forces but is
     not the derivative of the sampled projector (see :data:`RADIAL_SLOPES`).
+
+    ``atom_indices`` (the representative atoms of the orbits of symmetry
+    sectors) samples the projectors of those atoms only: their columns, in the
+    order of the projectors and with their atom indices in the labels, each
+    the same column as in the gradients of every atom.
     """
 
     if radial_slopes not in RADIAL_SLOPES:
         raise ValueError("radial_slopes must be one of " + ", ".join(RADIAL_SLOPES))
     tabulated = radial_slopes == "tabulated"
+    wanted = _selected_atoms(len(atoms), atom_indices)
 
     order = int(getattr(grid.settings, "double_grid_order", 1))
     if order > 1:
@@ -602,6 +609,7 @@ def build_periodic_projector_gradients(
             k_point,
             order=order,
             tabulated=tabulated,
+            wanted=wanted,
         )
     lattice_vectors = np.asarray(lattice_vectors, dtype=np.float64)
     complex_valued = k_point is not None
@@ -617,6 +625,8 @@ def build_periodic_projector_gradients(
     coordinates = grid.coordinates
 
     for atom_index, atom in enumerate(atoms):
+        if wanted is not None and not wanted[atom_index]:
+            continue
         potential = potentials[atom.symbol]
         specification = specifications[atom.symbol]
         local_l = specification.local_angular_momentum
@@ -725,6 +735,19 @@ def build_periodic_projector_gradients(
     )
 
 
+def _selected_atoms(count: int, atom_indices) -> np.ndarray | None:
+    """A mask of the atoms of ``atom_indices`` among ``count`` atoms, or ``None`` for every atom."""
+
+    if atom_indices is None:
+        return None
+    selected = np.asarray(atom_indices, dtype=np.int64).reshape(-1)
+    if selected.size and (selected.min() < 0 or selected.max() >= count):
+        raise ValueError("an atom index of the projector gradients is outside the atoms")
+    wanted = np.zeros(count, dtype=bool)
+    wanted[selected] = True
+    return wanted
+
+
 def _double_grid_periodic_gradients(
     grid,
     atoms: Sequence[Atom],
@@ -735,6 +758,7 @@ def _double_grid_periodic_gradients(
     *,
     order: int,
     tabulated: bool,
+    wanted: np.ndarray | None = None,
 ) -> NonlocalProjectorGradients:
     """Gradients of the double-grid projectors of a periodic cell.
 
@@ -764,6 +788,8 @@ def _double_grid_periodic_gradients(
     labels: list[tuple[int, int, int]] = []
     column = 0
     for atom_index, atom in enumerate(atoms):
+        if wanted is not None and not wanted[atom_index]:
+            continue
         potential = potentials[atom.symbol]
         specification = specifications[atom.symbol]
         local_l = specification.local_angular_momentum
@@ -996,6 +1022,75 @@ def _kpoints_invariant(rotation: np.ndarray, k_points, lattice_vectors) -> bool:
     return True
 
 
+class _PeriodicImageMatcher:
+    """The atom each mapped atom falls on, modulo the lattice: the search of ``symm_forces.f90`` with ``tol``.
+
+    For every mapped atom ``a`` (fractional coordinates ``mapped[a]``) the atoms of its species whose Cartesian
+    minimum-image distance ``|(mapped[a] - f_b - round(mapped[a] - f_b)) A|`` is at most ``tolerance`` are its
+    candidates; the operation maps the atoms where every atom has exactly one.  The candidates are those of the
+    distances of every pair (the loop over the atoms of before 2026-11-19, ``O(N^2)`` per operation: 2.5 s for the
+    24 operations of 1,728 atoms); a tree of the fractional coordinates of each species (periodic, side 1) gives the
+    atoms within ``tolerance / sigma_min(A)`` of each mapped atom, a superset of them, whose distances are then
+    those of the same expression, so the images and the decisions are the same.
+    """
+
+    def __init__(self, fractions: np.ndarray, symbols, vectors: np.ndarray, tolerance: float) -> None:
+        from scipy.spatial import cKDTree
+
+        self.fractions = np.asarray(fractions, dtype=np.float64)
+        self.vectors = np.asarray(vectors, dtype=np.float64)
+        self.tolerance = float(tolerance)
+        self.symbols = np.asarray(list(symbols))
+        count = self.fractions.shape[0]
+        smallest = float(np.linalg.svd(self.vectors, compute_uv=False).min()) if count else 1.0
+        # |df A| >= sigma_min |df|: every candidate lies within this fractional distance (with room for round-off)
+        self.radius = self.tolerance / smallest * (1.0 + 1.0e-6) + 1.0e-12
+        self.species = []
+        for symbol in dict.fromkeys(self.symbols.tolist()):
+            members = np.flatnonzero(self.symbols == symbol)
+            self.species.append((members, cKDTree(self._wrapped(self.fractions[members]), boxsize=1.0)))
+
+    @staticmethod
+    def _wrapped(values: np.ndarray) -> np.ndarray:
+        wrapped = values - np.floor(values)
+        wrapped[wrapped >= 1.0] = 0.0
+        return wrapped
+
+    def _distances(self, point: np.ndarray, others: np.ndarray) -> np.ndarray:
+        difference = point[None, :] - self.fractions[others]
+        difference -= np.round(difference)
+        return np.linalg.norm(difference @ self.vectors, axis=1)
+
+    def images(self, mapped: np.ndarray):
+        """``image[a]`` of every mapped atom, or ``None`` where an atom has no candidate or more than one."""
+
+        mapped = np.asarray(mapped, dtype=np.float64)
+        image = np.full(self.fractions.shape[0], -1, dtype=np.int64)
+        for members, tree in self.species:
+            queries = self._wrapped(mapped[members])
+            counts = np.asarray(tree.query_ball_point(queries, self.radius, return_length=True), dtype=np.int64)
+            if np.any(counts == 0):
+                return None
+            single = counts == 1
+            if np.any(single):
+                _, nearest = tree.query(queries[single], k=1)
+                chosen = members[np.asarray(nearest, dtype=np.int64)]
+                atoms = members[single]
+                difference = mapped[atoms] - self.fractions[chosen]
+                difference -= np.round(difference)
+                if np.any(np.linalg.norm(difference @ self.vectors, axis=1) > self.tolerance):
+                    return None
+                image[atoms] = chosen
+            for local in np.flatnonzero(~single):
+                atom = int(members[local])
+                others = members[np.asarray(tree.query_ball_point(queries[local], self.radius), dtype=np.int64)]
+                candidates = others[self._distances(mapped[atom], others) <= self.tolerance]
+                if candidates.size != 1:
+                    return None
+                image[atom] = int(candidates[0])
+        return image
+
+
 def periodic_symmetry_operations(
     atoms: Sequence[Atom],
     lattice_vectors: np.ndarray,
@@ -1019,29 +1114,15 @@ def periodic_symmetry_operations(
     positions = np.array([atom.position for atom in atoms], dtype=np.float64)
     symbols = [atom.symbol for atom in atoms]
     fractions = fractional_coordinates(positions, vectors) if len(atoms) else positions
+    matcher = _PeriodicImageMatcher(fractions, symbols, vectors, tolerance)
     found: list[PeriodicAtomSymmetryOperation] = []
     for rotation, matrix in _lattice_point_operations(vectors):
         if grid is not None and not _grid_invariant(grid, matrix):
             continue
         if not _kpoints_invariant(rotation, k_points, vectors):
             continue
-        mapped = fractions @ matrix
-        image = np.full(len(atoms), -1, dtype=np.int64)
-        valid = True
-        for index, point in enumerate(mapped):
-            difference = point[None, :] - fractions
-            difference -= np.round(difference)
-            distance = np.linalg.norm(difference @ vectors, axis=1)
-            candidates = [
-                other
-                for other in np.flatnonzero(distance <= tolerance)
-                if symbols[other] == symbols[index]
-            ]
-            if len(candidates) != 1:
-                valid = False
-                break
-            image[index] = candidates[0]
-        if not valid or np.unique(image).size != len(atoms):
+        image = matcher.images(fractions @ matrix)
+        if image is None or np.unique(image).size != len(atoms):
             continue
         found.append(
             PeriodicAtomSymmetryOperation(

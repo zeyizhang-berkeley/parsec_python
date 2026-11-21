@@ -239,15 +239,19 @@ class DeviceRouteTests(unittest.TestCase):
             with mock.patch.object(exchange_device, "_device_memory", return_value=(0, 1)):
                 return real_fits(*args, **kwargs)
 
-        # auto_tiles: the sector blocks paired tile by tile, without the pooled full-grid block; auto_full: auto on
-        # a device whose free memory (mocked) takes no pooled block, so every build falls back to those tiles;
-        # auto_late: the first build pooled, every later one on those tiles
-        for setting in ("off", "auto", "auto_tiles", "auto_full", "auto_late", "kpoint"):
+        # auto: the pair densities in the classes of the face-centring translations of the cube
+        # (PARSEC_CUPY_EXCHANGE_TRANSLATIONS=auto); auto_pool: the pooled full-grid block of the sector orbitals
+        # (translation classes off); auto_tiles: the sector blocks paired tile by tile, without the pooled full-grid
+        # block; auto_full: auto on a device whose free memory (mocked) takes neither the coset blocks nor the pooled
+        # block, so every build falls back to those tiles; auto_late: the first build pooled, every later one on
+        # those tiles (translation classes off)
+        for setting in ("off", "auto", "auto_pool", "auto_tiles", "auto_full", "auto_late", "kpoint"):
             path = _write_silicon(folder / setting, spacing="0.57")
             errors = StringIO()
             environment = {
                 "PARSEC_GAMMA_HYBRID_SECTORS": setting.split("_")[0],
                 "PARSEC_CUPY_EXCHANGE_POOL": "off" if setting == "auto_tiles" else "auto",
+                "PARSEC_CUPY_EXCHANGE_TRANSLATIONS": "off" if setting in ("auto_pool", "auto_late") else "auto",
             }
             with ExitStack() as stack:
                 stack.enter_context(mock.patch.dict(os.environ, environment))
@@ -268,6 +272,16 @@ class DeviceRouteTests(unittest.TestCase):
         self.assertEqual(energies["auto_full"], energies["auto_tiles"])
         self.assertIn("full-grid block of the orbitals did not fit the device", logs["auto_full"])
         self.assertNotIn("did not fit the device", logs["auto"])
+        # the translation classes are named where the builds took them
+        classes = "in the classes of their 3 half-cell translations, the "
+        self.assertIn(classes, logs["auto"])
+        for setting in ("off", "auto_pool", "auto_tiles", "auto_full", "auto_late"):
+            self.assertNotIn(classes, logs[setting], setting)
+        # auto_full: the coset blocks did not fit either, and the log says so
+        unfit = "the coset blocks of the half-cell translations of the sector orbitals did not fit the device"
+        self.assertIn(unfit, logs["auto_full"])
+        for setting in ("off", "auto", "auto_pool", "auto_tiles", "auto_late"):
+            self.assertNotIn(unfit, logs[setting], setting)
         # each Fock iteration names the builds of its step, the summary those of the run
         summary = r"Pair-density Poisson solver: .* in (\d+) of (\d+) builds, where the full-grid block"
         found = re.search(summary, logs["auto_full"])
@@ -282,7 +296,7 @@ class DeviceRouteTests(unittest.TestCase):
         found = re.search(summary, logs["auto_late"])
         self.assertIsNotNone(found)
         self.assertEqual(int(found.group(1)), int(found.group(2)) - 1)
-        self.assertAlmostEqual(energies["auto_late"], energies["auto"], delta=3.0e-8)
+        self.assertAlmostEqual(energies["auto_late"], energies["auto_pool"], delta=3.0e-8)
         self.assertIn("does not take a hybrid functional; the full grid is used", logs["off"])
         # the 16 commuting involutions of the cube with its face-centring translations
         self.assertIn("exact commuting group of 16 operations detected", logs["auto"])
@@ -291,6 +305,8 @@ class DeviceRouteTests(unittest.TestCase):
         self.assertRegex(logs["kpoint"], r"K-point sectors\s+:\s+16\s+tasks")
         # the outputs print 8 decimals; the three loops converge to 1e-9 Ry (SCF) and 1e-10 Ry (Fock loop)
         self.assertAlmostEqual(energies["auto"], energies["off"], delta=3.0e-8)
+        self.assertAlmostEqual(energies["auto_pool"], energies["off"], delta=3.0e-8)
+        self.assertAlmostEqual(energies["auto"], energies["auto_pool"], delta=3.0e-8)
         self.assertAlmostEqual(energies["auto_tiles"], energies["off"], delta=3.0e-8)
         self.assertAlmostEqual(energies["kpoint"], energies["off"], delta=3.0e-8)
 

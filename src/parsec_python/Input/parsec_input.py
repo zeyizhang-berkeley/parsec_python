@@ -47,9 +47,12 @@ from ..Grid.cell import primitive_lattice, replicate_positions, supercell_lattic
 from ..Grid.pbc import fortran_grid_shift
 from ..Grid.kpoints import (
     explicit_kpoints,
+    hybrid_kpoint_wedge_setting,
     kpoint_force_wedge_setting,
+    mesh_keeps_time_reversal,
     kpoint_time_reversal_setting,
     read_kpoint_file,
+    soc_kpoint_wedge_setting,
 )
 from ..Grid.pbc import periodic_grid_shift, uses_general_periodic_grid
 from . import routines as _routines_module
@@ -268,6 +271,18 @@ class ParsecInputTranslation:
     # coordinates of the input also where PARSEC re-centres them (a cluster,
     # a slab along z, the first structure of a molecular dynamics restart).
     recenter_aperiodic: bool = True
+    # PARSEC_STANDARD_ORIENTATION=on: the map between the frame of the input
+    # (as PARSEC places it) and the frame the cluster is calculated in, where
+    # it changed the atoms (parsec_python.Input.standard_orientation.
+    # StandardOrientation); ``None`` otherwise.
+    standard_orientation: object | None = None
+    # Why PARSEC 1.5 uses no point group although the input does not say
+    # Ignore_Symmetry: "manual", "molecular_dynamics", "polarizability",
+    # "point_charges", "fdet" (``use_symmetry`` false), and "foldblock"
+    # (``Foldblock_Side_Length`` 2 sets ``ignore_symmetry``).  The accelerated
+    # driver may keep a group these inputs do not break
+    # (acceleration/SCF/symmetry_off_inputs.py).
+    symmetry_off_reasons: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -441,6 +456,55 @@ _INPUT15_ACCEPTED_GLOBAL = frozenset(
 
 #: Per-species keywords of PARSEC 1.5 (read once per Atom_Type, ESDF cursor).
 _INPUT15_SPECIES_KEYS = frozenset({"pseudopot_file"})
+
+
+# The notes of a Monkhorst_Pack_Grid without a Monkhorst_Pack_Shift block (PARSEC_MP_UNSHIFTED_MESH=fortran): the wedge
+# of a scalar run, the time-reversal pairs of a hybrid, the wedge of a hybrid single point (PARSEC_HYBRID_KPOINT_WEDGE).
+_UNSHIFTED_MESH_PREFIX = (
+    "Monkhorst_Pack_Grid without Monkhorst_Pack_Shift: PARSEC 1.5's Gamma-centred mesh k = (i-1)/n (shift 0), "
+)
+_UNSHIFTED_MESH_PORT = "(PARSEC_MP_UNSHIFTED_MESH=port keeps the former unreduced mesh (2i-n-1)/(2n))"
+_UNSHIFTED_WEDGE_NOTE = (
+    _UNSHIFTED_MESH_PREFIX + "reduced to its irreducible wedge as with a zero Monkhorst_Pack_Shift " + _UNSHIFTED_MESH_PORT
+)
+# (the placeholder of a hybrid's note until the wedge decision is known: _unshifted_hybrid_pairs_note replaces it with
+# its reason, or _UNSHIFTED_HYBRID_WEDGE_NOTE)
+_UNSHIFTED_HYBRID_PAIRS_NOTE = _UNSHIFTED_MESH_PREFIX + "reduced by time reversal only (k ~ -k) " + _UNSHIFTED_MESH_PORT
+
+
+def _unshifted_hybrid_pairs_note(reason: str) -> str:
+    """The note of a hybrid's mesh without a shift block that keeps its time-reversal pairs, with ``reason``."""
+
+    return _UNSHIFTED_MESH_PREFIX + "reduced by time reversal only (k ~ -k): " + reason + " " + _UNSHIFTED_MESH_PORT
+
+
+# why a hybrid keeps the time-reversal pairs of its mesh (the note above)
+_HYBRID_PAIRS_OFF = "PARSEC_HYBRID_KPOINT_WEDGE=off keeps the time-reversal pairs of a hybrid's mesh"
+_HYBRID_PAIRS_LOW_DIMENSION = "a wire or slab keeps the time-reversal pairs of a hybrid's mesh"
+_HYBRID_PAIRS_MOVING = (
+    "forces and moving atoms keep the time-reversal pairs of a hybrid's mesh (PARSEC_HYBRID_KPOINT_WEDGE reduces the "
+    "mesh of a single point)"
+)
+_HYBRID_PAIRS_SPINORS = "spinor orbitals keep the time-reversal pairs of a hybrid's mesh"
+_HYBRID_PAIRS_NO_GROUP = (
+    "no operation of the space group other than the identity maps the grid, its finite-difference operators and this "
+    "mesh onto themselves, or the symmetry is off (Ignore_Symmetry, Symmetrize_Charge_Density: .false.)"
+)
+_UNSHIFTED_HYBRID_WEDGE_NOTE = (
+    _UNSHIFTED_MESH_PREFIX
+    + "reduced to its irreducible wedge as with a zero Monkhorst_Pack_Shift; the exchange of the hybrid functional "
+    "sums over the whole mesh through the images of the wedge (PARSEC_HYBRID_KPOINT_WEDGE=on: the semilocal start "
+    "and the Fock loop on the wedge, the symmetric state; off keeps the time-reversal pairs of the mesh) "
+    + _UNSHIFTED_MESH_PORT
+)
+_UNSHIFTED_HYBRID_DEFERRED_NOTE = (
+    _UNSHIFTED_MESH_PREFIX
+    + "reduced by time reversal only (k ~ -k) for the semilocal start of the hybrid; its Fock loop takes the "
+    "irreducible wedge of the mesh (the exchange summed over the whole mesh through the images of the wedge) if "
+    "that start fills every state to 0 or 1, and keeps the pairs where a state is partly filled at the Fermi level "
+    "(PARSEC_HYBRID_KPOINT_WEDGE=auto; a NOTE after the start names the route; on takes the wedge, the symmetric "
+    "state, off the pairs) " + _UNSHIFTED_MESH_PORT
+)
 
 
 def _hybrid_label(text: str) -> str | None:
@@ -2990,9 +3054,13 @@ def _parse_parsec_input(
         scalar, one, periodicity=periodicity, grid_notes=grid_notes
     )
     ignore_symmetry = optional_bool("ignore_symmetry")
+    # Why PARSEC 1.5 uses no point group here although the input does not say Ignore_Symmetry
+    # (ParsecInputTranslation.symmetry_off_reasons).
+    symmetry_off_reasons: list[str] = []
     if foldblock_side != 1 and not ignore_symmetry:
         # usrinputfile.F90:814-817: a fold block other than 1 switches the symmetry off.
         ignore_symmetry = True
+        symmetry_off_reasons.append("foldblock")
         grid_notes.append(
             f"Foldblock_Side_Length {foldblock_side}: symmetry is switched off, as in PARSEC 1.5 "
             "(' WARNING! SYMMETRY IS AUTOMATICALLY SWITCHED OFF')"
@@ -3011,6 +3079,12 @@ def _parse_parsec_input(
     # one point), whose wedge _default_routines_wedge may take instead of the full list.
     default_routines_mesh: tuple | None = None
     kpoint_notes: list[str] = []
+    # where the note of a Monkhorst_Pack_Grid without Monkhorst_Pack_Shift sits in kpoint_notes (None: no such mesh)
+    unshifted_note_slot: int | None = None
+    # why the default routines keep the whole mesh of such a grid (None: they reduce it, or other routines run)
+    full_mesh_reason: str | None = None
+    # a fall-back of such a mesh wrote its own note (the wedge refused on the Fortran-derived routines)
+    unshifted_fallback_noted = False
     explicit_kpoint_array: np.ndarray | None = None
     explicit_kpoint_weights: np.ndarray | None = None
     shape: str | None = None
@@ -3222,11 +3296,18 @@ def _parse_parsec_input(
                 and unshifted_mesh_setting() == "fortran"
             )
             if fortran_unshifted:
-                kpoint_notes.append(
-                    "Monkhorst_Pack_Grid without Monkhorst_Pack_Shift: PARSEC 1.5's Gamma-centred mesh k = (i-1)/n "
-                    "(shift 0), reduced to its irreducible wedge as with a zero Monkhorst_Pack_Shift "
-                    "(PARSEC_MP_UNSHIFTED_MESH=port keeps the former unreduced mesh (2i-n-1)/(2n))"
-                )
+                if SCFSettings(xc_functional=xc_functional).is_hybrid:
+                    # A hybrid functional: the time-reversal pairs of the mesh on either set of routines
+                    # (Grid.kpoints.kpoint_sampling), its exchange summing over the whole mesh; the note of a hybrid
+                    # single point that takes the wedge (PARSEC_HYBRID_KPOINT_WEDGE) replaces this one below, once
+                    # that is known (and so does its reason for the pairs, _unshifted_hybrid_pairs_note).
+                    kpoint_notes.append(_UNSHIFTED_HYBRID_PAIRS_NOTE)
+                else:
+                    # the note says what the run makes of the mesh, which is known once the routines, the orbitals
+                    # and the movements have decided it (_unshifted_mesh_note, before the problem is built): its
+                    # place among the notes is kept here
+                    unshifted_note_slot = len(kpoint_notes)
+                    kpoint_notes.append(_UNSHIFTED_MESH_NOTE_PREFIX)
             if "monkhorst_pack_shift" in blocks or fortran_unshifted:
                 if periodicity == 3 and not fortran_unshifted:
                     # a bulk cell's shifted grid runs on the Fortran-derived routines (Fortran's wedge and weights)
@@ -4040,6 +4121,11 @@ def _parse_parsec_input(
     warnings: list[str] = (
         list(coordinate_notes) + super_cell_notes + warnings_from_kpoints + kpoint_notes + grid_notes
     )
+    unshifted_note_index = (
+        None
+        if unshifted_note_slot is None
+        else len(coordinate_notes) + len(super_cell_notes) + len(warnings_from_kpoints) + unshifted_note_slot
+    )
     # PARSEC 1.5 keywords of the input layer (_input15_keywords, Correlation_Type wb).
     warnings.extend(input15_notes)
     warnings.extend(bak15_notes)
@@ -4850,6 +4936,7 @@ def _parse_parsec_input(
             # parsec.F90 uses no symmetry when the structures are imposed,
             # and usrinputfile.F90 makes every atom movable.
             use_symmetry = False
+            symmetry_off_reasons.append("manual")
             movable = [True] * len(atoms)
         elif not any(movable):
             raise ParsecInputError(
@@ -4872,21 +4959,61 @@ def _parse_parsec_input(
             )
         # parsec.F90 uses no symmetry in molecular dynamics.
         use_symmetry = False
+        symmetry_off_reasons.append("molecular_dynamics")
     if polarizability:
         # parsec.F90 uses no symmetry when it applies an electric field.
         use_symmetry = False
+        symmetry_off_reasons.append("polarizability")
     if point_charges:
         # PARSEC finds the point group of the atoms alone (a defect of the
         # Fortran unless Ignore_Symmetry is set); a group the point charges
         # do not have is not used here.
         use_symmetry = False
+        symmetry_off_reasons.append("point_charges")
     if foldblock_side != 1:
         # A domain of whole blocks is no image of itself under the reflections (usrinputfile.F90:814-817
         # switches the symmetry off), also not on request of the command line.
         use_symmetry = False
+    # PARSEC_STANDARD_ORIENTATION (opt-in, Input.standard_orientation): a cluster runs in the frame and about the
+    # centre of its largest group of signed permutations; the reports go back to the frame of the input.
+    input_atoms = tuple(atoms)
+    standard_orientation, orientation_note = _standard_orientation(
+        atoms,
+        scalar,
+        one,
+        optional_bool,
+        is_periodic=is_periodic,
+        ignore_symmetry=ignore_symmetry,
+        use_symmetry=use_symmetry,
+        domain_shape=getattr(grid, "domain_shape", "sphere"),
+        grid_shift=getattr(grid, "shift", None),
+        recenter=recenter,
+        recenter_aperiodic=recenter_aperiodic,
+        spinors=bool(
+            noncollinear
+            or self_consistent_spin_orbit
+            or any(getattr(specification, "spin_orbit", False) for specification in specifications.values())
+        ),
+        movable=movable if atoms_move else None,
+        initial_density=initial_density_settings,
+        # (a relaxation by an optimizer keeps the subgroup of its Move_Flag under PARSEC_MOVE_FLAG_SUBGROUP=auto:
+        # Relaxation.run.symmetry_decision; molecular dynamics and manual movements use no group)
+        move_flag_subgroup=minimization in ("bfgs", "simple") and not molecular_dynamics.enabled,
+    )
+    if orientation_note is not None:
+        warnings.append(orientation_note)
+    if standard_orientation is not None:
+        atoms = list(standard_orientation[1])
+        standard_orientation = standard_orientation[0]
     symmetrize_density = optional_bool("symmetrize_charge_density")
     space_group = None
     kpoint_time_reversal = False
+    # PARSEC_SOC_KPOINT_WEDGE: read for every input, so that a wrong value stops here
+    soc_wedge_setting = soc_kpoint_wedge_setting()
+    # the irreducible wedge of a hybrid's mesh (PARSEC_HYBRID_KPOINT_WEDGE; SinglePointInput.hybrid_kpoint_wedge)
+    hybrid_kpoint_wedge = False
+    # the wedge an auto hybrid takes after an insulating semilocal start (SinglePointInput.hybrid_kpoint_wedge_deferred)
+    hybrid_kpoint_wedge_deferred = None
     if wire_or_slab:
         # The space group of a wire or slab (and what it decides) is found
         # below, once bandstruc and nscf_kpoints are read.
@@ -4895,21 +5022,39 @@ def _parse_parsec_input(
         # Andrew Grieder's routines put no fractional translations in the grid.  The Monkhorst_Pack_Shift mesh of a
         # bulk single point of scalar orbitals is reduced by the operations of the crystal that map his grid onto
         # itself, with time reversal, and the density is symmetrized with them (_default_routines_wedge); a hybrid
-        # (its exchange sums over the full mesh) and spinors keep the full list of equal weights.  Forces and a
-        # relaxation take the wedge too (PARSEC_KPOINT_FORCE_WEDGE, since 2026-11-18): their forces are completed
-        # and averaged over the group (Forces.total.compute_periodic_forces, symm_forces.f90), so the structure keeps
-        # it; molecular dynamics and manual movements use no symmetry (as PARSEC) and keep the full list.
+        # (its exchange sums over the full mesh) keeps the full list of equal weights.  Non-magnetic spin-orbit
+        # coupling (PARSEC_SOC_KPOINT_WEDGE, since 2026-11-19) is reduced as PARSEC 1.5's irrbz does for is_so: the
+        # operations turn a spinor with their SU(2) matrices and time reversal maps it onto its Kramers partner at
+        # -k, neither of which changes the density; under auto only by the operations that also keep the grid's
+        # finite-difference operators (stencil_exact: on an oblique grid the others change the discrete Hamiltonian,
+        # hcp Au 7.7e-3 Ry at 0.3 bohr), under grid by those of scalar orbitals.  Non-collinear magnetism and
+        # spin-polarized spin-orbit coupling keep the full list (time reversal flips the moments, and the group
+        # found from the atoms ignores them).  Forces and a relaxation take the wedge too
+        # (PARSEC_KPOINT_FORCE_WEDGE, since 2026-11-18): their forces are completed and averaged over the group
+        # (Forces.total.compute_periodic_forces, symm_forces.f90), so the structure keeps it; molecular dynamics
+        # and manual movements use no symmetry (as PARSEC) and keep the full list.
         spinor_orbitals = bool(
             noncollinear
             or self_consistent_spin_orbit
             or any(specification.spin_orbit for specification in specifications.values())
         )
+        soc_wedge = bool(
+            spinor_orbitals
+            and self_consistent_spin_orbit
+            and not noncollinear
+            and not spin_polarized
+            and soc_wedge_setting in ("auto", "grid")
+        )
+        # the orbitals whose mesh these routines do not reduce
+        unreduced_orbitals = spinor_orbitals and not soc_wedge
+        # their wedge keeps the operations that keep the grid's finite-difference operators (PARSEC_SOC_KPOINT_WEDGE)
+        stencil_exact = soc_wedge and soc_wedge_setting == "auto"
         moving_wedge = None
         if (
             periodicity == 3
             and default_routines_mesh is not None
             and (atoms_move or single_point_forces)
-            and not (scf.is_hybrid or spinor_orbitals)
+            and not (scf.is_hybrid or unreduced_orbitals)
             and not (molecular_dynamics.enabled or minimization == "manual")
             and not (optional_bool("create_dos") or optional_bool("output_gw"))
             and kpoint_force_wedge_setting() == "auto"
@@ -4923,12 +5068,89 @@ def _parse_parsec_input(
                 ignore_symmetry=ignore_symmetry,
                 symmetrize_density=symmetrize_density,
                 symmetrize_given="symmetrize_charge_density" in scalar,
+                stencil_exact=stencil_exact,
             )
-        keeps_full_mesh = bool(
+        # A hybrid single point (PARSEC_HYBRID_KPOINT_WEDGE): the wedge of the stencil-exact operations of the grid
+        # and the mesh with the density averaged over them, where there are any; the exchange reaches the rest of the
+        # mesh through the images of the wedge's Bloch factors (SCF/hybrid_periodic.py, hybrid_mesh_stars).  on: the
+        # whole run on the wedge; auto (since 2026-11-20): the input of off (the time-reversal pairs, no density
+        # average) with the wedge kept aside, which the Fock loop takes after a semilocal start without partly filled
+        # states (BlochExchange.after_start).
+        hybrid_wedge = None
+        if (
             scf.is_hybrid
-            or spinor_orbitals
+            and periodicity == 3
+            and default_routines_mesh is not None
+            and not (atoms_move or single_point_forces or spinor_orbitals)
+            and hybrid_kpoint_wedge_setting() in ("auto", "on")
+            and mesh_keeps_time_reversal(default_routines_mesh[1])
+        ):
+            wedge_notes: list[str] = []
+            found = _default_routines_wedge(
+                atoms,
+                periodic_cell,
+                grid,
+                default_routines_mesh,
+                ignore_symmetry=ignore_symmetry,
+                symmetrize_density=symmetrize_density,
+                symmetrize_given="symmetrize_charge_density" in scalar,
+                warnings=wedge_notes,
+                stencil_exact=True,
+                stencil_switch=None,
+            )
+            from ..Grid.kpoints import DeferredHybridWedge, hybrid_wedge_operations
+
+            if (
+                found[0]
+                and found[1] is not None
+                and hybrid_wedge_operations(found[1], periodic_cell, grid, *default_routines_mesh) is not None
+            ):
+                if hybrid_kpoint_wedge_setting() == "on":
+                    hybrid_wedge = (found, wedge_notes)
+                    hybrid_kpoint_wedge = True
+                else:
+                    hybrid_kpoint_wedge_deferred = DeferredHybridWedge(
+                        group=found[1],
+                        dimensions=tuple(int(value) for value in default_routines_mesh[0]),
+                        shift=tuple(float(value) for value in default_routines_mesh[1]),
+                        density_group=found[1],
+                    )
+        keeps_full_mesh = bool(
+            (scf.is_hybrid and hybrid_wedge is None)
+            or unreduced_orbitals
             or ((atoms_move or single_point_forces) and moving_wedge is None)
         )
+        if default_routines_mesh is not None and keeps_full_mesh:
+            # for the note of a Monkhorst_Pack_Grid without Monkhorst_Pack_Shift (_unshifted_mesh_note)
+            if scf.is_hybrid:
+                full_mesh_reason = "a hybrid functional: its exchange sums over the whole mesh"
+            elif noncollinear:
+                full_mesh_reason = (
+                    "non-collinear magnetism: the group found from the atoms ignores the moments, and time reversal "
+                    "flips them (PARSEC 1.5 reduces such a mesh by the space group of the atoms, which ignores the "
+                    "moments too)"
+                )
+            elif spinor_orbitals and spin_polarized:
+                full_mesh_reason = (
+                    "spin-polarized spin-orbit coupling: time reversal and the operations that turn the spin axis "
+                    "are no symmetries of the moments (PARSEC 1.5 reduces such a mesh by the space group of the "
+                    "atoms and time reversal, which ignores the moments)"
+                )
+            elif unreduced_orbitals:
+                full_mesh_reason = "spin-orbit coupling with PARSEC_SOC_KPOINT_WEDGE=off"
+            elif molecular_dynamics.enabled or minimization == "manual":
+                full_mesh_reason = "molecular dynamics and manual movements use no symmetry, as in PARSEC"
+            elif optional_bool("create_dos") or optional_bool("output_gw"):
+                full_mesh_reason = "forces or moving atoms with Create_DOS or Output_GW"
+            elif kpoint_force_wedge_setting() != "auto":
+                full_mesh_reason = "forces or moving atoms with PARSEC_KPOINT_FORCE_WEDGE=off"
+            else:
+                full_mesh_reason = (
+                    "forces or moving atoms without a group to reduce it: Ignore_Symmetry, Symmetrize_Charge_Density: "
+                    ".false., no operation but the identity that maps the grid and the mesh onto themselves"
+                    + (" and keeps the grid's finite-difference operators" if stencil_exact else "")
+                    + ", or one that exchanges fixed and movable atoms"
+                )
         weighted_list = bool(
             explicit_kpoint_weights is not None
             and not np.allclose(explicit_kpoint_weights, explicit_kpoint_weights[0], rtol=1.0e-12, atol=0.0)
@@ -4945,12 +5167,16 @@ def _parse_parsec_input(
             # every Symmetrize_Charge_Density: .true. did before 2026-11-08
             fall_back(
                 "Symmetrize_Charge_Density: .true. (the default routines average the density of a Monkhorst_Pack_Shift "
-                "wedge or a weighted Kpoint_List of a bulk single point of scalar orbitals only)"
+                "wedge of scalar orbitals or non-magnetic spin-orbit coupling, or of a weighted Kpoint_List of a bulk "
+                "single point of scalar orbitals, only)"
             )
         if default_routines_mesh is not None and not keeps_full_mesh:
             if moving_wedge is not None:
                 symmetrize_density, space_group, wedge_warnings = moving_wedge
                 warnings.extend(wedge_warnings)
+            elif hybrid_wedge is not None:
+                (symmetrize_density, space_group), wedge_notes = hybrid_wedge
+                warnings.extend(wedge_notes)
             else:
                 symmetrize_density, space_group = _default_routines_wedge(
                     atoms,
@@ -4961,6 +5187,7 @@ def _parse_parsec_input(
                     symmetrize_density=symmetrize_density,
                     symmetrize_given="symmetrize_charge_density" in scalar,
                     warnings=warnings,
+                    stencil_exact=stencil_exact,
                 )
             monkhorst_pack_dimensions, monkhorst_pack_shift = default_routines_mesh
             explicit_kpoint_array = None
@@ -4983,9 +5210,7 @@ def _parse_parsec_input(
             and explicit_kpoint_array is not None
             and not (
                 scf.is_hybrid
-                or noncollinear
-                or self_consistent_spin_orbit
-                or any(specification.spin_orbit for specification in specifications.values())
+                or unreduced_orbitals
                 or optional_bool("create_dos")
                 or optional_bool("output_gw")
             )
@@ -4995,7 +5220,8 @@ def _parse_parsec_input(
             # group: the structure may lose it); k and -k still give the same density and forces (u_-k = u_k^*),
             # as Fortran's irrbz uses for every run that is not non-collinear: the mesh stays the list of equal
             # weights of these routines, and kpoint_sampling runs the representatives of its pairs with twice the
-            # weight (the DOS tetrahedra and Output_GW keep the whole mesh).
+            # weight (the DOS tetrahedra and Output_GW keep the whole mesh).  Non-magnetic spin-orbit coupling
+            # (PARSEC_SOC_KPOINT_WEDGE) too: the Kramers partner of a spinor at -k has the same density and forces.
             kpoint_time_reversal = True
     elif is_periodic:
         weighted_kpoints = bool(
@@ -5061,12 +5287,52 @@ def _parse_parsec_input(
             bulk_notes = []
             symmetrize_density, space_group, grid = bulk_symmetry(None, bulk_notes)
             space_group = None
+            unshifted_fallback_noted = True
             bulk_notes.append(
                 "Monkhorst_Pack_Grid without Monkhorst_Pack_Shift: the irreducible wedge of the space group is not "
                 f"used ({error}); PARSEC 1.5's mesh is reduced by time reversal alone and the density is not "
                 "symmetrized"
             )
         warnings.extend(bulk_notes)
+        if (
+            scf.is_hybrid
+            and periodicity == 3
+            and monkhorst_pack_shift is not None
+            and monkhorst_pack_dimensions is not None
+            and not forces_requested
+            and symmetrize_density
+            and space_group is not None
+            and not (
+                noncollinear
+                or self_consistent_spin_orbit
+                or any(specification.spin_orbit for specification in specifications.values())
+            )
+            and hybrid_kpoint_wedge_setting() in ("auto", "on")
+            and mesh_keeps_time_reversal(monkhorst_pack_shift)
+        ):
+            # A hybrid single point (PARSEC_HYBRID_KPOINT_WEDGE): the wedge of the operations of the space group that
+            # map its mesh and the finite-difference operators of the grid onto themselves (Grid.kpoints.
+            # hybrid_wedge_operations, on any grid: Fortran's general grid of an oblique cell keeps those that map
+            # lapmvs with its auxiliary directions onto itself); the density average keeps the whole group, as for
+            # every k-point run of these routines, and the images of the exchange take only the stencil-exact
+            # operations that keep the mesh (V_xc.bloch_exchange.mesh_stars).  on: the whole run on the wedge; auto
+            # (since 2026-11-20): the input of off with the wedge kept aside, which the Fock loop takes after a
+            # semilocal start without partly filled states (SCF.hybrid_periodic.BlochExchange.after_start).
+            from ..Grid.kpoints import DeferredHybridWedge, hybrid_wedge_operations
+
+            kept = hybrid_wedge_operations(
+                space_group, periodic_cell, grid, monkhorst_pack_dimensions, monkhorst_pack_shift
+            )
+            if kept is not None:
+                if hybrid_kpoint_wedge_setting() == "on":
+                    hybrid_kpoint_wedge = True
+                else:
+                    hybrid_kpoint_wedge_deferred = DeferredHybridWedge(
+                        group=kept,
+                        dimensions=tuple(int(value) for value in monkhorst_pack_dimensions),
+                        shift=tuple(float(value) for value in monkhorst_pack_shift),
+                        density_group=None,
+                    )
         # The space group's fractional translations are in the grid settings now: the counts of adjust_step decide
         # between the orthorhombic grid and Fortran's general grid.
         general_periodic_grid = uses_general_periodic_grid(periodic_cell, grid)
@@ -5111,6 +5377,28 @@ def _parse_parsec_input(
                         "1/2 in every direction always does); set Ignore_Symmetry: true or "
                         "Symmetrize_Charge_Density: false"
                     )
+    if _UNSHIFTED_HYBRID_PAIRS_NOTE in warnings:
+        # the note of a hybrid's mesh without a shift block, now that the wedge decision is known: the wedge of a
+        # single point (PARSEC_HYBRID_KPOINT_WEDGE), or the time-reversal pairs and why
+        if hybrid_kpoint_wedge:
+            mesh_note = _UNSHIFTED_HYBRID_WEDGE_NOTE
+        elif hybrid_kpoint_wedge_deferred is not None:
+            mesh_note = _UNSHIFTED_HYBRID_DEFERRED_NOTE
+        elif hybrid_kpoint_wedge_setting() == "off":
+            mesh_note = _unshifted_hybrid_pairs_note(_HYBRID_PAIRS_OFF)
+        elif wire_or_slab:
+            mesh_note = _unshifted_hybrid_pairs_note(_HYBRID_PAIRS_LOW_DIMENSION)
+        elif atoms_move or single_point_forces:
+            mesh_note = _unshifted_hybrid_pairs_note(_HYBRID_PAIRS_MOVING)
+        elif (
+            noncollinear
+            or self_consistent_spin_orbit
+            or any(specification.spin_orbit for specification in specifications.values())
+        ):
+            mesh_note = _unshifted_hybrid_pairs_note(_HYBRID_PAIRS_SPINORS)
+        else:
+            mesh_note = _unshifted_hybrid_pairs_note(_HYBRID_PAIRS_NO_GROUP)
+        warnings[:] = [mesh_note if note == _UNSHIFTED_HYBRID_PAIRS_NOTE else note for note in warnings]
     if symmetrize_density and not wire_or_slab:
         scf = replace(scf, symmetrize_density=True)
     # PARSEC always evaluates the forces.  Here a single point evaluates
@@ -5207,6 +5495,8 @@ def _parse_parsec_input(
             raise UnsupportedParsecOptionError(str(error)) from error
 
     if ignore_symmetry and not is_periodic:
+        # (Also where Foldblock_Side_Length 2 set it; the accelerated CLI leaves it out where it keeps the group of
+        # the fold-block domain, PARSEC_FOLDBLOCK_SYMMETRY: symmetry_off_inputs.kept_group_warnings.)
         warnings.append(
             "Ignore_Symmetry=true reproduces PARSEC's zero grid shift and "
             "disables accelerated symmetry reduction unless --symmetry=on "
@@ -5592,6 +5882,17 @@ def _parse_parsec_input(
                 nscf=post_processing.nscf is not None,
                 no_symmetry=bool(molecular_dynamics.enabled or polarizability or minimization == "manual"),
                 warnings=[],
+                slab_mesh=_slab_mesh_request(
+                    periodicity=periodicity,
+                    monkhorst_pack_dimensions=monkhorst_pack_dimensions,
+                    monkhorst_pack_shift=monkhorst_pack_shift,
+                    scf=scf,
+                    specifications=specifications,
+                    movable=movable,
+                    relaxation=minimization in {"bfgs", "simple"},
+                    charged_sheets=charged_sheets,
+                    ylm_dos=post_processing.dos is not None and post_processing.dos.ylm_l >= 0,
+                ),
             )
             if compute_forces:
                 _check_wire_slab_kpoint_movements(
@@ -5617,6 +5918,7 @@ def _parse_parsec_input(
             if "symmetrize_charge_density" in scalar:
                 raise
             monkhorst_pack_shift = None
+            unshifted_fallback_noted = True
             warnings.append(
                 (
                     "DOS_MP_Grid without DOS_MP_Shift"
@@ -5648,6 +5950,17 @@ def _parse_parsec_input(
                 molecular_dynamics.enabled or polarizability or minimization == "manual"
             ),
             warnings=warnings,
+            slab_mesh=_slab_mesh_request(
+                periodicity=periodicity,
+                monkhorst_pack_dimensions=monkhorst_pack_dimensions,
+                monkhorst_pack_shift=monkhorst_pack_shift,
+                scf=scf,
+                specifications=specifications,
+                movable=movable,
+                relaxation=minimization in {"bfgs", "simple"},
+                charged_sheets=charged_sheets,
+                ylm_dos=post_processing.dos is not None and post_processing.dos.ylm_l >= 0,
+            ),
         )
         if symmetrize_density:
             scf = replace(scf, symmetrize_density=True)
@@ -5961,6 +6274,23 @@ def _parse_parsec_input(
         # molecular-dynamics restart keeps the frame of the field.
         recenter_aperiodic = False
         use_symmetry = False
+        symmetry_off_reasons.append("fdet")
+    if unshifted_note_index is not None:
+        # the note of a Monkhorst_Pack_Grid without Monkhorst_Pack_Shift, now that the mesh is decided; a fall-back
+        # note says it instead, and the restarted SCF of Create_DOS on a DOS_MP_Grid does not run that mesh
+        if unshifted_fallback_noted or (
+            post_processing.monkhorst_pack_shift is not None and "dos_mp_grid" in blocks
+        ):
+            del warnings[unshifted_note_index]
+        else:
+            warnings[unshifted_note_index] = _unshifted_mesh_note(
+                reduced=monkhorst_pack_shift is not None,
+                space_group=space_group,
+                hybrid=bool(scf.is_hybrid),
+                noncollinear=bool(noncollinear),
+                time_reversal_pairs=bool(scf.is_hybrid or kpoint_time_reversal),
+                full_mesh_reason=full_mesh_reason,
+            )
 
     problem = SinglePointInput(
         atoms=atoms,
@@ -5983,6 +6313,8 @@ def _parse_parsec_input(
         space_group=space_group,
         **({} if fdet.embedding is None else {"embedding": fdet.embedding}),
         **({"kpoint_time_reversal": True} if kpoint_time_reversal else {}),
+        **({"hybrid_kpoint_wedge": True} if hybrid_kpoint_wedge else {}),
+        **({"hybrid_kpoint_wedge_deferred": hybrid_kpoint_wedge_deferred} if hybrid_kpoint_wedge_deferred else {}),
     )
     output_all_states = optional_bool("output_all_states")
     output_level = _integer(one("output_level", "1"), label="Output_Level")
@@ -6003,6 +6335,7 @@ def _parse_parsec_input(
         movable=tuple(movable),
         compute_forces=compute_forces,
         use_symmetry=use_symmetry,
+        symmetry_off_reasons=tuple(dict.fromkeys(symmetry_off_reasons)),
         molecular_dynamics=molecular_dynamics if molecular_dynamics.enabled else None,
         potential_extrapolation=potential_extrapolation,
         mlff=mlff,
@@ -6028,6 +6361,7 @@ def _parse_parsec_input(
         grid_shift=requested_grid_shift,
         atoms_outside_cell=atoms_outside_cell,
         recenter_aperiodic=recenter_aperiodic,
+        **({} if standard_orientation is None else {"standard_orientation": standard_orientation}),
     )
     if input15.complete_input:
         # PARSEC 1.5's Generate_Complete_Parsec_In: the effective input (bak_complete_parsec.in)
@@ -6036,7 +6370,10 @@ def _parse_parsec_input(
         translation = replace(
             translation,
             complete_input=complete_input_text(
-                translation,
+                # the coordinates of the input, also where PARSEC_STANDARD_ORIENTATION runs the atoms in another frame
+                translation
+                if standard_orientation is None
+                else replace(translation, problem=replace(problem, atoms=input_atoms)),
                 scalar,
                 blocks,
                 # the cell of the lattice-unit k-point lists of an input with a Super_Cell (Kpoint_List, nscf_kpoints)
@@ -6250,6 +6587,59 @@ def _time_reversal_count(problem) -> int:
     return int(len(kpoint_sampling(problem)[0]))
 
 
+_UNSHIFTED_MESH_NOTE_PREFIX = (
+    "Monkhorst_Pack_Grid without Monkhorst_Pack_Shift: PARSEC 1.5's Gamma-centred mesh k = (i-1)/n (shift 0)"
+)
+
+
+def _unshifted_mesh_note(
+    *,
+    reduced: bool,
+    space_group,
+    hybrid: bool,
+    noncollinear: bool,
+    time_reversal_pairs: bool,
+    full_mesh_reason: str | None,
+) -> str:
+    """The note of a ``Monkhorst_Pack_Grid`` without ``Monkhorst_Pack_Shift`` (``PARSEC_MP_UNSHIFTED_MESH=fortran``).
+
+    It says what the run makes of PARSEC 1.5's Gamma-centred mesh.  ``reduced``: the mesh is Fortran's grid with a
+    zero shift (``monkhorst_pack_shift``), which :func:`parsec_python.Grid.kpoints.kpoint_sampling_details` reduces
+    by ``space_group`` (unless ``hybrid``) and time reversal (unless ``noncollinear``); otherwise it is the explicit
+    list of the whole mesh of the default routines, which runs as its time-reversal pairs where
+    ``time_reversal_pairs`` (a hybrid, ``kpoint_time_reversal``) and for ``full_mesh_reason``.
+    """
+
+    order = 0 if space_group is None else int(space_group.order)
+    if reduced:
+        if hybrid:
+            body = (
+                "reduced by time reversal alone, as with a zero Monkhorst_Pack_Shift (a hybrid functional: its "
+                "exchange sums over the whole mesh)"
+            )
+        elif order > 1:
+            body = (
+                f"reduced to its irreducible wedge by {order} operations of the space group"
+                + (" without time reversal (non-collinear magnetism)" if noncollinear else " and time reversal")
+                + ", as with a zero Monkhorst_Pack_Shift"
+            )
+        elif noncollinear:
+            body = (
+                "the whole mesh (no operation of the space group but the identity, and no time reversal for "
+                "non-collinear magnetism)"
+            )
+        else:
+            body = "reduced by time reversal alone (no operation of the space group but the identity is used)"
+    else:
+        body = "the whole mesh" + (", run as its time-reversal pairs" if time_reversal_pairs else "")
+        if full_mesh_reason:
+            body += f" ({full_mesh_reason})"
+    return (
+        f"{_UNSHIFTED_MESH_NOTE_PREFIX}, {body} "
+        "(PARSEC_MP_UNSHIFTED_MESH=port keeps the former unreduced mesh (2i-n-1)/(2n))"
+    )
+
+
 def _default_routines_wedge(
     atoms,
     periodic_cell: PeriodicCell,
@@ -6260,6 +6650,8 @@ def _default_routines_wedge(
     symmetrize_density: bool,
     symmetrize_given: bool,
     warnings: list[str],
+    stencil_exact: bool = False,
+    stencil_switch: str | None = "PARSEC_SOC_KPOINT_WEDGE=grid",
 ):
     """The symmetry of a ``Monkhorst_Pack_Shift`` mesh of a bulk cell on the default routines.
 
@@ -6281,9 +6673,18 @@ def _default_routines_wedge(
 
     ``Ignore_Symmetry`` or ``Symmetrize_Charge_Density: .false.``: time reversal alone (``k`` and ``-k`` have the
     same density, which needs no average).
+
+    ``stencil_exact`` (non-magnetic spin-orbit coupling, ``PARSEC_SOC_KPOINT_WEDGE=auto``) keeps only the operations
+    that also map the grid's finite-difference operators onto themselves
+    (:func:`parsec_python.Grid.kpoints.stencil_preserving_operations`): on an oblique grid the others change the
+    discrete Hamiltonian at the order of the discretization, and their wedge is not the energy of the same points
+    without the group (scalar orbitals keep them, as before).  A hybrid single point takes them too
+    (``PARSEC_HYBRID_KPOINT_WEDGE`` on and auto, since 2026-11-20, on any grid:
+    :func:`parsec_python.Grid.kpoints.hybrid_wedge_operations`); ``stencil_switch`` names the value that keeps every
+    operation in the notes (``None``: none does).
     """
 
-    from ..Grid.kpoints import mesh_preserving_operations
+    from ..Grid.kpoints import mesh_preserving_operations, stencil_preserving_operations
     from ..Grid.pbc import default_periodic_grid_counts
     from ..Grid.space_group import find_grid_space_group, find_space_group
 
@@ -6301,8 +6702,21 @@ def _default_routines_wedge(
         crystal = find_space_group(lattice_vectors, atoms)
     except ValueError as error:
         raise ParsecInputError(f"symmetry operations: {error}") from error
-    group = mesh_preserving_operations(on_grid, *mesh)
+    on_mesh = mesh_preserving_operations(on_grid, *mesh)
+    group = stencil_preserving_operations(on_mesh, lattice_vectors, counts) if stencil_exact else on_mesh
+    stencil_note = (
+        "do not map the finite-difference operators of the oblique grid onto themselves (they turn a grid axis onto "
+        "another direction), so their wedge would differ from the same points without them at the order of the "
+        "discretization" + ("" if stencil_switch is None else f" ({stencil_switch} keeps them)")
+    )
     if group.order <= 1:
+        if group.order < on_mesh.order:
+            # spin-orbit coupling whose operations all turn the stencil: time reversal alone (or its pairs)
+            warnings.append(
+                "Monkhorst_Pack_Shift: the k-point mesh is reduced by time reversal alone: the "
+                f"{on_mesh.order - 1} operations of the space group besides the identity that map the grid and the "
+                f"mesh onto themselves {stencil_note}"
+            )
         return symmetrize_density, None
     if crystal.order > group.order:
         dropped = []
@@ -6311,8 +6725,10 @@ def _default_routines_wedge(
                 f"{crystal.order - on_grid.order} have fractional translations of no whole number of grid steps "
                 "(the grid of Grid_Spacing, " + "x".join(str(int(value)) for value in counts) + " points)"
             )
-        if group.order < on_grid.order:
-            dropped.append(f"{on_grid.order - group.order} more do not map the k-point mesh onto itself")
+        if on_mesh.order < on_grid.order:
+            dropped.append(f"{on_grid.order - on_mesh.order} more do not map the k-point mesh onto itself")
+        if group.order < on_mesh.order:
+            dropped.append(f"{on_mesh.order - group.order} more {stencil_note}")
         warnings.append(
             f"Monkhorst_Pack_Shift: the k-point mesh is reduced to the irreducible wedge of {group.order} of the "
             f"{crystal.order} operations of the space group and time reversal, and the density is symmetrized "
@@ -6331,6 +6747,7 @@ def _default_routines_force_wedge(
     ignore_symmetry: bool,
     symmetrize_density: bool,
     symmetrize_given: bool,
+    stencil_exact: bool = False,
 ):
     """The wedge of :func:`_default_routines_wedge` for forces or a relaxation, or ``None`` for the whole mesh.
 
@@ -6339,8 +6756,9 @@ def _default_routines_force_wedge(
     a relaxed structure in the group while every movable atom is mapped onto a movable one: ``movable`` (the flags of a
     relaxation, ``None`` for the forces of a single point) is checked against the atom images of every operation.
     ``None`` where no operation but the identity remains (``Ignore_Symmetry``, ``Symmetrize_Charge_Density:
-    .false.``, a structure without symmetry) or where an operation exchanges fixed and movable atoms: the caller then
-    keeps the whole mesh, run as its time-reversal pairs.
+    .false.``, a structure without symmetry, spin-orbit coupling whose operations all change the finite-difference
+    operators, ``stencil_exact``) or where an operation exchanges fixed and movable atoms: the caller then keeps the
+    whole mesh, run as its time-reversal pairs.
     """
 
     from ..Grid.space_group import space_group_atom_images
@@ -6355,6 +6773,7 @@ def _default_routines_force_wedge(
         symmetrize_density=symmetrize_density,
         symmetrize_given=symmetrize_given,
         warnings=found,
+        stencil_exact=stencil_exact,
     )
     if group is None or group.order <= 1:
         return None
@@ -6475,6 +6894,7 @@ def _wire_slab_symmetry(
     nscf: bool,
     no_symmetry: bool,
     warnings: list[str],
+    slab_mesh: dict | None = None,
 ):
     """The space group of a wire or slab and what it decides.
 
@@ -6482,7 +6902,11 @@ def _wire_slab_symmetry(
     (``parsec.F90:470-486``): ``Ignore_Symmetry`` suppresses the search; a
     slab gets none (``ierr = 2``) unless band structure, spin-orbit /
     non-collinear or an NSCF run sets ``ierr = 1`` after it; molecular
-    dynamics, Polarizability and manual movements get none.  Otherwise
+    dynamics, Polarizability and manual movements get none.  A slab that gets
+    none there but whose Monkhorst-Pack mesh ``slab_mesh`` names
+    (:func:`_slab_mesh_request`, ``PARSEC_SLAB_MESH_SYMMETRY`` ``auto`` or ``full``) takes the
+    operations of its group that keep its grid and its mesh
+    (:func:`_slab_mesh_space_group`); its grid stays that of no group.  Otherwise
     ``symmetries.f90`` searches with ``alatt`` = ``latt_vec`` and ``4 rmax``
     along the confined directions
     (:func:`parsec_python.Grid.space_group.find_wire_slab_space_group`); the
@@ -6509,6 +6933,10 @@ def _wire_slab_symmetry(
         group = identity_space_group()
     elif no_symmetry or (periodicity == 2 and not (bands or spin_orbit or nscf)):
         group = skipped_space_group()
+        if periodicity == 2 and not no_symmetry and slab_mesh is not None and symmetrize_density:
+            found = _slab_mesh_space_group(atoms, periodic_cell, grid, slab_mesh, warnings)
+            if found is not None:
+                group = found
     else:
         try:
             group, dropped = find_wire_slab_space_group(
@@ -6545,6 +6973,199 @@ def _wire_slab_symmetry(
             "(PARSEC does the same)"
         )
     return symmetrize_density, group, grid
+
+
+def _slab_mesh_request(
+    *,
+    periodicity: int,
+    monkhorst_pack_dimensions,
+    monkhorst_pack_shift,
+    scf,
+    specifications,
+    movable,
+    relaxation: bool,
+    charged_sheets=(),
+    ylm_dos: bool = False,
+) -> dict | None:
+    """What :func:`_slab_mesh_space_group` needs, or ``None`` where a slab keeps PARSEC 1.5's search (none).
+
+    Read for every slab, so that an unknown ``PARSEC_SLAB_MESH_SYMMETRY`` stops the parser.  ``auto`` (the
+    operations that are signed permutations of the lattice directions) and ``full`` (every operation that keeps
+    the grid and the mesh) name the Monkhorst-Pack mesh (more than one point, PARSEC's grid ``k = (i + s)/n`` of a ``Monkhorst_Pack_Shift`` block or
+    of the zero shift without it) of a slab whose density and forces the group average serves as validated: scalar
+    or collinear-spin orbitals (spinors search their group anyway), a native LDA or GGA, no LDA+U and no
+    Tkatchenko-Scheffler correction.  A hybrid keeps the whole mesh of its exchange (time reversal only) and gains
+    nothing.  ``ylm_dos`` (``Create_DOS`` with ``YLM_DOS_L``) and ``charged_sheets`` (``add_charged_sheets``) go
+    along for :func:`_slab_mesh_space_group`.
+    """
+
+    from ..Grid.space_group import slab_mesh_symmetry_setting
+    from ..V_xc.libxc import is_libxc_functional
+
+    if periodicity != 2:
+        return None
+    setting = slab_mesh_symmetry_setting()
+    if setting == "off":
+        return None
+    if monkhorst_pack_dimensions is None or monkhorst_pack_shift is None:
+        return None
+    if int(np.prod([int(value) for value in monkhorst_pack_dimensions])) <= 1:
+        return None
+    if (
+        scf.is_hybrid
+        or scf.is_meta_gga
+        or is_libxc_functional(scf.xc_functional)
+        or scf.van_der_waals
+        or scf.noncollinear
+        or scf.self_consistent_spin_orbit
+        or any(getattr(specification, "has_hubbard", False) for specification in specifications.values())
+    ):
+        return None
+    return {
+        "dimensions": tuple(int(value) for value in monkhorst_pack_dimensions),
+        "shift": tuple(float(value) for value in monkhorst_pack_shift),
+        "movable": tuple(bool(value) for value in movable),
+        "relaxation": bool(relaxation),
+        "exact": setting == "auto",
+        "sheets": tuple((float(sheet.charge), float(sheet.height)) for sheet in charged_sheets),
+        "ylm_dos": bool(ylm_dos),
+    }
+
+
+def _sheets_symmetric_about_zero(sheets, *, tolerance: float = 1.0e-6) -> bool:
+    """Whether charged sheets ``(charge, height)`` are their own mirror image under ``z -> -z``.
+
+    The potential ``sum_s 4 pi (q_s/A) |z - z_s|`` (:func:`parsec_python.V_ion.wire_slab.charged_sheet_potential`) is
+    even in ``z`` exactly when the multiset of ``(q_s, z_s)`` equals that of ``(q_s, -z_s)``.
+    """
+
+    unmatched = [(float(charge), float(height)) for charge, height in sheets]
+    for charge, height in [(float(charge), float(height)) for charge, height in sheets]:
+        for index, (other_charge, other_height) in enumerate(unmatched):
+            if (
+                abs(other_charge - charge) <= 1.0e-12 * max(1.0, abs(charge))
+                and abs(other_height + height) <= tolerance
+            ):
+                del unmatched[index]
+                break
+        else:
+            return False
+    return not unmatched
+
+
+def _slab_mesh_space_group(atoms, periodic_cell: PeriodicCell, grid: PeriodicGridSettings, slab_mesh: dict, warnings):
+    """The group of a slab's Monkhorst-Pack mesh under ``PARSEC_SLAB_MESH_SYMMETRY`` ``auto`` or ``full``, or ``None``.
+
+    The group of PARSEC's wire and slab search (:func:`parsec_python.Grid.space_group.find_wire_slab_space_group`,
+    ``alatt`` with ``4 rmax`` along ``z``), restricted to the operations that map the slab grid of no group onto
+    itself (:func:`parsec_python.Grid.space_group.slab_mesh_subgroup`: the grid does not change; under ``auto`` only
+    the signed permutations of the lattice directions, which the Hamiltonian of every k-point follows to round-off)
+    and the mesh onto itself (:func:`parsec_python.Grid.kpoints.mesh_preserving_operations`: the wedge with the
+    averaged density is the density of the whole mesh).  Charged sheets that are not symmetric about ``z = 0`` drop
+    the operations that reverse ``z``.  ``None`` (the slab keeps no group, as before) where only the identity
+    remains, the search fails, the wedge has as many points as that of time reversal alone, under ``auto`` a point
+    of the time-reversal wedge is no exact image of its representative
+    (:func:`parsec_python.Grid.space_group.slab_mesh_wedge_exactness`: a four-fold rotation without a diagonal mirror
+    on a mesh through the zone boundary), a relaxation's ``Move_Flag`` fixes atoms that an operation exchanges
+    with movable ones, or the Ylm-projected DOS is asked for (``Create_DOS`` with ``YLM_DOS_L``: the tetrahedra of
+    :func:`parsec_python.Output.dos.tetrahedron_dos` reuse the projections of a representative for every point of
+    its star without rotating the harmonics or permuting the atoms).
+    """
+
+    from ..Grid.confined import slab_grid_layout
+    from ..Grid.kpoints import mesh_preserving_operations
+    from ..Grid.space_group import (
+        confined_symmetry_lattice,
+        find_wire_slab_space_group,
+        slab_mesh_subgroup,
+        slab_mesh_wedge_exactness,
+        space_group_atom_images,
+    )
+
+    try:
+        group, _ = find_wire_slab_space_group(
+            periodic_cell.lattice_vectors, 2, grid.confinement_radius, atoms
+        )
+        counts, planes = slab_grid_layout(periodic_cell, grid)
+    except ValueError:
+        return None
+    if group.order <= 1:
+        return None
+    full_order = group.order
+    searched = group
+    group, off_grid = slab_mesh_subgroup(searched, counts, grid.shift, planes, exact=slab_mesh["exact"])
+    sheet_dropped = 0
+    if (
+        slab_mesh.get("sheets")
+        and np.any(group.rotation_matrices[:, 2, 2] == -1)
+        and not _sheets_symmetric_about_zero(slab_mesh["sheets"])
+    ):
+        kept_z = group.order
+        group, off_grid = slab_mesh_subgroup(
+            searched, counts, grid.shift, planes, exact=slab_mesh["exact"], reverse_z=False
+        )
+        sheet_dropped = kept_z - group.order
+        off_grid -= sheet_dropped
+    on_grid_order = group.order
+    if group.order > 1:
+        group = mesh_preserving_operations(group, slab_mesh["dimensions"], slab_mesh["shift"])
+    if group.order <= 1:
+        return None
+    exact, wedge_count, pair_count = slab_mesh_wedge_exactness(
+        periodic_cell.lattice_vectors, slab_mesh["dimensions"], slab_mesh["shift"], group.reciprocal_rotations
+    )
+    if slab_mesh["exact"] and not exact:
+        warnings.append(
+            "Boundary_Conditions: slab with a Monkhorst-Pack mesh: the operations of the slab's group "
+            f"({', '.join(label.strip() for label in group.labels)}) join k-points of the zone boundary that are "
+            "images of each other only modulo a reciprocal vector (a four-fold rotation without a diagonal mirror), "
+            "which the finite-difference Bloch operator does not treat alike; the mesh is reduced by time reversal "
+            "alone, as in PARSEC 1.5 (PARSEC_SLAB_MESH_SYMMETRY=full takes them)"
+        )
+        return None
+    if wedge_count >= pair_count:
+        return None
+    if slab_mesh["relaxation"]:
+        mask = np.asarray(slab_mesh["movable"], dtype=bool)
+        if mask.size == len(atoms) and not np.all(mask):
+            images = space_group_atom_images(
+                group, confined_symmetry_lattice(periodic_cell.lattice_vectors, 2, grid.confinement_radius), atoms
+            )
+            if any(not np.array_equal(mask[row], mask) for row in images):
+                warnings.append(
+                    "Boundary_Conditions: slab: Move_Flag fixes atoms that an operation of the slab's group exchanges "
+                    "with movable ones; the Monkhorst-Pack mesh is reduced by time reversal alone, as in PARSEC 1.5 "
+                    "(PARSEC_SLAB_MESH_SYMMETRY)"
+                )
+                return None
+    if slab_mesh.get("ylm_dos"):
+        warnings.append(
+            "Boundary_Conditions: slab with Create_DOS and YLM_DOS_L: the Monkhorst-Pack mesh is reduced by time "
+            "reversal alone, as in PARSEC 1.5 (the projected DOS of a wedge would reuse the projections of a "
+            "representative for every point of its star without rotating the harmonics or permuting the atoms; "
+            "PARSEC_SLAB_MESH_SYMMETRY)"
+        )
+        return None
+    dropped = []
+    if off_grid:
+        dropped.append(
+            f"{off_grid} would change the grid (fractional translations of no whole number of steps)"
+            + (" or are no signed permutation of the lattice directions, under which the Hamiltonian of a k-point "
+               "follows them only to the error of the finite differences (PARSEC_SLAB_MESH_SYMMETRY=full keeps them)"
+               if slab_mesh["exact"] else "")
+        )
+    if sheet_dropped:
+        dropped.append(f"{sheet_dropped} reverse z, which the charged sheets (not symmetric about z = 0) do not allow")
+    if group.order < on_grid_order:
+        dropped.append(f"{on_grid_order - group.order} do not map the k-point mesh onto itself")
+    warnings.append(
+        "Boundary_Conditions: slab with a Monkhorst-Pack mesh: the mesh is reduced to the irreducible wedge of "
+        f"{group.order} of the {full_order} operations of the slab's space group with time reversal, the density is "
+        "symmetrized and the forces are averaged with them"
+        + (" (" + "; ".join(dropped) + ")" if dropped else "")
+        + "; PARSEC 1.5 searches no symmetry for a slab (PARSEC_SLAB_MESH_SYMMETRY=off: time reversal alone)"
+    )
+    return group
 
 
 def _check_reduced_kpoint_movements(
@@ -7294,6 +7915,118 @@ def _gw_settings(
         "as in PARSEC; BerkeleyGW's reader refuses it unless told not to check the grid"
     )
     return GWSettings(space_group=space_group)
+
+
+def _standard_orientation(
+    atoms,
+    scalar,
+    one,
+    optional_bool,
+    *,
+    is_periodic: bool,
+    ignore_symmetry: bool,
+    use_symmetry: bool,
+    domain_shape: str,
+    grid_shift,
+    recenter: bool,
+    recenter_aperiodic: bool,
+    spinors: bool,
+    movable,
+    initial_density=None,
+    move_flag_subgroup: bool = False,
+):
+    """``PARSEC_STANDARD_ORIENTATION`` (:mod:`parsec_python.Input.standard_orientation`) for a cluster.
+
+    Returns ``((orientation, atoms), note)``: the map between the frames and the atoms of the calculation frame
+    where the switch is on and the group of signed permutations grows, else ``None``; ``note`` says what the switch
+    did, or why it does nothing, and is ``None`` with the switch off.  An unknown value of the switches is an error
+    here, before the SCF.
+    """
+
+    from .standard_orientation import (
+        SWITCH,
+        find_standard_orientation,
+        oriented_atoms,
+        standard_orientation_setting,
+        standard_orientation_tolerance,
+    )
+
+    try:
+        setting = standard_orientation_setting()
+        tolerance = standard_orientation_tolerance()
+    except ValueError as error:
+        raise ParsecInputError(str(error)) from None
+    if setting == "off":
+        return None, None
+    refusal = None
+    if is_periodic:
+        refusal = "a periodic cell (the orientation is that of the lattice)"
+    elif ignore_symmetry:
+        refusal = "Ignore_Symmetry uses no point group"
+    elif not use_symmetry:
+        refusal = (
+            "the calculation uses no point group (manual movements, molecular dynamics, Polarizability, point "
+            "charges or FoldBlock)"
+        )
+    elif domain_shape != "sphere":
+        refusal = f"the {domain_shape} domain has a frame of its own"
+    elif not recenter_aperiodic:
+        refusal = "Recenter_Atoms_In_Aperiodic_Directions: false keeps the coordinates of the input"
+    elif spinors:
+        refusal = "spin-orbit coupling and non-collinear magnetism tie the spin directions to the frame"
+    elif optional_bool("potential_field") or optional_bool("write_potential_field") or optional_bool("afm_scan"):
+        refusal = "FDET: the frozen field and pot.dat are in the frame of the input"
+    elif _normalize_label(one("initial_structure", "input")) == "mlff":
+        refusal = "Initial_Structure: mlff moves the atoms before the calculation"
+    elif initial_density is not None and (
+        initial_density.method == "file" or initial_density.file is not None
+    ):
+        refusal = (
+            "the initial density of Initial_Density: file or ML_Density_File was made for the atoms in the frame "
+            "of the input"
+        )
+    if refusal is not None:
+        return None, f"{SWITCH}=on is not applied: {refusal}"
+    from ..V_ion import center_cluster_geometry
+
+    try:
+        detection = _orientation_detection_tolerance()
+    except ValueError as error:
+        raise ParsecInputError(str(error)) from None
+    placed = center_cluster_geometry(atoms) if recenter else tuple(atoms)
+    positions = np.asarray([atom.position for atom in placed], dtype=np.float64)
+    recentring = np.asarray(atoms[0].position, dtype=np.float64) - positions[0]
+    # the species are the labels; in a relaxation a frame counts as Relaxation.run.symmetry_decision decides: a group
+    # that exchanges a fixed atom with a movable one keeps the subgroup of the operations that map the fixed atoms
+    # onto fixed atoms in a relaxation by an optimizer under PARSEC_MOVE_FLAG_SUBGROUP=auto, and is not used otherwise
+    from ..Relaxation.run import move_flag_subgroup_setting
+
+    search = find_standard_orientation(
+        positions,
+        [atom.symbol for atom in atoms],
+        tolerance=tolerance,
+        detection=detection,
+        grid_shift=grid_shift,
+        recentring=recentring,
+        movable=None if movable is None else [bool(flag) for flag in movable],
+        move_flag_subgroup=bool(move_flag_subgroup) and move_flag_subgroup_setting() == "auto",
+    )
+    if search.orientation is None:
+        return None, (
+            f"{SWITCH}=on: the frame of the input keeps the largest group of signed permutations found "
+            f"(abelian sector group {search.before[0]}, signed permutations {search.before[1]}); the atoms are "
+            "used as PARSEC places them"
+        )
+    orientation = search.orientation
+    return (orientation, oriented_atoms(atoms, search.positions)), orientation.note()
+
+
+def _orientation_detection_tolerance() -> float:
+    """The atom tolerance of the run's group detection (``PARSEC_SYMMETRY_ATOM_TOLERANCE``, 1e-7 bohr)."""
+
+    from .standard_orientation import detection_tolerance
+
+    return detection_tolerance()
 
 
 def _point_charges(

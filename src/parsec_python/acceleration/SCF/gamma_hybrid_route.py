@@ -9,10 +9,13 @@ values:
 * ``auto`` (default): the cell takes the route of the sectors of the Gamma point in one process
   (``driver._gamma_hybrid_in_sectors``): its orbitals real, in the sectors of the abelian group of the cell (the
   commuting involutions with the half-cell translations of a supercell, ``periodic_abelian_reduction``; a hybrid
-  keeps no weighted sectors, ``driver._orbital_group_refusal``), the device exchange from their orbitals unfolded to
-  the full grid, where the cuFFT pair solver of the cell solves the pair densities, folded back to every sector,
-  whose compressed operator ``-a_x xi_G xi_G^T`` joins its Hamiltonian (``Hamiltonian/exchange_device.py``,
-  ``PARSEC_CUPY_EXCHANGE_POOL``).  Its energies are those of the full grid to the SCF convergence.  A cell whose
+  keeps no weighted sectors, ``driver._orbital_group_refusal``), the device exchange from their orbitals gathered
+  into the coset form of the half-cell translations the sectors carry, whose pair densities the cuFFT pair solver of
+  the cell solves class by class on the sublattice of each class (``Hamiltonian/exchange_translations.py``,
+  ``PARSEC_CUPY_EXCHANGE_TRANSLATIONS``; a cell without such translations: unfolded to the full grid and solved
+  there, ``PARSEC_CUPY_EXCHANGE_POOL``), folded back to every sector, whose compressed operator
+  ``-a_x xi_G xi_G^T`` joins its Hamiltonian (``Hamiltonian/exchange_device.py``).  Its energies are those of the
+  full grid to the SCF convergence.  A cell whose
   basis (grid points times states) is below ``2^24`` entries (:func:`sector_basis_reached`) keeps the full grid.
   The MPI runner keeps refusing a periodic hybrid.
 * ``kpoint``: a cell this module finds large enough (:func:`gamma_hybrid_sector_route`) runs as the 1x1x1 k-point
@@ -150,6 +153,20 @@ def _states(problem) -> int:
     return int(np.ceil(0.5 * electrons)) + 6
 
 
+def periodic_grid_points(problem) -> int:
+    """The points of the grid of the cell of ``problem`` (``build_periodic_grid(...).size``), counted without
+    building the grid (its coordinates and lookup, about 90 bytes per point) on the default routines of a bulk cell
+    (``Grid.pbc.default_periodic_grid_counts``); the grids of the Fortran-derived routines and of a slab are built.
+    The checks of the builder (stencil width, one common spacing) are left to the preparation, which builds it."""
+
+    from parsec_python.Grid.pbc import build_periodic_grid, default_periodic_grid_counts
+
+    cell, settings = problem.periodic_cell, problem.grid
+    if getattr(settings, "fortran_routines", False) or int(getattr(cell, "dimensions", 3)) == 2:
+        return int(build_periodic_grid(cell, settings).size)
+    return int(np.prod(default_periodic_grid_counts(cell, settings)))
+
+
 def sector_basis_reached(problem) -> bool:
     """Whether the basis of ``problem`` (grid points of its cell times its states) reaches the floor of the k-point
     sectors (``kpoint_sectors._MINIMUM_ENTRIES``, ``2^24``): below it the ``auto`` route keeps the full grid.
@@ -157,12 +174,10 @@ def sector_basis_reached(problem) -> bool:
     ``False`` where the grid or the states cannot be found here (the driver then keeps the full grid as well).
     """
 
-    from parsec_python.Grid.pbc import build_periodic_grid
-
     from .kpoint_sectors import _MINIMUM_ENTRIES
 
     try:
-        rows = int(build_periodic_grid(problem.periodic_cell, problem.grid).size)
+        rows = periodic_grid_points(problem)
         states = _states(problem)
     except (AttributeError, OSError, TypeError, ValueError):
         return False
@@ -188,6 +203,7 @@ def gamma_hybrid_sector_route(translation) -> GammaHybridSectorRoute | None:
         _WORK_FRACTION,
         CellGroup,
         generated_subgroup,
+        kpoint_sector_atom_tolerance,
         kpoint_sectors_setting,
         largest_commuting_involutions,
         sector_margin,
@@ -219,7 +235,9 @@ def gamma_hybrid_sector_route(translation) -> GammaHybridSectorRoute | None:
     if rows * states < _MINIMUM_ENTRIES:
         return None
     atoms = fold_atoms_into_cell(tuple(problem.atoms), problem.periodic_cell.lattice_vectors)
-    cell = CellGroup(grid, atoms)
+    # the tolerance of plan_sectors for this route (a single point: PARSEC_SYMMETRY_ATOM_TOLERANCE as it is, 1e-7 under
+    # PARSEC_KPOINT_SECTOR_TOLERANCE=fixed)
+    cell = CellGroup(grid, atoms, atom_tolerance=kpoint_sector_atom_tolerance())
     if cell.table is None or cell.order < 2:
         return None
     # At the Gamma point alone every operation of the cell fixes k and maps the mesh {0} onto itself

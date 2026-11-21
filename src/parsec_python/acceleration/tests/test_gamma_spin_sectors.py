@@ -190,41 +190,161 @@ class SwitchAndRefusalTests(unittest.TestCase):
                 periodic_sector_refusal(problem), "spin polarization, spin-orbit coupling or non-collinear magnetism"
             )
 
+    def _default_routines(self):
+        # O2 across the face z = 0 of the cube on the default routines (the forces of the Fortran-derived routines,
+        # which the fixture's atom outside the cell takes, keep the full grid)
+        directory, translation = _o2_cell(
+            extra="Use_Fortran_Routines: .false.\n", coordinates="   0.0 0.0 1.2\n   0.0 0.0 8.7\n"
+        )
+        self.addCleanup(shutil.rmtree, directory, True)
+        return translation
+
     def test_the_command_line_route(self) -> None:
-        translation = self.translation
+        translation = self._default_routines()
 
         def route(changed=translation, *, mpi=False, cupy=True):
             return gamma_spin.gamma_spin_on_sector_route(changed, mpi=mpi, backend_is_cupy=lambda: cupy)
 
-        with mock.patch.dict(os.environ, {"PARSEC_GAMMA_SPIN_SECTORS": "auto"}):
+        with mock.patch.dict(os.environ, {"PARSEC_GAMMA_SPIN_SECTORS": "auto", "PARSEC_SPIN_SECTOR_FORCES": "auto"}):
             self.assertTrue(route())
             self.assertFalse(route(mpi=True))
             self.assertFalse(route(cupy=False))
             for name, value in (
-                ("compute_forces", True),
-                ("relaxation", object()),
-                ("molecular_dynamics", object()),
                 ("restart_run", True),
                 ("polarizability_field", object()),
             ):
                 with self.subTest(name=name):
                     self.assertFalse(route(replace(translation, **{name: value})))
+            # forces and relaxations by an optimizer keep the sectors where the rule of an unpolarized cell does;
+            # molecular dynamics, manual movements and fixed atoms take the full grid of the driver
+            for name, value in (
+                ("compute_forces", True),
+                ("relaxation", SimpleNamespace(method="bfgs")),
+                ("relaxation", SimpleNamespace(method="manual")),
+                ("molecular_dynamics", object()),
+            ):
+                with self.subTest(name=name, value=value):
+                    moving = replace(translation, **{name: value})
+                    self.assertTrue(route(moving))
+                    self.assertFalse(route(moving, mpi=True))
+                    self.assertFalse(gamma_spin.gamma_spin_on_sector_route(
+                        moving, mpi=False, backend_is_cupy=lambda: True, supercell=True))
+                    with mock.patch.dict(os.environ, {"PARSEC_SPIN_SECTOR_FORCES": "off"}):
+                        self.assertFalse(route(moving))
+                        self.assertTrue(route())
+                    with mock.patch.dict(os.environ, {"PARSEC_PERIODIC_SECTOR_FORCES": "off"}):
+                        self.assertFalse(route(moving))
+            fixed = replace(translation, relaxation=SimpleNamespace(method="bfgs"), movable=(True, False))
+            self.assertTrue(route(fixed))
+            with mock.patch.dict(os.environ, {"PARSEC_SPIN_SECTOR_FORCES": "on"}), self.assertRaises(ValueError):
+                route()
             unpolarized = replace(
-                translation, problem=replace(self.problem, scf=replace(self.problem.scf, spin_polarized=False))
+                translation, problem=replace(translation.problem, scf=replace(translation.problem.scf, spin_polarized=False))
             )
             self.assertFalse(route(unpolarized))
+            # the Fortran-derived routines of the fixture: forces on the k-point driver, the single point in sectors
+            self.assertTrue(route(self.translation))
+            self.assertFalse(route(replace(self.translation, compute_forces=True)))
         with mock.patch.dict(os.environ, {"PARSEC_GAMMA_SPIN_SECTORS": "off"}):
             self.assertFalse(route())
+            self.assertFalse(route(replace(translation, compute_forces=True)))
+
+    def test_a_full_grid_that_fits_nowhere_keeps_the_kpoint_driver(self) -> None:
+        # Molecular dynamics, manual movements, Move_Flag and forces with Ignore_Symmetry solve both channels on the
+        # full grid: where its estimate fits neither one device nor the GPUs of the process (the V- 5^3 cell on one
+        # A100 under off, 999 atoms), the k-point driver of before, with a NOTE; the shared layout where it fits.
+        from parsec_python.acceleration import driver
+        from parsec_python.acceleration.driver import SpinFallbackPlan
+
+        translation = self._default_routines()
+        gib = 2**30
+
+        def plan(setting, basis=22 * gib):
+            return lambda problem: SpinFallbackPlan(
+                basis_bytes=basis, device_bytes=80 * gib, devices=4, divided=True, shareable=True,
+                setting=setting, mpi=False, moves=True,
+            )
+
+        dynamics = replace(translation, molecular_dynamics=object())
+        cases = (
+            dynamics,
+            replace(translation, relaxation=SimpleNamespace(method="manual")),
+            replace(translation, relaxation=SimpleNamespace(method="bfgs"), movable=(True, False)),
+        )
+        with mock.patch.dict(os.environ, {"PARSEC_GAMMA_SPIN_SECTORS": "auto", "PARSEC_SPIN_SECTOR_FORCES": "auto"}):
+            for moving in cases:
+                with self.subTest(moving=moving.relaxation or "dynamics"):
+                    with mock.patch.object(driver, "spin_full_grid_plan", plan("off")):
+                        notes = []
+                        self.assertFalse(gamma_spin.gamma_spin_on_sector_route(
+                            moving, mpi=False, backend_is_cupy=lambda: True, notes=notes))
+                        self.assertEqual(len(notes), 1)
+                        self.assertIn("keeps the 1x1x1 k-point driver", notes[0])
+                    with mock.patch.object(driver, "spin_full_grid_plan", plan("auto")):
+                        notes = []
+                        self.assertTrue(gamma_spin.gamma_spin_on_sector_route(
+                            moving, mpi=False, backend_is_cupy=lambda: True, notes=notes))
+                        self.assertEqual(notes, [])
+                        self.assertEqual(gamma_spin.spin_full_grid_moves_plan(moving).layout, "shared")
+                    with mock.patch.object(driver, "spin_full_grid_plan", plan("off", basis=6 * gib)):
+                        self.assertTrue(gamma_spin.gamma_spin_on_sector_route(
+                            moving, mpi=False, backend_is_cupy=lambda: True))
+                        self.assertEqual(gamma_spin.spin_full_grid_moves_plan(moving).layout, "device")
+            forces = replace(translation, compute_forces=True)
+            with mock.patch.object(driver, "spin_full_grid_plan", plan("off")):
+                # forces in the sectors and a single point ask no plan; Ignore_Symmetry (symmetry_off) does
+                self.assertIsNone(gamma_spin.spin_full_grid_moves_plan(forces))
+                self.assertIsNone(gamma_spin.spin_full_grid_moves_plan(translation, symmetry_off=True))
+                self.assertTrue(gamma_spin.gamma_spin_on_sector_route(forces, mpi=False, backend_is_cupy=lambda: True))
+                self.assertFalse(gamma_spin.gamma_spin_on_sector_route(
+                    forces, mpi=False, backend_is_cupy=lambda: True, symmetry_off=True))
+                self.assertTrue(gamma_spin.gamma_spin_on_sector_route(
+                    translation, mpi=False, backend_is_cupy=lambda: True, symmetry_off=True))
+        from parsec_python.acceleration import cli
+
+        self.assertTrue(cli._spin_symmetry_off(SimpleNamespace(symmetry="off"), translation))
+        self.assertFalse(cli._spin_symmetry_off(SimpleNamespace(symmetry=None), translation))
+        self.assertTrue(cli._spin_symmetry_off(SimpleNamespace(symmetry=None), replace(translation, ignore_symmetry=True)))
+        self.assertFalse(cli._spin_symmetry_off(SimpleNamespace(symmetry="auto"), replace(translation, ignore_symmetry=True)))
+
+    def test_the_forces_switch(self) -> None:
+        for value, expected in (("", "auto"), ("auto", "auto"), ("off", "off"), ("no", "off"), (" OFF ", "off")):
+            with mock.patch.dict(os.environ, {"PARSEC_SPIN_SECTOR_FORCES": value}):
+                self.assertEqual(gamma_spin.spin_sector_forces_setting(), expected)
+        with mock.patch.dict(os.environ, {"PARSEC_SPIN_SECTOR_FORCES": "on"}), self.assertRaises(ValueError):
+            gamma_spin.spin_sector_forces_setting()
 
     def test_the_mpi_runner_takes_the_cell(self) -> None:
-        # The full-SCF runner divides the sectors of both channels among its ranks (single points; forces of spin
-        # on several ranks stay refused by _refuse_spin_ionic_steps); off refuses the cell as before.
+        # The full-SCF runner divides the sectors of both channels among its ranks: single points, and under
+        # PARSEC_SPIN_SECTOR_FORCES=auto the forces and relaxations that keep the sectors (_refuse_spin_ionic_steps
+        # refuses the others, and every one under off); off of PARSEC_GAMMA_SPIN_SECTORS refuses the cell as before.
         from parsec_python.acceleration.benchmarks import mpi_full_scf
 
-        with mock.patch.dict(os.environ, {"PARSEC_GAMMA_SPIN_SECTORS": "auto"}):
+        translation = self._default_routines()
+        with mock.patch.dict(os.environ, {"PARSEC_GAMMA_SPIN_SECTORS": "auto", "PARSEC_SPIN_SECTOR_FORCES": "auto"}):
             mpi_full_scf._refuse_unsupported_periodic(self.translation)
-            with self.assertRaisesRegex(ValueError, "forces, relaxation and molecular dynamics of a spin"):
-                mpi_full_scf._refuse_spin_ionic_steps(replace(self.translation, compute_forces=True), 4)
+            forces = replace(translation, compute_forces=True)
+            mpi_full_scf._refuse_spin_ionic_steps(forces, 4)
+            mpi_full_scf._refuse_spin_ionic_steps(replace(translation, relaxation=SimpleNamespace(method="bfgs")), 4)
+            # (with PARSEC_MOVE_FLAG_SUBGROUP=auto) the flags of a single point with forces move no atom: it
+            # keeps the sectors; a relaxation with fixed atoms of a spin cell keeps the full grid of both channels.
+            mpi_full_scf._refuse_spin_ionic_steps(replace(forces, movable=(True, False)), 4)
+            for changed, reason in (
+                (replace(translation, molecular_dynamics=object()), "molecular dynamics uses no symmetry"),
+                (replace(translation, relaxation=SimpleNamespace(method="manual")), "manual movements"),
+                (replace(translation, relaxation=SimpleNamespace(method="bfgs"), movable=(True, False)), "Move_Flag"),
+                (replace(self.translation, compute_forces=True), "Fortran-derived routines"),
+            ):
+                with self.subTest(reason=reason), self.assertRaisesRegex(ValueError, reason):
+                    mpi_full_scf._refuse_spin_ionic_steps(changed, 4)
+            with self.assertRaisesRegex(ValueError, "supercell"):
+                mpi_full_scf._refuse_spin_ionic_steps(forces, 4, supercell=True)
+            mpi_full_scf._refuse_spin_ionic_steps(replace(translation, molecular_dynamics=object()), 1)
+            with (
+                mock.patch.dict(os.environ, {"PARSEC_SPIN_SECTOR_FORCES": "off"}),
+                self.assertRaisesRegex(ValueError, "forces, relaxation and molecular dynamics of a spin"),
+            ):
+                mpi_full_scf._refuse_spin_ionic_steps(forces, 4)
         with (
             mock.patch.dict(os.environ, {"PARSEC_GAMMA_SPIN_SECTORS": "off"}),
             self.assertRaisesRegex(ValueError, "spin polarization"),
@@ -627,8 +747,9 @@ def _kpoint_run(problem):
 
 @unittest.skipUnless(cupy_available() and native_available(), "CUDA runtime or native extension is unavailable")
 class GammaSpinSectorRunTests(unittest.TestCase):
+    # The abelian sectors of the cells (the weighted ones of PARSEC_ORBITAL_GROUP_SPIN: test_weighted_inputs.py).
     def setUp(self) -> None:
-        patcher = mock.patch.dict(os.environ, {"PARSEC_GAMMA_SPIN_SECTORS": "auto"})
+        patcher = mock.patch.dict(os.environ, {"PARSEC_GAMMA_SPIN_SECTORS": "auto", "PARSEC_ORBITAL_GROUP_SPIN": "off"})
         patcher.start()
         self.addCleanup(patcher.stop)
 

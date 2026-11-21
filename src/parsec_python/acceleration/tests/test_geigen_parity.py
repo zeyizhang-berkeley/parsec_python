@@ -15,6 +15,7 @@ from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
 import os
 from pathlib import Path
+import re
 import shutil
 import tempfile
 import unittest
@@ -383,7 +384,13 @@ class AcceleratedCalculationTests(unittest.TestCase):
         self.assertLess(abs(float(archive["energy_total_ry"]) - energy), 1.0e-6)
         counts = [int(value) for value in archive["details"]["orbital_sector_final_state_counts"].split()]
         share = np.bincount(np.asarray(archive["representations"]) - 1, minlength=len(counts))
-        self.assertEqual(counts, [max(1, int(value)) for value in share])
+        # The weighted sectors of H2 in D4h (PARSEC_ORBITAL_GROUP_FIXED_COUNT=auto): the listed levels hold every
+        # partner of a state of weight w, which its sector solves once.
+        found = re.search(r"\(weights ([0-9, ]+)\)", str(archive["details"].get("symmetry_detection", "")))
+        weights = np.ones(len(counts), dtype=np.int64) if found is None else np.array(
+            [int(value) for value in found.group(1).split(",")], dtype=np.int64
+        )
+        self.assertEqual(counts, [max(1, int(value)) for value in share // weights])
         log = (path.parent / "parsec.out").read_text()
         self.assertIn(" Fixing the number of eigenvalues per representation", log)
         # Six states from a file of four: PARSEC's error 404.

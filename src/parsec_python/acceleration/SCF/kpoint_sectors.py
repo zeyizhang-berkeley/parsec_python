@@ -24,7 +24,9 @@ The largest subgroup ``H_k`` of ``G_k`` whose elements commute and are of order 
 the twofold axes and the mirrors that fix ``k``) has the real characters ``+-1``: the sector basis ``U`` of
 :class:`..Symmetry.representations.ReflectionRepresentationDecomposition` is real, and the complex Hermitian
 ``H_k`` reduces as a real symmetric operator does, ``U^T H_k U`` from the representative rows
-(:meth:`~..Symmetry.representations.ReflectionRepresentationDecomposition.reduce_hermitian_operators`).  The
+(:meth:`~..Symmetry.representations.ReflectionRepresentationDecomposition.reduce_hermitian_operators`; the kinetic
+term, an axial stencil of the grid, on the device as the gathered stencil of :mod:`..Hamiltonian.sector_bloch_stencil`
+straight from the grid, ``PARSEC_KPOINT_SECTOR_STENCIL``).  The
 spectrum of ``H_k`` is the union of the spectra of the sectors: each k-point becomes ``|H_k|`` eigenproblems of
 about ``1/|H_k|`` of its rows and states, and the work of the eigensolver (rows times states squared) falls by
 about ``|H_k|^2`` per k-point.  The projectors of one atom per orbit of ``H_k`` serve every sector
@@ -55,8 +57,11 @@ The density of a sector, ``|U v|^2``, is ``q_s / m_w`` on the rows of the orbit 
 (``q = sum_n f_n |v_n|^2``, ``m_w`` the orbit size): expanded on the host and summed by the job of the driver.
 
 The k-point SCF of a bulk orthorhombic cell takes it, scalar or spin-polarized, with the exchange of a hybrid, forces
-and kept orbitals, without meta-GGA, LDA+U, the fixed occupations of ``occup.in`` or refined levels (the driver then
-gives the job its ``geometry``); ``PARSEC_KPOINT_SECTORS=off`` keeps one task per k-point, bit for bit as before.
+and kept orbitals, without meta-GGA, LDA+U or the fixed occupations of ``occup.in`` (the driver then gives the job its
+``geometry``); ``PARSEC_KPOINT_SECTORS=off`` keeps one task per k-point, bit for bit as before.  The loop with refined
+levels (the last inner loop of the Fock loop of a hybrid with the adaptive inner criterion or the outer DIIS) takes it
+too since 2026-11-19 (``PARSEC_KPOINT_SECTOR_LEVELS=auto``: its level passes solve the sectors, started from the Ritz
+states of the loop before; ``off``: one task per k-point from fresh subspaces, as before).
 
 The sectors hold the potential invariant under the operations of ``H_k``, also where only the self-consistent
 solution is (a single Gamma point, a full mesh, the translations of a supercell: the operations the density is not
@@ -70,6 +75,16 @@ Fermi-Dirac occupations no fractional occupation of such a multiplet at the end,
 electrons it adds to the density).  A loop that fails one runs again with one task per k-point
 (:func:`parsec_python.SCF.kpoints.run_scf_kpoints_spin_polarized`).  An unpolarized loop is not tested, as the
 unpolarized sectors of a cluster are not.
+
+The Fock loop of a spin-polarized hybrid: its semilocal start is such a loop; since 2026-11-19 its inner loops run
+tests 2 and 3 at their end as well (``PARSEC_KPOINT_SECTOR_GUARD_FOCK=auto``; before, they were not tested).  An inner
+loop at the final criterion that fails one makes the Fock loop start again from its semilocal start with one task per
+k-point (:func:`parsec_python.SCF.hybrid_periodic.run_periodic_hybrid_scf`; its carried mixer and the states of the
+sectors cannot be taken back), a looser inner loop is measured only.  What no test can see: a state that breaks an
+operation of ``H_k`` itself (the sector orbitals and their densities are invariant under ``H_k`` by construction, so a
+hybrid ground state that localizes, a polaron, on one of the sites ``H_k`` exchanges is held in its symmetric form);
+the tests see a multiplet left partly filled across the sectors and a channel density that breaks the operations
+beyond ``H_k`` (those of the cell group and of the atoms the sectors assume).
 """
 
 from __future__ import annotations
@@ -111,6 +126,8 @@ _CACHE_KEY = "kpoint_sector_plans"
 _FORCE_COLUMNS = 32
 _MARGIN_SWITCH = "PARSEC_KPOINT_SECTOR_MARGIN"
 _REFIT_SWITCH = "PARSEC_KPOINT_SECTOR_REFIT"
+_LEVELS_SWITCH = "PARSEC_KPOINT_SECTOR_LEVELS"
+_FOCK_GUARD_SWITCH = "PARSEC_KPOINT_SECTOR_GUARD_FOCK"
 # the buffer of a refitted sector over the levels it holds among those kept (at least _EXTRA_STATES states)
 _REFIT_BUFFER = 0.1
 _EXTRA_STATES = 6
@@ -119,11 +136,14 @@ _ATTEMPTS = 4
 _WORK_FRACTION = 0.5
 # the smallest basis of a k-point (rows times states) that is split
 _MINIMUM_ENTRIES = 1 << 24
+# guards the cache the k-points of one structure share (KPointSectors._shared)
+_SHARED_LOCK = threading.Lock()
 
 
 def kpoint_sectors_setting() -> str:
-    """``PARSEC_KPOINT_SECTORS``: ``auto`` (default) splits the k-points of a scalar periodic SCF into the sectors
-    of their little groups where that halves the work; ``off`` keeps one task per k-point, bit for bit as before."""
+    """``PARSEC_KPOINT_SECTORS``: ``auto`` (default) splits the k-points of a scalar or collinear-spin periodic SCF
+    into the sectors of their little groups where that halves the work; ``off`` keeps one task per k-point, bit for
+    bit as before."""
 
     value = os.environ.get(_SWITCH, "auto").strip().lower() or "auto"
     if value not in {"auto", "off"}:
@@ -155,6 +175,34 @@ def sector_guard_setting() -> str:
     return value
 
 
+def sector_guard_fock_setting() -> str:
+    """``PARSEC_KPOINT_SECTOR_GUARD_FOCK``: ``auto`` (default) also runs tests 2 and 3 of the guard
+    (``PARSEC_KPOINT_SECTOR_GUARD``) at the end of the inner loops of the Fock loop of a spin-polarized hybrid in the
+    sectors of its k-points: an inner loop at the final criterion that fails one makes the Fock loop start again from
+    its semilocal start with one task per k-point (:func:`parsec_python.SCF.hybrid_periodic.run_periodic_hybrid_scf`),
+    a looser one is measured only; ``off`` tests the semilocal start alone, bit for bit as before.  A loop that
+    passes gives the same numbers, except where the density asymmetry lies between the tolerance and the noise bound
+    at the final criterion (the criterion is then tightened, as for a semilocal loop)."""
+
+    value = os.environ.get(_FOCK_GUARD_SWITCH, "auto").strip().lower() or "auto"
+    if value not in {"auto", "off"}:
+        raise ValueError(f"{_FOCK_GUARD_SWITCH} must be auto or off, not {value!r}")
+    return value
+
+
+def sector_levels_setting() -> str:
+    """``PARSEC_KPOINT_SECTOR_LEVELS``: ``auto`` (default) keeps a k-point loop with refined levels (the last inner
+    loop at the final criterion of the Fock loop of a hybrid with the adaptive inner criterion or the outer DIIS,
+    ``SCFWarmStart.level_tolerance``) in the sectors of its k-points, started from the Ritz states of the loop before,
+    and its level passes solve the sectors; ``off`` solves that loop with one task per k-point from fresh subspaces,
+    bit for bit as before."""
+
+    value = os.environ.get(_LEVELS_SWITCH, "auto").strip().lower() or "auto"
+    if value not in {"auto", "off"}:
+        raise ValueError(f"{_LEVELS_SWITCH} must be auto or off, not {value!r}")
+    return value
+
+
 def sector_refit_setting() -> str:
     """``PARSEC_KPOINT_SECTOR_REFIT``: ``auto`` (default) cuts the states of every sector after the first solve of a
     loop to the levels it holds among those its k-point keeps plus a buffer (:meth:`SectorKPointSolver._refit`);
@@ -163,6 +211,18 @@ def sector_refit_setting() -> str:
     value = os.environ.get(_REFIT_SWITCH, "auto").strip().lower() or "auto"
     if value not in {"auto", "off"}:
         raise ValueError(f"{_REFIT_SWITCH} must be auto or off, not {value!r}")
+    return value
+
+
+def kpoint_force_orbits_setting() -> str:
+    """``PARSEC_KPOINT_FORCE_ORBITS``: ``auto`` (default) forms the nonlocal forces of the states of a k-point in
+    sectors for one atom per orbit of its little group (their projector gradients and overlaps only) and turns them
+    onto the other atoms of the orbit (:meth:`KPointSectors.complete_orbit_forces`); ``off`` forms them for every atom,
+    bit for bit as before."""
+
+    value = os.environ.get("PARSEC_KPOINT_FORCE_ORBITS", "auto").strip().lower() or "auto"
+    if value not in {"auto", "off"}:
+        raise ValueError(f"PARSEC_KPOINT_FORCE_ORBITS must be auto or off, not {value!r}")
     return value
 
 
@@ -608,13 +668,17 @@ class SectorGuardGroup:
     With ``environments`` (``PARSEC_SPIN_GUARD_CELL_GROUP=auto``, the default) the operations of the atoms found from
     their environments follow (:func:`.spin_sectors._environment_operations`, at the atom tolerance of the cell group
     and at most 1e-6 bohr), those the potential is taken to be invariant under and the subgroup so far does not hold
-    (:meth:`PotentialInvariance.admits`; at a single Gamma point all of them).  The cell group misses most of the
-    operations about a defect off the origin of a cell larger than 2 x 2 x 2 diamond cubes (its search of the
-    translation of each operation gives up after 32 candidates; a vacancy at ``(a/2, a/2, 0)`` of 3 x 3 x 3 cubes
-    keeps the swap of x and y), and so do its sectors: a broken state that fills two partners of the t2 level of
-    one sector of that swap would pass a test of the swap alone, and the test would fire on the same cell with the
-    vacancy at the origin.  These operations are given as their affine ``[[R, t], [0, 1]]`` (``t`` in grid steps) in
-    place of an index of the cell group.
+    (:meth:`PotentialInvariance.admits`; at a single Gamma point all of them).  Under
+    ``PARSEC_PERIODIC_DEFECT_CENTRE=off`` the cell group misses most of the operations about a defect off the origin
+    of a cell larger than 2 x 2 x 2 diamond cubes (its search of the translation of each operation gives up after 32
+    candidates; a vacancy at ``(a/2, a/2, 0)`` of 3 x 3 x 3 cubes keeps the swap of x and y), and so do its sectors: a
+    broken state that fills two partners of the t2 level of one sector of that swap would pass a test of the swap
+    alone, and the test would fire on the same cell with the vacancy at the origin (under ``auto``, the default since
+    2026-11-19, the cell group holds them, and these add none).  These operations are given as their affine
+    ``[[R, t], [0, 1]]`` (``t`` in grid steps) in place of an index of the cell group.  With a cell group of a looser
+    atom tolerance than 1e-6 bohr (``PARSEC_SYMMETRY_ATOM_TOLERANCE``) its operations beyond the subgroup of those the
+    density is symmetrized over are tested only where they hold the atoms to 1e-6 bohr (:meth:`_strict_test`), as on
+    the Gamma sectors: one that holds them only to the looser tolerance would measure the structure.
     """
 
     def __init__(self, cell: CellGroup, invariance: PotentialInvariance, *, environments: bool = False) -> None:
@@ -652,8 +716,13 @@ class SectorGuardGroup:
                 self._close(closure, generators)
         tested: list[tuple[int | np.ndarray, np.ndarray]] = []
         table = _RowOrderTable(self.cell.grid) if _fast_maps_requested() else None
+        holds = self._strict_test()
         for index in admitted:
             if index in closure:
+                continue
+            if holds is not None and not holds(index):
+                # an operation the atoms keep only to the looser tolerance of the cell group: the densities break
+                # it by about as much as the atoms are off (as the operations beyond the sectors of the Gamma guard)
                 continue
             rows = self.cell.row_map(index, table=table)
             if rows is None:
@@ -665,6 +734,30 @@ class SectorGuardGroup:
             tested += self._environment_images(generators, table)
         self._images = tested
         return tested
+
+    def _strict_test(self) -> Callable[[int], bool] | None:
+        """Whether an operation of the cell group carries every atom within 1e-6 bohr
+        (:data:`parsec_python.Forces.symmetry.POSITION_TOLERANCE`) onto an atom of its species, as a permutation;
+        ``None`` (every one does) for a cell group of that tolerance or a stricter one
+        (``PARSEC_SYMMETRY_ATOM_TOLERANCE`` at most 1e-6, the default 1e-7 among them)."""
+
+        from parsec_python.Forces.symmetry import POSITION_TOLERANCE
+
+        from ..Symmetry.axis_reflection import _atoms_are_invariant_operation, _positions_by_species
+
+        cell = self.cell
+        if cell.atom_tolerance <= POSITION_TOLERANCE:
+            return None
+        species = _positions_by_species(cell.atoms)
+        period = _lattice_period(cell.grid)
+        steps = period / cell.counts
+
+        def holds(index: int) -> bool:
+            return _atoms_are_invariant_operation(
+                species, cell.matrices[index], POSITION_TOLERANCE, period, cell.shifts[index] * steps
+            )
+
+        return holds
 
     def _environment_images(self, generators: list[int], table) -> list[tuple[np.ndarray, np.ndarray]]:
         """``(affine, rows)`` of the operations found from the environments of the atoms that the subgroup of
@@ -726,11 +819,21 @@ class SectorGuardGroup:
 
 
 class SectorBlochHamiltonian(KPointKohnShamHamiltonian):
-    """The Bloch Hamiltonian of one sector of a k-point: its complex matrices (the reduced kinetic term in the slot
-    of the Bloch Laplacian, the reduced projectors) take the complex CSR kernel of the device
+    """The Bloch Hamiltonian of one sector of a k-point: its kinetic term in the slot of the Bloch Laplacian (the
+    gathered stencil of :mod:`..Hamiltonian.sector_bloch_stencil`, ``PARSEC_KPOINT_SECTOR_STENCIL=auto``, or the
+    reduced complex CSR) and its reduced projectors; the complex matrices take the complex CSR kernel of the device
     (:mod:`..Hamiltonian.complex_csr_device`, ``device_csr``)."""
 
     device_csr = True
+
+
+def _materialized(laplacian):
+    """``laplacian`` as a matrix: the deferred stencil of a Gamma cell (the band k-points after its SCF in sectors,
+    ``SCF/band_sectors.py``) materialized, any other operator as it is."""
+
+    if not sp.issparse(laplacian) and callable(getattr(laplacian, "materialize", None)):
+        return laplacian.materialize()
+    return laplacian
 
 
 class KPointSectors:
@@ -754,10 +857,66 @@ class KPointSectors:
         # symmetry guard (set by plan_sectors)
         self.assumed = False
         self.guard_group: SectorGuardGroup | None = None
+        # the atom orbits of the nonlocal forces (force_orbits): None not yet made, False none
+        self._orbit_forces = None
+        # what the k-points of one structure share (plan_sectors): the check of the kinetic stencils of the grid
+        self._shared: dict = {}
+        # whether the operators of the sectors go to the device code (sector_solver sets it from the k-point
+        # backend): only there does the kinetic term take its gathered stencil (_stencil_parts)
+        self.device_operators = True
 
     @property
     def order(self) -> int:
         return self.decomposition.representation_count
+
+    def force_orbits(self, geometry):
+        """``(representatives, images, matrices)`` for the nonlocal forces of one atom per orbit of the little group,
+        or ``None`` (the job's force takes no atoms, every atom is its own orbit, or an image misses).
+
+        ``images[p, a]`` is the atom that operation ``p`` of the group (``matrices[p]``, with its translation) carries
+        atom ``a`` onto (:func:`..Symmetry.axis_reflection.atom_image_table`).  The states of a sector are
+        eigenfunctions of every operation of the group, so the nonlocal force of their density on atom ``R a + t`` is
+        ``R`` times that on atom ``a`` (:meth:`complete_orbit_forces`)."""
+
+        if not geometry.get("force_atoms"):
+            return None
+        with self._lock:
+            if self._orbit_forces is None:
+                self._orbit_forces = self._make_force_orbits(geometry) or False
+            return self._orbit_forces or None
+
+    def _make_force_orbits(self, geometry):
+        from ..Symmetry.axis_reflection import atom_image_table
+
+        reduction = self.decomposition.reduction
+        representatives = getattr(reduction, "atom_representatives", None)
+        operations = getattr(reduction, "operations", None)
+        if representatives is None or operations is None:
+            return None
+        members = np.unique(np.asarray(representatives, dtype=np.int64))
+        if members.size >= np.size(representatives):
+            return None
+        translations = getattr(reduction, "translations", None)
+        images = atom_image_table(
+            list(geometry["atoms"]), list(operations), None if translations is None else list(translations),
+            geometry["grid"], 1.0e-6,
+        )
+        if images is None:
+            return None
+        return members, images, np.asarray(operations, dtype=np.float64).reshape(-1, 3, 3)
+
+    @staticmethod
+    def complete_orbit_forces(forces: np.ndarray, orbits) -> np.ndarray:
+        """The forces of every atom from those of the representatives of their orbits (:meth:`force_orbits`)."""
+
+        members, images, matrices = orbits
+        forces = np.asarray(forces, dtype=np.float64)
+        out = np.full_like(forces, np.nan)
+        for operation in range(images.shape[0]):
+            out[images[operation, members]] = forces[members] @ matrices[operation].T
+        if np.isnan(out).any():
+            raise RuntimeError("the orbits of the little group miss an atom of the nonlocal forces")
+        return out
 
     def twin(self, k_index: int) -> "KPointSectors":
         """The sectors of the same k-point for another task (the other channel of a spin-polarized run): the bases
@@ -827,30 +986,77 @@ class KPointSectors:
         self._exchange[sector] = (exchange, reduced)
         return reduced
 
+    def _stencil_parts(self, full):
+        """``(shape, half width, centre, weights)`` of the kinetic term of this k-point as an axial stencil
+        (:mod:`..Hamiltonian.sector_bloch_stencil`), ``None`` where the matrices of the whole grid are not one,
+        ``PARSEC_KPOINT_SECTOR_STENCIL`` is ``off`` or the operators stay on the CPU (:attr:`device_operators`
+        false: the host applies the reduced CSR in one scipy product, 3-4 times faster than a loop over the slots of
+        the table).  The check of the matrices of the whole grid is made once for the k-points of a structure (they
+        share them: the cache of the plans)."""
+
+        from ..Hamiltonian.sector_bloch_stencil import checked_axial_stencils, kinetic_weights, sector_stencil_setting
+
+        if sector_stencil_setting() == "off" or not self.device_operators:
+            return None
+        laplacian, gradient = full.negative_laplacian, tuple(full.gradient)
+        anchors = (laplacian, *gradient)
+        with _SHARED_LOCK:
+            entry = self._shared.get("axial_stencils")
+            if entry is None or len(entry[0]) != len(anchors) or any(a is not b for a, b in zip(entry[0], anchors)):
+                entry = (anchors, checked_axial_stencils(_materialized(laplacian), gradient))
+                self._shared["axial_stencils"] = entry
+        stencils = entry[1]
+        if stencils is None:
+            return None
+        found = kinetic_weights(stencils, self.k_point, getattr(full, "bloch_laplacian", None))
+        if found is None:
+            return None
+        centre, weights = found
+        return stencils.shape, stencils.half_width, centre, weights
+
     def _build_static(self, full, sectors) -> None:
-        """The kinetic matrices (with ``|k|^2``), projectors and empty stand-ins of the real stencils of ``sectors``
-        (one pass over the operator of the whole grid for all of them)."""
+        """The kinetic terms (with ``|k|^2``), projectors and empty stand-ins of the real stencils of ``sectors``
+        (one pass over the operator of the whole grid for all of them).
+
+        The kinetic term of a sector is its gathered stencil from the grid
+        (:class:`..Hamiltonian.sector_bloch_stencil.SectorStencilTable`, ``PARSEC_KPOINT_SECTOR_STENCIL=auto``) where
+        the kinetic matrices are an axial stencil of the grid, else the reduced complex CSR of the matrix of the whole
+        grid (as before)."""
 
         sectors = sorted({int(sector) for sector in sectors} - set(self._static))
         if not sectors:
             return
-        k = self.k_point
-        bloch = getattr(full, "bloch_laplacian", None)
-        if bloch is not None:
-            matrix = sp.csr_matrix(bloch, dtype=np.complex128)
-        else:
-            matrix = sp.csr_matrix(full.negative_laplacian, dtype=np.complex128)
-            # sum_c k_c G_c, here only (the driver's cache of it would keep a matrix of the whole grid per k-point)
-            k_gradient = None
-            for axis, gradient in enumerate(full.gradient):
-                if k[axis] != 0.0:
-                    term = float(k[axis]) * sp.csr_matrix(gradient, dtype=np.float64)
-                    k_gradient = term if k_gradient is None else k_gradient + term
-            if k_gradient is not None:
-                matrix = matrix - 2.0j * k_gradient
-            matrix = matrix + float(k @ k) * sp.identity(matrix.shape[0], dtype=np.complex128, format="csr")
-        kinetic = self.decomposition.reduce_hermitian_operators(matrix, sectors)
-        del matrix
+        from ..Hamiltonian.sector_bloch_stencil import build_sector_table
+
+        kinetic: dict[int, Any] = {}
+        parts = self._stencil_parts(full)
+        if parts is not None:
+            for sector in sectors:
+                table = build_sector_table(self.decomposition, sector, *parts)
+                if table is not None:
+                    kinetic[sector] = table
+        rest = [sector for sector in sectors if sector not in kinetic]
+        if rest:
+            k = self.k_point
+            bloch = getattr(full, "bloch_laplacian", None)
+            if bloch is not None:
+                matrix = sp.csr_matrix(bloch, dtype=np.complex128)
+            else:
+                laplacian = _materialized(full.negative_laplacian)
+                matrix = sp.csr_matrix(laplacian, dtype=np.complex128)
+                # sum_c k_c G_c, here only (the driver's cache of it would keep a matrix of the whole grid per k-point)
+                k_gradient = None
+                for axis, gradient in enumerate(full.gradient):
+                    if k[axis] != 0.0:
+                        term = float(k[axis]) * sp.csr_matrix(gradient, dtype=np.float64)
+                        k_gradient = term if k_gradient is None else k_gradient + term
+                if k_gradient is not None:
+                    matrix = matrix - 2.0j * k_gradient
+                matrix = matrix + float(k @ k) * sp.identity(matrix.shape[0], dtype=np.complex128, format="csr")
+            matrices = self.decomposition.reduce_hermitian_operators(matrix, rest)
+            del matrix
+            for sector in rest:
+                kinetic[sector] = matrices[sector]
         projectors = compress_projectors_for_sectors(full.nonlocal_operator, self.decomposition.reduction)
         reduced = self.decomposition.reduce_nonlocal_operators(projectors, sectors)
         for sector in sectors:
@@ -941,8 +1147,70 @@ class KPointSectors:
         return phases[:, None] * wedge[decomposition.reduction.full_to_wedge]
 
 
+_TOLERANCE_SWITCH = "PARSEC_KPOINT_SECTOR_TOLERANCE"
+
+
+def kpoint_sector_tolerance_setting() -> str:
+    """``PARSEC_KPOINT_SECTOR_TOLERANCE``: ``follow`` (default, since 2026-11-19) builds the cell group of the k-point
+    sectors and of the ``kpoint`` route of ``PARSEC_GAMMA_HYBRID_SECTORS`` at ``PARSEC_SYMMETRY_ATOM_TOLERANCE``, as
+    the Gamma detection (:func:`kpoint_sector_atom_tolerance`); ``fixed`` keeps the 1e-7 bohr of before whatever that
+    says, bit for bit.  Unset, the two agree."""
+
+    value = os.environ.get(_TOLERANCE_SWITCH, "follow").strip().lower() or "follow"
+    if value not in {"follow", "fixed"}:
+        raise ValueError(f"{_TOLERANCE_SWITCH} must be follow or fixed, not {value!r}")
+    return value
+
+
+def kpoint_sector_atom_tolerance(*, forces: bool = False) -> float:
+    """The atom tolerance (bohr) of the cell group of the k-point sectors: ``PARSEC_SYMMETRY_ATOM_TOLERANCE``, as for
+    the detection of the Gamma sectors, at most :data:`parsec_python.Forces.symmetry.POSITION_TOLERANCE` (1e-6) for
+    a loop that computes forces (the extras of the sectors take the projectors of one atom per orbit, so a looser
+    group would give forces of the Hamiltonian averaged over it; the Gamma route refuses forces off by more as
+    well).  ``1e-7`` by default, the tolerance of before, and always under ``PARSEC_KPOINT_SECTOR_TOLERANCE=fixed``
+    (:func:`kpoint_sector_tolerance_setting`)."""
+
+    from parsec_python.Forces.symmetry import POSITION_TOLERANCE
+
+    from ..Symmetry.axis_reflection import DEFAULT_ATOM_TOLERANCE, symmetry_atom_tolerance
+
+    tolerance = symmetry_atom_tolerance()
+    if kpoint_sector_tolerance_setting() == "fixed":
+        return DEFAULT_ATOM_TOLERANCE
+    return min(tolerance, POSITION_TOLERANCE) if forces else tolerance
+
+
+def check_kpoint_sector_switches() -> None:
+    """Read the switches of the k-point sectors and of the detection of their cell group, so that a value they do not
+    know is refused at the preparation of a run (``ValueError``) and not first at the setup of its k-point solver:
+    ``PARSEC_KPOINT_SECTORS``, ``PARSEC_KPOINT_SECTOR_TOLERANCE``, ``PARSEC_SYMMETRY_ATOM_TOLERANCE``,
+    ``PARSEC_PERIODIC_TRANSLATIONS``, ``PARSEC_PERIODIC_TRIVIAL_ORIGIN``, ``PARSEC_PERIODIC_SYMMETRY_CENTRE`` and
+    ``PARSEC_PERIODIC_DEFECT_CENTRE``.  Reading them changes nothing else."""
+
+    from ..Symmetry.axis_reflection import (
+        periodic_centre_setting,
+        periodic_defect_centre_setting,
+        periodic_translation_setting,
+        periodic_trivial_origin_setting,
+        symmetry_atom_tolerance,
+    )
+
+    kpoint_sectors_setting()
+    kpoint_sector_tolerance_setting()
+    symmetry_atom_tolerance()
+    periodic_translation_setting()
+    periodic_trivial_origin_setting()
+    periodic_centre_setting()
+    periodic_defect_centre_setting()
+
+
 def plan_sectors(job: KPointJob) -> list[KPointSectors | None] | None:
-    """The sectors of every k-point of ``job`` (``None`` for a k-point that stays one task), ``None`` for none."""
+    """The sectors of every k-point of ``job`` (``None`` for a k-point that stays one task), ``None`` for none.
+
+    The cell group is built at :func:`kpoint_sector_atom_tolerance` (``PARSEC_SYMMETRY_ATOM_TOLERANCE``, at most 1e-6
+    bohr for a job with extras, the forces; 1e-7 under ``PARSEC_KPOINT_SECTOR_TOLERANCE=fixed``); the plans of a loop
+    before on the same structure (the cache of ``geometry``, same signature) are taken before any search of the group.
+    """
 
     geometry = job.geometry
     grid = geometry["grid"]
@@ -959,22 +1227,30 @@ def plan_sectors(job: KPointJob) -> list[KPointSectors | None] | None:
     states, rows = int(job.number_of_states), int(grid.size)
     if rows * states < _MINIMUM_ENTRIES:  # before any search of the group: a small cell stays as it was
         return None
-    cell = CellGroup(grid, geometry["atoms"])
-    if cell.table is None or cell.order < 2:
-        return None
-    invariance = PotentialInvariance(
-        cell, geometry.get("density_symmetry"), k_points, geometry["weights"], geometry["lattice"]
-    )
+    tolerance = kpoint_sector_atom_tolerance(forces=job.extras is not None)
     margin = sector_margin()
     cache = geometry.get("cache")
     signature = (
         int(job.n_tasks), states, rows, margin, _EXTRA_STATES, tuple(int(value) for value in k_of_task),
-        tuple(np.round(k_points, 12).ravel().tolist()),
+        tuple(np.round(k_points, 12).ravel().tolist()), tolerance,
     )
+    # The plans the loops before kept for this structure (the cache of its projectors), before the group is searched
+    # again: they were made from the same atoms and grid.
     if isinstance(cache, dict):
         found = cache.get(_CACHE_KEY)
         if found is not None and found[0] == signature:
             return found[1]
+    cell = CellGroup(grid, geometry["atoms"], atom_tolerance=tolerance)
+    if cell.table is None or cell.order < 2:
+        return None
+    # a caller whose potential is invariant under a known group (the band k-points of a Gamma cell solved in sectors,
+    # .band_sectors) gives its own test
+    invariance_of = geometry.get("invariance")
+    invariance = (
+        PotentialInvariance(cell, geometry.get("density_symmetry"), k_points, geometry["weights"], geometry["lattice"])
+        if invariance_of is None
+        else invariance_of(cell, k_points, geometry["weights"], geometry["lattice"])
+    )
     decompositions: dict[tuple[int, ...], ReflectionRepresentationDecomposition | None] = {}
     plans: list[KPointSectors | None] = []
     for index, k_point in enumerate(k_points):
@@ -1013,9 +1289,11 @@ def plan_sectors(job: KPointJob) -> list[KPointSectors | None] | None:
 
     # (read here, before the first solve: a bad value stops the run before its first loop)
     guard = SectorGuardGroup(cell, invariance, environments=spin_guard_cell_group_setting() == "auto")
+    shared: dict = {}
     for plan in plans:
         if plan is not None:
             plan.guard_group = guard
+            plan._shared = shared
     # the tasks of one k-point share its bases and static operators (KPointSectors.twin)
     by_task: list[KPointSectors | None] = []
     taken: set[int] = set()
@@ -1072,6 +1350,8 @@ class SectorKPointSolver:
         self._refitted = False
         self._trimmed: set[tuple[int, int]] = set()  # the sectors whose counts the refit cut
         self._refit_states = 0  # the states the refit took off all sectors
+        # PARSEC_KPOINT_FORCE_ORBITS (read here, before the first solve: a bad value stops the run before its loop)
+        self._force_orbits = kpoint_force_orbits_setting() == "auto"
         self._inner = None
         self._inner = self._new_inner()
 
@@ -1389,17 +1669,26 @@ class SectorKPointSolver:
         wanted = place[columns] if columns.size else np.zeros(0, dtype=np.int64)
         keep = np.flatnonzero(wanted >= 0)
         plan = self._plans[k_index]
+        # PARSEC_KPOINT_FORCE_ORBITS: the forces of one atom per orbit of the little group, turned onto the others
+        orbits = plan.force_orbits(self.job.geometry) if self._force_orbits else None
+        options = {} if orbits is None else {"atoms": orbits[0]}
         total = None
         for c0 in range(0, int(keep.size), _FORCE_COLUMNS):
             chosen = keep[c0 : c0 + _FORCE_COLUMNS]
             block = vectors[:, chosen if xp is np else xp.asarray(chosen)]
             piece = np.asarray(
-                _host(self.job.extras(k_index, plan.expand(sector, block, xp), xp=xp, columns=wanted[chosen])),
+                _host(
+                    self.job.extras(
+                        k_index, plan.expand(sector, block, xp), xp=xp, columns=wanted[chosen], **options
+                    )
+                ),
                 dtype=np.float64,
             )
             total = piece if total is None else total + piece
         if total is None:
             total = np.zeros((len(self.job.geometry["atoms"]), 3), dtype=np.float64)
+        elif orbits is not None:
+            total = plan.complete_orbit_forces(total, orbits)
         return total
 
     # ----------------------------------------------------------- the symmetry guard
@@ -1666,6 +1955,9 @@ def sector_solver(job: KPointJob, make_solver: Callable[..., Any], **options):
     ``extras_by_columns``): each sector's part from its kept states, in one process or on the ranks of the MPI pools.
     """
 
+    from ..Hamiltonian.sector_bloch_stencil import sector_stencil_setting
+
+    sector_stencil_setting()  # read here: a bad value stops the run before its first solve
     if (
         getattr(job, "geometry", None) is None
         or (job.extras is not None and not job.extras_by_columns)
@@ -1676,7 +1968,24 @@ def sector_solver(job: KPointJob, make_solver: Callable[..., Any], **options):
     plans = plan_sectors(job)
     if plans is None:
         return None
+    # the gathered stencils of the kinetic terms only where the operators go to the device code
+    device = sector_stencil_setting() == "auto" and sector_operators_on_device(options.get("backend"))
+    for plan in plans:
+        if plan is not None:
+            plan.device_operators = device
     return SectorKPointSolver(job, plans, make_solver, options)
+
+
+def sector_operators_on_device(backend: str | None = None) -> bool:
+    """Whether the operators of the sectors of a k-point go to the device code: the k-point backend of the solver
+    (``backend``, else ``PARSEC_KPOINT_BACKEND`` / ``PARSEC_DEVICE``) resolves to a device, CuPy or ``numpy-device``
+    (the device code on the host, the tests' double of CuPy).  On the CPU route (the worker threads of this process
+    or the MPI pools on CPU ranks) the Hamiltonians of the sectors are applied on the host.  Every rank takes the same
+    answer: the backend follows the environment of the job."""
+
+    from .kpoint_parallel import resolve_backend
+
+    return resolve_backend(backend) is not None
 
 
 __all__ = [
@@ -1687,15 +1996,22 @@ __all__ = [
     "SectorBlochHamiltonian",
     "SectorGuardGroup",
     "SectorKPointSolver",
+    "check_kpoint_sector_switches",
+    "kpoint_sector_atom_tolerance",
+    "kpoint_sector_tolerance_setting",
     "kpoint_sectors_setting",
+    "kpoint_force_orbits_setting",
     "generated_subgroup",
     "largest_commuting_involutions",
     "little_group_reduction",
     "plan_sectors",
     "carried_state",
     "refitted_count",
+    "sector_guard_fock_setting",
     "sector_guard_setting",
+    "sector_levels_setting",
     "sector_margin",
+    "sector_operators_on_device",
     "sector_refit_setting",
     "sector_solver",
     "trimmed_state",

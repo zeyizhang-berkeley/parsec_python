@@ -18,7 +18,9 @@
 # moving the projectors of its sectors. Molecular dynamics, manual movements
 # and fixed atoms (Move_Flag) of a cell, and every forces or moving run under
 # PARSEC_PERIODIC_SECTOR_FORCES=off, take one sector of the identity, as
-# main.py takes the full grid: one rank on one node, or --rank-per-gpu.
+# main.py takes the full grid: one rank on one node, --rank-per-gpu, or (with
+# Eigensolver: chebff) one rank per node, each spreading its share of the basis
+# over the GPUs of its node (PARSEC_MPI_NESTED_SHARING=auto, the default).
 # K-points go to parsec_python/main.py --mpi; spin, hybrids, meta-GGAs,
 # oblique cells, wires, slabs and the forces of Use_Fortran_Routines of a cell
 # to main.py (the runner refuses them by name). See "Periodic cells at the
@@ -32,7 +34,15 @@
 # dynamics have one sector: they run on one node with one rank, or on several
 # nodes with --rank-per-gpu, which starts one rank per GPU; the ranks then
 # share the orbitals of that sector (src/parsec_python/acceleration/
-# Eigensolvers/mpi_shared_basis.py). See src/parsec_python/FORCES_AND_RELAXATION.md.
+# Eigensolvers/mpi_shared_basis.py). With Eigensolver: chebff the default
+# layout shares it too, every rank over the GPUs of its node
+# (Eigensolvers/mpi_nested_basis.py, PARSEC_MPI_NESTED_SHARING), and so do
+# groups of nodes where a structure has fewer sectors than nodes; under
+# PARSEC_MPI_NESTED_SHARING=groups (opt-in) also where the nodes do not divide
+# the sectors evenly. Its exchanges between nodes pass GPU arrays to MPI where
+# mpi4py links libmpi_gtl_cuda (Cray MPICH: built with craype-accel-nvidia80
+# loaded) and go through the host otherwise, as parsec.out then says. See
+# src/parsec_python/FORCES_AND_RELAXATION.md.
 # A hybrid functional (Correlation_Type pbe0, hse06, ...) runs on either
 # layout: every sector on one GPU of its rank and the pair densities of its
 # exchange on all GPUs of all ranks; a structure without symmetry then needs
@@ -176,8 +186,11 @@ export PARSEC_CUPY_STAGE_TIMING="${PARSEC_CUPY_STAGE_TIMING:-1}"
 
 # Cray MPICH: the network interface nearest to the GPUs (other MPI libraries
 # ignore the variable). The runner itself switches MPICH_GPU_SUPPORT_ENABLED
-# off where its ranks exchange host arrays only, and on for --rank-per-gpu and
-# for a hybrid functional (PARSEC_MPI_EXCHANGE_TRANSPORT=host keeps it off).
+# off where its ranks exchange host arrays only, and on for --rank-per-gpu, for
+# one rank per node on several nodes with Eigensolver: chebff where mpi4py
+# links libmpi_gtl_cuda (nested sharing; PARSEC_MPI_SHARED_TRANSPORT=host or
+# PARSEC_MPI_NESTED_SHARING=off keep it off)
+# and for a hybrid functional (PARSEC_MPI_EXCHANGE_TRANSPORT=host keeps it off).
 export MPICH_OFI_NIC_POLICY="${MPICH_OFI_NIC_POLICY:-GPU}"
 
 devices=0

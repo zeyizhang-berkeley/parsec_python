@@ -27,6 +27,8 @@ _SCALAR_TYPES = {
 _POINTER_TYPES = {
     "int *": np.dtype(np.int32),
     "unsigned char *": np.dtype(np.uint8),
+    # the two-byte codes of a sector stencil of more than 256 coefficients (PARSEC_SECTOR_PALETTE_CODES)
+    "unsigned short *": np.dtype(np.uint16),
     "float *": np.dtype(np.float32),
     "double *": np.dtype(np.float64),
 }

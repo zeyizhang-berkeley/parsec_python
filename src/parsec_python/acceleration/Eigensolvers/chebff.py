@@ -13,6 +13,7 @@ from parsec_python.Eigensolvers.chebff import ChebFFCycle, ChebFFSettings
 from ..backends.cupy import device_stage, require_cupy
 from .chebyshev import chebff_filter
 from .handover import first_cycle_condition_limit
+from .irrep_projection import orthonormal_in_unit
 from .lapack_random import LapackRandom
 from .orthogonalize import orthonormalize_complete_subspace
 from .rayleigh_ritz import (
@@ -215,11 +216,16 @@ def run_chebff(
             # SUBSPACE iterations: small problems retain PARSEC's selective
             # MGS, moderate GPU problems use one blocked QR, and
             # multi-gigabyte tall bases use memory-bounded TSQR.  All three
-            # construct the same FP64 column span.
+            # construct the same FP64 column span.  A unit of irreducible
+            # representations keeps its basis in their range (columns drawn
+            # for dependent ones, or the rounding of nearly dependent ones,
+            # projected back: irrep_projection.orthonormal_in_unit).
             with device_stage(operator, "initial_orthogonalization_seconds"):
-                vectors = orthonormalize_complete_subspace(
-                    vectors, rng=basis_generator
-                ).basis
+                vectors = orthonormal_in_unit(
+                    operator,
+                    orthonormalize_complete_subspace(vectors, rng=basis_generator),
+                    basis_generator,
+                )
             # CHEBFF uses only eigenvalues and rotated vectors.  Forming
             # ``(H Q) C - (Q C) Lambda`` here is both absent from PARSEC's
             # CHEBFF control flow and an unnecessary grid-by-state GPU

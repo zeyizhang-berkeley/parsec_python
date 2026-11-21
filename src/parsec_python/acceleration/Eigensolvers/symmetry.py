@@ -5,8 +5,10 @@ then globally sorts their Ritz values for occupations.  This adapter applies
 the same decomposition while reusing the existing CuPy CHEBFF/CHEBDAV and
 later-SUBSPACE implementations for each reduced Hamiltonian.
 
-Each representation is assigned round-robin to the CUDA devices selected by
-``PARSEC_CUPY_DEVICES``.  Independent sectors run concurrently across devices
+The representations go to the CUDA devices selected by
+``PARSEC_CUPY_DEVICES`` by their cost (``PARSEC_CUPY_SECTOR_PLACEMENT=size``,
+:func:`process_sector_device_groups`; an MPI rank by its sector context), or
+round-robin (``cyclic``, as before 2026-11-19).  Independent sectors run concurrently across devices
 and are gathered in fixed PARSEC representation order before the stable global
 eigenvalue sort.  A single GPU remains serialized by default because each
 sparse/filter kernel already saturates it; ``PARSEC_CUPY_SECTOR_SCHEDULER``
@@ -17,6 +19,7 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, wait
 from dataclasses import dataclass, replace
+import math
 import os
 from pathlib import Path
 from time import perf_counter
@@ -43,7 +46,7 @@ from ..backends.implicit_stencil import (
     implicit_tile_for_sector,
     regular_tile_share,
 )
-from .distributed_state import shared_basis_devices, shared_block_bytes
+from .distributed_state import _devices_can_filter, shared_basis_devices, shared_block_bytes
 from .eigval import DEVICE_ITERATIVE_SOLVERS, CuPyEigvalResult, CuPyEigvalSolver, spill_download_order
 from .filter_graph import graph_route_name
 from .handover import (
@@ -110,6 +113,10 @@ class CuPySymmetryEigvalResult:
     # How many states each returned state counts for (the weight of its sector, Symmetry/orbital_groups.py),
     # or None where every state counts once (the groups of before).
     state_weights: np.ndarray | None = None
+    # With ``state_weights``: per state, the bit mask of the representations of the full group held by its sector
+    # whose partners several solved states share (decomposition.sector_partner_masks; 0: none), which fixed
+    # occupations must fill alike (Occupations.partner_occupations).  None otherwise.
+    state_partners: tuple[int, ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -168,7 +175,15 @@ class CuPySymmetryOrbitals:
             raise ValueError("block_states must be positive")
         if self.remote_sectors:
             raise RuntimeError("MPI symmetry orbitals require distributed export; disable final materialization")
-        if any(hasattr(item, "group") for item in self.sector_vectors or ()):
+        from .distributed_state import DistributedBasis
+        from .mpi_shared_basis import SharedBasis
+
+        if any(
+            hasattr(item, "group") and (isinstance(item, SharedBasis) or not isinstance(item, DistributedBasis))
+            for item in self.sector_vectors or ()
+        ):
+            # (the share of a basis that MPI ranks hold; the columns of a basis that the GPUs of this process
+            # share are read from their devices below)
             raise RuntimeError("a sector basis shared by several devices cannot be exported as one host array here")
         self._require_ritz_vectors()
         cp, _ = require_cupy()
@@ -193,7 +208,12 @@ class CuPySymmetryOrbitals:
                         raise RuntimeError("lazy symmetry orbitals are incomplete")
                     source = self.sector_vectors[representation]
                     source_columns = self.representation_columns[columns]
-                    if isinstance(source, cp.ndarray):
+                    if isinstance(source, DistributedBasis):
+                        # A basis that the devices of one process share (its sector placed by size,
+                        # PARSEC_CUPY_SECTOR_PLACEMENT, or the shared full grid of a spin fallback,
+                        # PARSEC_SPIN_FALLBACK_SHARED): each device copies the columns it holds.
+                        selected = source.column_array(source_columns)
+                    elif isinstance(source, cp.ndarray):
                         with source.device:
                             selected = cp.asnumpy(source[:, source_columns])
                     else:
@@ -250,8 +270,6 @@ class CuPySymmetryOrbitals:
 
         if self.remote_sectors:
             raise RuntimeError("MPI symmetry orbitals cannot be materialized on one device")
-        if any(hasattr(item, "group") for item in self.sector_vectors or ()):
-            raise RuntimeError("a sector basis shared by several devices cannot be materialized on one device")
         self._require_ritz_vectors()
         cp, _ = require_cupy()
         wedge = self.scaled_wedge_vectors
@@ -276,7 +294,11 @@ class CuPySymmetryOrbitals:
                 if output_columns.size == 0:
                     continue
                 source_columns = self.representation_columns[output_columns]
-                selected = cp.asfortranarray(source[:, source_columns])
+                if hasattr(source, "group"):
+                    # A basis that the devices of its sector share: its columns gathered on this device.
+                    selected = source.column_array(source_columns, device=int(cp.cuda.Device().id))
+                else:
+                    selected = cp.asfortranarray(source[:, source_columns])
                 selected *= cp.asarray(
                     self.sector_scales[representation], dtype=cp.float64
                 )[:, None]
@@ -447,6 +469,73 @@ _WEIGHTED_SECTOR_MARGIN = 0.10
 # (nvidia-smi), and 8 % more basis in the same domain stopped for memory in the first Ritz step, where it
 # counted about 0.87.
 _SECTOR_MARGIN_BUDGET = "0.82"
+# The margin of the first count of a weighted sector over its share of the valence orbitals of the atoms
+# (PARSEC_WEIGHTED_FIRST_SHARE=orbitals, Symmetry/sector_shares.py): the shares of the nanodiamonds k02 to k14
+# predict those of their occupied levels to the third digit.
+_PREDICTED_SHARE_MARGIN = 0.03
+
+
+def first_level_share(decomposition, representation: int, requested_states: int) -> float | None:
+    """The predicted share of the lowest ``requested_states`` levels that weighted sector ``representation`` holds,
+    from the valence orbitals that ``decomposition`` was given
+    (:func:`..Symmetry.sector_shares.attach_valence_orbital_counts`), or ``None`` (the even share)."""
+
+    counts = getattr(decomposition, "valence_orbital_counts", None)
+    if counts is None:
+        return None
+    from ..Symmetry.sector_shares import predicted_level_shares
+
+    shares = predicted_level_shares(counts, decomposition.sector_weights, int(requested_states))
+    return None if shares is None else float(shares[int(representation)])
+
+
+def irrep_units_refusal(decomposition, settings) -> str | None:
+    """Why the units of irreducible representations of ``decomposition`` cannot be solved with ``settings``.
+
+    The units with a projector (``PARSEC_ORBITAL_IRREPS``) keep their bases in the range of the projector after
+    every Chebyshev filter (:mod:`.irrep_projection`): the CHEBFF first solve and the SUBSPACE passes.  CHEBDAV
+    inserts random vectors between its filters and ARPACK and the dense solver filter nothing, so those first solves
+    are refused (``Eigensolver: chebff``, or ``PARSEC_ORBITAL_IRREPS=off``).  ``None`` where nothing stands in the way.
+    """
+
+    projected = getattr(decomposition, "projected_sectors", ())
+    if not projected:
+        return None
+    method = getattr(settings, "initial_method", "chebff")
+    if method != "chebff":
+        return (
+            f"PARSEC_ORBITAL_IRREPS solves units of irreducible representations whose bases its CHEBFF filters "
+            f"project; the first solve {method!r} is refused there (Eigensolver: chebff, or "
+            f"PARSEC_ORBITAL_IRREPS=off)"
+        )
+    return None
+
+
+def sector_limit(decomposition, representation: int, count: int) -> int:
+    """The most states sector ``representation`` can hold: its rows, or for a unit of irreducible representations
+    (``PARSEC_ORBITAL_IRREPS``) the dimension of its projector's range.
+
+    A unit's range holds about ``1 / [G:H]`` of its rows or more; the trace of its projector
+    (:meth:`..Symmetry.representations.ReflectionRepresentationDecomposition.sector_rank`, which builds its tables) is
+    computed only where ``count`` comes near that (a small grid), so that a process does not build the tables of the
+    units it does not solve.
+    """
+
+    size = int(decomposition.sector_size(representation))
+    projected = getattr(decomposition, "sector_projected", None)
+    if projected is None or not projected(representation):
+        return size
+    cosets = int(getattr(decomposition.reduction, "coset_count", 1) or 1)
+    if int(count) <= size // (2 * cosets):
+        return size
+    return int(decomposition.sector_rank(representation))
+
+
+def _unit_shares(decomposition):
+    """The expected shares of the states of the units of irreducible representations, ``None`` without units."""
+
+    shares = getattr(decomposition, "sector_shares", None)
+    return None if shares is None else np.asarray(shares, dtype=np.float64)
 
 
 def first_sector_count(
@@ -455,6 +544,9 @@ def first_sector_count(
     requested_states: int,
     safety_buffer: int,
     margin: float = _WEIGHTED_SECTOR_MARGIN,
+    shares=None,
+    index: int | None = None,
+    share: float | None = None,
 ) -> int:
     """The state count of a sector of ``size`` rows at its first solve (``_initial_sector_count``).
 
@@ -462,10 +554,31 @@ def first_sector_count(
     choice nadd=0 and ensures the union contains at least the globally requested number of states.  With weighted
     sectors (a subgroup's one-dimensional sectors, ``weights`` not all 1) every sector holds about
     requested / sum(weights) of the states: the sum is the count of sectors of before.
+
+    ``share`` (weighted sectors under ``PARSEC_WEIGHTED_FIRST_SHARE=orbitals``): the predicted share of the requested
+    levels that the sector holds (:func:`first_level_share`), taken with a margin of at most 3 % instead of the
+    even share with 10 %.
+
+    ``shares`` (with ``index``): the units of irreducible representations of the full group
+    (``PARSEC_ORBITAL_IRREPS``), whose shares of the states differ (Td: 1/24 for A1 and A2, 1/12 for E, 1/8 for T1
+    and T2): unit ``index`` holds ``requested * share`` of them with a margin that grows as ``1/sqrt(share)``
+    from ``margin`` at the largest share (the counts of the levels of one small representation scatter more).
+    Where both are given the units' ``shares`` decide: the share of a unit is that of its
+    representations, which the predicted share of the valence orbitals only estimates.
     """
 
+    if shares is not None and index is not None:
+        shares = np.asarray(shares, dtype=np.float64)
+        share = float(shares[int(index)])
+        largest = float(np.max(shares))
+        widened = margin * np.sqrt(largest / share) if share > 0.0 else margin
+        count = int(np.ceil(requested_states * share * (1.0 + widened))) + int(safety_buffer)
+        return min(int(size), max(1, count))
     weights = np.asarray(weights, dtype=np.int64)
     shares = int(np.sum(weights))
+    if share is not None and bool(np.any(weights != 1)):
+        count = math.ceil(float(requested_states) * float(share) * (1.0 + min(float(margin), _PREDICTED_SHARE_MARGIN)))
+        return min(int(size), max(1, count + safety_buffer))
     if bool(np.any(weights != 1)):
         # The sectors of a non-abelian subgroup hold different kinds of levels (Td in D2d: A1 with one
         # partner of E, A2 with E, and one partner of T1 or T2), not equal shares of the lowest ones: on
@@ -480,6 +593,30 @@ def first_sector_count(
         requested_states // shares + safety_buffer,
     )
     return min(int(size), max(1, count))
+
+
+def decomposition_first_count(
+    decomposition,
+    representation: int,
+    size: int,
+    weights,
+    requested_states: int,
+    safety_buffer: int,
+    margin: float = _WEIGHTED_SECTOR_MARGIN,
+) -> int:
+    """:func:`first_sector_count` of sector ``representation`` of ``decomposition``: by the shares of its units of
+    irreducible representations where it has them (bounded by :func:`sector_limit`), as before otherwise (the
+    predicted share of ``PARSEC_WEIGHTED_FIRST_SHARE=orbitals`` included, :func:`first_level_share`)."""
+
+    size = int(size)
+    shares = _unit_shares(decomposition)
+    if shares is None:
+        return first_sector_count(
+            size, weights, requested_states, safety_buffer, margin,
+            share=first_level_share(decomposition, representation, requested_states),
+        )
+    count = first_sector_count(size, weights, requested_states, safety_buffer, margin, shares, representation)
+    return min(count, sector_limit(decomposition, representation, count))
 
 
 def sector_placement_costs(decomposition, filter_plan: FilterPlan | None = None) -> tuple[float, ...]:
@@ -500,12 +637,60 @@ def sector_placement_costs(decomposition, filter_plan: FilterPlan | None = None)
     weights = getattr(decomposition, "sector_weights", None)
     weights = np.ones(len(sizes), dtype=np.int64) if weights is None else np.asarray(weights, dtype=np.int64)
     return tuple(
-        float(size) * float(first_sector_count(size, weights, int(filter_plan.states), int(filter_plan.buffer)))
-        for size in sizes
+        float(size) * float(decomposition_first_count(
+            decomposition, index, size, weights, int(filter_plan.states), int(filter_plan.buffer)))
+        for index, size in enumerate(sizes)
     )
 
 
-def sector_bases_divisible(decomposition, filter_plan: FilterPlan | None = None) -> tuple[bool, ...] | None:
+def units_fit_whole(
+    decomposition, filter_plan: FilterPlan | None, devices, device_bytes: int | None = None, owned=None
+) -> bool:
+    """Whether the units of irreducible representations (``PARSEC_ORBITAL_IRREPS``) of a process fit whole on
+    single devices.
+
+    Placed on disjoint devices, more units than devices lie whole on one device each, the costliest first
+    (``experimental/mpi_scf._rank_device_groups``).  A device then holds at most the mean of the bases of the
+    process's units over its devices plus the largest one, and its first solve forms one more array of the size of
+    the largest (the 20^3 cube of 64,000 diamond atoms on 16 A100: a unit of 4407 states on one GPU asked for a
+    second array of 51.4 GB beside its basis and ran out of memory).  This counts the bases at their first counts
+    (:func:`decomposition_first_count`, FP64 real orbitals) of the units ``owned`` (those of an MPI rank,
+    :func:`planned_owned_units`; ``None`` counts every unit, as a process without MPI solves them all) and
+    compares ``sum / len(devices) + 2 * largest`` with the share :func:`sector_margin_budget` of the smallest of
+    ``devices`` (``device_bytes``, or ``cudaMemGetInfo`` of each).  ``False`` without units, a plan, devices or
+    owned units.
+    """
+
+    if _unit_shares(decomposition) is None or filter_plan is None or not devices:
+        return False
+    sizes = getattr(decomposition, "sector_sizes", None)
+    if sizes is None:
+        sizes = [decomposition.sector_size(index) for index in range(int(decomposition.representation_count))]
+    sizes = tuple(int(size) for size in sizes)
+    weights = getattr(decomposition, "sector_weights", None)
+    weights = np.ones(len(sizes), dtype=np.int64) if weights is None else np.asarray(weights, dtype=np.int64)
+    chosen = range(len(sizes)) if owned is None else sorted({int(index) for index in owned})
+    bases = [
+        8.0 * float(sizes[index]) * float(decomposition_first_count(
+            decomposition, index, sizes[index], weights, int(filter_plan.states), int(filter_plan.buffer)))
+        for index in chosen
+    ]
+    if not bases:
+        return False
+    if device_bytes is None:
+        cp, _ = require_cupy()
+        totals = []
+        for device_id in devices:
+            with cp.cuda.Device(int(device_id)):
+                totals.append(int(cp.cuda.runtime.memGetInfo()[1]))
+        device_bytes = min(totals)
+    need = sum(bases) / len(tuple(devices)) + 2.0 * max(bases)
+    return need <= sector_margin_budget() * float(device_bytes)
+
+
+def sector_bases_divisible(
+    decomposition, filter_plan: FilterPlan | None = None, devices=None, device_bytes: int | None = None, owned=None
+) -> tuple[bool, ...] | None:
     """Whether a CHEBFF first solve divides the basis of each sector over the devices of a group.
 
     The placement of the sectors on the GPUs of an MPI rank (``experimental/mpi_scf.sector_device_groups``,
@@ -515,7 +700,17 @@ def sector_bases_divisible(decomposition, filter_plan: FilterPlan | None = None)
     ``on`` every one, and ``auto`` (the default) those whose rows times columns squared reach the threshold of
     the generalized Ritz step (:func:`rayleigh_ritz.generalized_ritz_requested`); below it the basis stays on
     the first device of the group.  ``None`` without a plan (the counts are not known).  Every rank computes the
-    same flags from the same decomposition.
+    same flags from the same decomposition (the units of irreducible representations: from the units it solves,
+    below).
+
+    The units of irreducible representations (``PARSEC_ORBITAL_IRREPS``) are marked not divided where the units
+    that the process solves (``owned``: those of its MPI rank, :func:`planned_owned_units`; ``None`` for all)
+    fit whole on single devices of the process (:func:`units_fit_whole` with ``devices``), so that a rank keeps
+    them on disjoint groups of its GPUs: the pool of five units on four A100 measured 19.9 s against 16.0 s for the
+    disjoint groups (nanodiamond k10, eigensolves).  Larger units follow the rule of the sectors (the 20 units of
+    a cube of 64,000 diamond atoms on 16 A100 ran in the pool and ran out of memory on disjoint GPUs).  That
+    choice is the layout of a rank's own units on its own GPUs (only the flags of its sectors are read); which
+    rank solves which unit does not depend on it.
     """
 
     from .distributed_state import distributed_state_policy
@@ -526,6 +721,8 @@ def sector_bases_divisible(decomposition, filter_plan: FilterPlan | None = None)
         sizes = [decomposition.sector_size(index) for index in range(int(decomposition.representation_count))]
     sizes = tuple(int(size) for size in sizes)
     policy = distributed_state_policy()
+    if units_fit_whole(decomposition, filter_plan, devices, device_bytes, owned=owned):
+        return (False,) * len(sizes)
     if policy != "auto":
         return (policy == "on",) * len(sizes)
     if filter_plan is None:
@@ -534,9 +731,197 @@ def sector_bases_divisible(decomposition, filter_plan: FilterPlan | None = None)
     weights = np.ones(len(sizes), dtype=np.int64) if weights is None else np.asarray(weights, dtype=np.int64)
     return tuple(
         bool(generalized_ritz_requested(
-            size, first_sector_count(size, weights, int(filter_plan.states), int(filter_plan.buffer))))
-        for size in sizes
+            size, decomposition_first_count(
+                decomposition, index, size, weights, int(filter_plan.states), int(filter_plan.buffer))))
+        for index, size in enumerate(sizes)
     )
+
+
+# The value of PARSEC_CUPY_SECTOR_PLACEMENT where none is named (process_sector_placement_setting).
+_PROCESS_SECTOR_PLACEMENT = "size"
+
+
+def process_sector_placement_setting() -> str:
+    """``PARSEC_CUPY_SECTOR_PLACEMENT``: how one process with several GPUs (``main.py``) places its sectors.
+
+    ``size`` (the default) places them as the MPI full-SCF runner places the sectors of one rank
+    (:func:`process_sector_device_groups`): by their cost, with the device pool where the first solve divides
+    the bases, and the one sector of the identity (``PARSEC_CUPY_SINGLE_SECTOR=on``) shared by all the GPUs.
+    ``cyclic`` deals sector ``s`` to GPU ``s mod`` (number of GPUs), each basis whole on its GPU, as before
+    2026-11-19.  The sectors are the same; which GPU holds a basis, whether several share it, and so the order
+    of the sums of the Ritz step and the density differ (round-off).  So are the state counts, unless
+    ``PARSEC_CUPY_SECTOR_MARGIN=auto`` cuts the margins for memory: it judges the fit per device of the
+    placement (``_state_fit_bytes``).  An MPI rank places its sectors by ``PARSEC_SECTOR_PLACEMENT`` instead.
+    """
+
+    value = os.environ.get("PARSEC_CUPY_SECTOR_PLACEMENT", _PROCESS_SECTOR_PLACEMENT).strip().lower()
+    value = value or _PROCESS_SECTOR_PLACEMENT
+    if value not in {"size", "cyclic"}:
+        raise ValueError(f"PARSEC_CUPY_SECTOR_PLACEMENT must be size or cyclic, not {value!r}")
+    return value
+
+
+# The basis bytes per GPU of the mean sector below which one process keeps disjoint device groups instead of
+# the device pool (PARSEC_CUPY_SECTOR_POOL_MIN_BYTES, process_pool_min_bytes).
+_PROCESS_POOL_MIN_BYTES = 24 * 2**20
+
+
+def process_pool_min_bytes() -> int:
+    """``PARSEC_CUPY_SECTOR_POOL_MIN_BYTES``: the least basis per GPU and sector of the device pool of one process.
+
+    The device pool solves the sectors one after another, each basis shared by all the GPUs; it saves the
+    imbalance of disjoint groups but adds the exchanges and synchronizations of a shared basis to every sector
+    it solves, whatever its size.  One process (:func:`process_sector_device_groups`) takes it only where the
+    mean sector gives every GPU at least this many bytes of basis (:func:`process_pool_share_bytes`).  A
+    nonnegative integer of bytes; ``0`` takes the pool by the memory rule alone, as the MPI runner does.
+    """
+
+    raw = os.environ.get("PARSEC_CUPY_SECTOR_POOL_MIN_BYTES", "").strip()
+    if not raw:
+        return _PROCESS_POOL_MIN_BYTES
+    try:
+        value = int(raw)
+    except ValueError as error:
+        raise ValueError(
+            f"PARSEC_CUPY_SECTOR_POOL_MIN_BYTES must be a nonnegative integer number of bytes, not {raw!r}"
+        ) from error
+    if value < 0:
+        raise ValueError(
+            f"PARSEC_CUPY_SECTOR_POOL_MIN_BYTES must be a nonnegative integer number of bytes, not {raw!r}"
+        )
+    return value
+
+
+def process_pool_share_bytes(costs, device_count: int) -> float:
+    """The basis bytes that the mean sector of ``costs`` gives each of ``device_count`` GPUs in the device pool.
+
+    ``costs`` are those of :func:`sector_placement_costs` with a filter plan: the rows of a sector times its
+    first state count, counted here as FP64 values.
+    """
+
+    costs = tuple(float(cost) for cost in costs)
+    return 8.0 * sum(costs) / (len(costs) * int(device_count))
+
+
+def process_sector_device_groups(
+    decomposition,
+    device_ids,
+    filter_plan: FilterPlan | None = None,
+    *,
+    divided: bool,
+    notes: list[str] | None = None,
+) -> dict[int, tuple[int, ...]] | None:
+    """The devices of every sector of one process with several GPUs, or ``None`` for the cyclic deal of before.
+
+    ``PARSEC_CUPY_SECTOR_PLACEMENT=size`` (:func:`process_sector_placement_setting`) with two devices or more:
+    the groups that the MPI full-SCF runner gives the sectors of a rank that owns all of them
+    (``experimental/mpi_scf._rank_device_groups``, by the costs of :func:`sector_placement_costs`).  At most
+    as many sectors as devices take disjoint groups in proportion to their costs; more sectors go to the
+    devices costliest first.  Every sector spreads over all the devices instead, solved one after another (the
+    device pool, ``PARSEC_SECTOR_DEVICE_POOL=auto``), where that lowers the fullest device by more than 5 % and
+    the first solve divides every basis over the devices of a group: ``divided`` (``Eigensolver: chebff``)
+    and every sector marked by :func:`sector_bases_divisible`.  Unlike the runner, one process also asks that
+    the mean sector give every device at least ``PARSEC_CUPY_SECTOR_POOL_MIN_BYTES`` of basis
+    (:func:`process_pool_min_bytes`; not judged without ``filter_plan``, whose counts the costs need): below it
+    the shared bases cost more time than the imbalance of disjoint groups, and their memory matters nowhere.
+    One sector (the identity of ``PARSEC_CUPY_SINGLE_SECTOR=on``) gets all the devices.  A group of several
+    devices shares the basis of its sector where :func:`distributed_state.shared_basis_devices` allows it, and
+    the first device of a group holds the sector otherwise.  ``None`` under ``cyclic`` or with one device:
+    sector ``s`` on device ``s mod len(device_ids)``, as before.  ``notes`` (a list) receives the reason of a
+    pool decision for the backend details.
+    """
+
+    devices = tuple(int(device) for device in device_ids)
+    if len(devices) < 2 or process_sector_placement_setting() == "cyclic":
+        return None
+    from ..experimental.mpi_scf import _rank_device_groups
+
+    count = int(decomposition.representation_count)
+    costs = sector_placement_costs(decomposition, filter_plan)
+    divisible = sector_bases_divisible(decomposition, filter_plan)
+    pool = bool(divided) and (divisible is None or all(bool(flag) for flag in divisible))
+    groups = _rank_device_groups(tuple(range(count)), costs, devices, pool=pool)
+    pooled = count > 1 and all(tuple(groups[sector]) == devices for sector in range(count))
+    if pooled and filter_plan is not None:
+        floor = process_pool_min_bytes()
+        share = process_pool_share_bytes(costs, len(devices))
+        if share < floor:
+            groups = _rank_device_groups(tuple(range(count)), costs, devices, pool=False)
+            reason = "disjoint groups: the device pool would give"
+        else:
+            reason = "device pool:"
+        if notes is not None:
+            notes.append(
+                f"{reason} {share / 2**20:.1f} MiB of basis per GPU per sector, "
+                f"{'below' if share < floor else 'at least'} PARSEC_CUPY_SECTOR_POOL_MIN_BYTES = {floor / 2**20:g} MiB"
+            )
+    return {int(sector): tuple(int(device) for device in groups[sector]) for sector in range(count)}
+
+
+def process_placement_record(groups, device_ids, count: int) -> str:
+    """The placement of the sectors of one process as the backend details list it."""
+
+    devices = tuple(int(device) for device in device_ids)
+    if not groups:
+        if len(devices) < 2:
+            return f"all {int(count)} sectors on CUDA device {devices[0] if devices else 0}"
+        return f"cyclic: sector s on CUDA device s mod {len(devices)} (devices {','.join(map(str, devices))})"
+    by_group: dict[tuple[int, ...], list[int]] = {}
+    for sector in range(int(count)):
+        by_group.setdefault(tuple(groups[sector]), []).append(sector)
+    parts = [
+        f"sectors {' '.join(map(str, sectors))} on CUDA device{'s' if len(group) > 1 else ''} "
+        f"{','.join(map(str, group))}"
+        for group, sectors in by_group.items()
+    ]
+    pooled = len(by_group) == 1 and len(next(iter(by_group))) == len(devices) and int(count) > 1
+    return "size: " + "; ".join(parts) + (" (device pool, solved in turn)" if pooled else "")
+def planned_owned_units(decomposition, mpi_context, devices, costs=None) -> tuple[int, ...] | None:
+    """The units of irreducible representations that this MPI rank will solve, as ``configure`` assigns them.
+
+    The keys of ``mpi_context.planned_groups`` (no MPI call: the same placement by ``costs`` that ``configure``
+    makes), for :func:`units_fit_whole`.  ``None`` without units (``PARSEC_ORBITAL_IRREPS`` off: nothing is
+    asked), without a context that places by costs, or where the placement fails (``configure`` then reports the
+    error of every rank together).
+    """
+
+    if mpi_context is None or _unit_shares(decomposition) is None:
+        return None
+    planned = getattr(mpi_context, "planned_groups", None)
+    if not callable(planned) or not getattr(mpi_context, "accepts_sector_costs", False):
+        return None
+    try:
+        groups = planned(int(decomposition.representation_count), tuple(devices), costs=costs)
+    except Exception:  # noqa: BLE001 - configure reports it on every rank
+        return None
+    return tuple(sorted(int(sector) for sector in groups))
+
+
+def unit_device_ids(decomposition, filter_plan: FilterPlan | None, device_ids) -> tuple[int, ...] | None:
+    """The GPU of every unit of irreducible representations in one process without an MPI context.
+
+    Such a process spreads its sectors over its GPUs in turn (sector ``s`` on device ``s % n``).  The units
+    (``PARSEC_ORBITAL_IRREPS``) have unequal costs, and five of them on four GPUs in turn put the T2 unit of Td
+    beside the A1 unit; here the costliest goes first to the GPU that then holds the least
+    (``experimental/mpi_scf._fill_groups`` with :func:`sector_placement_costs`): T1, T2, E and A1 + A2 on four.
+    ``None`` without units, with one GPU, or with at most as many units as GPUs (the GPUs in turn, as before).
+    """
+
+    device_ids = tuple(int(device) for device in device_ids)
+    count = int(decomposition.representation_count)
+    if _unit_shares(decomposition) is None or len(device_ids) < 2 or count <= len(device_ids):
+        return None
+    from ..experimental.mpi_scf import _fill_groups
+
+    filled = _fill_groups(sector_placement_costs(decomposition, filter_plan), (1,) * len(device_ids))
+    if filled is None:
+        return None
+    members, _ = filled
+    owners = [device_ids[0]] * count
+    for device, items in zip(device_ids, members, strict=True):
+        for sector in items:
+            owners[sector] = device
+    return tuple(owners)
 
 
 def _first_solve_divides_bases(solver: Any, representation: int) -> bool:
@@ -545,11 +930,14 @@ def _first_solve_divides_bases(solver: Any, representation: int) -> bool:
     The memory rules of ``solver`` (a :class:`CuPySymmetrySCFEigensolver`) count before that solve, when the
     sector solvers still hold the settings of their construction (CHEBFF, whatever the input names): an MPI
     context says what the input names (``divided_bases``, which the full-SCF runner sets from its
-    ``Eigensolver``); without one, or with one that names nothing, the settings of the sector solver are read,
-    as before.
+    ``Eigensolver``), and so does the driver of one process that placed its sectors by size
+    (``process_divided_bases``, :func:`process_sector_device_groups`); without either, the settings of the
+    sector solver are read, as before.
     """
 
     divided = getattr(getattr(solver, "mpi_context", None), "divided_bases", None)
+    if divided is None:
+        divided = getattr(solver, "process_divided_bases", None)
     if divided is not None:
         return bool(divided)
     return getattr(
@@ -796,6 +1184,9 @@ class CuPySymmetrySCFEigensolver:
         decomposition_cache_key: str | None = None,
         mpi_context: Any | None = None,
         filter_plan: FilterPlan | None = None,
+        process_device_group: bool = False,
+        sector_device_groups: dict[int, tuple[int, ...]] | None = None,
+        divided_bases: bool | None = None,
     ) -> None:
         self.full_operator = full_operator
         self.decomposition = decomposition
@@ -849,17 +1240,62 @@ class CuPySymmetrySCFEigensolver:
             # The ranks and GPUs of the sectors are chosen by their costs (experimental/mpi_scf.py,
             # PARSEC_SECTOR_PLACEMENT); the driver planned the device of its Hartree objects from the same costs.
             if getattr(mpi_context, "accepts_sector_costs", False):
-                # The GPUs of a rank pool several sectors only where their bases are divided over them.
+                # The GPUs of a rank pool several sectors only where their bases are divided over them (units of
+                # irreducible representations: where this rank's own units do not fit whole on single devices).
+                costs = sector_placement_costs(decomposition, filter_plan)
                 self.sector_device_groups = mpi_context.configure(
                     decomposition.representation_count, device_ids,
-                    costs=sector_placement_costs(decomposition, filter_plan),
-                    divisible=sector_bases_divisible(decomposition, filter_plan))
+                    costs=costs,
+                    divisible=sector_bases_divisible(
+                        decomposition, filter_plan, device_ids,
+                        owned=planned_owned_units(decomposition, mpi_context, device_ids, costs)))
             else:
                 self.sector_device_groups = mpi_context.configure(decomposition.representation_count, device_ids)
             self._owned_representations = mpi_context.owned_sectors
+        elif process_device_group and decomposition.representation_count == 1 and len(device_ids) > 1:
+            # One sector of the identity whose basis the GPUs of this process share (the full grid of both channels
+            # of a spin-polarized run that left its sectors, PARSEC_SPIN_FALLBACK_SHARED; distributed_state decides
+            # whether the basis is divided where it is solved), as one rank of the runner shares a sector over the
+            # GPUs of its node.
+            self.sector_device_groups = {0: tuple(int(device) for device in device_ids)}
+        # Whether the first solve divides the bases of the groups of one process (process_sector_device_groups);
+        # None where it placed none (read as before, _first_solve_divides_bases).
+        self.process_divided_bases = None
+        if mpi_context is None and sector_device_groups:
+            # One process with several GPUs whose driver placed the sectors by size (PARSEC_CUPY_SECTOR_PLACEMENT).
+            count = int(decomposition.representation_count)
+            groups = {int(sector): tuple(int(device) for device in group)
+                      for sector, group in dict(sector_device_groups).items()}
+            if (sorted(groups) != list(range(count))
+                    or any(not group or len(set(group)) != len(group) or not set(group) <= set(device_ids)
+                           for group in groups.values())):
+                raise ValueError(
+                    f"the sector device groups {groups!r} do not place {count} sectors on the devices {device_ids}"
+                )
+            self.sector_device_groups = groups
+            self.process_divided_bases = None if divided_bases is None else bool(divided_bases)
+        # One process with the units of irreducible representations: by cost instead of in turn (PARSEC_ORBITAL_IRREPS).
+        # Where the driver placed the sectors of this process by size (PARSEC_CUPY_SECTOR_PLACEMENT=size,
+        # whose costs count the states of the units, sector_placement_costs) or shared one sector over its GPUs, that
+        # placement stands and this one is not made; under cyclic the units go by cost.
+        unit_devices = (
+            None if mpi_context is not None or self.sector_device_groups
+            else unit_device_ids(decomposition, filter_plan, device_ids)
+        )
+        if mpi_context is not None:
+            self.placement_record = None
+        elif unit_devices is not None:
+            by_unit = {sector: (int(device),) for sector, device in enumerate(unit_devices)}
+            record = process_placement_record(by_unit, device_ids, decomposition.representation_count)
+            self.placement_record = "units by cost (PARSEC_ORBITAL_IRREPS): " + record.partition(": ")[2]
+        else:
+            self.placement_record = process_placement_record(
+                self.sector_device_groups, device_ids, decomposition.representation_count
+            )
         self._sector_device_ids = tuple(
             self.sector_device_groups[index][0]
-            if index in self.sector_device_groups else device_ids[index % len(device_ids)]
+            if index in self.sector_device_groups
+            else (unit_devices[index] if unit_devices is not None else device_ids[index % len(device_ids)])
             for index in range(decomposition.representation_count)
         )
         # Several sectors of a shared group of ranks are solved one after another (their collectives share one
@@ -888,6 +1324,13 @@ class CuPySymmetrySCFEigensolver:
             else "cuda-streams"
         )
         self._serial_per_device = scheduler == "sequential" and len(device_ids) > 1
+        if getattr(mpi_context, "nested", False):
+            # The shared bases of a rank spread over all its devices (Eigensolvers/mpi_nested_basis.py): every
+            # sector of the rank is solved on the calling thread, one after another, since that thread alone calls
+            # MPI for the device threads of each step (as one device per rank does: one worker, no batches).
+            self.scheduler_workers = 1
+            self.scheduler_mode = "sequential"
+            self._serial_per_device = False
         self._streams = []
         for representation, device_id in enumerate(self._sector_device_ids):
             if representation not in self._owned_representations:
@@ -995,7 +1438,10 @@ class CuPySymmetrySCFEigensolver:
         symmetric_rows = np.flatnonzero(
             np.all(decomposition.characters == 1, axis=1)
         )
-        if symmetric_rows.size != 1:
+        # Units of irreducible representations (PARSEC_ORBITAL_IRREPS) may share the totally symmetric character;
+        # the first of them gives the Poisson stencil (the same stencil for all of them).
+        units = getattr(decomposition, "projected_sectors", ())
+        if symmetric_rows.size != 1 and not (units and symmetric_rows.size >= 1):
             raise RuntimeError(
                 "reflection character table has no unique totally symmetric sector"
             )
@@ -1092,8 +1538,13 @@ class CuPySymmetrySCFEigensolver:
         shared_device_neighbors: dict[int, Any] = {}
         shared_device_potentials: dict[tuple[int, bytes], Any] = {}
         sector_local_potentials: list[Any] = []
-        # The round buffers of the shared bases of this rank (one device, sectors solved in turn).
+        # The round buffers of the shared bases of this rank (one device, sectors solved in turn); with nested
+        # sharing one dict per device, and one hub per communicator (Eigensolvers/mpi_nested_basis.py).
         shared_round_buffers: dict = {}
+        nested_hubs: dict = {}
+        # The sectors whose shared basis this rank spreads over its devices (the MPI runner names them in
+        # parsec.out).
+        self.nested_representations: tuple[int, ...] = ()
         for representation, (stencil_metadata, reduced_nonlocal) in enumerate(zip(
             static_operators.stencil_metadata,
             static_operators.nonlocal_operators,
@@ -1130,9 +1581,49 @@ class CuPySymmetrySCFEigensolver:
                     ),
                     implicit_tile=sector_tiles[representation],
                 )
-                if mpi_context is not None:
+                if representation in self.sector_device_groups:
+                    # (every sector of an MPI rank; in one process the sectors placed by size,
+                    # PARSEC_CUPY_SECTOR_PLACEMENT, whose group devices share a basis where
+                    # distributed_state.shared_basis_devices allows it, or the shared sector of the identity of a spin
+                    # fallback, PARSEC_SPIN_FALLBACK_SHARED)
                     operator.distributed_filter_devices = self.sector_device_groups[representation]
-                    if getattr(mpi_context, "shared", False):
+                if mpi_context is not None:
+                    nested_group = self.sector_device_groups.get(representation, ())
+                    if getattr(mpi_context, "nested", False) and len(nested_group) > 1:
+                        # The ranks of this sector's group share its basis, each over all its devices
+                        # (one rank per node, PARSEC_MPI_NESTED_SHARING).  Every device filters its columns
+                        # with the stencil-major and fused projector kernels (distributed_state._devices_can_filter),
+                        # which a switch or a failed build on one rank can take away; the ranks of the group agree
+                        # on it (mpi_nested_basis.nested_filter_agreement, since 2026-11-20) and stop together
+                        # where one lacks them, as the group of one GPU per rank needs the same kernels
+                        # (MPIShardGroup.filter): before, such a rank attached that group alone and the others
+                        # waited in collectives it never entered.
+                        from .mpi_nested_basis import attach_nested_group, nested_filter_agreement
+
+                        sector_comm = getattr(mpi_context, "sector_comm", mpi_context.comm)
+                        unable = nested_filter_agreement(sector_comm, _devices_can_filter(operator))
+                        if unable:
+                            members = tuple(getattr(mpi_context, "rank_groups", ())[representation]) if (
+                                representation < len(getattr(mpi_context, "rank_groups", ()))) else ()
+                            named = ", ".join(
+                                str(members[rank] if rank < len(members) else rank) for rank in unable
+                            )
+                            raise RuntimeError(
+                                f"the basis of sector {representation} cannot be shared over the GPUs of MPI "
+                                f"rank(s) {named}: their sector operator has no stencil-major or no fused "
+                                "projector kernels (a switch such as PARSEC_CUPY_STENCIL_MAJOR=0, or a failed "
+                                "build of those kernels), which every GPU of a shared basis filters with"
+                            )
+                        attach_nested_group(
+                            operator,
+                            sector_comm,
+                            self.sector_device_groups[representation],
+                            ritz_route=getattr(mpi_context, "shared_ritz_route", "rows"),
+                            round_buffers=shared_round_buffers,
+                            hubs=nested_hubs,
+                        )
+                        self.nested_representations = (*self.nested_representations, representation)
+                    elif getattr(mpi_context, "shared", False):
                         # The ranks of this sector's group share its basis, one device each (all ranks for
                         # the one sector of a run without symmetry).
                         from .mpi_shared_basis import attach_shared_group
@@ -1146,6 +1637,13 @@ class CuPySymmetrySCFEigensolver:
                             # device: one set of round buffers for all of them, as _state_fit_bytes counts.
                             round_buffers=shared_round_buffers,
                         )
+                if decomposition.sector_projected(representation) if hasattr(decomposition, "sector_projected") else False:
+                    # A unit of irreducible representations of the full group: its filtered blocks are projected
+                    # onto them (irrep_projection; PARSEC_ORBITAL_IRREPS).
+                    from .irrep_projection import IrrepProjection
+
+                    operator.irrep_projection = IrrepProjection(
+                        *decomposition.projection_tables(representation), representation=representation)
                 if neighbors_are_shared and device_id not in shared_device_neighbors:
                     selected_stencil = operator.compact_finite_difference
                     shared_device_neighbors[device_id] = getattr(
@@ -1372,8 +1870,9 @@ class CuPySymmetrySCFEigensolver:
         """Return how many devices filter the basis of one sector solved here.
 
         An MPI rank counts the group it was given for the sector, which may
-        share the basis (:mod:`distributed_state`) or its filter.  Without a
-        sector context the filter is spread over every device of the process
+        share the basis (:mod:`distributed_state`) or its filter, and so does
+        one process that placed its sectors by size
+        (:func:`process_sector_device_groups`).  Otherwise the filter is spread over every device of the process
         under ``PARSEC_CUPY_DISTRIBUTED_FILTER=1``
         (:func:`distributed_filter.distributed_filter`) and stays on the
         device of the sector otherwise.
@@ -1537,6 +2036,34 @@ class CuPySymmetrySCFEigensolver:
             f"{record} (sectors {' '.join(map(str, indices))})"
             for record, indices in sectors.items()
         ) or "none"
+
+    @property
+    def coefficient_codes(self) -> str:
+        """How the stencils of the sectors solved here code their coefficients (``PARSEC_SECTOR_PALETTE_CODES``).
+
+        ``one byte`` (a palette of at most 256 values) or ``two bytes`` (more, or every stencil under ``on``), with
+        the sectors of each where they differ, and the largest palette; ``none`` for an operator without the
+        stencil-major kernels.
+        """
+
+        sectors: dict[str, list[int]] = {}
+        largest = 0
+        for sector, operator in enumerate(self._operators):
+            if operator is None:
+                continue
+            stencil = operator.compact_finite_difference
+            width = getattr(stencil, "code_bytes", None)
+            record = "none" if width is None else "two bytes" if width == 2 else "one byte"
+            sectors.setdefault(record, []).append(sector)
+            largest = max(largest, int(getattr(stencil, "palette_size", 0) or 0))
+        if not sectors:
+            return "none"
+        text = (
+            next(iter(sectors))
+            if len(sectors) == 1
+            else "; ".join(f"{record} (sectors {' '.join(map(str, indices))})" for record, indices in sectors.items())
+        )
+        return f"{text}; largest palette {largest} values"
 
     @property
     def later_filter_precision(self) -> str:
@@ -2049,6 +2576,26 @@ class CuPySymmetrySCFEigensolver:
                 states[owner] += rows * int(count) * np.dtype(np.float64).itemsize * self.spin_channel_count
                 buffers[owner] = max(buffers[owner], streaming_workspace_bytes(rows, count))
                 continue
+            nested_devices = tuple(getattr(group, "local_devices", ())) if group is not None else ()
+            if group is not None and len(nested_devices) > 1:
+                from .mpi_shared_basis import exchange_bytes, shared_ritz_route
+
+                # A share spread over the devices of this rank (Eigensolvers/mpi_nested_basis.py): every device
+                # is a virtual rank of the group and counts what one rank of one device counts below (the block
+                # route: its columns with the room of its row block, the round buffers, the m x m matrices of
+                # the small solve and its helpers), its columns once per spin channel.
+                share = -(-int(count) // group.size)
+                route = shared_ritz_route(group.ritz_route)
+                for device_id in nested_devices:
+                    states[device_id] += rows * share * np.dtype(np.float64).itemsize * self.spin_channel_count
+                    buffers[device_id] = max(
+                        buffers[device_id],
+                        4 * exchange_bytes() + 11 * int(count) ** 2 * np.dtype(np.float64).itemsize
+                        if route == "block"
+                        else 3 * rows * share * np.dtype(np.float64).itemsize + 3 * exchange_bytes()
+                        + 2 * int(count) ** 2 * np.dtype(np.float64).itemsize,
+                    )
+                continue
             if group is not None:
                 from .mpi_shared_basis import exchange_bytes, shared_ritz_route
 
@@ -2404,9 +2951,9 @@ class CuPySymmetrySCFEigensolver:
         # union contains at least the globally requested number of states.
         # With weighted sectors (a subgroup's one-dimensional sectors) every sector holds about
         # requested / sum(weights) of the states: the sum is the count of sectors of before.
-        return first_sector_count(
-            self.decomposition.sector_size(representation), self._sector_weight_array, requested_states,
-            safety_buffer, margin)
+        return decomposition_first_count(
+            self.decomposition, representation, self.decomposition.sector_size(representation),
+            self._sector_weight_array, requested_states, safety_buffer, margin)
 
     def _fit_sector_margins(self, requested_states: int, safety_buffer: int) -> None:
         """Cut the margin of the first counts of weighted sectors where the devices cannot hold it.
@@ -2496,9 +3043,14 @@ class CuPySymmetrySCFEigensolver:
         from ..SCF.symmetry_fields import SymmetryScalarField
 
         if isinstance(full_potential, SymmetryScalarField):
-            if full_potential.reduction is not self.decomposition.reduction:
+            if full_potential.reduction is self.decomposition.reduction:
+                wedge = full_potential.values
+            elif getattr(full_potential.reduction, "subgroup", None) is self.decomposition.reduction:
+                # A field on the orbits of the full group (Symmetry/field_orbits.py): every orbit of the
+                # sectors takes the value of its orbit of that group.
+                wedge = full_potential.reduction.to_subgroup(full_potential.values)
+            else:
                 raise ValueError("local potential uses a different symmetry map")
-            wedge = full_potential.values
         else:
             wedge = self.decomposition.invariant_wedge_values(full_potential)
         started = perf_counter()
@@ -3102,7 +3654,7 @@ class CuPySymmetrySCFEigensolver:
             # By index: a loop variable would hold the result of the last sector, and with it its basis,
             # through the growth below.
             for representation in range(len(results)):
-                sector_size = self.decomposition.sector_size(representation)
+                sector_size = sector_limit(self.decomposition, representation, counts[representation])
                 if counts[representation] >= sector_size:
                     continue
                 last = float(results[representation].eigenvalues[-1])
@@ -3146,7 +3698,7 @@ class CuPySymmetrySCFEigensolver:
                 else:
                     wanted = max(old_count + increment, (3 * old_count + 1) // 2)
                 counts[representation] = min(
-                    self.decomposition.sector_size(representation), wanted)
+                    sector_limit(self.decomposition, representation, wanted), wanted)
                 restarted = True
                 reasons.append(
                     f"representation {representation + 1}: spectral bracket "
@@ -3351,6 +3903,9 @@ class CuPySymmetrySCFEigensolver:
         requested_states = int(requested_states)
         if requested_states < 1:
             raise ValueError("requested_states must be positive")
+        refusal = irrep_units_refusal(self.decomposition, settings)
+        if refusal is not None:
+            raise ValueError(refusal)
         if self._sector_counts is None:
             self._sector_counts = [
                 self._initial_sector_count(
@@ -3482,7 +4037,18 @@ class CuPySymmetrySCFEigensolver:
                 if self._weighted
                 else None
             ),
+            state_partners=self._state_partners(selected_representations),
         )
+
+    def _state_partners(self, representations) -> tuple[int, ...] | None:
+        """The partner masks of the selected states of weighted sectors (``CuPySymmetryEigvalResult.state_partners``)."""
+
+        if not self._weighted:
+            return None
+        masks = getattr(self.decomposition, "sector_partner_masks", None)
+        if masks is None:
+            return None
+        return tuple(int(masks[int(representation)]) for representation in representations)
 
 
 class SectorSpinChannel:

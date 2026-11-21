@@ -841,6 +841,14 @@ class CuPyEigvalSolver:
         self.timing_stats.solve_calls += 1
         assert self._state is not None
         cp, _ = require_cupy()
+        projection = getattr(self.operator, "irrep_projection", None)
+        if projection is not None:
+            # A unit of irreducible representations (PARSEC_ORBITAL_IRREPS): its states must lie in the range of
+            # its projector.  The rounding of a Ritz step on an ill-conditioned block is projected back here; a
+            # column that no projection reached (far beyond rounding) stops the run.
+            from .irrep_projection import check_unit_basis
+
+            check_unit_basis(projection, self._state.subspace.vectors, requested_states)
 
         def download():
             saved = self._state.subspace

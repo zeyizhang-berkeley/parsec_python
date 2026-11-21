@@ -342,7 +342,7 @@ def _pack_affine_tiles_reference(metadata, tile=32):
             regular += stop - start
         else:
             nn = np.full((slots, tile), -1, np.int32)
-            cc = np.zeros((slots, tile), np.uint8)
+            cc = np.zeros((slots, tile), codes.dtype)
             nn[:, :stop-start], cc[:, :stop-start] = n, c
             nn, cc = nn.ravel(), cc.ravel()
             headers[k] = offset
@@ -352,10 +352,10 @@ def _pack_affine_tiles_reference(metadata, tile=32):
         if offset > np.iinfo(np.int32).max:
             raise ValueError("packed stencil exceeds int32 offsets")
     return (np.concatenate((headers, *packed_n)),
-            np.concatenate((np.zeros(count, np.uint8), *packed_c)),
+            np.concatenate((np.zeros(count, codes.dtype), *packed_c)),
             dict(tile=tile, regular_rows=regular, rows=rows,
                  original_bytes=neighbors.nbytes+codes.nbytes,
-                 packed_bytes=offset*5))
+                 packed_bytes=offset*(4+codes.dtype.itemsize)))
 
 
 def pack_worker_setting():
@@ -387,7 +387,7 @@ def pack_affine_tiles(metadata, tile=32):
     regular=np.zeros(count,dtype=bool)
     def chunk(first,last):
         size=(last-first)*tile
-        nn=np.full((slots,size),-1,np.int32); cc=np.zeros((slots,size),np.uint8)
+        nn=np.full((slots,size),-1,np.int32); cc=np.zeros((slots,size),codes.dtype)
         valid=min(rows-first*tile,size)
         nn[:,:valid]=neighbors[:,first*tile:first*tile+valid]
         cc[:,:valid]=codes[:,first*tile:first*tile+valid]
@@ -425,18 +425,20 @@ def pack_affine_tiles(metadata, tile=32):
         starts=count+np.r_[0,np.cumsum(lengths[:-1],dtype=np.int64)]
         end=count+int(lengths.sum())
         if end>np.iinfo(np.int32).max: raise ValueError("packed stencil exceeds int32 offsets")
-        packed_n=np.empty(end,np.int32); packed_c=np.zeros(end,np.uint8)
+        packed_n=np.empty(end,np.int32); packed_c=np.zeros(end,codes.dtype)
         packed_n[:count]=np.where(regular,-starts,starts)
         each(fill)
     finally:
         if pool: pool.shutdown()
+    # (a record is an int32 neighbour and a code of one byte, or of two in a sector stencil of two-byte codes)
     return packed_n,packed_c,dict(tile=tile,regular_rows=int(regular.sum())*tile,rows=rows,
-                                 original_bytes=neighbors.nbytes+codes.nbytes,packed_bytes=end*5)
+                                 original_bytes=neighbors.nbytes+codes.nbytes,
+                                 packed_bytes=end*(4+codes.dtype.itemsize))
 
 
 def unpack_affine_tiles(indices, codes, rows, slots, tile):
     """Independent host reconstruction for exact structural validation."""
-    n, c = np.full((slots, rows), -1, np.int32), np.zeros((slots, rows), np.uint8)
+    n, c = np.full((slots, rows), -1, np.int32), np.zeros((slots, rows), codes.dtype)
     for row in range(rows):
         descriptor = int(indices[row // tile])
         if descriptor < 0:
@@ -473,25 +475,28 @@ class PackedTileHostMetadata:
         if tile not in _TILES or int(self.statistics["rows"]) != rows:
             raise ValueError("packed stencil statistics do not match its shape")
         neighbors, codes = self.neighbors, self.coefficient_codes
-        if neighbors.dtype != np.int32 or codes.dtype != np.uint8:
-            raise ValueError("packed stencil arrays must be int32 and uint8")
+        if neighbors.dtype != np.int32 or codes.dtype not in (np.uint8, np.uint16):
+            raise ValueError("packed stencil arrays must be int32 and uint8 (or uint16)")
         if neighbors.ndim != 1 or codes.shape != neighbors.shape:
             raise ValueError("packed stencil arrays must be flat and of one length")
-        if 5 * neighbors.size != int(self.statistics["packed_bytes"]) or int(self.slot_count) < 1:
+        record = 4 + codes.dtype.itemsize
+        if record * neighbors.size != int(self.statistics["packed_bytes"]) or int(self.slot_count) < 1:
             raise ValueError("packed stencil arrays do not match their statistics")
-        # The kernels read the palette as FP64; the codes are one byte each.
+        # The kernels read the palette as FP64; the codes are one byte each, or two in a sector stencil of more than
+        # 256 coefficients (PARSEC_SECTOR_PALETTE_CODES).
         palette = self.coefficient_palette
-        if palette.dtype != np.float64 or palette.ndim != 1 or not 1 <= palette.size <= 256:
-            raise ValueError("packed stencil palette must be 1 to 256 float64 coefficients")
+        capacity = 65536 if codes.dtype == np.uint16 else 256
+        if palette.dtype != np.float64 or palette.ndim != 1 or not 1 <= palette.size <= capacity:
+            raise ValueError(f"packed stencil palette must be 1 to {capacity} float64 coefficients")
 
     @property
     def tile(self):
         return int(self.statistics["tile"])
 
 
-def implicit_source(tile):
-    """The source of the two stencil kernels, reading tiles of ``tile`` rows."""
-    from .cupy_stencil_major import _CUDA_SOURCE
+def implicit_source(tile, codes_dtype=np.uint8):
+    """The source of the two stencil kernels, reading tiles of ``tile`` rows (codes of ``codes_dtype``)."""
+    from .cupy_stencil_major import _CUDA_SOURCE, code_source
     old = '''const long long metadata_offset =
             static_cast<long long>(slot) * row_count + row;
         const int source_row = neighbors[metadata_offset];'''
@@ -505,19 +510,20 @@ def implicit_source(tile):
             : encoded;'''
     if _CUDA_SOURCE.count(old) != 2:
         raise RuntimeError("production stencil ABI changed")
-    return _CUDA_SOURCE.replace(old, new)
+    return code_source(_CUDA_SOURCE.replace(old, new), codes_dtype)
 
 
-def stencil_source(tile, slot_count, kernel="former"):
+def stencil_source(tile, slot_count, kernel="former", codes_dtype=np.uint8):
     """The source of the two stencil kernels for tiles of ``tile`` rows (0: slot-major).
 
     ``kernel`` is a value of ``PARSEC_CUPY_STENCIL_KERNEL`` (:mod:`.stencil_pipeline`).
     ``former`` gives the source as it was, :func:`implicit_source` or the slot-major source;
     ``pipelined`` is generated from it for a stencil of ``slot_count`` slots, with the fast path
-    in ``stencil_major_chebyshev6`` alone.
+    in ``stencil_major_chebyshev6`` alone.  ``codes_dtype``: the codes of the stencil, ``uint8``
+    or the ``uint16`` of a sector stencil of more than 256 coefficients.
     """
-    from .cupy_stencil_major import _CUDA_SOURCE
-    base = implicit_source(tile) if tile else _CUDA_SOURCE
+    from .cupy_stencil_major import _CUDA_SOURCE, code_source
+    base = implicit_source(tile, codes_dtype) if tile else code_source(_CUDA_SOURCE, codes_dtype)
     if kernel == "former":
         return base
     from .stencil_pipeline import pipelined_source
@@ -541,7 +547,11 @@ def initialize_implicit(instance, cp, metadata, tile):
     instance.coefficient_palette = cp.asarray(metadata.coefficient_palette, dtype=cp.float64)
     # The former kernels keep the key (device, tile) they had under every value; the recurrence kernel of
     # ``pipelined`` is generated for the slot count, which a stencil that arrives packed names in its
-    # metadata alone, and kept beside them.
+    # metadata alone, and kept beside them.  Two-byte codes (a sector stencil of more than 256 coefficients)
+    # have kernels of their own, under (device, tile, "uint16").
+    key = (int(cp.cuda.Device().id), tile)
+    if np.dtype(c.dtype) == np.uint16:
+        key = (*key, "uint16")
     instance.hold_kernels(compiled_kernels(
-        cp, _CACHE, _LOCK, (int(cp.cuda.Device().id), tile), implicit_source(tile), tile, instance.slot_count,
+        cp, _CACHE, _LOCK, key, implicit_source(tile, c.dtype), tile, instance.slot_count,
         setting, compile_cupy_raw))

@@ -63,7 +63,7 @@ from ..SCF.spin_polarized import (
     _number_of_states_per_channel,
     _weighted_initial_polarization,
 )
-from ..Forces.nonlocal_force import bloch_projector_gradients, nonlocal_forces
+from ..Forces.nonlocal_force import bloch_projector_gradients, build_periodic_projector_gradients, nonlocal_forces
 from ..V_ion import build_nonlocal_projectors
 from .kpoint_hubbard import KPointHubbard, kpoint_backend
 from .single_point import (
@@ -102,6 +102,34 @@ from ..models import (
 def level_tolerance_of(warm_start) -> float | None:
     """The tolerance of the refined levels a warm start asks for (``None`` without)."""
     return getattr(warm_start, "level_tolerance", None)
+
+
+def _sectors_take_levels(warm_start) -> bool:
+    """Whether a loop may take the sectors of its k-points as far as its refined levels go: a loop without them, or
+    one with them under ``PARSEC_KPOINT_SECTOR_LEVELS=auto`` (the default since 2026-11-19; the switch is read only for
+    such a loop, the last inner loop of the Fock loop of a hybrid)."""
+
+    if level_tolerance_of(warm_start) is None:
+        return True
+    from ..acceleration.SCF.kpoint_sectors import sector_levels_setting
+
+    return sector_levels_setting() == "auto"
+
+
+def _fock_loops_guarded() -> bool:
+    """``PARSEC_KPOINT_SECTOR_GUARD_FOCK=auto`` (the default since 2026-11-19): the inner loops of the Fock loop of a
+    spin-polarized hybrid in the sectors of its k-points run tests 2 and 3 of the guard at their end."""
+
+    from ..acceleration.SCF.kpoint_sectors import sector_guard_fock_setting
+
+    return sector_guard_fock_setting() == "auto"
+class _ProjectorColumns:
+    """The columns of some atoms of a nonlocal projector operator (what the force contractions read of it)."""
+
+    def __init__(self, projectors, labels, signs) -> None:
+        self.projectors = projectors
+        self.labels = labels
+        self.signs = signs
 
 
 def _number_of_states(system: PeriodicPreparedSinglePointSystem) -> int:
@@ -417,20 +445,51 @@ def run_scf_kpoints(
     # sectors of the k-point).  Cleared after the pass.
     force_cache: dict = {}
 
-    def kpoint_nonlocal_force(task, vectors, xp=np, columns=None):
+    def kpoint_nonlocal_force(task, vectors, xp=np, columns=None, atoms=None):
+        # ``atoms``: the forces of these atoms only (the others zero), from their projectors and gradients alone: the
+        # representative atoms of the orbits of the little group of a k-point in sectors (kpoint_sectors.py, which
+        # turns them onto the other atoms of their orbits); None: every atom
         if task not in projector_cache:
             make_hamiltonian(task, {"V": ionic_potential})
-        gradients = force_cache.get(("gradients", task))
+        chosen = None if atoms is None else tuple(int(atom) for atom in atoms)
+        gradients = force_cache.get(("gradients", task, chosen))
         if gradients is None:
-            # (on the confined grid of a wire or slab: the images of its periodic directions, as the projectors)
-            gradients = force_cache[("gradients", task)] = bloch_projector_gradients(
-                system.grid,
-                cell_atoms,
-                system.pseudopotentials,
-                system.input.pseudopotentials,
-                lattice_vectors,
-                k_points[task],
-            )
+            if chosen is None:
+                # (on the confined grid of a wire or slab: the images of its periodic directions, as the projectors)
+                gradients = bloch_projector_gradients(
+                    system.grid,
+                    cell_atoms,
+                    system.pseudopotentials,
+                    system.input.pseudopotentials,
+                    lattice_vectors,
+                    k_points[task],
+                )
+            else:
+                # the columns of those atoms of the whole build, bit for bit (a bulk cell: the sectors take no other)
+                gradients = build_periodic_projector_gradients(
+                    system.grid,
+                    cell_atoms,
+                    system.pseudopotentials,
+                    system.input.pseudopotentials,
+                    lattice_vectors,
+                    k_points[task],
+                    atom_indices=chosen,
+                )
+            force_cache[("gradients", task, chosen)] = gradients
+        operator = projector_cache[task]
+        if chosen is not None:
+            found = force_cache.get(("operator", task, chosen))
+            if found is None:
+                wanted = set(chosen)
+                kept = np.fromiter(
+                    (index for index, label in enumerate(operator.labels) if int(label[0]) in wanted), dtype=np.int64
+                )
+                found = force_cache[("operator", task, chosen)] = _ProjectorColumns(
+                    projectors=operator.projectors.tocsc()[:, kept],
+                    labels=tuple(operator.labels[int(index)] for index in kept),
+                    signs=np.asarray(operator.signs)[kept],
+                )
+            operator = found
         # ``columns``: the states of the task these columns are (all of them, in order, where None)
         occupations = final_occupations[task] if columns is None else final_occupations[task][np.asarray(columns)]
         if xp is not np and not isinstance(vectors, np.ndarray):
@@ -438,13 +497,13 @@ def run_scf_kpoints(
             # supplied the device array, supplies the contraction)
             from ..acceleration.Forces.kpoint_nonlocal_device import device_nonlocal_forces, prepare_device_nonlocal
 
-            key = ("device", task, int(vectors.device.id))
+            key = ("device", task, int(vectors.device.id), chosen)
             prepared = force_cache.get(key)
             if prepared is None:
-                prepared = force_cache[key] = prepare_device_nonlocal(xp, projector_cache[task], gradients)
+                prepared = force_cache[key] = prepare_device_nonlocal(xp, operator, gradients)
             return device_nonlocal_forces(
                 xp,
-                projector_cache[task],
+                operator,
                 gradients,
                 vectors,
                 weighting.of_k(task) * occupations,
@@ -452,7 +511,7 @@ def run_scf_kpoints(
                 prepared=prepared,
             )
         return nonlocal_forces(
-            projector_cache[task],
+            operator,
             gradients,
             np.asarray(vectors),
             weighting.of_k(task) * occupations,
@@ -460,14 +519,16 @@ def run_scf_kpoints(
         )
 
     # What a solver that splits the k-points into the sectors of their little groups needs
-    # (acceleration/SCF/kpoint_sectors.py): a loop without LDA+U, meta-GGA, fixed occupations or refined levels
-    # (the forces, kept orbitals and states and the exchange of a hybrid go through its orbitals on the whole grid).
+    # (acceleration/SCF/kpoint_sectors.py): a loop without LDA+U, meta-GGA or fixed occupations, and with refined
+    # levels only under PARSEC_KPOINT_SECTOR_LEVELS=auto (the forces, kept orbitals and states and the exchange of a
+    # hybrid go through its orbitals on the whole grid; the level passes solve the sectors, which hold the levels of
+    # the k-point).
     sector_geometry = None
     if (
         hubbard is None
         and meta is None
         and settings.fixed_occupations is None
-        and getattr(warm_start, "level_tolerance", None) is None
+        and _sectors_take_levels(warm_start)
     ):
         sector_geometry = {
             "grid": system.grid,
@@ -483,6 +544,8 @@ def run_scf_kpoints(
             "exchange_cross_scale": None
             if exchange_term is None
             else (lambda task: 0.5 * float(exchange_term.spin_weight) * weighting.of_k(task)),
+            # the nonlocal force takes ``atoms=`` (those of some orbits only, turned onto the others by the sectors)
+            "force_atoms": True,
         }
     with timer.stage("solver_setup"):
         solver = make_kpoint_solver(
@@ -864,8 +927,21 @@ class KPointSectorsAbandoned(RuntimeError):
         )
 
 
+class KPointSectorsAbandonedInFockLoop(KPointSectorsAbandoned):
+    """An inner loop of the Fock loop of a spin-polarized hybrid at the final criterion failed test 2 or 3 of the guard
+    (``PARSEC_KPOINT_SECTOR_GUARD_FOCK``).
+
+    :func:`run_scf_kpoints_spin_polarized` does not run such a loop again (its carried mixer and the Ritz states of
+    the sectors have moved on): :func:`parsec_python.SCF.hybrid_periodic.run_periodic_hybrid_scf` starts the Fock
+    loop again from its semilocal start with one task per k-point.
+    """
+
+
 # the key of a structure's projector cache that says its loops take no k-point sectors (the guard left them)
 _SECTORS_ABANDONED_KEY = "kpoint_sectors_abandoned"
+# the key of a structure's projector cache under which the guarded inner loops of a Fock loop leave what tests 2 and 3
+# measured at their end (the last loop's values; run_periodic_hybrid_scf adds them to the timings of the result)
+_FOCK_GUARD_KEY = "kpoint_guard_fock"
 
 
 def run_scf_kpoints_spin_polarized(
@@ -925,6 +1001,9 @@ def run_scf_kpoints_spin_polarized(
         return _spin_kpoint_loop(system, k_points, weights, allow_sectors=False, **arguments)
     try:
         return _spin_kpoint_loop(system, k_points, weights, **arguments)
+    except KPointSectorsAbandonedInFockLoop:
+        # not run again here: the Fock loop starts again from its semilocal start (run_periodic_hybrid_scf)
+        raise
     except KPointSectorsAbandoned as error:
         # only the report leaves this block: the frames of the loop in the sectors, and their orbitals, go
         abandoned = (error.stage, error.report, error.passes, error.measured)
@@ -1181,14 +1260,14 @@ def _spin_kpoint_loop(
     # k-point share its sectors (both spin densities are symmetrized over the same group).  Not with the fixed
     # occupations of occup.in, as in run_scf_kpoints: they fill the levels in order of energy, and partners of a
     # degenerate level that lie in different sectors could be filled unequally, a density the orbit means of the
-    # sector Hamiltonians cannot follow.
+    # sector Hamiltonians cannot follow.  Refined levels as in run_scf_kpoints (PARSEC_KPOINT_SECTOR_LEVELS).
     sector_geometry = None
     if (
         hubbard is None
         and meta is None
         and settings.fixed_occupations is None
-        and level_tolerance_of(warm_start) is None
         and allow_sectors
+        and _sectors_take_levels(warm_start)
     ):
         sector_geometry = {
             "grid": system.grid,
@@ -1289,9 +1368,16 @@ def _spin_kpoint_loop(
 
     # The symmetry guard of the sectors of the k-points (PARSEC_KPOINT_SECTOR_GUARD, the analogue of the guard of
     # Spin_Symmetry_Sectors on clusters): the solver of the sectors where some of its k-points assume an invariance
-    # of the potential that the density is not symmetrized over; a loop without the exchange of a hybrid.
+    # of the potential that the density is not symmetrized over; a loop without the exchange of a hybrid, and since
+    # 2026-11-19 the inner loops of the Fock loop of a hybrid too (PARSEC_KPOINT_SECTOR_GUARD_FOCK=auto: tests 2 and 3
+    # at their end, deciding at the final criterion only, fock_exact).
+    fock_loop = exchange_term is not None
+    # an inner loop of the Fock loop at the final criterion (no relative criterion): its tests decide
+    fock_exact = fock_loop and getattr(warm_start, "relative_criterion", None) is None
     guard = None
-    if exchange_term is None and level_tolerance is None and callable(getattr(solver, "guarded_tasks", None)):
+    if callable(getattr(solver, "guarded_tasks", None)) and (
+        (not fock_loop and level_tolerance is None) or (fock_loop and _fock_loops_guarded())
+    ):
         from ..acceleration.SCF.kpoint_sectors import sector_guard_setting
 
         if sector_guard_setting() == "auto" and solver.guarded_tasks():
@@ -1606,9 +1692,30 @@ def _spin_kpoint_loop(
                 break
             if iteration == 1:
                 first_residual = selected_residual
-            if level_tolerance is not None and selected_residual < loop_criterion(
-                warm_start, criterion, first_residual
-            ):
+            met = selected_residual < criterion_scale * (
+                settings.convergence_criterion
+                if warm_start is None and convergence_criterion is None
+                else loop_criterion(warm_start, criterion, first_residual)
+            )
+            if met and guard is not None and (fock_exact or not fock_loop):
+                # Test 2 of the guard: the channel densities keep the symmetry the sectors assume.  As on a
+                # cluster, noise shrinks with the residual and a broken state keeps its asymmetry: between the
+                # tolerance and the noise bound the loop goes on to a criterion ten times tighter (not a looser
+                # inner loop of the Fock loop, which its tests at the end only measure).
+                met_criterion = True
+                asymmetry = guard.density_symmetry_measure((density_up, density_down), system.grid.volume_element)
+                guard_values.setdefault("kpoint_guard_density_asymmetry_first", asymmetry)
+                if (
+                    DENSITY_SYMMETRY_TOLERANCE <= asymmetry < DENSITY_SYMMETRY_NOISE_BOUND
+                    and symmetry_tightenings < DENSITY_SYMMETRY_TIGHTENINGS
+                    and (last_asymmetry is None or asymmetry <= 0.5 * last_asymmetry)
+                    and iteration < settings.max_iterations
+                ):
+                    symmetry_tightenings += 1
+                    last_asymmetry = asymmetry
+                    criterion_scale *= 0.1
+                    met = False
+            if met and level_tolerance is not None:
                 # V_in stays: the next iteration solves the same Hamiltonians (level passes).
                 refining = True
                 continue
@@ -1620,30 +1727,7 @@ def _spin_kpoint_loop(
                 and filter_degree > minimum_filter_degree
             ):
                 filter_degree -= 1
-            if selected_residual < criterion_scale * (
-                settings.convergence_criterion
-                if warm_start is None and convergence_criterion is None
-                else loop_criterion(warm_start, criterion, first_residual)
-            ):
-                if guard is not None:
-                    # Test 2 of the guard: the channel densities keep the symmetry the sectors assume.  As on a
-                    # cluster, noise shrinks with the residual and a broken state keeps its asymmetry: between the
-                    # tolerance and the noise bound the loop goes on to a criterion ten times tighter.
-                    met_criterion = True
-                    asymmetry = guard.density_symmetry_measure((density_up, density_down), system.grid.volume_element)
-                    guard_values.setdefault("kpoint_guard_density_asymmetry_first", asymmetry)
-                    if (
-                        DENSITY_SYMMETRY_TOLERANCE <= asymmetry < DENSITY_SYMMETRY_NOISE_BOUND
-                        and symmetry_tightenings < DENSITY_SYMMETRY_TIGHTENINGS
-                        and (last_asymmetry is None or asymmetry <= 0.5 * last_asymmetry)
-                        and iteration < settings.max_iterations
-                    ):
-                        symmetry_tightenings += 1
-                        last_asymmetry = asymmetry
-                        criterion_scale *= 0.1
-                        if meta is not None:
-                            meta.advance()
-                        continue
+            if met:
                 converged = True
                 break
             if meta is not None:
@@ -1665,8 +1749,22 @@ def _spin_kpoint_loop(
                 guard_values["kpoint_guard_fractional_share"] = guard.fractional_measure(by_task, occupations_by_task)
             if report is None and settings.fixed_occupations is None:
                 report = guard.fractional_report(by_task, occupations_by_task)
-            if report is not None:
+            if fock_loop:
+                # what the tests measured at the end of this inner loop of the Fock loop (the last guarded loop's
+                # values reach the result of the Fock loop: run_periodic_hybrid_scf)
+                previous = projector_cache.get(_FOCK_GUARD_KEY) or {}
+                projector_cache[_FOCK_GUARD_KEY] = {
+                    "values": dict(guard_values),
+                    "loops": int(previous.get("loops", 0)) + 1,
+                    "exact": bool(fock_exact),
+                    "failed": int(previous.get("failed", 0)) + int(report is not None),
+                }
+            if report is not None and not fock_loop:
                 raise KPointSectorsAbandoned("the SCF loop", report, measured=guard_values)
+            if report is not None and fock_exact:
+                raise KPointSectorsAbandonedInFockLoop(
+                    "an inner loop of the Fock loop at the final criterion", report, measured=guard_values
+                )
         timings = _run_timings(system, timer, solver, started, levels)
         if guard_values:
             timings.detail.update(guard_values)

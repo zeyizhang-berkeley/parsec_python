@@ -4,7 +4,7 @@
   PARSEC-PYTHON - Modular real-space DFT program
   PARSEC-like report; Python real-space implementation
 
- starting run on 07-Nov-2026 06:50:43 -0800
+ starting run on 20-Nov-2026 14:35:33 -0800
  input file: examples/0d_hybrid_functionals/O2/hse03/parsec.in
 
  =================================================================
@@ -179,17 +179,19 @@
 
  Setup timings [sec]
  --------------------------------------------------
- Pseudopotential loading       :     0.009110
- Grid-domain construction      :     0.031175
- Finite-difference construction:     0.008582
- Local ionic potential setup   :     0.027942
- Nonlocal ionic projector setup:     0.011479
- Initial valence-density setup :     0.015412
- Core-density setup            :     0.000771
- Ion-ion energy setup           :     0.000099
- Hartree boundary estimate/tail :     0.056596
- Preparation wall time          :     0.161395
+ Pseudopotential loading       :     0.009306
+ Grid-domain construction      :     0.032870
+ Finite-difference construction:     0.008966
+ Local ionic potential setup   :     0.341624
+ Nonlocal ionic projector setup:     0.009688
+ Initial valence-density setup :     0.025989
+ Core-density setup            :     0.001187
+ Ion-ion energy setup           :     0.000093
+ Hartree boundary estimate/tail :     0.058346
+ Preparation wall time          :     0.119434
  --------------------------------------------------
+
+ The local ionic, density and ion-ion setups above ran on a thread beside the symmetry and sector setup and are not part of the preparation wall time.  Thread [sec] = 0.368933, wait at its join [sec] = 0.000030.
 
  The reference setup above describes the constructed full grid.  The GPU orbital solve is decomposed into the exact symmetry representations reported below.
 
@@ -201,10 +203,11 @@
  Device            = CUDA:0 (NVIDIA A100-SXM4-80GB)
  gpu_stencil_kernel = deferred_to_symmetry_sector_operators
  gpu_later_subspace_filter_precision = deferred_to_symmetry_sector_operators
+ symmetry_detection = exact Cartesian axis-reflection subgroup detected
  symmetry_cache_directory = disabled
  orbital_symmetry = CuPy real one-dimensional reflection representations
  finite_difference_builder = C++17 compressed-grid CSR builder (exact stencil parity)
- hartree_backend = native-boundary/cupy-linear
+ hartree_backend = cupy-boundary/cupy-linear
  hartree_boundary = PARSEC multipole expansion
  orbital_sector_stencil_kernel = pipelined: fast path for 37 slots
  orbital_sector_later_filter_precision = float64
@@ -212,18 +215,18 @@
  hartree_symmetry = normalized Cartesian axis-reflection wedge
  native_openmp_max_threads = 16
  Detailed backend settings: set Output_Level: 2
- Backend initialization [sec] =     0.062068
+ Backend initialization [sec] =     0.047539
 
  Execution resources:
  --------------------
  Device            = GPU (auto, the default: a usable GPU was found)
  GPUs              = 1 of 1 visible, index 0; all visible, the default
- CPU threads       = 16 of 128 CPUs allowed (affinity of the process); OMP_NUM_THREADS=16
+ CPU threads       = 16 of 32 CPUs allowed (affinity of the process); OMP_NUM_THREADS=16
 
  SCF iter #   1
 
- Diagonalization time [sec] :       4.12,      tdiag_sum =        4.12
- Iteration time [sec]       :       4.18
+ Diagonalization time [sec] :       3.83,      tdiag_sum =        3.83
+ Iteration time [sec]       :       3.87
 
  Eigensolver residual max [Ry] :   2.5383e-05
 
@@ -264,7 +267,7 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
  Max and min values of charge density [e/bohr^3]:   4.9140E-01   2.5751E-14   dn
 
- Hartree potential time [sec]:       0.04
+ Hartree potential time [sec]:       0.02
 
    Eigenvalue Energy             =         -19.18656080 [Ry]
    Hartree Energy                =          88.57638595 [Ry]
@@ -282,8 +285,8 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
  SCF iter #   2
 
- Diagonalization time [sec] :       0.16,      tdiag_sum =        4.28
- Iteration time [sec]       :       0.22
+ Diagonalization time [sec] :       0.13,      tdiag_sum =        3.96
+ Iteration time [sec]       :       0.18
 
  Electrons in up, down spins:    7.00    5.00
  Net magnetic moment (in Bohr magnetons):    2.00
@@ -322,7 +325,7 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
  Max and min values of charge density [e/bohr^3]:   4.7141E-01   1.6597E-11   dn
 
- Hartree potential time [sec]:       0.04
+ Hartree potential time [sec]:       0.02
 
    Eigenvalue Energy             =         -16.69264610 [Ry]
    Hartree Energy                =          87.12262634 [Ry]
@@ -335,42 +338,42 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
    Total Energy =           -63.65126591 [Ry]
    Energy/atom  =          -433.01319683 [eV]
 
-  0-  2 up SRE of pot. & charge weighted pot =   5.7343697622   0.4430041789
+  0-  2 up SRE of pot. & charge weighted pot =   5.7343697623   0.4430041789
 
-  0-  2 dn SRE of pot. & charge weighted pot =   3.6917421811   0.3266871059
+  0-  2 dn SRE of pot. & charge weighted pot =   3.6917421816   0.3266871059
 
  SCF iter #   3
 
- Diagonalization time [sec] :       0.14,      tdiag_sum =        4.42
- Iteration time [sec]       :       0.20
+ Diagonalization time [sec] :       0.13,      tdiag_sum =        4.09
+ Iteration time [sec]       :       0.17
 
  Electrons in up, down spins:    7.00    5.00
  Net magnetic moment (in Bohr magnetons):    2.00
 
 up State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
-    1        -2.6089943534       -35.4974553737    1.0000        1
-    2        -1.7062048089       -23.2142813887    1.0000        8
-    3        -1.2101573460       -16.4651588184    1.0000        1
-    4        -1.1656220427       -15.8592203881    1.0000        6
-    5        -1.1656217928       -15.8592169878    1.0000        7
-    6        -0.6759974556        -9.1974861809    1.0000        3
-    7        -0.6759970716        -9.1974809568    1.0000        2
+    1        -2.6089943534       -35.4974553738    1.0000        1
+    2        -1.7062048089       -23.2142813888    1.0000        8
+    3        -1.2101573460       -16.4651588185    1.0000        1
+    4        -1.1656220427       -15.8592203882    1.0000        6
+    5        -1.1656217928       -15.8592169879    1.0000        7
+    6        -0.6759974556        -9.1974861810    1.0000        3
+    7        -0.6759970716        -9.1974809569    1.0000        2
     8        -0.0137540924        -0.1871354299    0.0000        1
-    9         0.0131171412         0.1784691991    0.0000        8
+    9         0.0131171411         0.1784691990    0.0000        8
    10         0.0774557963         1.0538480738    0.0000        6
    11         0.0774576047         1.0538726777    0.0000        7
 
 
 dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
-    1        -2.3856391165       -32.4585286919    1.0000        1
-    2        -1.4776215527       -20.1042233216    1.0000        8
-    3        -1.0098026717       -13.7391731908    1.0000        1
-    4        -0.9426116141       -12.8249850995    1.0000        7
-    5        -0.9426112772       -12.8249805153    1.0000        6
-    6        -0.4329324903        -5.8903928766    0.0000        2
-    7        -0.4329318377        -5.8903839975    0.0000        3
+    1        -2.3856391166       -32.4585286920    1.0000        1
+    2        -1.4776215527       -20.1042233217    1.0000        8
+    3        -1.0098026717       -13.7391731909    1.0000        1
+    4        -0.9426116141       -12.8249850996    1.0000        7
+    5        -0.9426112772       -12.8249805154    1.0000        6
+    6        -0.4329324903        -5.8903928767    0.0000        2
+    7        -0.4329318377        -5.8903839976    0.0000        3
     8         0.0094155704         0.1281063678    0.0000        1
     9         0.0691641145         0.9410331090    0.0000        8
    10         0.0941146620         1.2805052680    0.0000        7
@@ -381,7 +384,7 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
  Max and min values of charge density [e/bohr^3]:   4.6476E-01   1.3889E-11   dn
 
- Hartree potential time [sec]:       0.04
+ Hartree potential time [sec]:       0.02
 
    Eigenvalue Energy             =         -15.96688110 [Ry]
    Hartree Energy                =          86.50193342 [Ry]
@@ -394,14 +397,14 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
    Total Energy =           -63.68007967 [Ry]
    Energy/atom  =          -433.20921402 [eV]
 
-  0-  3 up SRE of pot. & charge weighted pot =   4.8930391836   0.3149851712
+  0-  3 up SRE of pot. & charge weighted pot =   4.8930391834   0.3149851712
 
-  0-  3 dn SRE of pot. & charge weighted pot =   2.8676963807   0.2199212381
+  0-  3 dn SRE of pot. & charge weighted pot =   2.8676963806   0.2199212381
 
  SCF iter #   4
 
- Diagonalization time [sec] :       0.14,      tdiag_sum =        4.56
- Iteration time [sec]       :       0.20
+ Diagonalization time [sec] :       0.14,      tdiag_sum =        4.23
+ Iteration time [sec]       :       0.19
 
  Electrons in up, down spins:    7.00    5.00
  Net magnetic moment (in Bohr magnetons):    2.00
@@ -414,7 +417,7 @@ up State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
     4        -1.0806013806       -14.7024462647    1.0000        6
     5        -1.0806002230       -14.7024305142    1.0000        7
     6        -0.5866834922        -7.9822982578    1.0000        3
-    7        -0.5866819601        -7.9822774130    1.0000        2
+    7        -0.5866819601        -7.9822774131    1.0000        2
     8        -0.0017532619        -0.0238545313    0.0000        1
     9         0.0460058103         0.6259458536    0.0000        8
    10         0.0852038321         1.1592662983    0.0000        6
@@ -440,7 +443,7 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
  Max and min values of charge density [e/bohr^3]:   4.5581E-01   1.5772E-11   dn
 
- Hartree potential time [sec]:       0.04
+ Hartree potential time [sec]:       0.02
 
    Eigenvalue Energy             =         -15.01127379 [Ry]
    Hartree Energy                =          85.73393371 [Ry]
@@ -453,28 +456,28 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
    Total Energy =           -63.70189710 [Ry]
    Energy/atom  =          -433.35763576 [eV]
 
-  0-  4 up SRE of pot. & charge weighted pot =   4.1205542121   0.1508841353
+  0-  4 up SRE of pot. & charge weighted pot =   4.1205542123   0.1508841353
 
-  0-  4 dn SRE of pot. & charge weighted pot =   2.4128637957   0.0883674620
+  0-  4 dn SRE of pot. & charge weighted pot =   2.4128637965   0.0883674620
 
  SCF iter #   5
 
- Diagonalization time [sec] :       0.14,      tdiag_sum =        4.70
- Iteration time [sec]       :       0.20
+ Diagonalization time [sec] :       0.13,      tdiag_sum =        4.35
+ Iteration time [sec]       :       0.18
 
  Electrons in up, down spins:    7.00    5.00
  Net magnetic moment (in Bohr magnetons):    2.00
 
 up State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
-    1        -2.4692975442       -33.5967685275    1.0000        1
-    2        -1.5587222228       -21.2076628195    1.0000        8
-    3        -1.0557131176       -14.3638215352    1.0000        1
-    4        -1.0384044058       -14.1283226638    1.0000        6
+    1        -2.4692975443       -33.5967685276    1.0000        1
+    2        -1.5587222228       -21.2076628196    1.0000        8
+    3        -1.0557131176       -14.3638215353    1.0000        1
+    4        -1.0384044058       -14.1283226639    1.0000        6
     5        -1.0384028532       -14.1283015398    1.0000        7
-    6        -0.5425918050        -7.3823955808    1.0000        3
-    7        -0.5425897948        -7.3823682303    1.0000        2
-    8         0.0038588225         0.0525023669    0.0000        1
+    6        -0.5425918050        -7.3823955809    1.0000        3
+    7        -0.5425897948        -7.3823682304    1.0000        2
+    8         0.0038588225         0.0525023668    0.0000        1
     9         0.0568844012         0.7739577854    0.0000        8
    10         0.0886961043         1.2067814557    0.0000        6
    11         0.0887014332         1.2068539598    0.0000        7
@@ -483,10 +486,10 @@ up State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
     1        -2.3062119710       -31.3778588348    1.0000        1
-    2        -1.3733456548       -18.6854663094    1.0000        8
-    3        -0.9180407392       -12.4906786893    1.0000        1
-    4        -0.8533065831       -11.6099187086    1.0000        7
-    5        -0.8533063849       -11.6099160114    1.0000        6
+    2        -1.3733456548       -18.6854663095    1.0000        8
+    3        -0.9180407392       -12.4906786894    1.0000        1
+    4        -0.8533065831       -11.6099187087    1.0000        7
+    5        -0.8533063849       -11.6099160115    1.0000        6
     6        -0.3314390523        -4.5094934572    0.0000        2
     7        -0.3314375716        -4.5094733111    0.0000        3
     8         0.0201804931         0.2745717528    0.0000        1
@@ -499,7 +502,7 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
  Max and min values of charge density [e/bohr^3]:   4.5152E-01   1.0545E-11   dn
 
- Hartree potential time [sec]:       0.04
+ Hartree potential time [sec]:       0.02
 
    Eigenvalue Energy             =         -14.54993308 [Ry]
    Hartree Energy                =          85.29716006 [Ry]
@@ -512,14 +515,14 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
    Total Energy =           -63.70813970 [Ry]
    Energy/atom  =          -433.40010354 [eV]
 
-  0-  5 up SRE of pot. & charge weighted pot =   3.1089254002   0.0667693546
+  0-  5 up SRE of pot. & charge weighted pot =   3.1089254000   0.0667693546
 
-  0-  5 dn SRE of pot. & charge weighted pot =   1.8189272747   0.0347447338
+  0-  5 dn SRE of pot. & charge weighted pot =   1.8189272751   0.0347447338
 
  SCF iter #   6
 
- Diagonalization time [sec] :       0.14,      tdiag_sum =        4.83
- Iteration time [sec]       :       0.21
+ Diagonalization time [sec] :       0.13,      tdiag_sum =        4.48
+ Iteration time [sec]       :       0.18
 
  Electrons in up, down spins:    7.00    5.00
  Net magnetic moment (in Bohr magnetons):    2.00
@@ -558,7 +561,7 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
  Max and min values of charge density [e/bohr^3]:   4.4903E-01   5.7166E-12   dn
 
- Hartree potential time [sec]:       0.04
+ Hartree potential time [sec]:       0.02
 
    Eigenvalue Energy             =         -14.31474246 [Ry]
    Hartree Energy                =          85.04325798 [Ry]
@@ -571,23 +574,23 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
    Total Energy =           -63.70969484 [Ry]
    Energy/atom  =          -433.41068305 [eV]
 
-  0-  6 up SRE of pot. & charge weighted pot =   1.9379500647   0.0259174031
+  0-  6 up SRE of pot. & charge weighted pot =   1.9379500648   0.0259174031
 
-  0-  6 dn SRE of pot. & charge weighted pot =   1.3425840261   0.0375298420
+  0-  6 dn SRE of pot. & charge weighted pot =   1.3425840264   0.0375298420
 
  SCF iter #   7
 
- Diagonalization time [sec] :       0.13,      tdiag_sum =        4.97
- Iteration time [sec]       :       0.20
+ Diagonalization time [sec] :       0.13,      tdiag_sum =        4.61
+ Iteration time [sec]       :       0.18
 
  Electrons in up, down spins:    7.00    5.00
  Net magnetic moment (in Bohr magnetons):    2.00
 
 up State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
-    1        -2.4676503746       -33.5743574663    1.0000        1
+    1        -2.4676503746       -33.5743574664    1.0000        1
     2        -1.5544828852       -21.1499832389    1.0000        8
-    3        -1.0501769490       -14.2884975332    1.0000        1
+    3        -1.0501769490       -14.2884975333    1.0000        1
     4        -1.0363202150       -14.0999655816    1.0000        6
     5        -1.0363186121       -14.0999437720    1.0000        7
     6        -0.5408299817        -7.3584245655    1.0000        3
@@ -601,7 +604,7 @@ up State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
     1        -2.3172087647       -31.5274790111    1.0000        1
-    2        -1.3775312592       -18.7424148062    1.0000        8
+    2        -1.3775312592       -18.7424148063    1.0000        8
     3        -0.9251004540       -12.5867317566    1.0000        1
     4        -0.8580397358       -11.6743170367    1.0000        7
     5        -0.8580395702       -11.6743147844    1.0000        6
@@ -617,7 +620,7 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
  Max and min values of charge density [e/bohr^3]:   4.5077E-01   6.7934E-13   dn
 
- Hartree potential time [sec]:       0.04
+ Hartree potential time [sec]:       0.02
 
    Eigenvalue Energy             =         -14.56252673 [Ry]
    Hartree Energy                =          85.16867661 [Ry]
@@ -630,14 +633,14 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
    Total Energy =           -63.70989001 [Ry]
    Energy/atom  =          -433.41201077 [eV]
 
-  0-  7 up SRE of pot. & charge weighted pot =   1.2584329571   0.0528726079
+  0-  7 up SRE of pot. & charge weighted pot =   1.2584329569   0.0528726079
 
-  0-  7 dn SRE of pot. & charge weighted pot =   0.8208673628   0.0276610550
+  0-  7 dn SRE of pot. & charge weighted pot =   0.8208673618   0.0276610550
 
  SCF iter #   8
 
- Diagonalization time [sec] :       0.14,      tdiag_sum =        5.11
- Iteration time [sec]       :       0.20
+ Diagonalization time [sec] :       0.13,      tdiag_sum =        4.74
+ Iteration time [sec]       :       0.19
 
  Electrons in up, down spins:    7.00    5.00
  Net magnetic moment (in Bohr magnetons):    2.00
@@ -661,8 +664,8 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
     1        -2.3179915877       -31.5381299436    1.0000        1
     2        -1.3725230553       -18.6742741864    1.0000        8
-    3        -0.9226884491       -12.5539145004    1.0000        1
-    4        -0.8543276277       -11.6238108375    1.0000        7
+    3        -0.9226884491       -12.5539145005    1.0000        1
+    4        -0.8543276277       -11.6238108376    1.0000        7
     5        -0.8543274678       -11.6238086616    1.0000        6
     6        -0.3292875171        -4.4802200996    0.0000        2
     7        -0.3292861454        -4.4802014366    0.0000        3
@@ -676,7 +679,7 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
  Max and min values of charge density [e/bohr^3]:   4.5082E-01   1.7584E-13   dn
 
- Hartree potential time [sec]:       0.04
+ Hartree potential time [sec]:       0.02
 
    Eigenvalue Energy             =         -14.46666124 [Ry]
    Hartree Energy                =          85.11322339 [Ry]
@@ -689,13 +692,13 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
    Total Energy =           -63.71033765 [Ry]
    Energy/atom  =          -433.41505601 [eV]
 
-  0-  8 up SRE of pot. & charge weighted pot =   1.0734989198   0.0361761441
+  0-  8 up SRE of pot. & charge weighted pot =   1.0734989197   0.0361761441
 
-  0-  8 dn SRE of pot. & charge weighted pot =   0.5578623955   0.0211079383
+  0-  8 dn SRE of pot. & charge weighted pot =   0.5578623954   0.0211079383
 
  SCF iter #   9
 
- Diagonalization time [sec] :       0.14,      tdiag_sum =        5.25
+ Diagonalization time [sec] :       0.14,      tdiag_sum =        4.88
  Iteration time [sec]       :       0.21
 
  Electrons in up, down spins:    7.00    5.00
@@ -705,10 +708,10 @@ up State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
     1        -2.4484178291       -33.3126832998    1.0000        1
     2        -1.5321397807       -20.8459874279    1.0000        8
-    3        -1.0253606214       -13.9508515423    1.0000        1
+    3        -1.0253606214       -13.9508515422    1.0000        1
     4        -1.0184756456       -13.8571759383    1.0000        6
     5        -1.0184743661       -13.8571585308    1.0000        7
-    6        -0.5228031192        -7.1131546787    1.0000        3
+    6        -0.5228031192        -7.1131546786    1.0000        3
     7        -0.5228014745        -7.1131323021    1.0000        2
     8         0.0069342560         0.0943461002    0.0000        1
     9         0.0616975293         0.8394442444    0.0000        8
@@ -726,7 +729,7 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
     6        -0.3263628082        -4.4404270956    0.0000        2
     7        -0.3263615951        -4.4404105911    0.0000        3
     8         0.0213739825         0.2908101312    0.0000        1
-    9         0.0847929482         1.1536758942    0.0000        8
+    9         0.0847929482         1.1536758943    0.0000        8
    10         0.1022200530         1.3907855965    0.0000        7
    11         0.1022478882         1.3911643177    0.0000        6
 
@@ -735,7 +738,7 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
  Max and min values of charge density [e/bohr^3]:   4.5127E-01   5.4128E-15   dn
 
- Hartree potential time [sec]:       0.04
+ Hartree potential time [sec]:       0.03
 
    Eigenvalue Energy             =         -14.40702579 [Ry]
    Hartree Energy                =          85.08518796 [Ry]
@@ -750,40 +753,40 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
   0-  9 up SRE of pot. & charge weighted pot =   0.7248741902   0.0254445794
 
-  0-  9 dn SRE of pot. & charge weighted pot =   0.4401152635   0.0167086296
+  0-  9 dn SRE of pot. & charge weighted pot =   0.4401152634   0.0167086296
 
  SCF iter #  10
 
- Diagonalization time [sec] :       0.14,      tdiag_sum =        5.39
- Iteration time [sec]       :       0.21
+ Diagonalization time [sec] :       0.14,      tdiag_sum =        5.02
+ Iteration time [sec]       :       0.19
 
  Electrons in up, down spins:    7.00    5.00
  Net magnetic moment (in Bohr magnetons):    2.00
 
 up State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
-    1        -2.4380093926       -33.1710681934    1.0000        1
-    2        -1.5202975755       -20.6848647532    1.0000        8
-    3        -1.0116614233       -13.7644629936    1.0000        1
-    4        -1.0091339201       -13.7300742901    1.0000        6
-    5        -1.0091330410       -13.7300623299    1.0000        7
-    6        -0.5137163544        -6.9895219751    1.0000        3
-    7        -0.5137152196        -6.9895065348    1.0000        2
+    1        -2.4380093926       -33.1710681933    1.0000        1
+    2        -1.5202975755       -20.6848647530    1.0000        8
+    3        -1.0116614233       -13.7644629934    1.0000        1
+    4        -1.0091339201       -13.7300742900    1.0000        6
+    5        -1.0091330410       -13.7300623297    1.0000        7
+    6        -0.5137163544        -6.9895219749    1.0000        3
+    7        -0.5137152196        -6.9895065346    1.0000        2
     8         0.0085397673         0.1161903660    0.0000        1
-    9         0.0638618057         0.8688909559    0.0000        8
+    9         0.0638618057         0.8688909560    0.0000        8
    10         0.0915474004         1.2455756198    0.0000        6
    11         0.0915495937         1.2456054614    0.0000        7
 
 
 dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
-    1        -2.3254747197       -31.6399439420    1.0000        1
-    2        -1.3689658112       -18.6258750346    1.0000        8
+    1        -2.3254747198       -31.6399439420    1.0000        1
+    2        -1.3689658112       -18.6258750345    1.0000        8
     3        -0.9246710678       -12.5808896145    1.0000        1
     4        -0.8519204849       -11.5910597336    1.0000        7
-    5        -0.8519203444       -11.5910578217    1.0000        6
+    5        -0.8519203444       -11.5910578216    1.0000        6
     6        -0.3237070775        -4.4042937555    0.0000        2
-    7        -0.3237062131        -4.4042819943    0.0000        3
+    7        -0.3237062131        -4.4042819942    0.0000        3
     8         0.0223210185         0.3036953136    0.0000        1
     9         0.0859733368         1.1697360257    0.0000        8
    10         0.1030960085         1.4027036722    0.0000        7
@@ -794,7 +797,7 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
  Max and min values of charge density [e/bohr^3]:   4.5252E-01   7.2677E-14   dn
 
- Hartree potential time [sec]:       0.04
+ Hartree potential time [sec]:       0.02
 
    Eigenvalue Energy             =         -14.33861935 [Ry]
    Hartree Energy                =          85.06893114 [Ry]
@@ -807,14 +810,14 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
    Total Energy =           -63.71078902 [Ry]
    Energy/atom  =          -433.41812665 [eV]
 
-  0- 10 up SRE of pot. & charge weighted pot =   0.4082521322   0.0129668196
+  0- 10 up SRE of pot. & charge weighted pot =   0.4082521320   0.0129668195
 
-  0- 10 dn SRE of pot. & charge weighted pot =   0.2413130467   0.0097417075
+  0- 10 dn SRE of pot. & charge weighted pot =   0.2413130465   0.0097417075
 
  SCF iter #  11
 
- Diagonalization time [sec] :       0.14,      tdiag_sum =        5.53
- Iteration time [sec]       :       0.21
+ Diagonalization time [sec] :       0.14,      tdiag_sum =        5.15
+ Iteration time [sec]       :       0.19
 
  Electrons in up, down spins:    7.00    5.00
  Net magnetic moment (in Bohr magnetons):    2.00
@@ -826,7 +829,7 @@ up State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
     3        -1.0000559818       -13.6065616771    1.0000        6
     4        -1.0000556067       -13.6065565736    1.0000        7
     5        -0.9982235692       -13.5816302373    1.0000        1
-    6        -0.5052097817        -6.8737832474    1.0000        3
+    6        -0.5052097817        -6.8737832473    1.0000        3
     7        -0.5052093019        -6.8737767202    1.0000        2
     8         0.0098755494         0.1343647496    0.0000        1
     9         0.0656410107         0.8930984638    0.0000        8
@@ -837,12 +840,12 @@ up State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
     1        -2.3314675134       -31.7214806941    1.0000        1
-    2        -1.3690737391       -18.6273434799    1.0000        8
+    2        -1.3690737391       -18.6273434798    1.0000        8
     3        -0.9284094040       -12.6317526690    1.0000        1
     4        -0.8518145701       -11.5896186785    1.0000        7
     5        -0.8518144545       -11.5896171053    1.0000        6
     6        -0.3218304502        -4.3787607388    0.0000        2
-    7        -0.3218300693        -4.3787555571    0.0000        3
+    7        -0.3218300693        -4.3787555570    0.0000        3
     8         0.0233326557         0.3174594469    0.0000        1
     9         0.0872731225         1.1874206506    0.0000        8
    10         0.1040794713         1.4160844708    0.0000        7
@@ -853,7 +856,7 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
  Max and min values of charge density [e/bohr^3]:   4.5426E-01   2.9493E-13   dn
 
- Hartree potential time [sec]:       0.04
+ Hartree potential time [sec]:       0.03
 
    Eigenvalue Energy             =         -14.27761111 [Ry]
    Hartree Energy                =          85.06255263 [Ry]
@@ -866,14 +869,14 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
    Total Energy =           -63.71089539 [Ry]
    Energy/atom  =          -433.41885023 [eV]
 
-  0- 11 up SRE of pot. & charge weighted pot =   0.1325965681   0.0021040137
+  0- 11 up SRE of pot. & charge weighted pot =   0.1325965684   0.0021040137
 
   0- 11 dn SRE of pot. & charge weighted pot =   0.0662421810   0.0028652930
 
  SCF iter #  12
 
- Diagonalization time [sec] :       0.14,      tdiag_sum =        5.67
- Iteration time [sec]       :       0.20
+ Diagonalization time [sec] :       0.13,      tdiag_sum =        5.29
+ Iteration time [sec]       :       0.19
 
  Electrons in up, down spins:    7.00    5.00
  Net magnetic moment (in Bohr magnetons):    2.00
@@ -889,7 +892,7 @@ up State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
     7        -0.5046144536        -6.8656833329    1.0000        2
     8         0.0097117765         0.1321364892    0.0000        1
     9         0.0655166545         0.8914064975    0.0000        8
-   10         0.0921576041         1.2538779298    0.0000        6
+   10         0.0921576041         1.2538779297    0.0000        6
    11         0.0921578667         1.2538815021    0.0000        7
 
 
@@ -912,7 +915,7 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
  Max and min values of charge density [e/bohr^3]:   4.5479E-01   3.8731E-13   dn
 
- Hartree potential time [sec]:       0.04
+ Hartree potential time [sec]:       0.02
 
    Eigenvalue Energy             =         -14.27460309 [Ry]
    Hartree Energy                =          85.05961510 [Ry]
@@ -925,14 +928,14 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
    Total Energy =           -63.71091736 [Ry]
    Energy/atom  =          -433.41899972 [eV]
 
-  0- 12 up SRE of pot. & charge weighted pot =   0.0957098724   0.0009482355
+  0- 12 up SRE of pot. & charge weighted pot =   0.0957098726   0.0009482355
 
   0- 12 dn SRE of pot. & charge weighted pot =   0.0421573186   0.0016499470
 
  SCF iter #  13
 
- Diagonalization time [sec] :       0.13,      tdiag_sum =        5.80
- Iteration time [sec]       :       0.20
+ Diagonalization time [sec] :       0.13,      tdiag_sum =        5.42
+ Iteration time [sec]       :       0.19
 
  Electrons in up, down spins:    7.00    5.00
  Net magnetic moment (in Bohr magnetons):    2.00
@@ -941,11 +944,11 @@ up State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
     1        -2.4253486312       -32.9988084060    1.0000        1
     2        -1.5087759026       -20.5281031759    1.0000        8
-    3        -0.9995233073       -13.5993142141    1.0000        6
+    3        -0.9995233073       -13.5993142142    1.0000        6
     4        -0.9995231851       -13.5993125513    1.0000        7
     5        -0.9971449516       -13.5669547819    1.0000        1
     6        -0.5052474428        -6.8742956571    1.0000        3
-    7        -0.5052473242        -6.8742940443    1.0000        2
+    7        -0.5052473243        -6.8742940443    1.0000        2
     8         0.0093588612         0.1273347943    0.0000        1
     9         0.0651294667         0.8861384983    0.0000        8
    10         0.0918505105         1.2496996759    0.0000        6
@@ -971,7 +974,7 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
  Max and min values of charge density [e/bohr^3]:   4.5543E-01   4.4600E-13   dn
 
- Hartree potential time [sec]:       0.04
+ Hartree potential time [sec]:       0.02
 
    Eigenvalue Energy             =         -14.28130849 [Ry]
    Hartree Energy                =          85.06076682 [Ry]
@@ -984,13 +987,13 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
    Total Energy =           -63.71092588 [Ry]
    Energy/atom  =          -433.41905764 [eV]
 
-  0- 13 up SRE of pot. & charge weighted pot =   0.0566879975   0.0006278157
+  0- 13 up SRE of pot. & charge weighted pot =   0.0566879976   0.0006278157
 
   0- 13 dn SRE of pot. & charge weighted pot =   0.0163841292   0.0005407587
 
  SCF iter #  14
 
- Diagonalization time [sec] :       0.14,      tdiag_sum =        5.94
+ Diagonalization time [sec] :       0.16,      tdiag_sum =        5.58
  Iteration time [sec]       :       0.21
 
  Electrons in up, down spins:    7.00    5.00
@@ -1014,8 +1017,8 @@ up State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
     1        -2.3332138885       -31.7452415247    1.0000        1
-    2        -1.3715675496       -18.6612737666    1.0000        8
-    3        -0.9319232465       -12.6795613068    1.0000        1
+    2        -1.3715675496       -18.6612737667    1.0000        8
+    3        -0.9319232465       -12.6795613069    1.0000        1
     4        -0.8528932620       -11.6042951443    1.0000        7
     5        -0.8528932527       -11.6042950173    1.0000        6
     6        -0.3228013371        -4.3919704326    0.0000        3
@@ -1030,7 +1033,7 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
  Max and min values of charge density [e/bohr^3]:   4.5570E-01   4.5520E-13   dn
 
- Hartree potential time [sec]:       0.04
+ Hartree potential time [sec]:       0.02
 
    Eigenvalue Energy             =         -14.28224505 [Ry]
    Hartree Energy                =          85.05992188 [Ry]
@@ -1045,12 +1048,12 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
   0- 14 up SRE of pot. & charge weighted pot =   0.0206237130   0.0002995034
 
-  0- 14 dn SRE of pot. & charge weighted pot =   0.0072073183   0.0002363056
+  0- 14 dn SRE of pot. & charge weighted pot =   0.0072073184   0.0002363056
 
  SCF iter #  15
 
- Diagonalization time [sec] :       0.14,      tdiag_sum =        6.08
- Iteration time [sec]       :       0.21
+ Diagonalization time [sec] :       0.14,      tdiag_sum =        5.72
+ Iteration time [sec]       :       0.19
 
  Electrons in up, down spins:    7.00    5.00
  Net magnetic moment (in Bohr magnetons):    2.00
@@ -1074,9 +1077,9 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
     1        -2.3332744282       -31.7460652147    1.0000        1
     2        -1.3712639870       -18.6571435542    1.0000        8
-    3        -0.9316175896       -12.6754026008    1.0000        1
+    3        -0.9316175896       -12.6754026007    1.0000        1
     4        -0.8527950107       -11.6029583567    1.0000        6
-    5        -0.8527950034       -11.6029582570    1.0000        7
+    5        -0.8527950034       -11.6029582569    1.0000        7
     6        -0.3226202690        -4.3895068559    0.0000        3
     7        -0.3226202286        -4.3895063070    0.0000        2
     8         0.0237957127         0.3237597080    0.0000        1
@@ -1089,7 +1092,7 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
  Max and min values of charge density [e/bohr^3]:   4.5570E-01   4.1654E-13   dn
 
- Hartree potential time [sec]:       0.04
+ Hartree potential time [sec]:       0.02
 
    Eigenvalue Energy             =         -14.28007631 [Ry]
    Hartree Energy                =          85.05854146 [Ry]
@@ -1108,8 +1111,8 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
  SCF iter #  16
 
- Diagonalization time [sec] :       0.14,      tdiag_sum =        6.22
- Iteration time [sec]       :       0.21
+ Diagonalization time [sec] :       0.14,      tdiag_sum =        5.85
+ Iteration time [sec]       :       0.19
 
  Electrons in up, down spins:    7.00    5.00
  Net magnetic moment (in Bohr magnetons):    2.00
@@ -1122,7 +1125,7 @@ up State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
     4        -0.9993062813       -13.5963614023    1.0000        6
     5        -0.9963980256       -13.5567922574    1.0000        1
     6        -0.5050345129        -6.8713985759    1.0000        2
-    7        -0.5050344795        -6.8713981217    1.0000        3
+    7        -0.5050344795        -6.8713981216    1.0000        3
     8         0.0094053489         0.1279672957    0.0000        1
     9         0.0651733235         0.8867352049    0.0000        8
    10         0.0918897235         1.2502332001    0.0000        7
@@ -1134,9 +1137,9 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
     1        -2.3332792379       -31.7461306554    1.0000        1
     2        -1.3712861846       -18.6574455709    1.0000        8
     3        -0.9316367703       -12.6756635698    1.0000        1
-    4        -0.8528069278       -11.6031204979    1.0000        6
+    4        -0.8528069278       -11.6031204978    1.0000        6
     5        -0.8528069201       -11.6031203933    1.0000        7
-    6        -0.3226374553        -4.3897406886    0.0000        3
+    6        -0.3226374552        -4.3897406886    0.0000        3
     7        -0.3226374199        -4.3897402080    0.0000        2
     8         0.0237887295         0.3236646956    0.0000        1
     9         0.0878816892         1.1957006868    0.0000        8
@@ -1148,7 +1151,7 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
  Max and min values of charge density [e/bohr^3]:   4.5574E-01   3.9301E-13   dn
 
- Hartree potential time [sec]:       0.05
+ Hartree potential time [sec]:       0.02
 
    Eigenvalue Energy             =         -14.28021757 [Ry]
    Hartree Energy                =          85.05799081 [Ry]
@@ -1167,8 +1170,8 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
  SCF iter #  17
 
- Diagonalization time [sec] :       0.16,      tdiag_sum =        6.38
- Iteration time [sec]       :       0.23
+ Diagonalization time [sec] :       0.14,      tdiag_sum =        5.99
+ Iteration time [sec]       :       0.19
 
  Electrons in up, down spins:    7.00    5.00
  Net magnetic moment (in Bohr magnetons):    2.00
@@ -1207,7 +1210,7 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
  Max and min values of charge density [e/bohr^3]:   4.5575E-01   3.7035E-13   dn
 
- Hartree potential time [sec]:       0.04
+ Hartree potential time [sec]:       0.02
 
    Eigenvalue Energy             =         -14.27966069 [Ry]
    Hartree Energy                =          85.05716409 [Ry]
@@ -1220,14 +1223,14 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
    Total Energy =           -63.71093086 [Ry]
    Energy/atom  =          -433.41909155 [eV]
 
-  0- 17 up SRE of pot. & charge weighted pot =   0.0193353818   0.0003001163
+  0- 17 up SRE of pot. & charge weighted pot =   0.0193353818   0.0003001164
 
   0- 17 dn SRE of pot. & charge weighted pot =   0.0108022313   0.0004127895
 
  SCF iter #  18
 
- Diagonalization time [sec] :       0.14,      tdiag_sum =        6.52
- Iteration time [sec]       :       0.21
+ Diagonalization time [sec] :       0.14,      tdiag_sum =        6.13
+ Iteration time [sec]       :       0.19
 
  Electrons in up, down spins:    7.00    5.00
  Net magnetic moment (in Bohr magnetons):    2.00
@@ -1266,7 +1269,7 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
  Max and min values of charge density [e/bohr^3]:   4.5583E-01   3.7253E-13   dn
 
- Hartree potential time [sec]:       0.04
+ Hartree potential time [sec]:       0.02
 
    Eigenvalue Energy             =         -14.28156738 [Ry]
    Hartree Energy                =          85.05833126 [Ry]
@@ -1285,8 +1288,8 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
  SCF iter #  19
 
- Diagonalization time [sec] :       0.14,      tdiag_sum =        6.65
- Iteration time [sec]       :       0.21
+ Diagonalization time [sec] :       0.13,      tdiag_sum =        6.26
+ Iteration time [sec]       :       0.19
 
  Electrons in up, down spins:    7.00    5.00
  Net magnetic moment (in Bohr magnetons):    2.00
@@ -1295,7 +1298,7 @@ up State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
     1        -2.4250786210       -32.9951347019    1.0000        1
     2        -1.5083850001       -20.5227846350    1.0000        8
-    3        -0.9993737552       -13.5972794381    1.0000        7
+    3        -0.9993737552       -13.5972794382    1.0000        7
     4        -0.9993737335       -13.5972791428    1.0000        6
     5        -0.9965181371       -13.5584264701    1.0000        1
     6        -0.5051420100        -6.8728611602    1.0000        2
@@ -1325,7 +1328,7 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
  Max and min values of charge density [e/bohr^3]:   4.5584E-01   3.6128E-13   dn
 
- Hartree potential time [sec]:       0.04
+ Hartree potential time [sec]:       0.02
 
    Eigenvalue Energy             =         -14.28155460 [Ry]
    Hartree Energy                =          85.05834056 [Ry]
@@ -1344,8 +1347,8 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
  SCF iter #  20
 
- Diagonalization time [sec] :       0.14,      tdiag_sum =        6.79
- Iteration time [sec]       :       0.21
+ Diagonalization time [sec] :       0.13,      tdiag_sum =        6.40
+ Iteration time [sec]       :       0.23
 
  Electrons in up, down spins:    7.00    5.00
  Net magnetic moment (in Bohr magnetons):    2.00
@@ -1384,7 +1387,7 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
  Max and min values of charge density [e/bohr^3]:   4.5586E-01   3.5530E-13   dn
 
- Hartree potential time [sec]:       0.04
+ Hartree potential time [sec]:       0.03
 
    Eigenvalue Energy             =         -14.28163659 [Ry]
    Hartree Energy                =          85.05838504 [Ry]
@@ -1397,21 +1400,21 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
    Total Energy =           -63.71093106 [Ry]
    Energy/atom  =          -433.41909294 [eV]
 
-  0- 20 up SRE of pot. & charge weighted pot =   0.0020968374   0.0000188608
+  0- 20 up SRE of pot. & charge weighted pot =   0.0020968375   0.0000188608
 
   0- 20 dn SRE of pot. & charge weighted pot =   0.0013174855   0.0000160930
 
  SCF iter #  21
 
- Diagonalization time [sec] :       0.13,      tdiag_sum =        6.93
- Iteration time [sec]       :       0.20
+ Diagonalization time [sec] :       0.12,      tdiag_sum =        6.52
+ Iteration time [sec]       :       0.17
 
  Electrons in up, down spins:    7.00    5.00
  Net magnetic moment (in Bohr magnetons):    2.00
 
 up State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
-    1        -2.4250621588       -32.9949107204    1.0000        1
+    1        -2.4250621588       -32.9949107205    1.0000        1
     2        -1.5083903776       -20.5228577999    1.0000        8
     3        -0.9993729398       -13.5972683440    1.0000        7
     4        -0.9993729310       -13.5972682241    1.0000        6
@@ -1443,7 +1446,7 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
  Max and min values of charge density [e/bohr^3]:   4.5587E-01   3.5145E-13   dn
 
- Hartree potential time [sec]:       0.04
+ Hartree potential time [sec]:       0.02
 
    Eigenvalue Energy             =         -14.28168379 [Ry]
    Hartree Energy                =          85.05837624 [Ry]
@@ -1462,8 +1465,8 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
  SCF iter #  22
 
- Diagonalization time [sec] :       0.13,      tdiag_sum =        7.06
- Iteration time [sec]       :       0.19
+ Diagonalization time [sec] :       0.12,      tdiag_sum =        6.65
+ Iteration time [sec]       :       0.18
 
  Electrons in up, down spins:    7.00    5.00
  Net magnetic moment (in Bohr magnetons):    2.00
@@ -1502,7 +1505,7 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
  Max and min values of charge density [e/bohr^3]:   4.5587E-01   3.4776E-13   dn
 
- Hartree potential time [sec]:       0.04
+ Hartree potential time [sec]:       0.02
 
    Eigenvalue Energy             =         -14.28166297 [Ry]
    Hartree Energy                =          85.05835110 [Ry]
@@ -1521,8 +1524,8 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
  SCF iter #  23
 
- Diagonalization time [sec] :       0.13,      tdiag_sum =        7.19
- Iteration time [sec]       :       0.19
+ Diagonalization time [sec] :       0.12,      tdiag_sum =        6.77
+ Iteration time [sec]       :       0.17
 
  Electrons in up, down spins:    7.00    5.00
  Net magnetic moment (in Bohr magnetons):    2.00
@@ -1561,7 +1564,7 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
  Max and min values of charge density [e/bohr^3]:   4.5587E-01   3.4539E-13   dn
 
- Hartree potential time [sec]:       0.04
+ Hartree potential time [sec]:       0.02
 
    Eigenvalue Energy             =         -14.28166018 [Ry]
    Hartree Energy                =          85.05834145 [Ry]
@@ -1580,8 +1583,8 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
  SCF iter #  24
 
- Diagonalization time [sec] :       0.13,      tdiag_sum =        7.32
- Iteration time [sec]       :       0.20
+ Diagonalization time [sec] :       0.13,      tdiag_sum =        6.89
+ Iteration time [sec]       :       0.18
 
  Electrons in up, down spins:    7.00    5.00
  Net magnetic moment (in Bohr magnetons):    2.00
@@ -1620,7 +1623,7 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
  Max and min values of charge density [e/bohr^3]:   4.5588E-01   3.4312E-13   dn
 
- Hartree potential time [sec]:       0.04
+ Hartree potential time [sec]:       0.02
 
    Eigenvalue Energy             =         -14.28161914 [Ry]
    Hartree Energy                =          85.05830545 [Ry]
@@ -1639,8 +1642,8 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
  SCF iter #  25
 
- Diagonalization time [sec] :       0.13,      tdiag_sum =        7.45
- Iteration time [sec]       :       0.21
+ Diagonalization time [sec] :       0.13,      tdiag_sum =        7.02
+ Iteration time [sec]       :       0.18
 
  Electrons in up, down spins:    7.00    5.00
  Net magnetic moment (in Bohr magnetons):    2.00
@@ -1648,10 +1651,10 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 up State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
     1        -2.4250538991       -32.9947983409    1.0000        1
-    2        -1.5083802389       -20.5227198549    1.0000        8
+    2        -1.5083802389       -20.5227198548    1.0000        8
     3        -0.9993658839       -13.5971723432    1.0000        7
     4        -0.9993658701       -13.5971721548    1.0000        6
-    5        -0.9965057780       -13.5582583141    1.0000        1
+    5        -0.9965057780       -13.5582583140    1.0000        1
     6        -0.5051394649        -6.8728265317    1.0000        2
     7        -0.5051394484        -6.8728263072    1.0000        3
     8         0.0094082954         0.1280073852    0.0000        1
@@ -1666,7 +1669,7 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
     2        -1.3715222507       -18.6606574391    1.0000        8
     3        -0.9318814506       -12.6789926412    1.0000        1
     4        -0.8529314188       -11.6048142980    1.0000        6
-    5        -0.8529314170       -11.6048142734    1.0000        7
+    5        -0.8529314170       -11.6048142735    1.0000        7
     6        -0.3227945822        -4.3918785271    0.0000        3
     7        -0.3227945699        -4.3918783592    0.0000        2
     8         0.0237648194         0.3233393799    0.0000        1
@@ -1679,7 +1682,7 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
  Max and min values of charge density [e/bohr^3]:   4.5588E-01   3.4076E-13   dn
 
- Hartree potential time [sec]:       0.05
+ Hartree potential time [sec]:       0.02
 
    Eigenvalue Energy             =         -14.28158788 [Ry]
    Hartree Energy                =          85.05827590 [Ry]
@@ -1692,14 +1695,14 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
    Total Energy =           -63.71093108 [Ry]
    Energy/atom  =          -433.41909304 [eV]
 
-  0- 25 up SRE of pot. & charge weighted pot =   0.0022040910   0.0000097540
+  0- 25 up SRE of pot. & charge weighted pot =   0.0022040907   0.0000097540
 
-  0- 25 dn SRE of pot. & charge weighted pot =   0.0022861652   0.0000182588
+  0- 25 dn SRE of pot. & charge weighted pot =   0.0022861650   0.0000182588
 
  SCF iter #  26
 
- Diagonalization time [sec] :       0.13,      tdiag_sum =        7.58
- Iteration time [sec]       :       0.19
+ Diagonalization time [sec] :       0.13,      tdiag_sum =        7.15
+ Iteration time [sec]       :       0.18
 
  Electrons in up, down spins:    7.00    5.00
  Net magnetic moment (in Bohr magnetons):    2.00
@@ -1711,11 +1714,11 @@ up State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
     3        -0.9993713142       -13.5972462270    1.0000        6
     4        -0.9993713104       -13.5972461745    1.0000        7
     5        -0.9965032493       -13.5582239087    1.0000        1
-    6        -0.5051432419        -6.8728779201    1.0000        3
+    6        -0.5051432419        -6.8728779202    1.0000        3
     7        -0.5051432379        -6.8728778661    1.0000        2
     8         0.0094145366         0.1280923015    0.0000        1
-    9         0.0651840078         0.8868805733    0.0000        8
-   10         0.0919076251         1.2504767660    0.0000        6
+    9         0.0651840078         0.8868805734    0.0000        8
+   10         0.0919076251         1.2504767661    0.0000        6
    11         0.0919076308         1.2504768428    0.0000        7
 
 
@@ -1724,12 +1727,12 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
     1        -2.3333929387       -31.7476776453    1.0000        1
     2        -1.3715352387       -18.6608341506    1.0000        8
     3        -0.9318940319       -12.6791638189    1.0000        1
-    4        -0.8529467746       -11.6050232255    1.0000        7
+    4        -0.8529467746       -11.6050232256    1.0000        7
     5        -0.8529467719       -11.6050231887    1.0000        6
-    6        -0.3228079514        -4.3920604249    0.0000        2
+    6        -0.3228079514        -4.3920604250    0.0000        2
     7        -0.3228079471        -4.3920603668    0.0000        3
     8         0.0237575227         0.3232401029    0.0000        1
-    9         0.0878237629         1.1949125538    0.0000        8
+    9         0.0878237629         1.1949125537    0.0000        8
    10         0.1046078525         1.4232735189    0.0000        6
    11         0.1046078548         1.4232735503    0.0000        7
 
@@ -1738,7 +1741,7 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
  Max and min values of charge density [e/bohr^3]:   4.5588E-01   3.4146E-13   dn
 
- Hartree potential time [sec]:       0.04
+ Hartree potential time [sec]:       0.02
 
    Eigenvalue Energy             =         -14.28168962 [Ry]
    Hartree Energy                =          85.05832069 [Ry]
@@ -1751,14 +1754,14 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
    Total Energy =           -63.71093108 [Ry]
    Energy/atom  =          -433.41909304 [eV]
 
-  0- 26 up SRE of pot. & charge weighted pot =   0.0015480450   0.0000065136
+  0- 26 up SRE of pot. & charge weighted pot =   0.0015480455   0.0000065136
 
-  0- 26 dn SRE of pot. & charge weighted pot =   0.0015643865   0.0000084142
+  0- 26 dn SRE of pot. & charge weighted pot =   0.0015643870   0.0000084142
 
  SCF iter #  27
 
- Diagonalization time [sec] :       0.13,      tdiag_sum =        7.71
- Iteration time [sec]       :       0.20
+ Diagonalization time [sec] :       0.12,      tdiag_sum =        7.27
+ Iteration time [sec]       :       0.18
 
  Electrons in up, down spins:    7.00    5.00
  Net magnetic moment (in Bohr magnetons):    2.00
@@ -1780,12 +1783,12 @@ up State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
 dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
-    1        -2.3333912145       -31.7476541868    1.0000        1
+    1        -2.3333912145       -31.7476541869    1.0000        1
     2        -1.3715345634       -18.6608249627    1.0000        8
     3        -0.9318934303       -12.6791556345    1.0000        1
     4        -0.8529456871       -11.6050084289    1.0000        7
     5        -0.8529456848       -11.6050083987    1.0000        6
-    6        -0.3228071088        -4.3920489611    0.0000        2
+    6        -0.3228071088        -4.3920489612    0.0000        2
     7        -0.3228071062        -4.3920489254    0.0000        3
     8         0.0237582017         0.3232493408    0.0000        1
     9         0.0878249738         1.1949290282    0.0000        8
@@ -1797,7 +1800,7 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
  Max and min values of charge density [e/bohr^3]:   4.5588E-01   3.3975E-13   dn
 
- Hartree potential time [sec]:       0.04
+ Hartree potential time [sec]:       0.02
 
    Eigenvalue Energy             =         -14.28168481 [Ry]
    Hartree Energy                =          85.05831566 [Ry]
@@ -1810,14 +1813,14 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
    Total Energy =           -63.71093108 [Ry]
    Energy/atom  =          -433.41909305 [eV]
 
-  0- 27 up SRE of pot. & charge weighted pot =   0.0010596767   0.0000049405
+  0- 27 up SRE of pot. & charge weighted pot =   0.0010596768   0.0000049405
 
-  0- 27 dn SRE of pot. & charge weighted pot =   0.0010609697   0.0000060711
+  0- 27 dn SRE of pot. & charge weighted pot =   0.0010609698   0.0000060711
 
  SCF iter #  28
 
- Diagonalization time [sec] :       0.13,      tdiag_sum =        7.84
- Iteration time [sec]       :       0.21
+ Diagonalization time [sec] :       0.13,      tdiag_sum =        7.40
+ Iteration time [sec]       :       0.18
 
  Electrons in up, down spins:    7.00    5.00
  Net magnetic moment (in Bohr magnetons):    2.00
@@ -1843,7 +1846,7 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
     2        -1.3715323917       -18.6607954151    1.0000        8
     3        -0.9318913894       -12.6791278662    1.0000        1
     4        -0.8529423388       -11.6049628727    1.0000        7
-    5        -0.8529423379       -11.6049628604    1.0000        6
+    5        -0.8529423379       -11.6049628605    1.0000        6
     6        -0.3228044961        -4.3920134125    0.0000        3
     7        -0.3228044943        -4.3920133886    0.0000        2
     8         0.0237600895         0.3232750259    0.0000        1
@@ -1856,7 +1859,7 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
  Max and min values of charge density [e/bohr^3]:   4.5588E-01   3.3797E-13   dn
 
- Hartree potential time [sec]:       0.04
+ Hartree potential time [sec]:       0.02
 
    Eigenvalue Energy             =         -14.28166692 [Ry]
    Hartree Energy                =          85.05830359 [Ry]
@@ -1869,14 +1872,14 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
    Total Energy =           -63.71093108 [Ry]
    Energy/atom  =          -433.41909305 [eV]
 
-  0- 28 up SRE of pot. & charge weighted pot =   0.0000415081   0.0000015851
+  0- 28 up SRE of pot. & charge weighted pot =   0.0000415080   0.0000015851
 
   0- 28 dn SRE of pot. & charge weighted pot =   0.0000618521   0.0000020533
 
  SCF iter #  29
 
- Diagonalization time [sec] :       0.13,      tdiag_sum =        7.97
- Iteration time [sec]       :       0.20
+ Diagonalization time [sec] :       0.13,      tdiag_sum =        7.53
+ Iteration time [sec]       :       0.18
 
  Electrons in up, down spins:    7.00    5.00
  Net magnetic moment (in Bohr magnetons):    2.00
@@ -1899,7 +1902,7 @@ up State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
     1        -2.3333863726       -31.7475883078    1.0000        1
-    2        -1.3715336621       -18.6608127001    1.0000        8
+    2        -1.3715336621       -18.6608127002    1.0000        8
     3        -0.9318926769       -12.6791453833    1.0000        1
     4        -0.8529429806       -11.6049716049    1.0000        7
     5        -0.8529429798       -11.6049715946    1.0000        6
@@ -1915,7 +1918,7 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
  Max and min values of charge density [e/bohr^3]:   4.5588E-01   3.3699E-13   dn
 
- Hartree potential time [sec]:       0.04
+ Hartree potential time [sec]:       0.02
 
    Eigenvalue Energy             =         -14.28167583 [Ry]
    Hartree Energy                =          85.05830597 [Ry]
@@ -1928,7 +1931,7 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
    Total Energy =           -63.71093108 [Ry]
    Energy/atom  =          -433.41909305 [eV]
 
-  0- 29 up SRE of pot. & charge weighted pot =   0.0000580633   0.0000003221
+  0- 29 up SRE of pot. & charge weighted pot =   0.0000580632   0.0000003221
 
   0- 29 dn SRE of pot. & charge weighted pot =   0.0000711580   0.0000005926
 
@@ -1938,12 +1941,12 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
    E_x (start orbitals)          =         -11.20111516 [Ry]
    Total Energy (HSE03) of them   =         -63.92369537 [Ry]
    ACE operator: 11/11 orbitals (up/down), max|M - M^T|/max|M| = 9.3E-13
-   Exact exchange: 101 pair-density Poisson solves, 0.11 s of 1.05 s (FP64 CUDA Kronecker-product FD Poisson solve (order 12) on the 140x140x140 box, multipole boundary of order 9, erfc(w r)/r kernel, w = 0.106066/bohr as Coulomb minus/plus its Gaussian smoothing (ranks (15, 15, 15)); devices take tiles of 32-column orbital blocks; the pair densities of symmetry-sector orbitals in reflection-parity classes on the 70x70x70 octant)
+   Exact exchange: 101 pair-density Poisson solves, 0.10 s of 1.60 s (FP64 CUDA Kronecker-product FD Poisson solve (order 12) on the 140x140x140 box, multipole boundary of order 9, erfc(w r)/r kernel, w = 0.106066/bohr as Coulomb minus/plus its Gaussian smoothing (ranks (15, 15, 15)); devices take tiles of 32-column orbital blocks; the pair densities of symmetry-sector orbitals in reflection-parity classes on the 70x70x70 octant)
 
  SCF iter #   1
 
- Diagonalization time [sec] :       0.25,      tdiag_sum =        8.21
- Iteration time [sec]       :       0.31
+ Diagonalization time [sec] :       0.20,      tdiag_sum =        7.73
+ Iteration time [sec]       :       0.24
 
  Electrons in up, down spins:    7.00    5.00
  Net magnetic moment (in Bohr magnetons):    2.00
@@ -1955,7 +1958,7 @@ up State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
     3        -1.1759036516       -15.9991099035    1.0000        7
     4        -1.1759036491       -15.9991098691    1.0000        6
     5        -1.1440593777       -15.5658430806    1.0000        1
-    6        -0.6564595467        -8.9316573002    1.0000        2
+    6        -0.6564595467        -8.9316573001    1.0000        2
     7        -0.6564595436        -8.9316572579    1.0000        3
     8         0.0150810979         0.2051904024    0.0000        1
     9         0.0734953325         0.9999627948    0.0000        8
@@ -1982,7 +1985,7 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
  Max and min values of charge density [e/bohr^3]:   4.5475E-01   3.3937E-14   dn
 
- Hartree potential time [sec]:       0.04
+ Hartree potential time [sec]:       0.02
 
    Eigenvalue Energy             =         -16.35200213 [Ry]
    Hartree Energy                =          85.13555818 [Ry]
@@ -2004,8 +2007,8 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
  SCF iter #   2
 
- Diagonalization time [sec] :       0.22,      tdiag_sum =        8.44
- Iteration time [sec]       :       0.28
+ Diagonalization time [sec] :       0.21,      tdiag_sum =        7.94
+ Iteration time [sec]       :       0.26
 
  Electrons in up, down spins:    7.00    5.00
  Net magnetic moment (in Bohr magnetons):    2.00
@@ -2044,7 +2047,7 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
  Max and min values of charge density [e/bohr^3]:   4.5646E-01   2.9486E-14   dn
 
- Hartree potential time [sec]:       0.04
+ Hartree potential time [sec]:       0.02
 
    Eigenvalue Energy             =         -16.32981079 [Ry]
    Hartree Energy                =          85.14627223 [Ry]
@@ -2066,8 +2069,8 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
  SCF iter #   3
 
- Diagonalization time [sec] :       0.22,      tdiag_sum =        8.65
- Iteration time [sec]       :       0.29
+ Diagonalization time [sec] :       0.21,      tdiag_sum =        8.15
+ Iteration time [sec]       :       0.26
 
  Electrons in up, down spins:    7.00    5.00
  Net magnetic moment (in Bohr magnetons):    2.00
@@ -2092,7 +2095,7 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
     1        -2.5664381382       -34.9184440214    1.0000        1
     2        -1.5469571744       -21.0475899231    1.0000        8
     3        -1.0603764504       -14.4272699092    1.0000        1
-    4        -0.9439883879       -12.8437172077    1.0000        7
+    4        -0.9439883879       -12.8437172078    1.0000        7
     5        -0.9439883518       -12.8437167167    1.0000        6
     6        -0.2601179179        -3.5391123672    0.0000        3
     7        -0.2601178014        -3.5391107817    0.0000        2
@@ -2106,7 +2109,7 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
  Max and min values of charge density [e/bohr^3]:   4.5587E-01   8.7185E-14   dn
 
- Hartree potential time [sec]:       0.04
+ Hartree potential time [sec]:       0.02
 
    Eigenvalue Energy             =         -16.28649807 [Ry]
    Hartree Energy                =          85.12827617 [Ry]
@@ -2128,8 +2131,8 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
  SCF iter #   4
 
- Diagonalization time [sec] :       0.22,      tdiag_sum =        8.87
- Iteration time [sec]       :       0.29
+ Diagonalization time [sec] :       0.21,      tdiag_sum =        8.37
+ Iteration time [sec]       :       0.27
 
  Electrons in up, down spins:    7.00    5.00
  Net magnetic moment (in Bohr magnetons):    2.00
@@ -2168,7 +2171,7 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
  Max and min values of charge density [e/bohr^3]:   4.5628E-01   6.0453E-14   dn
 
- Hartree potential time [sec]:       0.04
+ Hartree potential time [sec]:       0.02
 
    Eigenvalue Energy             =         -16.28001894 [Ry]
    Hartree Energy                =          85.13515722 [Ry]
@@ -2190,8 +2193,8 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
  SCF iter #   5
 
- Diagonalization time [sec] :       0.22,      tdiag_sum =        9.09
- Iteration time [sec]       :       0.29
+ Diagonalization time [sec] :       0.21,      tdiag_sum =        8.58
+ Iteration time [sec]       :       0.27
 
  Electrons in up, down spins:    7.00    5.00
  Net magnetic moment (in Bohr magnetons):    2.00
@@ -2230,7 +2233,7 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
  Max and min values of charge density [e/bohr^3]:   4.5611E-01   8.0702E-14   dn
 
- Hartree potential time [sec]:       0.04
+ Hartree potential time [sec]:       0.02
 
    Eigenvalue Energy             =         -16.28031208 [Ry]
    Hartree Energy                =          85.13480240 [Ry]
@@ -2252,8 +2255,8 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
  SCF iter #   6
 
- Diagonalization time [sec] :       0.22,      tdiag_sum =        9.31
- Iteration time [sec]       :       0.29
+ Diagonalization time [sec] :       0.21,      tdiag_sum =        8.79
+ Iteration time [sec]       :       0.26
 
  Electrons in up, down spins:    7.00    5.00
  Net magnetic moment (in Bohr magnetons):    2.00
@@ -2292,7 +2295,7 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
  Max and min values of charge density [e/bohr^3]:   4.5621E-01   1.1340E-13   dn
 
- Hartree potential time [sec]:       0.04
+ Hartree potential time [sec]:       0.02
 
    Eigenvalue Energy             =         -16.28024771 [Ry]
    Hartree Energy                =          85.13603519 [Ry]
@@ -2314,8 +2317,8 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
  SCF iter #   7
 
- Diagonalization time [sec] :       0.22,      tdiag_sum =        9.53
- Iteration time [sec]       :       0.28
+ Diagonalization time [sec] :       0.21,      tdiag_sum =        9.01
+ Iteration time [sec]       :       0.26
 
  Electrons in up, down spins:    7.00    5.00
  Net magnetic moment (in Bohr magnetons):    2.00
@@ -2330,7 +2333,7 @@ up State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
     6        -0.6522566361        -8.8744733393    1.0000        2
     7        -0.6522565986        -8.8744728293    1.0000        3
     8         0.0203701288         0.2771518984    0.0000        1
-    9         0.0784425553         1.0672737193    0.0000        8
+    9         0.0784425553         1.0672737192    0.0000        8
    10         0.1007850759         1.3712615863    0.0000        7
    11         0.1007850875         1.3712617433    0.0000        6
 
@@ -2354,7 +2357,7 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
  Max and min values of charge density [e/bohr^3]:   4.5620E-01   1.4374E-13   dn
 
- Hartree potential time [sec]:       0.04
+ Hartree potential time [sec]:       0.02
 
    Eigenvalue Energy             =         -16.28104040 [Ry]
    Hartree Energy                =          85.13833277 [Ry]
@@ -2376,8 +2379,8 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
  SCF iter #   8
 
- Diagonalization time [sec] :       0.21,      tdiag_sum =        9.74
- Iteration time [sec]       :       0.28
+ Diagonalization time [sec] :       0.22,      tdiag_sum =        9.22
+ Iteration time [sec]       :       0.27
 
  Electrons in up, down spins:    7.00    5.00
  Net magnetic moment (in Bohr magnetons):    2.00
@@ -2416,7 +2419,7 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
  Max and min values of charge density [e/bohr^3]:   4.5622E-01   1.6337E-13   dn
 
- Hartree potential time [sec]:       0.04
+ Hartree potential time [sec]:       0.02
 
    Eigenvalue Energy             =         -16.28007653 [Ry]
    Hartree Energy                =          85.13859207 [Ry]
@@ -2434,12 +2437,12 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
   0-  8 up SRE of pot. & charge weighted pot =   0.0256420372   0.0005187889
 
-  0-  8 dn SRE of pot. & charge weighted pot =   0.0293454100   0.0006393176
+  0-  8 dn SRE of pot. & charge weighted pot =   0.0293454099   0.0006393176
 
  SCF iter #   9
 
- Diagonalization time [sec] :       0.21,      tdiag_sum =        9.95
- Iteration time [sec]       :       0.28
+ Diagonalization time [sec] :       0.29,      tdiag_sum =        9.51
+ Iteration time [sec]       :       0.34
 
  Electrons in up, down spins:    7.00    5.00
  Net magnetic moment (in Bohr magnetons):    2.00
@@ -2478,7 +2481,7 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
  Max and min values of charge density [e/bohr^3]:   4.5621E-01   1.7823E-13   dn
 
- Hartree potential time [sec]:       0.04
+ Hartree potential time [sec]:       0.02
 
    Eigenvalue Energy             =         -16.27958037 [Ry]
    Hartree Energy                =          85.13845929 [Ry]
@@ -2494,14 +2497,14 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
    Total Energy =           -63.92664323 [Ry]
    Energy/atom  =          -434.88656125 [eV]
 
-  0-  9 up SRE of pot. & charge weighted pot =   0.0258131068   0.0004870706
+  0-  9 up SRE of pot. & charge weighted pot =   0.0258131067   0.0004870706
 
-  0-  9 dn SRE of pot. & charge weighted pot =   0.0298088320   0.0006005545
+  0-  9 dn SRE of pot. & charge weighted pot =   0.0298088319   0.0006005545
 
  SCF iter #  10
 
- Diagonalization time [sec] :       0.21,      tdiag_sum =       10.17
- Iteration time [sec]       :       0.28
+ Diagonalization time [sec] :       0.24,      tdiag_sum =        9.75
+ Iteration time [sec]       :       0.29
 
  Electrons in up, down spins:    7.00    5.00
  Net magnetic moment (in Bohr magnetons):    2.00
@@ -2540,7 +2543,7 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
  Max and min values of charge density [e/bohr^3]:   4.5623E-01   1.8888E-13   dn
 
- Hartree potential time [sec]:       0.04
+ Hartree potential time [sec]:       0.02
 
    Eigenvalue Energy             =         -16.27938653 [Ry]
    Hartree Energy                =          85.13877475 [Ry]
@@ -2556,14 +2559,14 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
    Total Energy =           -63.92664320 [Ry]
    Energy/atom  =          -434.88656106 [eV]
 
-  0- 10 up SRE of pot. & charge weighted pot =   0.0241822097   0.0005463200
+  0- 10 up SRE of pot. & charge weighted pot =   0.0241822095   0.0005463200
 
-  0- 10 dn SRE of pot. & charge weighted pot =   0.0286448825   0.0006470338
+  0- 10 dn SRE of pot. & charge weighted pot =   0.0286448823   0.0006470338
 
  SCF iter #  11
 
- Diagonalization time [sec] :       0.22,      tdiag_sum =       10.38
- Iteration time [sec]       :       0.28
+ Diagonalization time [sec] :       0.21,      tdiag_sum =        9.96
+ Iteration time [sec]       :       0.26
 
  Electrons in up, down spins:    7.00    5.00
  Net magnetic moment (in Bohr magnetons):    2.00
@@ -2571,26 +2574,26 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 up State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
     1        -2.6927517307       -36.6370414977    1.0000        1
-    2        -1.7469338133       -23.7684320764    1.0000        8
-    3        -1.1703163270       -15.9230898814    1.0000        7
+    2        -1.7469338133       -23.7684320763    1.0000        8
+    3        -1.1703163270       -15.9230898813    1.0000        7
     4        -1.1703163083       -15.9230896280    1.0000        6
     5        -1.1381953232       -15.4860579288    1.0000        1
     6        -0.6522376080        -8.8742144468    1.0000        2
-    7        -0.6522375898        -8.8742141988    1.0000        3
+    7        -0.6522375898        -8.8742141987    1.0000        3
     8         0.0203271820         0.2765675734    0.0000        1
     9         0.0783979472         1.0666667894    0.0000        8
    10         0.1007396372         1.3706433564    0.0000        7
-   11         0.1007396449         1.3706434606    0.0000        6
+   11         0.1007396449         1.3706434605    0.0000        6
 
 
 dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
     1        -2.5657944488       -34.9096861111    1.0000        1
     2        -1.5461060662       -21.0360099149    1.0000        8
-    3        -1.0597210843       -14.4183531288    1.0000        1
-    4        -0.9430917173       -12.8315172871    1.0000        7
-    5        -0.9430917128       -12.8315172259    1.0000        6
-    6        -0.2591512374        -3.5259599055    0.0000        3
+    3        -1.0597210843       -14.4183531287    1.0000        1
+    4        -0.9430917173       -12.8315172870    1.0000        7
+    5        -0.9430917128       -12.8315172258    1.0000        6
+    6        -0.2591512374        -3.5259599054    0.0000        3
     7        -0.2591512226        -3.5259597041    0.0000        2
     8         0.0305914124         0.4162206392    0.0000        1
     9         0.0970021941         1.3197924530    0.0000        8
@@ -2602,7 +2605,7 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
  Max and min values of charge density [e/bohr^3]:   4.5619E-01   1.9897E-13   dn
 
- Hartree potential time [sec]:       0.03
+ Hartree potential time [sec]:       0.02
 
    Eigenvalue Energy             =         -16.28079373 [Ry]
    Hartree Energy                =          85.13842079 [Ry]
@@ -2618,42 +2621,42 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
    Total Energy =           -63.92664336 [Ry]
    Energy/atom  =          -434.88656211 [eV]
 
-  0- 11 up SRE of pot. & charge weighted pot =   0.0165417983   0.0004999149
+  0- 11 up SRE of pot. & charge weighted pot =   0.0165417980   0.0004999149
 
-  0- 11 dn SRE of pot. & charge weighted pot =   0.0214317999   0.0005889122
+  0- 11 dn SRE of pot. & charge weighted pot =   0.0214317994   0.0005889122
 
  SCF iter #  12
 
- Diagonalization time [sec] :       0.21,      tdiag_sum =       10.60
- Iteration time [sec]       :       0.28
+ Diagonalization time [sec] :       0.21,      tdiag_sum =       10.17
+ Iteration time [sec]       :       0.27
 
  Electrons in up, down spins:    7.00    5.00
  Net magnetic moment (in Bohr magnetons):    2.00
 
 up State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
-    1        -2.6926279293       -36.6353570809    1.0000        1
-    2        -1.7467825970       -23.7663746577    1.0000        8
+    1        -2.6926279293       -36.6353570808    1.0000        1
+    2        -1.7467825970       -23.7663746576    1.0000        8
     3        -1.1701877573       -15.9213405878    1.0000        6
-    4        -1.1701877345       -15.9213402783    1.0000        7
+    4        -1.1701877345       -15.9213402782    1.0000        7
     5        -1.1380531705       -15.4841238271    1.0000        1
-    6        -0.6521015198        -8.8723628575    1.0000        3
+    6        -0.6521015198        -8.8723628574    1.0000        3
     7        -0.6521014936        -8.8723625013    1.0000        2
     8         0.0202503883         0.2755227326    0.0000        1
-    9         0.0783194066         1.0655981817    0.0000        8
+    9         0.0783194066         1.0655981818    0.0000        8
    10         0.1006542220         1.3694812138    0.0000        6
    11         0.1006542244         1.3694812465    0.0000        7
 
 
 dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
-    1        -2.5656152107       -34.9072474331    1.0000        1
-    2        -1.5458663044       -21.0327477638    1.0000        8
-    3        -1.0595267240       -14.4157087007    1.0000        1
-    4        -0.9429229427       -12.8292209734    1.0000        6
+    1        -2.5656152106       -34.9072474330    1.0000        1
+    2        -1.5458663044       -21.0327477637    1.0000        8
+    3        -1.0595267239       -14.4157087007    1.0000        1
+    4        -0.9429229427       -12.8292209733    1.0000        6
     5        -0.9429229284       -12.8292207794    1.0000        7
-    6        -0.2589214068        -3.5228328767    0.0000        2
-    7        -0.2589214062        -3.5228328678    0.0000        3
+    6        -0.2589214068        -3.5228328766    0.0000        2
+    7        -0.2589214061        -3.5228328678    0.0000        3
     8         0.0306302088         0.4167484945    0.0000        1
     9         0.0969664745         1.3193064587    0.0000        8
    10         0.1102274038         1.4997320113    0.0000        6
@@ -2664,7 +2667,7 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
  Max and min values of charge density [e/bohr^3]:   4.5615E-01   1.8895E-13   dn
 
- Hartree potential time [sec]:       0.04
+ Hartree potential time [sec]:       0.02
 
    Eigenvalue Energy             =         -16.27889631 [Ry]
    Hartree Energy                =          85.13601547 [Ry]
@@ -2680,23 +2683,23 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
    Total Energy =           -63.92664350 [Ry]
    Energy/atom  =          -434.88656309 [eV]
 
-  0- 12 up SRE of pot. & charge weighted pot =   0.0136981461   0.0001295011
+  0- 12 up SRE of pot. & charge weighted pot =   0.0136981458   0.0001295011
 
-  0- 12 dn SRE of pot. & charge weighted pot =   0.0133706452   0.0001283346
+  0- 12 dn SRE of pot. & charge weighted pot =   0.0133706451   0.0001283346
 
  SCF iter #  13
 
- Diagonalization time [sec] :       0.21,      tdiag_sum =       10.81
- Iteration time [sec]       :       0.28
+ Diagonalization time [sec] :       0.21,      tdiag_sum =       10.39
+ Iteration time [sec]       :       0.26
 
  Electrons in up, down spins:    7.00    5.00
  Net magnetic moment (in Bohr magnetons):    2.00
 
 up State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
-    1        -2.6925288682       -36.6340092753    1.0000        1
+    1        -2.6925288682       -36.6340092752    1.0000        1
     2        -1.7467463837       -23.7658819467    1.0000        8
-    3        -1.1701274360       -15.9205198690    1.0000        6
+    3        -1.1701274360       -15.9205198689    1.0000        6
     4        -1.1701274346       -15.9205198492    1.0000        7
     5        -1.1380069837       -15.4834954189    1.0000        1
     6        -0.6520512099        -8.8716783512    1.0000        3
@@ -2726,7 +2729,7 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
  Max and min values of charge density [e/bohr^3]:   4.5616E-01   1.9784E-13   dn
 
- Hartree potential time [sec]:       0.04
+ Hartree potential time [sec]:       0.02
 
    Eigenvalue Energy             =         -16.27830195 [Ry]
    Hartree Energy                =          85.13573964 [Ry]
@@ -2756,25 +2759,25 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
    Total Energy (HSE03)           =         -63.92690023 [Ry]
    Inner SCF: stopped below a residual of 8.20E-05 Ry (adaptive criterion)
    ACE operator: 11/11 orbitals (up/down), max|M - M^T|/max|M| = 6.2E-13
-   Exact exchange: 101 pair-density Poisson solves, 0.11 s of 0.19 s (FP64 CUDA Kronecker-product FD Poisson solve (order 12) on the 140x140x140 box, multipole boundary of order 9, erfc(w r)/r kernel, w = 0.106066/bohr as Coulomb minus/plus its Gaussian smoothing (ranks (15, 15, 15)); devices take tiles of 32-column orbital blocks; the pair densities of symmetry-sector orbitals in reflection-parity classes on the 70x70x70 octant)
+   Exact exchange: 101 pair-density Poisson solves, 0.10 s of 0.18 s (FP64 CUDA Kronecker-product FD Poisson solve (order 12) on the 140x140x140 box, multipole boundary of order 9, erfc(w r)/r kernel, w = 0.106066/bohr as Coulomb minus/plus its Gaussian smoothing (ranks (15, 15, 15)); devices take tiles of 32-column orbital blocks; the pair densities of symmetry-sector orbitals in reflection-parity classes on the 70x70x70 octant)
 
  SCF iter #   1
 
- Diagonalization time [sec] :       0.22,      tdiag_sum =       11.03
- Iteration time [sec]       :       0.28
+ Diagonalization time [sec] :       0.22,      tdiag_sum =       10.60
+ Iteration time [sec]       :       0.26
 
  Electrons in up, down spins:    7.00    5.00
  Net magnetic moment (in Bohr magnetons):    2.00
 
 up State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
-    1        -2.6936313979       -36.6490100730    1.0000        1
+    1        -2.6936313979       -36.6490100731    1.0000        1
     2        -1.7486988398       -23.7924466747    1.0000        8
     3        -1.1712983814       -15.9364515173    1.0000        6
     4        -1.1712983774       -15.9364514637    1.0000        7
     5        -1.1385843416       -15.4913508344    1.0000        1
     6        -0.6536479958        -8.8934039013    1.0000        3
-    7        -0.6536479906        -8.8934038309    1.0000        2
+    7        -0.6536479906        -8.8934038310    1.0000        2
     8         0.0204286649         0.2779483294    0.0000        1
     9         0.0784529866         1.0674156446    0.0000        8
    10         0.1007658173         1.3709995567    0.0000        6
@@ -2783,7 +2786,7 @@ up State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
 dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
-    1        -2.5651731289       -34.9012325568    1.0000        1
+    1        -2.5651731289       -34.9012325569    1.0000        1
     2        -1.5455811098       -21.0288674631    1.0000        8
     3        -1.0604732932       -14.4285875328    1.0000        1
     4        -0.9419578642       -12.8160903087    1.0000        7
@@ -2800,7 +2803,7 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
  Max and min values of charge density [e/bohr^3]:   4.5658E-01   1.1813E-13   dn
 
- Hartree potential time [sec]:       0.04
+ Hartree potential time [sec]:       0.02
 
    Eigenvalue Energy             =         -16.28595058 [Ry]
    Hartree Energy                =          85.14421294 [Ry]
@@ -2816,14 +2819,14 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
    Total Energy =           -63.92692663 [Ry]
    Energy/atom  =          -434.88848918 [eV]
 
-  0-  1 up SRE of pot. & charge weighted pot =   0.0328626686   0.0006988297
+  0-  1 up SRE of pot. & charge weighted pot =   0.0328626685   0.0006988297
 
-  0-  1 dn SRE of pot. & charge weighted pot =   0.0144341247   0.0008516468
+  0-  1 dn SRE of pot. & charge weighted pot =   0.0144341246   0.0008516468
 
  SCF iter #   2
 
- Diagonalization time [sec] :       0.23,      tdiag_sum =       11.26
- Iteration time [sec]       :       0.29
+ Diagonalization time [sec] :       0.22,      tdiag_sum =       10.82
+ Iteration time [sec]       :       0.26
 
  Electrons in up, down spins:    7.00    5.00
  Net magnetic moment (in Bohr magnetons):    2.00
@@ -2835,7 +2838,7 @@ up State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
     3        -1.1711302988       -15.9341646193    1.0000        6
     4        -1.1711302977       -15.9341646044    1.0000        7
     5        -1.1383421577       -15.4880557292    1.0000        1
-    6        -0.6534998363        -8.8913880723    1.0000        3
+    6        -0.6534998363        -8.8913880724    1.0000        3
     7        -0.6534998357        -8.8913880649    1.0000        2
     8         0.0205843044         0.2800659284    0.0000        1
     9         0.0785964571         1.0693676758    0.0000        8
@@ -2862,7 +2865,7 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
  Max and min values of charge density [e/bohr^3]:   4.5661E-01   1.3745E-13   dn
 
- Hartree potential time [sec]:       0.04
+ Hartree potential time [sec]:       0.02
 
    Eigenvalue Energy             =         -16.28353377 [Ry]
    Hartree Energy                =          85.14485502 [Ry]
@@ -2884,8 +2887,8 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
  SCF iter #   3
 
- Diagonalization time [sec] :       0.22,      tdiag_sum =       11.48
- Iteration time [sec]       :       0.28
+ Diagonalization time [sec] :       0.21,      tdiag_sum =       11.03
+ Iteration time [sec]       :       0.26
 
  Electrons in up, down spins:    7.00    5.00
  Net magnetic moment (in Bohr magnetons):    2.00
@@ -2924,7 +2927,7 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
  Max and min values of charge density [e/bohr^3]:   4.5660E-01   1.4797E-13   dn
 
- Hartree potential time [sec]:       0.04
+ Hartree potential time [sec]:       0.02
 
    Eigenvalue Energy             =         -16.27995317 [Ry]
    Hartree Energy                =          85.14338615 [Ry]
@@ -2942,12 +2945,12 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
   0-  3 up SRE of pot. & charge weighted pot =   0.0076075818   0.0001790740
 
-  0-  3 dn SRE of pot. & charge weighted pot =   0.0020408496   0.0001991873
+  0-  3 dn SRE of pot. & charge weighted pot =   0.0020408497   0.0001991873
 
  SCF iter #   4
 
- Diagonalization time [sec] :       0.22,      tdiag_sum =       11.70
- Iteration time [sec]       :       0.28
+ Diagonalization time [sec] :       0.21,      tdiag_sum =       11.24
+ Iteration time [sec]       :       0.26
 
  Electrons in up, down spins:    7.00    5.00
  Net magnetic moment (in Bohr magnetons):    2.00
@@ -2986,7 +2989,7 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
  Max and min values of charge density [e/bohr^3]:   4.5660E-01   1.6388E-13   dn
 
- Hartree potential time [sec]:       0.04
+ Hartree potential time [sec]:       0.02
 
    Eigenvalue Energy             =         -16.27893956 [Ry]
    Hartree Energy                =          85.14347124 [Ry]
@@ -3008,8 +3011,8 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
  SCF iter #   5
 
- Diagonalization time [sec] :       0.21,      tdiag_sum =       11.91
- Iteration time [sec]       :       0.28
+ Diagonalization time [sec] :       0.21,      tdiag_sum =       11.45
+ Iteration time [sec]       :       0.27
 
  Electrons in up, down spins:    7.00    5.00
  Net magnetic moment (in Bohr magnetons):    2.00
@@ -3048,7 +3051,7 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
  Max and min values of charge density [e/bohr^3]:   4.5661E-01   1.7816E-13   dn
 
- Hartree potential time [sec]:       0.04
+ Hartree potential time [sec]:       0.02
 
    Eigenvalue Energy             =         -16.27890908 [Ry]
    Hartree Energy                =          85.14356543 [Ry]
@@ -3070,8 +3073,8 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
  SCF iter #   6
 
- Diagonalization time [sec] :       0.21,      tdiag_sum =       12.12
- Iteration time [sec]       :       0.27
+ Diagonalization time [sec] :       0.21,      tdiag_sum =       11.66
+ Iteration time [sec]       :       0.26
 
  Electrons in up, down spins:    7.00    5.00
  Net magnetic moment (in Bohr magnetons):    2.00
@@ -3082,10 +3085,10 @@ up State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
     2        -1.7481694340       -23.7852436849    1.0000        8
     3        -1.1708369871       -15.9301738792    1.0000        6
     4        -1.1708369828       -15.9301738207    1.0000        7
-    5        -1.1379057017       -15.4821173964    1.0000        1
-    6        -0.6532864087        -8.8884842202    1.0000        3
+    5        -1.1379057017       -15.4821173965    1.0000        1
+    6        -0.6532864088        -8.8884842202    1.0000        3
     7        -0.6532864037        -8.8884841511    1.0000        2
-    8         0.0208957043         0.2843027738    0.0000        1
+    8         0.0208957043         0.2843027739    0.0000        1
     9         0.0788622542         1.0729840582    0.0000        8
    10         0.1012030740         1.3769487845    0.0000        6
    11         0.1012030758         1.3769488085    0.0000        7
@@ -3110,7 +3113,7 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
  Max and min values of charge density [e/bohr^3]:   4.5661E-01   1.8658E-13   dn
 
- Hartree potential time [sec]:       0.04
+ Hartree potential time [sec]:       0.02
 
    Eigenvalue Energy             =         -16.27899908 [Ry]
    Hartree Energy                =          85.14381937 [Ry]
@@ -3126,14 +3129,14 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
    Total Energy =           -63.92693035 [Ry]
    Energy/atom  =          -434.88851451 [eV]
 
-  0-  6 up SRE of pot. & charge weighted pot =   0.0012611129   0.0000687031
+  0-  6 up SRE of pot. & charge weighted pot =   0.0012611130   0.0000687031
 
   0-  6 dn SRE of pot. & charge weighted pot =   0.0006121488   0.0000647436
 
  SCF iter #   7
 
- Diagonalization time [sec] :       0.20,      tdiag_sum =       12.32
- Iteration time [sec]       :       0.27
+ Diagonalization time [sec] :       0.20,      tdiag_sum =       11.86
+ Iteration time [sec]       :       0.25
 
  Electrons in up, down spins:    7.00    5.00
  Net magnetic moment (in Bohr magnetons):    2.00
@@ -3172,7 +3175,7 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
  Max and min values of charge density [e/bohr^3]:   4.5661E-01   1.9203E-13   dn
 
- Hartree potential time [sec]:       0.04
+ Hartree potential time [sec]:       0.02
 
    Eigenvalue Energy             =         -16.27862740 [Ry]
    Hartree Energy                =          85.14358273 [Ry]
@@ -3194,8 +3197,8 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
  SCF iter #   8
 
- Diagonalization time [sec] :       0.19,      tdiag_sum =       12.51
- Iteration time [sec]       :       0.26
+ Diagonalization time [sec] :       0.19,      tdiag_sum =       12.05
+ Iteration time [sec]       :       0.25
 
  Electrons in up, down spins:    7.00    5.00
  Net magnetic moment (in Bohr magnetons):    2.00
@@ -3234,7 +3237,7 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
  Max and min values of charge density [e/bohr^3]:   4.5661E-01   1.9628E-13   dn
 
- Hartree potential time [sec]:       0.04
+ Hartree potential time [sec]:       0.02
 
    Eigenvalue Energy             =         -16.27858078 [Ry]
    Hartree Energy                =          85.14353423 [Ry]
@@ -3256,8 +3259,8 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
  SCF iter #   9
 
- Diagonalization time [sec] :       0.19,      tdiag_sum =       12.70
- Iteration time [sec]       :       0.26
+ Diagonalization time [sec] :       0.19,      tdiag_sum =       12.24
+ Iteration time [sec]       :       0.24
 
  Electrons in up, down spins:    7.00    5.00
  Net magnetic moment (in Bohr magnetons):    2.00
@@ -3296,7 +3299,7 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
  Max and min values of charge density [e/bohr^3]:   4.5661E-01   1.9937E-13   dn
 
- Hartree potential time [sec]:       0.04
+ Hartree potential time [sec]:       0.02
 
    Eigenvalue Energy             =         -16.27869420 [Ry]
    Hartree Energy                =          85.14355590 [Ry]
@@ -3312,21 +3315,21 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
    Total Energy =           -63.92693037 [Ry]
    Energy/atom  =          -434.88851463 [eV]
 
-  0-  9 up SRE of pot. & charge weighted pot =   0.0017224881   0.0000103235
+  0-  9 up SRE of pot. & charge weighted pot =   0.0017224882   0.0000103235
 
   0-  9 dn SRE of pot. & charge weighted pot =   0.0018362420   0.0000183286
 
  SCF iter #  10
 
- Diagonalization time [sec] :       0.18,      tdiag_sum =       12.89
- Iteration time [sec]       :       0.25
+ Diagonalization time [sec] :       0.18,      tdiag_sum =       12.42
+ Iteration time [sec]       :       0.23
 
  Electrons in up, down spins:    7.00    5.00
  Net magnetic moment (in Bohr magnetons):    2.00
 
 up State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
-    1        -2.6931321360       -36.6422172159    1.0000        1
+    1        -2.6931321360       -36.6422172160    1.0000        1
     2        -1.7481432486       -23.7848874120    1.0000        8
     3        -1.1708138370       -15.9298589033    1.0000        6
     4        -1.1708138334       -15.9298588541    1.0000        7
@@ -3358,7 +3361,7 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
  Max and min values of charge density [e/bohr^3]:   4.5661E-01   2.0097E-13   dn
 
- Hartree potential time [sec]:       0.04
+ Hartree potential time [sec]:       0.02
 
    Eigenvalue Energy             =         -16.27870698 [Ry]
    Hartree Energy                =          85.14358994 [Ry]
@@ -3374,14 +3377,14 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
    Total Energy =           -63.92693037 [Ry]
    Energy/atom  =          -434.88851464 [eV]
 
-  0- 10 up SRE of pot. & charge weighted pot =   0.0017212881   0.0000170154
+  0- 10 up SRE of pot. & charge weighted pot =   0.0017212882   0.0000170154
 
-  0- 10 dn SRE of pot. & charge weighted pot =   0.0020510017   0.0000201626
+  0- 10 dn SRE of pot. & charge weighted pot =   0.0020510018   0.0000201626
 
  SCF iter #  11
 
- Diagonalization time [sec] :       0.18,      tdiag_sum =       13.07
- Iteration time [sec]       :       0.25
+ Diagonalization time [sec] :       0.18,      tdiag_sum =       12.60
+ Iteration time [sec]       :       0.23
 
  Electrons in up, down spins:    7.00    5.00
  Net magnetic moment (in Bohr magnetons):    2.00
@@ -3394,11 +3397,11 @@ up State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
     4        -1.1708127164       -15.9298436567    1.0000        7
     5        -1.1378815518       -15.4817888179    1.0000        1
     6        -0.6532571273        -8.8880858220    1.0000        3
-    7        -0.6532571233        -8.8880857684    1.0000        2
+    7        -0.6532571233        -8.8880857683    1.0000        2
     8         0.0208970880         0.2843215999    0.0000        1
     9         0.0788657005         1.0730309476    0.0000        8
    10         0.1012036157         1.3769561550    0.0000        6
-   11         0.1012036172         1.3769561751    0.0000        7
+   11         0.1012036172         1.3769561750    0.0000        7
 
 
 dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
@@ -3420,7 +3423,7 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
  Max and min values of charge density [e/bohr^3]:   4.5661E-01   2.0278E-13   dn
 
- Hartree potential time [sec]:       0.04
+ Hartree potential time [sec]:       0.02
 
    Eigenvalue Energy             =         -16.27871099 [Ry]
    Hartree Energy                =          85.14356583 [Ry]
@@ -3442,8 +3445,8 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
  SCF iter #  12
 
- Diagonalization time [sec] :       0.18,      tdiag_sum =       13.25
- Iteration time [sec]       :       0.25
+ Diagonalization time [sec] :       0.18,      tdiag_sum =       12.78
+ Iteration time [sec]       :       0.23
 
  Electrons in up, down spins:    7.00    5.00
  Net magnetic moment (in Bohr magnetons):    2.00
@@ -3471,7 +3474,7 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
     4        -0.9411906709       -12.8056520302    1.0000        7
     5        -0.9411906705       -12.8056520245    1.0000        6
     6        -0.2564018950        -3.4885529034    0.0000        2
-    7        -0.2564018927        -3.4885528720    0.0000        3
+    7        -0.2564018927        -3.4885528721    0.0000        3
     8         0.0306096265         0.4164684559    0.0000        1
     9         0.0971841955         1.3222687272    0.0000        8
    10         0.1103075822         1.5008229018    0.0000        7
@@ -3482,7 +3485,7 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
  Max and min values of charge density [e/bohr^3]:   4.5661E-01   2.0341E-13   dn
 
- Hartree potential time [sec]:       0.04
+ Hartree potential time [sec]:       0.02
 
    Eigenvalue Energy             =         -16.27859492 [Ry]
    Hartree Energy                =          85.14351419 [Ry]
@@ -3498,53 +3501,53 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
    Total Energy =           -63.92693037 [Ry]
    Energy/atom  =          -434.88851464 [eV]
 
-  0- 12 up SRE of pot. & charge weighted pot =   0.0021062026   0.0000069074
+  0- 12 up SRE of pot. & charge weighted pot =   0.0021062028   0.0000069074
 
-  0- 12 dn SRE of pot. & charge weighted pot =   0.0022886082   0.0000089373
+  0- 12 dn SRE of pot. & charge weighted pot =   0.0022886083   0.0000089373
 
  SCF iter #  13
 
- Diagonalization time [sec] :       0.18,      tdiag_sum =       13.44
- Iteration time [sec]       :       0.25
+ Diagonalization time [sec] :       0.18,      tdiag_sum =       12.96
+ Iteration time [sec]       :       0.23
 
  Electrons in up, down spins:    7.00    5.00
  Net magnetic moment (in Bohr magnetons):    2.00
 
 up State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
-    1        -2.6931177865       -36.6420219802    1.0000        1
+    1        -2.6931177866       -36.6420219803    1.0000        1
     2        -1.7481280849       -23.7846810979    1.0000        8
     3        -1.1708008079       -15.9296816320    1.0000        6
     4        -1.1708008049       -15.9296815914    1.0000        7
-    5        -1.1378673879       -15.4815961058    1.0000        1
-    6        -0.6532451431        -8.8879227675    1.0000        3
+    5        -1.1378673879       -15.4815961059    1.0000        1
+    6        -0.6532451431        -8.8879227676    1.0000        3
     7        -0.6532451393        -8.8879227164    1.0000        2
     8         0.0209030232         0.2844023534    0.0000        1
     9         0.0788714030         1.0731085356    0.0000        8
-   10         0.1012089741         1.3770290599    0.0000        6
+   10         0.1012089741         1.3770290598    0.0000        6
    11         0.1012089755         1.3770290794    0.0000        7
 
 
 dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
-    1        -2.5644241611       -34.8910422506    1.0000        1
-    2        -1.5447491810       -21.0175484066    1.0000        8
-    3        -1.0597971508       -14.4193880742    1.0000        1
-    4        -0.9411872755       -12.8056058335    1.0000        7
-    5        -0.9411872750       -12.8056058263    1.0000        6
-    6        -0.2563983124        -3.4885041584    0.0000        2
-    7        -0.2563983100        -3.4885041266    0.0000        3
+    1        -2.5644241611       -34.8910422507    1.0000        1
+    2        -1.5447491810       -21.0175484067    1.0000        8
+    3        -1.0597971508       -14.4193880743    1.0000        1
+    4        -0.9411872755       -12.8056058336    1.0000        7
+    5        -0.9411872750       -12.8056058264    1.0000        6
+    6        -0.2563983124        -3.4885041585    0.0000        2
+    7        -0.2563983100        -3.4885041267    0.0000        3
     8         0.0306101775         0.4164759526    0.0000        1
     9         0.0971849473         1.3222789566    0.0000        8
    10         0.1103080266         1.5008289481    0.0000        7
-   11         0.1103080387         1.5008291128    0.0000        6
+   11         0.1103080387         1.5008291127    0.0000        6
 
 
  Max and min values of charge density [e/bohr^3]:   6.5865E-01   3.7387E-14   up
 
  Max and min values of charge density [e/bohr^3]:   4.5661E-01   2.0431E-13   dn
 
- Hartree potential time [sec]:       0.04
+ Hartree potential time [sec]:       0.02
 
    Eigenvalue Energy             =         -16.27855020 [Ry]
    Hartree Energy                =          85.14347353 [Ry]
@@ -3560,14 +3563,14 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
    Total Energy =           -63.92693037 [Ry]
    Energy/atom  =          -434.88851465 [eV]
 
-  0- 13 up SRE of pot. & charge weighted pot =   0.0020731084   0.0000136531
+  0- 13 up SRE of pot. & charge weighted pot =   0.0020731087   0.0000136531
 
-  0- 13 dn SRE of pot. & charge weighted pot =   0.0022774068   0.0000081960
+  0- 13 dn SRE of pot. & charge weighted pot =   0.0022774072   0.0000081960
 
  SCF iter #  14
 
- Diagonalization time [sec] :       0.18,      tdiag_sum =       13.62
- Iteration time [sec]       :       0.25
+ Diagonalization time [sec] :       0.18,      tdiag_sum =       13.15
+ Iteration time [sec]       :       0.23
 
  Electrons in up, down spins:    7.00    5.00
  Net magnetic moment (in Bohr magnetons):    2.00
@@ -3577,10 +3580,10 @@ up State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
     1        -2.6931187520       -36.6420351158    1.0000        1
     2        -1.7481291062       -23.7846949925    1.0000        8
     3        -1.1708014694       -15.9296906330    1.0000        6
-    4        -1.1708014667       -15.9296905959    1.0000        7
+    4        -1.1708014667       -15.9296905958    1.0000        7
     5        -1.1378681170       -15.4816060257    1.0000        1
     6        -0.6532465964        -8.8879425415    1.0000        3
-    7        -0.6532465929        -8.8879424930    1.0000        2
+    7        -0.6532465928        -8.8879424930    1.0000        2
     8         0.0209039538         0.2844150146    0.0000        1
     9         0.0788717809         1.0731136767    0.0000        8
    10         0.1012098011         1.3770403112    0.0000        6
@@ -3589,10 +3592,10 @@ up State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
 dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
-    1        -2.5644216063       -34.8910074916    1.0000        1
+    1        -2.5644216063       -34.8910074917    1.0000        1
     2        -1.5447469400       -21.0175179162    1.0000        8
     3        -1.0597970489       -14.4193866884    1.0000        1
-    4        -0.9411848892       -12.8055733657    1.0000        7
+    4        -0.9411848892       -12.8055733658    1.0000        7
     5        -0.9411848883       -12.8055733532    1.0000        6
     6        -0.2563947130        -3.4884551857    0.0000        2
     7        -0.2563947104        -3.4884551509    0.0000        3
@@ -3606,7 +3609,7 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
  Max and min values of charge density [e/bohr^3]:   4.5661E-01   2.0493E-13   dn
 
- Hartree potential time [sec]:       0.04
+ Hartree potential time [sec]:       0.02
 
    Eigenvalue Energy             =         -16.27854747 [Ry]
    Hartree Energy                =          85.14345194 [Ry]
@@ -3622,14 +3625,14 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
    Total Energy =           -63.92693037 [Ry]
    Energy/atom  =          -434.88851465 [eV]
 
-  0- 14 up SRE of pot. & charge weighted pot =   0.0013618904   0.0000138034
+  0- 14 up SRE of pot. & charge weighted pot =   0.0013618912   0.0000138034
 
-  0- 14 dn SRE of pot. & charge weighted pot =   0.0015527730   0.0000099931
+  0- 14 dn SRE of pot. & charge weighted pot =   0.0015527739   0.0000099931
 
  SCF iter #  15
 
- Diagonalization time [sec] :       0.18,      tdiag_sum =       13.80
- Iteration time [sec]       :       0.25
+ Diagonalization time [sec] :       0.18,      tdiag_sum =       13.33
+ Iteration time [sec]       :       0.23
 
  Electrons in up, down spins:    7.00    5.00
  Net magnetic moment (in Bohr magnetons):    2.00
@@ -3652,15 +3655,15 @@ up State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
     1        -2.5644271874       -34.8910834265    1.0000        1
-    2        -1.5447507042       -21.0175691307    1.0000        8
+    2        -1.5447507042       -21.0175691308    1.0000        8
     3        -1.0598026689       -14.4194631531    1.0000        1
     4        -0.9411886491       -12.8056245214    1.0000        7
-    5        -0.9411886478       -12.8056245049    1.0000        6
+    5        -0.9411886479       -12.8056245049    1.0000        6
     6        -0.2563970336        -3.4884867604    0.0000        2
-    7        -0.2563970315        -3.4884867306    0.0000        3
+    7        -0.2563970315        -3.4884867307    0.0000        3
     8         0.0306112683         0.4164907936    0.0000        1
-    9         0.0971838121         1.3222635108    0.0000        8
-   10         0.1103094327         1.5008480790    0.0000        7
+    9         0.0971838121         1.3222635107    0.0000        8
+   10         0.1103094327         1.5008480789    0.0000        7
    11         0.1103094402         1.5008481816    0.0000        6
 
 
@@ -3668,7 +3671,7 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
  Max and min values of charge density [e/bohr^3]:   4.5661E-01   2.0575E-13   dn
 
- Hartree potential time [sec]:       0.04
+ Hartree potential time [sec]:       0.02
 
    Eigenvalue Energy             =         -16.27862884 [Ry]
    Hartree Energy                =          85.14349026 [Ry]
@@ -3684,9 +3687,9 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
    Total Energy =           -63.92693038 [Ry]
    Energy/atom  =          -434.88851465 [eV]
 
-  0- 15 up SRE of pot. & charge weighted pot =   0.0001476574   0.0000014743
+  0- 15 up SRE of pot. & charge weighted pot =   0.0001476578   0.0000014743
 
-  0- 15 dn SRE of pot. & charge weighted pot =   0.0003091043   0.0000038204
+  0- 15 dn SRE of pot. & charge weighted pot =   0.0003091048   0.0000038204
 
 
  Fock loop iteration   2 (HSE03): inner SCF of 15 iterations
@@ -3698,12 +3701,12 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
    Total Energy (HSE03)           =         -63.92693465 [Ry]
    Inner SCF: stopped below a residual of 8.52E-06 Ry (adaptive criterion)
    ACE operator: 11/11 orbitals (up/down), max|M - M^T|/max|M| = 5.9E-13
-   Exact exchange: 101 pair-density Poisson solves, 0.10 s of 0.18 s (FP64 CUDA Kronecker-product FD Poisson solve (order 12) on the 140x140x140 box, multipole boundary of order 9, erfc(w r)/r kernel, w = 0.106066/bohr as Coulomb minus/plus its Gaussian smoothing (ranks (15, 15, 15)); devices take tiles of 32-column orbital blocks; the pair densities of symmetry-sector orbitals in reflection-parity classes on the 70x70x70 octant)
+   Exact exchange: 101 pair-density Poisson solves, 0.11 s of 0.21 s (FP64 CUDA Kronecker-product FD Poisson solve (order 12) on the 140x140x140 box, multipole boundary of order 9, erfc(w r)/r kernel, w = 0.106066/bohr as Coulomb minus/plus its Gaussian smoothing (ranks (15, 15, 15)); devices take tiles of 32-column orbital blocks; the pair densities of symmetry-sector orbitals in reflection-parity classes on the 70x70x70 octant)
 
  SCF iter #   1
 
- Diagonalization time [sec] :       0.21,      tdiag_sum =       14.01
- Iteration time [sec]       :       0.27
+ Diagonalization time [sec] :       0.21,      tdiag_sum =       13.53
+ Iteration time [sec]       :       0.25
 
  Electrons in up, down spins:    7.00    5.00
  Net magnetic moment (in Bohr magnetons):    2.00
@@ -3711,30 +3714,30 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 up State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
     1        -2.6932800728       -36.6442300151    1.0000        1
-    2        -1.7483888568       -23.7882291078    1.0000        8
-    3        -1.1709953640       -15.9323287235    1.0000        6
-    4        -1.1709953629       -15.9323287092    1.0000        7
+    2        -1.7483888568       -23.7882291079    1.0000        8
+    3        -1.1709953640       -15.9323287236    1.0000        6
+    4        -1.1709953630       -15.9323287092    1.0000        7
     5        -1.1379508481       -15.4827316496    1.0000        1
     6        -0.6535167814        -8.8916186246    1.0000        3
     7        -0.6535167801        -8.8916186063    1.0000        2
     8         0.0209088595         0.2844817606    0.0000        1
-    9         0.0788749665         1.0731570194    0.0000        8
+    9         0.0788749665         1.0731570195    0.0000        8
    10         0.1012079565         1.3770152146    0.0000        6
-   11         0.1012079569         1.3770152204    0.0000        7
+   11         0.1012079569         1.3770152205    0.0000        7
 
 
 dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
     1        -2.5642550355       -34.8887411624    1.0000        1
     2        -1.5446446948       -21.0161267888    1.0000        8
-    3        -1.0599609462       -14.4216166413    1.0000        1
+    3        -1.0599609462       -14.4216166414    1.0000        1
     4        -0.9410312054       -12.8034823750    1.0000        7
     5        -0.9410312053       -12.8034823725    1.0000        6
     6        -0.2561546709        -3.4851892207    0.0000        2
     7        -0.2561546694        -3.4851892011    0.0000        3
     8         0.0305981285         0.4163120163    0.0000        1
-    9         0.0972025787         1.3225188457    0.0000        8
-   10         0.1103178599         1.5009627377    0.0000        7
+    9         0.0972025787         1.3225188456    0.0000        8
+   10         0.1103178599         1.5009627376    0.0000        7
    11         0.1103178661         1.5009628224    0.0000        6
 
 
@@ -3742,7 +3745,7 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
  Max and min values of charge density [e/bohr^3]:   4.5671E-01   1.8878E-13   dn
 
- Hartree potential time [sec]:       0.04
+ Hartree potential time [sec]:       0.02
 
    Eigenvalue Energy             =         -16.27956715 [Ry]
    Hartree Energy                =          85.14485363 [Ry]
@@ -3760,12 +3763,12 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
   0-  1 up SRE of pot. & charge weighted pot =   0.0055331148   0.0001150172
 
-  0-  1 dn SRE of pot. & charge weighted pot =   0.0023615864   0.0001495436
+  0-  1 dn SRE of pot. & charge weighted pot =   0.0023615863   0.0001495436
 
  SCF iter #   2
 
- Diagonalization time [sec] :       0.21,      tdiag_sum =       14.23
- Iteration time [sec]       :       0.27
+ Diagonalization time [sec] :       0.21,      tdiag_sum =       13.75
+ Iteration time [sec]       :       0.26
 
  Electrons in up, down spins:    7.00    5.00
  Net magnetic moment (in Bohr magnetons):    2.00
@@ -3789,7 +3792,7 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
     1        -2.5642217808       -34.8882887050    1.0000        1
     2        -1.5446007366       -21.0155287021    1.0000        8
-    3        -1.0599230689       -14.4211012905    1.0000        1
+    3        -1.0599230689       -14.4211012906    1.0000        1
     4        -0.9409961071       -12.8030048345    1.0000        7
     5        -0.9409961067       -12.8030048282    1.0000        6
     6        -0.2561142700        -3.4846395346    0.0000        2
@@ -3804,7 +3807,7 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
  Max and min values of charge density [e/bohr^3]:   4.5670E-01   1.9473E-13   dn
 
- Hartree potential time [sec]:       0.04
+ Hartree potential time [sec]:       0.02
 
    Eigenvalue Energy             =         -16.27917918 [Ry]
    Hartree Energy                =          85.14488164 [Ry]
@@ -3822,12 +3825,12 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
   0-  2 up SRE of pot. & charge weighted pot =   0.0033049837   0.0000788822
 
-  0-  2 dn SRE of pot. & charge weighted pot =   0.0012386118   0.0001119701
+  0-  2 dn SRE of pot. & charge weighted pot =   0.0012386117   0.0001119701
 
  SCF iter #   3
 
- Diagonalization time [sec] :       0.21,      tdiag_sum =       14.44
- Iteration time [sec]       :       0.27
+ Diagonalization time [sec] :       0.21,      tdiag_sum =       13.96
+ Iteration time [sec]       :       0.26
 
  Electrons in up, down spins:    7.00    5.00
  Net magnetic moment (in Bohr magnetons):    2.00
@@ -3866,7 +3869,7 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
  Max and min values of charge density [e/bohr^3]:   4.5670E-01   1.9793E-13   dn
 
- Hartree potential time [sec]:       0.04
+ Hartree potential time [sec]:       0.02
 
    Eigenvalue Energy             =         -16.27864846 [Ry]
    Hartree Energy                =          85.14465078 [Ry]
@@ -3888,8 +3891,8 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
  SCF iter #   4
 
- Diagonalization time [sec] :       0.22,      tdiag_sum =       14.66
- Iteration time [sec]       :       0.28
+ Diagonalization time [sec] :       0.21,      tdiag_sum =       14.17
+ Iteration time [sec]       :       0.26
 
  Electrons in up, down spins:    7.00    5.00
  Net magnetic moment (in Bohr magnetons):    2.00
@@ -3921,14 +3924,14 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
     8         0.0305913852         0.4162202691    0.0000        1
     9         0.0972051582         1.3225539418    0.0000        8
    10         0.1103087012         1.5008381271    0.0000        7
-   11         0.1103087118         1.5008382708    0.0000        6
+   11         0.1103087118         1.5008382707    0.0000        6
 
 
  Max and min values of charge density [e/bohr^3]:   6.5880E-01   3.8479E-14   up
 
  Max and min values of charge density [e/bohr^3]:   4.5670E-01   2.0215E-13   dn
 
- Hartree potential time [sec]:       0.04
+ Hartree potential time [sec]:       0.02
 
    Eigenvalue Energy             =         -16.27859640 [Ry]
    Hartree Energy                =          85.14463751 [Ry]
@@ -3950,8 +3953,8 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
  SCF iter #   5
 
- Diagonalization time [sec] :       0.21,      tdiag_sum =       14.87
- Iteration time [sec]       :       0.28
+ Diagonalization time [sec] :       0.21,      tdiag_sum =       14.38
+ Iteration time [sec]       :       0.26
 
  Electrons in up, down spins:    7.00    5.00
  Net magnetic moment (in Bohr magnetons):    2.00
@@ -3982,15 +3985,15 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
     7        -0.2560434944        -3.4836765762    0.0000        3
     8         0.0305882321         0.4161773679    0.0000        1
     9         0.0972016422         1.3225061033    0.0000        8
-   10         0.1103058583         1.5007994473    0.0000        7
-   11         0.1103058666         1.5007995601    0.0000        6
+   10         0.1103058583         1.5007994472    0.0000        7
+   11         0.1103058666         1.5007995600    0.0000        6
 
 
  Max and min values of charge density [e/bohr^3]:   6.5880E-01   3.7842E-14   up
 
  Max and min values of charge density [e/bohr^3]:   4.5670E-01   2.0487E-13   dn
 
- Hartree potential time [sec]:       0.04
+ Hartree potential time [sec]:       0.02
 
    Eigenvalue Energy             =         -16.27864600 [Ry]
    Hartree Energy                =          85.14469687 [Ry]
@@ -4012,8 +4015,8 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
  SCF iter #   6
 
- Diagonalization time [sec] :       0.21,      tdiag_sum =       15.08
- Iteration time [sec]       :       0.27
+ Diagonalization time [sec] :       0.21,      tdiag_sum =       14.59
+ Iteration time [sec]       :       0.26
 
  Electrons in up, down spins:    7.00    5.00
  Net magnetic moment (in Bohr magnetons):    2.00
@@ -4036,7 +4039,7 @@ up State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
     1        -2.5641496495       -34.8873073015    1.0000        1
-    2        -1.5445149707       -21.0143617884    1.0000        8
+    2        -1.5445149707       -21.0143617885    1.0000        8
     3        -1.0598582469       -14.4202193351    1.0000        1
     4        -0.9409217696       -12.8019934130    1.0000        7
     5        -0.9409217687       -12.8019934005    1.0000        6
@@ -4052,7 +4055,7 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
  Max and min values of charge density [e/bohr^3]:   4.5670E-01   2.0601E-13   dn
 
- Hartree potential time [sec]:       0.04
+ Hartree potential time [sec]:       0.02
 
    Eigenvalue Energy             =         -16.27850866 [Ry]
    Hartree Energy                =          85.14463735 [Ry]
@@ -4068,14 +4071,14 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
    Total Energy =           -63.92693535 [Ry]
    Energy/atom  =          -434.88854850 [eV]
 
-  0-  6 up SRE of pot. & charge weighted pot =   0.0003365425   0.0000021784
+  0-  6 up SRE of pot. & charge weighted pot =   0.0003365426   0.0000021784
 
   0-  6 dn SRE of pot. & charge weighted pot =   0.0001253066   0.0000028496
 
  SCF iter #   7
 
- Diagonalization time [sec] :       0.20,      tdiag_sum =       15.28
- Iteration time [sec]       :       0.27
+ Diagonalization time [sec] :       0.20,      tdiag_sum =       14.79
+ Iteration time [sec]       :       0.25
 
  Electrons in up, down spins:    7.00    5.00
  Net magnetic moment (in Bohr magnetons):    2.00
@@ -4114,7 +4117,7 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
  Max and min values of charge density [e/bohr^3]:   4.5670E-01   2.0739E-13   dn
 
- Hartree potential time [sec]:       0.04
+ Hartree potential time [sec]:       0.02
 
    Eigenvalue Energy             =         -16.27849709 [Ry]
    Hartree Energy                =          85.14462318 [Ry]
@@ -4136,8 +4139,8 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
  SCF iter #   8
 
- Diagonalization time [sec] :       0.19,      tdiag_sum =       15.48
- Iteration time [sec]       :       0.26
+ Diagonalization time [sec] :       0.19,      tdiag_sum =       14.98
+ Iteration time [sec]       :       0.24
 
  Electrons in up, down spins:    7.00    5.00
  Net magnetic moment (in Bohr magnetons):    2.00
@@ -4176,7 +4179,7 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
  Max and min values of charge density [e/bohr^3]:   4.5670E-01   2.0819E-13   dn
 
- Hartree potential time [sec]:       0.04
+ Hartree potential time [sec]:       0.02
 
    Eigenvalue Energy             =         -16.27848613 [Ry]
    Hartree Energy                =          85.14461101 [Ry]
@@ -4198,8 +4201,8 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
  SCF iter #   9
 
- Diagonalization time [sec] :       0.20,      tdiag_sum =       15.68
- Iteration time [sec]       :       0.27
+ Diagonalization time [sec] :       0.19,      tdiag_sum =       15.17
+ Iteration time [sec]       :       0.24
 
  Electrons in up, down spins:    7.00    5.00
  Net magnetic moment (in Bohr magnetons):    2.00
@@ -4238,7 +4241,7 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
  Max and min values of charge density [e/bohr^3]:   4.5670E-01   2.0870E-13   dn
 
- Hartree potential time [sec]:       0.04
+ Hartree potential time [sec]:       0.02
 
    Eigenvalue Energy             =         -16.27849984 [Ry]
    Hartree Energy                =          85.14461528 [Ry]
@@ -4260,8 +4263,8 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
  SCF iter #  10
 
- Diagonalization time [sec] :       0.18,      tdiag_sum =       15.86
- Iteration time [sec]       :       0.25
+ Diagonalization time [sec] :       0.18,      tdiag_sum =       15.35
+ Iteration time [sec]       :       0.23
 
  Electrons in up, down spins:    7.00    5.00
  Net magnetic moment (in Bohr magnetons):    2.00
@@ -4300,7 +4303,7 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
  Max and min values of charge density [e/bohr^3]:   4.5670E-01   2.0907E-13   dn
 
- Hartree potential time [sec]:       0.04
+ Hartree potential time [sec]:       0.02
 
    Eigenvalue Energy             =         -16.27849984 [Ry]
    Hartree Energy                =          85.14461486 [Ry]
@@ -4316,7 +4319,7 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
    Total Energy =           -63.92693535 [Ry]
    Energy/atom  =          -434.88854851 [eV]
 
-  0- 10 up SRE of pot. & charge weighted pot =   0.0000913766   0.0000009994
+  0- 10 up SRE of pot. & charge weighted pot =   0.0000913767   0.0000009994
 
   0- 10 dn SRE of pot. & charge weighted pot =   0.0001257397   0.0000008751
 
@@ -4330,12 +4333,12 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
    Total Energy (HSE03)           =         -63.92693547 [Ry]
    Inner SCF: levels converged by 2 eigensolver passes at its last Hamiltonian (last move 6.6E-10 Ry)
    ACE operator: 11/11 orbitals (up/down), max|M - M^T|/max|M| = 5.9E-13
-   Exact exchange: 101 pair-density Poisson solves, 0.10 s of 0.18 s (FP64 CUDA Kronecker-product FD Poisson solve (order 12) on the 140x140x140 box, multipole boundary of order 9, erfc(w r)/r kernel, w = 0.106066/bohr as Coulomb minus/plus its Gaussian smoothing (ranks (15, 15, 15)); devices take tiles of 32-column orbital blocks; the pair densities of symmetry-sector orbitals in reflection-parity classes on the 70x70x70 octant)
+   Exact exchange: 101 pair-density Poisson solves, 0.10 s of 0.19 s (FP64 CUDA Kronecker-product FD Poisson solve (order 12) on the 140x140x140 box, multipole boundary of order 9, erfc(w r)/r kernel, w = 0.106066/bohr as Coulomb minus/plus its Gaussian smoothing (ranks (15, 15, 15)); devices take tiles of 32-column orbital blocks; the pair densities of symmetry-sector orbitals in reflection-parity classes on the 70x70x70 octant)
 
  SCF iter #   1
 
- Diagonalization time [sec] :       0.21,      tdiag_sum =       16.08
- Iteration time [sec]       :       0.27
+ Diagonalization time [sec] :       0.21,      tdiag_sum =       15.57
+ Iteration time [sec]       :       0.26
 
  Electrons in up, down spins:    7.00    5.00
  Net magnetic moment (in Bohr magnetons):    2.00
@@ -4374,7 +4377,7 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
  Max and min values of charge density [e/bohr^3]:   4.5672E-01   2.0624E-13   dn
 
- Hartree potential time [sec]:       0.04
+ Hartree potential time [sec]:       0.02
 
    Eigenvalue Energy             =         -16.27864285 [Ry]
    Hartree Energy                =          85.14485890 [Ry]
@@ -4396,8 +4399,8 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
  SCF iter #   2
 
- Diagonalization time [sec] :       0.21,      tdiag_sum =       16.29
- Iteration time [sec]       :       0.27
+ Diagonalization time [sec] :       0.21,      tdiag_sum =       15.78
+ Iteration time [sec]       :       0.26
 
  Electrons in up, down spins:    7.00    5.00
  Net magnetic moment (in Bohr magnetons):    2.00
@@ -4436,7 +4439,7 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
  Max and min values of charge density [e/bohr^3]:   4.5671E-01   2.0764E-13   dn
 
- Hartree potential time [sec]:       0.04
+ Hartree potential time [sec]:       0.02
 
    Eigenvalue Energy             =         -16.27857619 [Ry]
    Hartree Energy                =          85.14485804 [Ry]
@@ -4458,8 +4461,8 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
  SCF iter #   3
 
- Diagonalization time [sec] :       0.21,      tdiag_sum =       16.50
- Iteration time [sec]       :       0.27
+ Diagonalization time [sec] :       0.21,      tdiag_sum =       15.99
+ Iteration time [sec]       :       0.26
 
  Electrons in up, down spins:    7.00    5.00
  Net magnetic moment (in Bohr magnetons):    2.00
@@ -4476,7 +4479,7 @@ up State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
     8         0.0209691870         0.2853025650    0.0000        1
     9         0.0789266331         1.0738599844    0.0000        8
    10         0.1012607425         1.3777334110    0.0000        6
-   11         0.1012607429         1.3777334163    0.0000        7
+   11         0.1012607429         1.3777334164    0.0000        7
 
 
 dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
@@ -4498,7 +4501,7 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
  Max and min values of charge density [e/bohr^3]:   4.5671E-01   2.0832E-13   dn
 
- Hartree potential time [sec]:       0.04
+ Hartree potential time [sec]:       0.02
 
    Eigenvalue Energy             =         -16.27846948 [Ry]
    Hartree Energy                =          85.14480553 [Ry]
@@ -4520,8 +4523,8 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
  SCF iter #   4
 
- Diagonalization time [sec] :       0.21,      tdiag_sum =       16.71
- Iteration time [sec]       :       0.28
+ Diagonalization time [sec] :       0.21,      tdiag_sum =       16.20
+ Iteration time [sec]       :       0.26
 
  Electrons in up, down spins:    7.00    5.00
  Net magnetic moment (in Bohr magnetons):    2.00
@@ -4560,7 +4563,7 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
  Max and min values of charge density [e/bohr^3]:   4.5671E-01   2.0915E-13   dn
 
- Hartree potential time [sec]:       0.04
+ Hartree potential time [sec]:       0.02
 
    Eigenvalue Energy             =         -16.27845295 [Ry]
    Hartree Energy                =          85.14479571 [Ry]
@@ -4582,8 +4585,8 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
  SCF iter #   5
 
- Diagonalization time [sec] :       0.22,      tdiag_sum =       16.93
- Iteration time [sec]       :       0.28
+ Diagonalization time [sec] :       0.21,      tdiag_sum =       16.41
+ Iteration time [sec]       :       0.27
 
  Electrons in up, down spins:    7.00    5.00
  Net magnetic moment (in Bohr magnetons):    2.00
@@ -4622,7 +4625,7 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
  Max and min values of charge density [e/bohr^3]:   4.5671E-01   2.0990E-13   dn
 
- Hartree potential time [sec]:       0.04
+ Hartree potential time [sec]:       0.02
 
    Eigenvalue Energy             =         -16.27846944 [Ry]
    Hartree Energy                =          85.14480589 [Ry]
@@ -4644,8 +4647,8 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
  SCF iter #   6
 
- Diagonalization time [sec] :       0.21,      tdiag_sum =       17.14
- Iteration time [sec]       :       0.28
+ Diagonalization time [sec] :       0.21,      tdiag_sum =       16.62
+ Iteration time [sec]       :       0.26
 
  Electrons in up, down spins:    7.00    5.00
  Net magnetic moment (in Bohr magnetons):    2.00
@@ -4684,7 +4687,7 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
  Max and min values of charge density [e/bohr^3]:   4.5671E-01   2.1032E-13   dn
 
- Hartree potential time [sec]:       0.04
+ Hartree potential time [sec]:       0.02
 
    Eigenvalue Energy             =         -16.27846944 [Ry]
    Hartree Energy                =          85.14480676 [Ry]
@@ -4713,7 +4716,7 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
    Estimated exchange error      =            3.851E-09 [Ry]   (tolerance 1.0E-08): converged
    Total Energy (HSE03)           =         -63.92693550 [Ry]
    Inner SCF: levels converged by 2 eigensolver passes at its last Hamiltonian (last move 3.5E-10 Ry)
-   Exact exchange: 43 pair-density Poisson solves, 0.04 s of 0.11 s (FP64 CUDA Kronecker-product FD Poisson solve (order 12) on the 140x140x140 box, multipole boundary of order 9, erfc(w r)/r kernel, w = 0.106066/bohr as Coulomb minus/plus its Gaussian smoothing (ranks (15, 15, 15)); devices take tiles of 32-column orbital blocks; the pair densities of symmetry-sector orbitals in reflection-parity classes on the 70x70x70 octant)
+   Exact exchange: 43 pair-density Poisson solves, 0.05 s of 0.10 s (FP64 CUDA Kronecker-product FD Poisson solve (order 12) on the 140x140x140 box, multipole boundary of order 9, erfc(w r)/r kernel, w = 0.106066/bohr as Coulomb minus/plus its Gaussian smoothing (ranks (15, 15, 15)); devices take tiles of 32-column orbital blocks; the pair densities of symmetry-sector orbitals in reflection-parity classes on the 70x70x70 octant)
 
 
  Hybrid functional HSE03: generalized Kohn-Sham energies
@@ -4731,20 +4734,20 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
    Total Energy (HSE03)        =           -63.92693550 [Ry]
 
  Fock loop converged after 4 outer iterations (estimated exchange error 3.85E-09 Ry < 1.0E-08 Ry).
- Exact exchange: 447 pair-density Poisson solves in 1.71 s (0.46 s in the solver); Fock loop 26.02 s, 29 SCF iterations of the PBE start
+ Exact exchange: 447 pair-density Poisson solves in 2.28 s (0.47 s in the solver); Fock loop 24.64 s, 29 SCF iterations of the PBE start
  Pair-density Poisson solver: FP64 CUDA Kronecker-product FD Poisson solve (order 12) on the 140x140x140 box, multipole boundary of order 9, erfc(w r)/r kernel, w = 0.106066/bohr as Coulomb minus/plus its Gaussian smoothing (ranks (15, 15, 15)); devices take tiles of 32-column orbital blocks; the pair densities of symmetry-sector orbitals in reflection-parity classes on the 70x70x70 octant
 
 Self-consistency convergence achieved.
 
-Time for self-consistent field [sec] :      26.40,    tdiag_sum =       17.14
-Time spent on Hartree potential [sec] :        2.80
+Time for self-consistent field [sec] :      25.00,    tdiag_sum =       16.62
+Time spent on Hartree potential [sec] :        1.68
 
  Tot. charge (user input) [e] =   0.00000000
  Tot. charge (computed) [e] =   0.00000000
  Dipole components [Debye]:
  x-component =  -0.00000000
  y-component =   0.00000000
- z-component =  -0.00000000
+ z-component =   0.00000000
 
  Density at the sphere: the sphere adds an estimated 3.9E-07 Ry to the total energy (decay constant 0.91 /bohr: a factor 10 per 0.67 ang)
    Wall share of Domain_Energy_Tolerance (5.0E-04 Ry): within it.
@@ -4755,24 +4758,24 @@ Time spent on Hartree potential [sec] :        2.80
 
  Initial Hamiltonian component timings [sec]
  --------------------------------------------------
- Finite-difference (-nabla^2) :     0.008582
- V_ion diagonal/local         :     0.027942
- V_ion nonlocal projectors    :     0.011479
- Initial V_xc (HSE03)             :     0.109345
- Component subtotal             :     0.157348
+ Finite-difference (-nabla^2) :     0.008966
+ V_ion diagonal/local         :     0.341624
+ V_ion nonlocal projectors    :     0.009688
+ Initial V_xc (HSE03)             :     0.026700
+ Component subtotal             :     0.386977
  --------------------------------------------------
 
  SCF timing analysis [sec]
  --------------------------------------------------
- Initial Hartree potential      :     0.044959
- Initial exchange-correlation   :     0.109345
- Hamiltonian binding subtotal  :     0.024823
- Diagonalization subtotal       :    17.139247
- Occupation/density subtotal   :     0.827381
- Hartree potential subtotal     :     2.799144
- Exchange-correlation subtotal  :     0.160644
- Mixing/energy subtotal         :     0.897007
- SCF wall time                   :    26.023602
+ Initial Hartree potential      :     0.082929
+ Initial exchange-correlation   :     0.026700
+ Hamiltonian binding subtotal  :     0.024903
+ Diagonalization subtotal       :    16.620402
+ Occupation/density subtotal   :     0.857833
+ Hartree potential subtotal     :     1.675922
+ Exchange-correlation subtotal  :     0.148110
+ Mixing/energy subtotal         :     0.992821
+ SCF wall time                   :    24.638215
  --------------------------------------------------
 
 Forces and MPI statistics
@@ -4788,28 +4791,28 @@ are not calculated by this Python single-point implementation.
  Total H application time [sec] =     0.000000
  Average H application [sec] =     0.000000
  Local-potential updates =          146
- Local update time [sec] =     0.019558
+ Local update time [sec] =     0.019917
  Per-H device timing = disabled (would synchronize every recurrence)
  GPU initial-eigensolver calls =           16
- GPU initial-eigensolver synchronized time [sec] =     4.111260
+ GPU initial-eigensolver synchronized time [sec] =     3.818456
  GPU SUBSPACE calls =         1152
- GPU SUBSPACE synchronized time [sec] =    12.677328
+ GPU SUBSPACE synchronized time [sec] =    12.440682
  GPU representation scheduler batches =          146
- GPU representation scheduler wall time [sec] =    16.896141
+ GPU representation scheduler wall time [sec] =    16.365287
  Final active states by representation = up: 7 7 7 6 6 7 7 7; down: 7 7 7 6 6 7 7 7
- Requested-eigenpair download [sec] =     0.050902
+ Requested-eigenpair download [sec] =     0.051024
  GPU density builds =          876
- GPU density build/download [sec] =     0.209988
- Final wavefunction download [sec] =     0.341974
+ GPU density build/download [sec] =     0.228366
+ Final wavefunction download [sec] =     0.325915
  Accelerated Hartree solves =           74
- Accelerated Hartree total [sec] =     2.837268
- Hartree boundary/RHS [sec] =     1.132345
- Hartree linear solve [sec] =     1.704472
+ Accelerated Hartree total [sec] =     1.752144
+ Hartree boundary/RHS [sec] =     0.100073
+ Hartree linear solve [sec] =     1.635930
  Host-to-device time [sec] =     0.000000
- Device kernel time [sec] =    16.788588
- Device-to-host time [sec] =     0.050902
- Pre-SCF setup/reporting wall time [sec] :    1.743823
- Post-SCF finalization/reporting [sec] :    0.031646
- Total accelerated Python wall time [sec] :       28.18
+ Device kernel time [sec] =    16.259138
+ Device-to-host time [sec] =     0.051024
+ Pre-SCF setup/reporting wall time [sec] :    1.588068
+ Post-SCF finalization/reporting [sec] :    0.029925
+ Total accelerated Python wall time [sec] :       26.62
  parsec.dat: examples/0d_hybrid_functionals/O2/hse03/parsec.dat (potential and density of 2 spin channel(s) on 1413968 points, 12 wavefunction(s))
 Text log: examples/0d_hybrid_functionals/O2/hse03/parsec.out

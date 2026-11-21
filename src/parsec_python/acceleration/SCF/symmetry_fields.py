@@ -51,6 +51,41 @@ def scf_buffers_requested() -> bool:
     }
 
 
+_INPUT_GROUP_AVERAGE_SWITCH = "PARSEC_SECTOR_INPUT_GROUP_AVERAGE"
+
+
+def sector_input_group_average_setting() -> str:
+    """``PARSEC_SECTOR_INPUT_GROUP_AVERAGE``: ``auto`` (the default since 2026-11-19) or ``off``.
+
+    The weighted sectors of a subgroup ``H`` of the point group ``G``
+    (:class:`..Symmetry.axis_reflection.PointGroupReduction`) count the
+    partners of a level of ``G`` with weights, which assumes a Hamiltonian
+    invariant under all of ``G``.  The full-grid fields that enter the SCF
+    from outside (the local ionic potential, the start density of SAD, ML,
+    ``Initial_Density`` or ``Restart_Run``, the core density, and the fields
+    of a full-grid evaluator) are reduced to one value per orbit by the
+    orbit average.  ``auto`` averages such a field over the orbits of ``H``
+    and then over the cosets of ``G`` (``PointGroupReduction.symmetrize_values``),
+    so that a structure accepted within ``PARSEC_SYMMETRY_ATOM_TOLERANCE``
+    solves the Hamiltonian averaged over ``G``; for atoms that are images in
+    every bit the fields change by round-off only.  ``off`` keeps the
+    average over ``H`` alone, bit for bit as before.  Reductions without
+    cosets (abelian sectors, k-point little groups) are not touched.
+    """
+
+    value = os.environ.get(_INPUT_GROUP_AVERAGE_SWITCH, "auto").strip().lower() or "auto"
+    if value not in {"auto", "off"}:
+        raise ValueError(f"{_INPUT_GROUP_AVERAGE_SWITCH} must be auto or off, not {value!r}")
+    return value
+
+
+def group_average_applies(reduction) -> bool:
+    """Whether ``reduction`` has cosets of a larger group to average its full-grid inputs over."""
+
+    images = getattr(reduction, "coset_images", None)
+    return images is not None and int(np.asarray(images).shape[0]) > 1 and hasattr(reduction, "symmetrize_values")
+
+
 @dataclass(frozen=True)
 class SymmetryScalarField:
     """One physical scalar value per exact real-space symmetry orbit.
@@ -117,9 +152,17 @@ class SymmetryResidualMetrics:
 
 @dataclass(frozen=True)
 class SymmetrySCFReducer:
-    """Evaluate invariant scalar-field operations on one value per orbit."""
+    """Evaluate invariant scalar-field operations on one value per orbit.
+
+    ``group_average_inputs``: a full-grid field reduced by :meth:`wedge_values`
+    (and so :meth:`from_full`) is also averaged over the cosets of the full
+    group of a :class:`PointGroupReduction` (``PARSEC_SECTOR_INPUT_GROUP_AVERAGE``,
+    decided by the driver at preparation); ``False`` (the default of the
+    constructor): the orbit average alone, as before.
+    """
 
     reduction: AxisReflectionReduction
+    group_average_inputs: bool = False
 
     @cached_property
     def weights(self) -> np.ndarray:
@@ -175,7 +218,12 @@ class SymmetrySCFReducer:
             weights=array,
             minlength=self.reduction.wedge_size,
         )
-        return sums / self.reduction.multiplicities
+        values = sums / self.reduction.multiplicities
+        if self.group_average_inputs:
+            # The average over the full group G of the H-orbit values: what the weighted sectors assume of every
+            # field that enters from the full grid (PARSEC_SECTOR_INPUT_GROUP_AVERAGE).
+            values = self.reduction.symmetrize_values(values)
+        return values
 
     def expand_values(self, wedge_values) -> np.ndarray:
         """Expand physical orbit values without wavefunction normalization."""

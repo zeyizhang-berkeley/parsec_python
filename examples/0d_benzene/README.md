@@ -36,17 +36,17 @@ python src\parsec_python\main.py examples\0d_benzene\parsec.in --no-archive
 
 The physical calculation writes `parsec.out` in this directory. The
 retained `parsec_python.out` is the second command with
-`--log parsec_python.out`, run with the code of 5 November 2026 on a laptop
-GPU (RTX 5070). The native CHEBFF/SUBSPACE run solved the eight `D_2h`
-representations of the 268,096-point grid separately and converged in
-10 SCF iterations:
+`--log parsec_python.out`, run with the code of 20 November 2026 on one
+NVIDIA A100 (paths shortened to repository paths). The native
+CHEBFF/SUBSPACE run solved the eight `D_2h` representations of the
+268,096-point grid separately and converged in 10 SCF iterations:
 
 | Quantity | Python |
 |---|---:|
 | Total energy | -75.38863333 Ry |
 | Charge-weighted SRE | 0.0001034149 |
-| SCF time | 5.43 s |
-| Total wall time | 15.12 s |
+| SCF time | 1.16 s |
+| Total wall time | 2.41 s |
 
 ## PARSEC reference
 

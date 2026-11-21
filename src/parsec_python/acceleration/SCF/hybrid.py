@@ -357,8 +357,9 @@ class DeviceFockEngine:
 
     def take_exchange_paths(self):
         """The paths the builds took since the last call (counts: the parity classes or the full grid of a
-        cluster's sector orbitals, the pooled block of a periodic cell's or its fallback to the sector tiles,
-        ``PARSEC_CUPY_EXCHANGE_POOL``), forgotten here; ``None`` where the pair solvers keep no such record.
+        cluster's sector orbitals, the translation classes of a periodic cell's (``PARSEC_CUPY_EXCHANGE_TRANSLATIONS``),
+        its pooled block or its fallback to the sector tiles, ``PARSEC_CUPY_EXCHANGE_POOL``), forgotten here; ``None``
+        where the pair solvers keep no such record.
 
         The pair solvers are cached for the run of the driver (``DeviceExchange._solvers``): the Fock loop takes
         the record at its start, after each of its steps and names those builds in its records
@@ -599,11 +600,15 @@ def device_exchange_for(
         exchange_pool_setting,
     )
 
-    # The switches of the parity classes and of the pooled block of periodic sector orbitals
-    # (PARSEC_CUPY_EXCHANGE_POOL, read by the builds of such orbitals only) are refused here when wrong.
+    from ..Hamiltonian.exchange_translations import exchange_translation_setting
+
+    # The switches of the parity classes, of the pooled block of periodic sector orbitals and of their translation
+    # classes (PARSEC_CUPY_EXCHANGE_POOL, PARSEC_CUPY_EXCHANGE_TRANSLATIONS, read by the builds of such orbitals
+    # only) are refused here when wrong.
     exchange_parity_setting()
     exchange_parity_box_setting()
     exchange_pool_setting()
+    exchange_translation_setting()
     return DeviceExchange(
         backend=backend,
         sectors=sectors,

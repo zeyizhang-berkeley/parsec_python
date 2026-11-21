@@ -38,7 +38,7 @@ representation of twice the dimension.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from itertools import combinations
 
 import numpy as np
@@ -289,6 +289,34 @@ def one_dimensional_characters(table: np.ndarray, members) -> list[dict[int, int
 
 
 @dataclass(frozen=True)
+class IrrepUnit:
+    """One solved unit of the irreducible-representation plan (:func:`irrep_units`).
+
+    The states of the solved sector ``sector`` (an index into the plan's ``characters``: a one-dimensional
+    character ``lambda`` of ``H``) that lie in the real irreducible representations ``representations`` of ``G``
+    (indices into :func:`real_irreducible_characters` of the group table).  Each state counts ``weight`` times
+    (``d / m(lambda, Gamma)``, the same for every representation of the unit); ``share`` is its expected share of
+    the states (``sum m(lambda, Gamma) levels(Gamma) / |G|``, in units of ``M``).  ``projection``: ``None`` where
+    the sector holds these representations alone (the sector of before, solved whole), else the coefficients
+    ``b_c`` of the projector onto them on the sector, one per right coset representative ``c`` of the plan
+    (``P = sum_c b_c T_c``, :meth:`.representations.ReflectionRepresentationDecomposition.projection_tables`):
+
+    ``b_c = sum_Gamma (levels(Gamma) / |G|) sum_{h in H} chi_Gamma(h c) lambda(h)``.
+    """
+
+    sector: int
+    representations: tuple[int, ...]
+    weight: int
+    share: float
+    projection: tuple[float, ...] | None
+    # (with the partner occupations of the weighted sectors) the representations of the unit whose levels it
+    # holds in several states (``m(lambda, Gamma) > 1``): their partners take one occupation each, as
+    # :attr:`OrbitalGroupPlan.partner_irreps` says of the sectors of before; a representation solved in one state
+    # per level (``m = 1``, its other partners projected out of the other sectors) has none
+    partners: tuple[int, ...] = ()
+
+
+@dataclass(frozen=True)
 class OrbitalGroupPlan:
     """The orbital subgroup, its solved sectors and their weights, and the right cosets of the full group.
 
@@ -296,7 +324,16 @@ class OrbitalGroupPlan:
     (element index -> +1/-1 on ``H``); ``weights``: the number of states each state of that sector counts
     for; ``cosets``: indices of right coset representatives ``c`` (``G`` = union of ``H c``), the identity
     first; ``cost``: the solved rows times states in units of ``N M``; ``abelian_cost``: the same for the
-    largest abelian subgroup of order two per element (the former route).
+    largest abelian subgroup of order two per element (the former route).  ``units``: the units of the
+    irreducible representations of ``G`` that :func:`irrep_units` gives these sectors where the plan was asked
+    for them (``units=`` of :func:`orbital_group_plan`), else ``None``.
+
+    ``partner_irreps``: per solved sector, the indices (into the real irreducible representations of ``G``) of
+    those it holds whose partners several solved states share: the level splits over sectors (the e of Td over
+    the sectors A1 and B1 of D2d, weight 1 each) or over two states of one sector.  The states of such a level
+    stay degenerate, each with an occupation of its own (``Occupations.partner_occupations`` checks that fixed
+    occupations fill them alike).  Empty for the abelian route of before.  (With ``units`` the reduction takes
+    those of the units instead, :attr:`IrrepUnit.partners`.)
     """
 
     subgroup: tuple[int, ...]
@@ -305,6 +342,8 @@ class OrbitalGroupPlan:
     cosets: tuple[int, ...]
     cost: float
     abelian_cost: float
+    partner_irreps: tuple[tuple[int, ...], ...] = ()
+    units: tuple[IrrepUnit, ...] | None = None
 
 
 def _plan_for(table, representations, members, order):
@@ -352,6 +391,12 @@ def _plan_for(table, representations, members, order):
             orbit_of[j] = len(orbits)
         orbits.append(sorted(orbit))
     solved = [orbit[0] for orbit in orbits]
+    # A representation of G held by several solved states (summed over the solved sectors: a merged orbit holds
+    # its partners in one state) has a level whose partners take one occupation each.
+    solved_counts = multiplicity[solved].sum(axis=0)
+    partner_irreps = tuple(
+        tuple(int(g) for g in np.flatnonzero((multiplicity[i] > 0) & (solved_counts > 1))) for i in solved
+    )
     levels = np.array([rep.levels for rep in representations])
     states = multiplicity @ levels / order
     cost = float(sum(states[i] for i in solved)) / size
@@ -369,6 +414,7 @@ def _plan_for(table, representations, members, order):
         cosets=tuple(cosets),
         cost=cost,
         abelian_cost=float("nan"),
+        partner_irreps=partner_irreps,
     )
 
 
@@ -377,7 +423,108 @@ def _is_reflection_group(table: np.ndarray, members) -> bool:
     return all(int(table[m, m]) == identity for m in members)
 
 
-def orbital_group_plan(operations, modulus=None, required=()) -> OrbitalGroupPlan:
+IRREP_UNIT_MODES = ("once", "split")
+
+
+def irrep_units(table: np.ndarray, plan: OrbitalGroupPlan, mode: str = "once",
+                representations: list[RealRepresentation] | None = None) -> tuple[IrrepUnit, ...] | None:
+    """Every irreducible representation of ``G`` solved in one sector of ``plan``: the units of the sectors.
+
+    A solved sector ``lambda`` of the weighted plan holds every representation ``Gamma`` of ``G`` whose restriction
+    to ``H`` contains ``lambda`` (``m(lambda, Gamma) >= 1``), and a level of ``Gamma`` is found in each of the
+    ``n1(Gamma)`` sectors that hold it: the E levels of Td in both A1 and B1 of D2d.  Here every ``Gamma`` is
+    assigned to one solved sector (the least ``m``; then a sector other than the totally symmetric one; then the
+    sector that holds the fewest representations; then the first), and its states there count ``d / m`` times.
+    A sector keeps the representations assigned to it and loses the others to a projector (:class:`IrrepUnit`):
+
+    * ``once``: one unit per weight of the representations a sector keeps; a sector that keeps all it holds at
+      one weight is the sector of before (no projector);
+    * ``split``: one unit per representation (the Rayleigh-Ritz work of a sector that holds two representations at
+      one weight falls by half; the 3-dimensional representations of the 192 operations of a diamond supercell).
+
+    ``None`` where a weight ``d / m`` is not an integer.  Td in D2d: A1 in A1 (E projected out), A2 and E in B1
+    (one unit each), T1 in A2, T2 in B2: rows ``N/8`` each, states ``M/24, M/24, M/12, M/8, M/8`` with weights
+    1, 1, 2, 3, 3 instead of four sectors of ``M/8`` (rows times states 1.2 and rows times states squared 1.5
+    times less).
+    """
+
+    if mode not in IRREP_UNIT_MODES:
+        raise ValueError(f"the irreducible-representation units are {' or '.join(IRREP_UNIT_MODES)}, not {mode!r}")
+    if representations is None:
+        representations = real_irreducible_characters(table)
+    order = table.shape[0]
+    members = list(plan.subgroup)
+    size = len(members)
+    identity, _ = _identity_and_inverses(table)
+    multiplicity = np.array(
+        [[sum(chi[h] * rep.character[h] for h in members) / size for rep in representations] for chi in plan.characters]
+    )
+    if not np.allclose(multiplicity, np.rint(multiplicity), atol=1e-6):
+        raise RuntimeError("restriction multiplicities are not integers")
+    multiplicity = np.rint(multiplicity).astype(np.int64)
+    trivial = [all(int(chi[h]) == 1 for h in members) for chi in plan.characters]
+    held = [tuple(int(g) for g in np.flatnonzero(row)) for row in multiplicity]
+    assigned: list[list[int]] = [[] for _ in plan.characters]
+    for g, rep in enumerate(representations):
+        candidates = [s for s in range(len(plan.characters)) if multiplicity[s, g] >= 1]
+        if not candidates:
+            raise RuntimeError("a representation of the group is held by no solved sector")
+        best = min(candidates, key=lambda s: (int(multiplicity[s, g]), trivial[s], len(held[s]), s))
+        weight = rep.dimension / float(multiplicity[best, g])
+        if abs(weight - round(weight)) > 1e-9:
+            return None
+        assigned[best].append(g)
+
+    def coefficients(sector: int, kept: tuple[int, ...]) -> tuple[float, ...]:
+        chi = plan.characters[sector]
+        values = []
+        for coset in plan.cosets:
+            total = 0.0
+            for g in kept:
+                rep = representations[g]
+                total += rep.levels / order * sum(rep.character[int(table[h, coset])] * chi[h] for h in members)
+            values.append(float(total))
+        return tuple(values)
+
+    units: list[IrrepUnit] = []
+    for sector, kept in enumerate(assigned):
+        if not kept:
+            continue
+        weights = {g: int(round(representations[g].dimension / multiplicity[sector, g])) for g in kept}
+        if mode == "split":
+            groups = [(g,) for g in kept]
+        else:
+            groups = []
+            for weight in sorted(set(weights.values())):
+                groups.append(tuple(g for g in kept if weights[g] == weight))
+        for group in groups:
+            whole = tuple(sorted(group)) == held[sector]
+            share = float(sum(multiplicity[sector, g] * representations[g].levels for g in group)) / order
+            units.append(IrrepUnit(
+                sector=sector,
+                representations=tuple(group),
+                weight=weights[group[0]],
+                share=share,
+                projection=None if whole else coefficients(sector, tuple(group)),
+                partners=tuple(int(g) for g in group if int(multiplicity[sector, g]) > 1),
+            ))
+    # the identity coset first (orbital_group_plan): its coefficient is the share of the sector's states the unit keeps
+    assert plan.cosets[0] == identity
+    return tuple(units)
+
+
+def irrep_unit_costs(plan: OrbitalGroupPlan) -> tuple[float, float]:
+    """Rows times states and rows times states squared of ``plan.units`` (units of ``N M`` and ``N M^2``): the
+    filter-like and the Rayleigh-Ritz-like work, every unit on the rows of its sector (``N / |H|``)."""
+
+    if plan.units is None:
+        raise ValueError("the plan holds no units")
+    rows = 1.0 / len(plan.subgroup)
+    return (float(sum(rows * unit.share for unit in plan.units)),
+            float(sum(rows * unit.share ** 2 for unit in plan.units)))
+
+
+def orbital_group_plan(operations, modulus=None, required=(), units: str | None = None) -> OrbitalGroupPlan:
     """The admitted subgroup of ``operations`` (a point group of signed permutations) of the least cost.
 
     Ties go to the larger subgroup and then to the earlier one in the enumeration order.  The abelian route
@@ -387,6 +534,8 @@ def orbital_group_plan(operations, modulus=None, required=()) -> OrbitalGroupPla
     operations every candidate subgroup contains (the pure translations of a cell that repeats a smaller one:
     a normal subgroup of real characters, in the chosen subgroup of every cell measured; the search over the
     subgroups that contain it takes a tenth of a second instead of seconds for diamond's 192 operations).
+    ``units`` (``once`` or ``split``): the plan also carries the units of :func:`irrep_units` for its sectors
+    (``None`` there where they do not exist); the chosen subgroup and sectors are the same.
     """
 
     table = multiplication_table(operations, modulus=modulus)
@@ -411,14 +560,21 @@ def orbital_group_plan(operations, modulus=None, required=()) -> OrbitalGroupPla
             best = plan
     if best is None:
         raise RuntimeError("no orbital subgroup was admitted")
-    return OrbitalGroupPlan(best.subgroup, best.characters, best.weights, best.cosets, best.cost,
-                            abelian.cost if abelian is not None else float("nan"))
+    plan = OrbitalGroupPlan(best.subgroup, best.characters, best.weights, best.cosets, best.cost,
+                            abelian.cost if abelian is not None else float("nan"), best.partner_irreps)
+    if units is not None:
+        plan = replace(plan, units=irrep_units(table, plan, units, representations))
+    return plan
 
 
 __all__ = [
+    "IRREP_UNIT_MODES",
+    "IrrepUnit",
     "OrbitalGroupPlan",
     "RealRepresentation",
     "conjugacy_classes",
+    "irrep_unit_costs",
+    "irrep_units",
     "multiplication_table",
     "one_dimensional_characters",
     "orbital_group_plan",

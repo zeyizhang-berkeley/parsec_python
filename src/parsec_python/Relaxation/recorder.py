@@ -98,6 +98,13 @@ class RelaxationRecorder(IonicObserver):
     one.  ``on_record`` (optional) is called with the records of all
     structures so far after every structure (the AFM scan writes its table
     with it, so that a later failure keeps the points before).
+    ``orientation`` (``PARSEC_STANDARD_ORIENTATION``, a
+    :class:`parsec_python.Input.standard_orientation.StandardOrientation`)
+    puts the structures and forces of ``atom.cor`` and of the XYZ trajectory
+    in the frame of the input; ``relax_restart.dat``, the state of the
+    optimizer, stays in the frame of the calculation and records that frame
+    after all that PARSEC reads (:data:`files.ORIENTATION_HEADER`), so that a
+    restart from it reports in the frame of the run that wrote it.
     """
 
     def __init__(
@@ -111,8 +118,10 @@ class RelaxationRecorder(IonicObserver):
         elements: Sequence[str] | None = None,
         warm_starts: bool = True,
         on_record: Callable[[list[IonicStepRecord]], None] | None = None,
+        orientation=None,
     ) -> None:
         self.on_record = on_record
+        self.orientation = orientation
         self._records: list[IonicStepRecord] = []
         self.warm_starts = warm_starts
         self.reporter = reporter
@@ -137,6 +146,20 @@ class RelaxationRecorder(IonicObserver):
         )
 
     # ----- files ---------------------------------------------------------
+
+    def _positions(self, positions):
+        """Positions as the files report them (the frame of the input)."""
+
+        if self.orientation is None:
+            return positions
+        return self.orientation.to_reference(positions)
+
+    def _forces(self, forces):
+        """Forces as the files report them (the frame of the input)."""
+
+        if self.orientation is None:
+            return forces
+        return self.orientation.vectors_to_reference(forces)
 
     def _path(self, name: str) -> Path | None:
         return None if self.directory is None else self.directory / name
@@ -214,7 +237,7 @@ class RelaxationRecorder(IonicObserver):
         self._release()
         if step == 0:
             symbols = [atom.symbol for atom in system.atoms]
-            positions = np.array([atom.position for atom in system.atoms])
+            positions = self._positions(np.array([atom.position for atom in system.atoms]))
             # initial.f90 opens atom.cor with the input structure.
             self._start(ATOM_COR, format_atom_cor_structure(0, symbols, positions))
             self._start(TRAJECTORY, "")
@@ -281,10 +304,10 @@ class RelaxationRecorder(IonicObserver):
             TRAJECTORY,
             lambda: format_xyz_frame(
                 record.symbols,
-                record.positions,
+                self._positions(record.positions),
                 step=step,
                 energy=record.energy,
-                forces=record.forces.total,
+                forces=self._forces(record.forces.total),
                 elements=self.elements,
             ),
         )
@@ -320,6 +343,8 @@ class RelaxationRecorder(IonicObserver):
                 lower=_copy(state.lower) if bfgs else None,
                 upper=_copy(state.upper) if bfgs else None,
                 bound_step=state.bound_step if bfgs else None,
+                # PARSEC_STANDARD_ORIENTATION: the frame of the coordinates and of the optimizer state
+                orientation=None if self.orientation is None else self.orientation.restart_records(),
             )
             if getattr(self.settings, "write_restart", True):
                 # Write_Relax_Restart: .false. (PARSEC 1.5's default) writes none.
@@ -328,7 +353,7 @@ class RelaxationRecorder(IonicObserver):
                 )
             if step < self.settings.max_movements:
                 text += format_atom_cor_structure(
-                    step + 1, record.symbols, report.positions
+                    step + 1, record.symbols, self._positions(report.positions)
                 )
         self._append(ATOM_COR, text)
 
@@ -372,7 +397,7 @@ class RelaxationRecorder(IonicObserver):
         if outcome.movements_exhausted:
             text += " NOTICE: Maximum number of movements used.\n"
         if outcome.positions is not None:
-            text += format_atom_cor_final(outcome.positions)
+            text += format_atom_cor_final(self._positions(outcome.positions))
         self._append(ATOM_COR, text)
         self.flush()
         if self._writer is not None:

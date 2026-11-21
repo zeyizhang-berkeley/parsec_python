@@ -183,6 +183,7 @@ def run_band_structure(
     max_attempts: int = 5,
     workers: int | str | None = None,
     backend: str | None = None,
+    symmetry=None,
 ) -> BandStructureResult:
     """Diagonalize the SCF Hamiltonian along ``settings``' path.
 
@@ -192,7 +193,8 @@ def run_band_structure(
     attempts)`` is called as each k-point finishes (in completion order when
     several workers run).  ``residual_tolerance`` [Ry] and ``max_attempts``
     control the CHEBDAV re-solve described in the module docstring (a CHEBFF
-    first solver is never retried).
+    first solver is never retried).  ``symmetry`` is that of
+    :func:`solve_kpoint_bands` (the accelerated Gamma-cell SCF in sectors).
 
     The k-points of the path are independent, so they are spread over workers
     (serial without the acceleration package).  ``backend`` (or
@@ -236,6 +238,7 @@ def run_band_structure(
         workers=workers,
         backend=backend,
         filter_cycles=settings.ff_maxiter,
+        symmetry=symmetry,
     )
     return BandStructureResult(
         mode=mode,
@@ -285,6 +288,7 @@ def solve_kpoint_bands(
     backend: str | None = None,
     keep_vectors: bool = False,
     filter_cycles: int | None = None,
+    symmetry=None,
 ) -> KPointBands:
     """Diagonalize the Hamiltonian of ``potentials`` at every row of ``k_points``.
 
@@ -297,6 +301,12 @@ def solve_kpoint_bands(
     (``KPointBands.vectors``; host arrays).  ``filter_cycles`` replaces
     ``FF_MaxIter`` in these solves (PARSEC 1.5's ``Bands_FF_MaxIter``,
     ``calc_bands.f90:336-338``; CHEBFF first solver only); ``None`` keeps it.
+    ``symmetry``: the operations the potential is invariant under, given by
+    the accelerated SCF of a Gamma cell in the sectors of its point group
+    (:class:`parsec_python.acceleration.SCF.band_sectors.BandSymmetry`); a
+    scalar path then solves its k-points in the sectors of their little
+    groups where they split (``PARSEC_BAND_KPOINT_SECTORS``).  ``None`` (the
+    reference CLI) keeps every k-point whole.
     """
 
     if mode not in MODES:
@@ -484,19 +494,60 @@ def solve_kpoint_bands(
                 point_vectors.append(np.array(host, copy=True))
         return point_values, point_residuals, point_attempts, point_sigma, point_vectors
 
-    for k_index, (
+    indices = None
+    if symmetry is not None and mode == "scalar" and hubbard_matrices is None and not keep_vectors:
+        # The k-points of a Gamma cell solved in sectors (acceleration/SCF/band_sectors.py): None where none splits.
+        from ..acceleration.SCF.band_sectors import solve_band_sectors
+
+        found = solve_band_sectors(
+            system,
+            k_points,
+            potential=potentials["effective_potential"],
+            number_of_states=number_of_states,
+            eigval_settings=eigval_settings,
+            symmetry=symmetry,
+            make_hamiltonian=lambda k_point, _potential: hamiltonians(np.asarray(k_point))[0],
+            callback=callback,
+            workers=workers,
+            backend=backend,
+        )
+        if found is not None:
+            eigenvalues[0], residuals[0] = found
+            # A CHEBDAV first solver re-solves, whole and with its attempts below, a k-point whose largest residual
+            # in the sectors exceeds residual_tolerance, and keeps the better of the two (CHEBFF: never retried).
+            again = [k for k in range(n_k) if can_retry and not residuals[0, k] <= residual_tolerance]
+            if not again:
+                return KPointBands(
+                    channels=channels,
+                    eigenvalues=eigenvalues,
+                    residual_norms=residuals,
+                    attempts=attempts,
+                )
+            indices = again
+
+    in_sectors = indices is not None
+    if indices is None:
+        indices = list(range(n_k))
+    for task, (
         values,
         point_residuals,
         point_attempts,
         point_sigma,
         point_vectors,
     ) in map_tasks(
-        lambda k_index, converter: solve_point(k_points[k_index], converter),
-        n_k,
+        lambda task, converter: solve_point(k_points[indices[task]], converter),
+        len(indices),
         problem_size=system.grid.size,
         workers=workers,
         backend=backend,
     ):
+        k_index = indices[task]
+        if in_sectors:
+            # after the solve in sectors: the better of the two, one attempt more
+            point_attempts = point_attempts + 1
+            if float(residuals[0, k_index]) <= float(point_residuals.max()):
+                attempts[:, k_index] = point_attempts
+                continue
         eigenvalues[:, k_index] = values
         if keep_vectors:
             for channel, vectors_k in enumerate(point_vectors):

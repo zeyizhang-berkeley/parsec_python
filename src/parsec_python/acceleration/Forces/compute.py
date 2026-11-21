@@ -142,6 +142,12 @@ def _spin_nonlocal_forces(system, channels, operator, atom_count: int) -> np.nda
     its device or in the result.
     """
 
+    # PARSEC_SPIN_FLIP_SYMMETRY: a down channel taken from the up channel has no
+    # subspace; its forces are those of the up channel carried by the operation.
+    down_state = getattr(channels[1], "eigensolver_state", None) if len(channels) == 2 else None
+    if getattr(down_state, "spin_flip_channel", False):
+        up = _spin_nonlocal_forces(system, channels[:1], operator, atom_count)
+        return up + down_state.operation.down_forces(up)
     sectors = getattr(system.backend, "symmetry_eigensolver", None)
     if sectors is not None:
         # Both channels in the symmetry sectors (Spin_Symmetry_Sectors): each
@@ -149,11 +155,17 @@ def _spin_nonlocal_forces(system, channels, operator, atom_count: int) -> np.nda
         selections = []
         for channel in channels:
             representations = np.asarray(channel.representations, dtype=np.int32) - 1
+            occupations = np.asarray(channel.occupations, dtype=np.float64)
+            solved = getattr(channel, "sector_states", None)
+            if solved is not None:
+                # Weighted sectors: the states they solved, each with its occupation times its weight.
+                representations = np.asarray(solved[0], dtype=np.int32) - 1
+                occupations = np.asarray(solved[1], dtype=np.float64)
             selections.append(
                 (
                     representations,
                     sector_columns(representations),
-                    0.5 * np.asarray(channel.occupations, dtype=np.float64),
+                    0.5 * occupations,
                 )
             )
         return _sector_atom_forces(
@@ -251,6 +263,17 @@ def _abelian_local_operations(system, abelian=None):
     return abelian if abelian is not None and len(abelian) > 1 else None
 
 
+def _left_spin_sectors(system) -> bool:
+    """Whether ``system`` is the full grid that a spin-polarized run in the sectors went back to (its guard fired).
+
+    ``driver._SpinSectorFallback`` names that in the ``spin_symmetry_sectors`` detail of the replaced system
+    (``auto: left the sectors after ...``), which moved structures carry on.
+    """
+
+    details = dict(getattr(getattr(system, "backend_info", None), "details", ()) or ())
+    return str(details.get("spin_symmetry_sectors", "")).startswith("auto: left the sectors")
+
+
 def compute_periodic_forces(
     system,
     result,
@@ -285,7 +308,13 @@ def compute_periodic_forces(
     # A cell in the sectors of an Abelian group solves every level: its forces need no completion, but a relaxation
     # averages them (and its moved positions) over that group, so that atoms the group fixes stay on it.
     abelian = abelian_cell_operations(system) if completion is None and (symmetrize or operations) else None
-    if (symmetrize or operations) and completion is None and abelian is None:
+    # A spin-polarized cell that left its sectors for the full grid (its guard fired, driver._SpinSectorFallback):
+    # a relaxation keeps averaging over the operations of its first structure, which its moved positions keep; a
+    # single point gives the forces of the full grid as they are (its state may break that group).
+    kept = None
+    if (symmetrize or operations) and completion is None and abelian is None and _left_spin_sectors(system):
+        kept = tuple(operations) if operations else ()
+    if (symmetrize or operations) and completion is None and abelian is None and kept is None:
         raise ValueError(
             "a periodic cell has no symmetrized forces: its structure is not reduced by space-group operations"
         )
@@ -351,6 +380,8 @@ def compute_periodic_forces(
         averaged_over = tuple(operations) if operations else completion
     elif abelian is not None:
         averaged_over = tuple(operations) if operations else abelian
+    elif kept:
+        averaged_over = kept
     clock["nonlocal"] = perf_counter() - mark
     forces = assemble_forces(
         positions, repulsion, local, separable, averaged_over, phase_seconds=clock, periodic=True
@@ -390,14 +421,21 @@ def compute_forces(
             and int(decomposition.reduction.group_order) > 1
             and uses_fortran_routines(system.grid)
         ):
-            # The Fortran-derived routines read the orbitals and density of a cell on the full grid.
-            raise NotImplementedError(
-                "the forces of a periodic cell of the Fortran-derived routines solved in the sectors of its point "
-                "group are not implemented: prepare it with symmetry='off' or PARSEC_PERIODIC_SYMMETRY=off"
-            )
+            from .sector_symmetry import fortran_sector_forces_setting
+
+            if fortran_sector_forces_setting() == "off":
+                # The Fortran-derived routines read the orbitals and density of a cell on the full grid.
+                raise NotImplementedError(
+                    "the forces of a periodic cell of the Fortran-derived routines solved in the sectors of its point "
+                    "group are not computed under PARSEC_FORTRAN_SECTOR_FORCES=off: prepare it with symmetry='off' "
+                    "or PARSEC_PERIODIC_SYMMETRY=off"
+                )
         if uses_fortran_routines(system.grid):
             # The Fortran-derived routines (Use_Fortran_Routines): the device builders of
-            # their Ewald terms and projectors with their lattice images.
+            # their Ewald terms and projectors with their lattice images; in the sectors of
+            # the point group of the cell (PARSEC_FORTRAN_SECTOR_FORCES=auto) the local terms
+            # read the fields the sectors expand to the full grid and the nonlocal term is
+            # contracted in the sectors.
             from .periodic_device import compute_device_periodic_forces
 
             return compute_device_periodic_forces(
@@ -437,6 +475,7 @@ def compute_forces(
         from .local_device import (
             cupy_local_forces,
             cupy_wedge_local_forces,
+            group_wedge,
             local_force_device_ids,
             local_force_sums_setting,
         )
@@ -444,13 +483,18 @@ def compute_forces(
         devices = local_force_device_ids(system)
         sectors = getattr(system.backend, "symmetry_eigensolver", None)
         reduction = getattr(getattr(sectors, "decomposition", None), "reduction", None)
+        sums = local_force_sums_setting()
         if (
             reduction is not None
             and reduction.group_order > 1
-            and local_force_sums_setting() == "wedge"
+            and sums in ("orbits", "wedge")
         ):
-            local = cupy_wedge_local_forces(*fields, reduction, device_ids=devices)
-            clock["local_points"] = float(reduction.wedge_size)
+            # PARSEC_LOCAL_FORCE_SUMS=orbits: one point per orbit of the full group of weighted sectors
+            grouped = group_wedge(reduction) if sums == "orbits" else None
+            local = cupy_wedge_local_forces(
+                *fields, reduction, device_ids=devices, full_group=grouped is not None
+            )
+            clock["local_points"] = float(reduction.wedge_size if grouped is None else grouped[0].size)
         else:
             local = cupy_local_forces(*fields, device_ids=devices)
             clock["local_points"] = float(system.grid.size)

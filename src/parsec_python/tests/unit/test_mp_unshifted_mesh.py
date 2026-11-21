@@ -414,15 +414,25 @@ class ParserTests(unittest.TestCase):
                 np.testing.assert_array_equal(weights, [1.0])
 
     def test_hybrid_takes_time_reversal_of_the_zero_shift_mesh(self) -> None:
+        # PARSEC_HYBRID_KPOINT_WEDGE=off: the time-reversal pairs of the mesh; on: the wedge of a semilocal run (the
+        # exchange reaches the rest of the mesh through the images of its Bloch factors); auto (since 2026-11-20): the
+        # pairs of off with that wedge kept aside for the Fock loop of an insulating start
         for routines in ("Use_Fortran_Routines: .true.", "Use_Fortran_Routines: .false."):
-            with self.subTest(routines=routines):
-                unshifted = self.parse("3 3 3", "", routines, xc="pbe0")
-                zero = self.parse("3 3 3", _ZERO_SHIFT, routines, xc="pbe0")
-                k_ours, w_ours = kpoint_sampling(unshifted.problem)
-                k_zero, w_zero = kpoint_sampling(zero.problem)
-                np.testing.assert_array_equal(k_ours, k_zero)
-                np.testing.assert_array_equal(w_ours, w_zero)
-                self.assertEqual(len(k_ours), 14)  # (27 + 1)/2: Gamma and 13 pairs
+            for wedge, count in (("on", 4), ("auto", 14), ("off", 14)):
+                with self.subTest(routines=routines, wedge=wedge):
+                    with mock.patch.dict(os.environ, {"PARSEC_HYBRID_KPOINT_WEDGE": wedge}):
+                        unshifted = self.parse("3 3 3", "", routines, xc="pbe0")
+                        zero = self.parse("3 3 3", _ZERO_SHIFT, routines, xc="pbe0")
+                    self.assertEqual(unshifted.problem.hybrid_kpoint_wedge, wedge == "on")
+                    self.assertEqual(zero.problem.hybrid_kpoint_wedge, wedge == "on")
+                    for translation in (unshifted, zero):
+                        deferred = translation.problem.hybrid_kpoint_wedge_deferred
+                        self.assertEqual(deferred is not None, wedge == "auto")
+                    k_ours, w_ours = kpoint_sampling(unshifted.problem)
+                    k_zero, w_zero = kpoint_sampling(zero.problem)
+                    np.testing.assert_array_equal(k_ours, k_zero)
+                    np.testing.assert_array_equal(w_ours, w_zero)
+                    self.assertEqual(len(k_ours), count)  # off: (27 + 1)/2, Gamma and 13 pairs
                 lattice = unshifted.problem.periodic_cell.lattice_vectors
                 fractions = k_ours @ np.linalg.inv(2.0 * np.pi * np.linalg.inv(lattice).T)
                 mesh = np.rint(fractions * 3.0)

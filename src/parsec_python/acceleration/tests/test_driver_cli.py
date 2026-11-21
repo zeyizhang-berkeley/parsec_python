@@ -489,7 +489,9 @@ class PeriodicDriverTests(unittest.TestCase):
         comm = SimpleNamespace(rank=0, size=1, allgather=lambda value: [value])
         text = PERIODIC_SILICON.read_text()
         for added, message in (
-            ("Kpoint_Method: mp\nbegin Monkhorst_Pack_Grid\n2 2 2\nend Monkhorst_Pack_Grid\n",
+            # a 3 x 3 x 3 mesh: a 2 x 2 x 2 one (time-reversal invariant points) runs as the Gamma point of its
+            # supercell by default (PARSEC_KPOINT_SUPERCELL=auto, SCF/kpoint_supercell.py)
+            ("Kpoint_Method: mp\nbegin Monkhorst_Pack_Grid\n3 3 3\nend Monkhorst_Pack_Grid\n",
              "k-point sampling.*main.py --mpi"),
             # collinear spin runs in the sectors (SCF/gamma_spin.py), not with its channels on the full grid
             ("Spin_Polarization: true\nSpin_Symmetry_Sectors: off\n", "spin polarization with Spin_Symmetry_Sectors"),

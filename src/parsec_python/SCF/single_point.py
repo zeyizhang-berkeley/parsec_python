@@ -73,6 +73,7 @@ from ..Occupations import (
     density_from_orbitals,
     fermi_occupations,
     fixed_occupations,
+    weighted_fixed_occupations,
 )
 from ..Pseudopotential import ParsecPseudopotential
 from ..V_ion import (
@@ -2577,9 +2578,6 @@ def run_scf(
         # return one partner of some degenerate levels: each state counts for its weight's worth of states,
         # in the Fermi level and in everything the occupations weigh (density, band energy, forces).
         state_weights = getattr(eigensolution, "state_weights", None)
-        if state_weights is not None and settings.fixed_occupations is not None:
-            raise ValueError("occupations from occup.in name every state: they need the orbitals of the full grid "
-                             "or of the abelian group (PARSEC_ORBITAL_GROUP=abelian)")
         occupation_result = (
             fermi_occupations(
                 eigenvalues,
@@ -2592,6 +2590,17 @@ def run_scf(
                 eigenvalues,
                 system.electron_count,
                 settings.fixed_occupations,
+            )
+            if state_weights is None
+            # occup.in counts the partners of a weighted state, whose entries must be equal, as those of
+            # degenerate partners that several solved states hold (PARSEC_ORBITAL_GROUP_OCCUPATIONS;
+            # Occupations.UnequalPartnerOccupations otherwise).
+            else weighted_fixed_occupations(
+                eigenvalues,
+                state_weights,
+                system.electron_count,
+                settings.fixed_occupations,
+                partners=getattr(eigensolution, "state_partners", None),
             )
         )
         occupations = occupation_result.occupations

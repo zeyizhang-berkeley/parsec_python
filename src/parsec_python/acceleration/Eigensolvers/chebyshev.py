@@ -499,8 +499,35 @@ def chebff_filter(
     """Apply CHEBFF in memory blocks, preserving PARSEC's sigma carry.
 
     ``out`` (which may be ``vectors`` itself when the caller owns it) is used
-    only by the captured-graph route; always use the returned array.
+    only by the captured-graph route; always use the returned array.  The
+    filtered block of a unit of irreducible representations is projected onto
+    them (:func:`.irrep_projection.project_filtered`; a sector solved whole is
+    returned as it was filtered).
     """
+
+    from .irrep_projection import project_filtered
+
+    return project_filtered(operator, _chebff_filter(
+        operator, vectors, degree, lower_bound, upper_bound, reference_eigenvalue,
+        block_size=block_size, reset_recurrence_per_block=reset_recurrence_per_block,
+        batch_blocks=batch_blocks, out=out,
+    ))
+
+
+def _chebff_filter(
+    operator: Any,
+    vectors: Any,
+    degree: int,
+    lower_bound: float,
+    upper_bound: float,
+    reference_eigenvalue: float,
+    *,
+    block_size: int = 6,
+    reset_recurrence_per_block: bool = False,
+    batch_blocks: bool | None = None,
+    out: Any | None = None,
+):
+    """:func:`chebff_filter` without the projection of a unit."""
 
     cp, _ = require_cupy()
     matrix, was_vector = _as_device_columns(vectors)
@@ -612,8 +639,34 @@ def subspace_filter(
 
     ``out`` (which may be ``vectors`` itself when the caller owns it) is used
     only by the captured-graph and distributed routes; always use the
-    returned array.
+    returned array.  The filtered block of a unit of irreducible
+    representations is projected onto them (:func:`.irrep_projection.project_filtered`).
     """
+
+    from .irrep_projection import project_filtered
+
+    return project_filtered(operator, _subspace_filter(
+        operator, vectors, degree, degree_delta, lower_bound, upper_bound,
+        block_size=block_size, reset_recurrence_per_block=reset_recurrence_per_block,
+        batch_blocks=batch_blocks, mixed_precision=mixed_precision, out=out,
+    ))
+
+
+def _subspace_filter(
+    operator: Any,
+    vectors: Any,
+    degree: int,
+    degree_delta: int,
+    lower_bound: float,
+    upper_bound: float,
+    *,
+    block_size: int = 6,
+    reset_recurrence_per_block: bool = False,
+    batch_blocks: bool | None = None,
+    mixed_precision: bool | None = None,
+    out: Any | None = None,
+):
+    """:func:`subspace_filter` without the projection of a unit."""
 
     cp, _ = require_cupy()
     matrix, was_vector = _as_device_columns(vectors)

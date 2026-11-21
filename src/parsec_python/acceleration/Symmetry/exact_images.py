@@ -67,11 +67,13 @@ def _sorted_rows(points: np.ndarray) -> np.ndarray:
     return points[np.lexsort(points.T[::-1])]
 
 
-def atom_images_exact(atoms: Sequence, operations) -> bool:
+def atom_images_exact(atoms: Sequence, operations, tolerance: float = 0.0) -> bool:
     """Whether every operation maps the atoms of every species onto themselves, bit for bit.
 
     The sign of a zero is not a difference: a nucleus on a mirror plane is
-    its own image.
+    its own image.  ``tolerance`` (bohr, for moved structures): an image may
+    lie that far from its atom, every atom being the image of one; ``0``
+    asks for the same bits.
     """
 
     by_species: dict[str, list] = {}
@@ -81,9 +83,19 @@ def atom_images_exact(atoms: Sequence, operations) -> bool:
         # Adding zero turns a negative zero into a positive one.
         positions = np.asarray(positions, dtype=np.float64).reshape(-1, 3) + 0.0
         own = _sorted_rows(positions)
+        tree = None
         for sources, factors in operations:
             image = positions[:, sources] * factors + 0.0
-            if not np.array_equal(_sorted_rows(image), own):
+            if np.array_equal(_sorted_rows(image), own):
+                continue
+            if not tolerance > 0.0:
+                return False
+            if tree is None:
+                from scipy.spatial import cKDTree
+
+                tree = cKDTree(positions)
+            distances, nearest = tree.query(image, k=1, workers=1)
+            if not (np.all(distances <= tolerance) and np.unique(nearest).size == nearest.size):
                 return False
     return True
 
@@ -119,7 +131,9 @@ def grid_images_exact(grid, reduction, operations, representative=None) -> bool:
     return True
 
 
-def orbit_sum_points(grid, atoms: Sequence, reduction) -> tuple[np.ndarray | None, str | None]:
+def orbit_sum_points(
+    grid, atoms: Sequence, reduction, *, atom_tolerance: float = 0.0
+) -> tuple[np.ndarray | None, str | None]:
     """Return the points at which a sum over the atoms may stand for its whole orbit.
 
     They are the coordinates of the representative rows of ``reduction``,
@@ -127,6 +141,11 @@ def orbit_sum_points(grid, atoms: Sequence, reduction) -> tuple[np.ndarray | Non
     operation beside the identity and the images of the atoms and of the
     grid points are exact (see the module documentation).  Otherwise
     ``None`` and, in words, the first condition that fails.
+    ``atom_tolerance`` lets an image of an atom lie that far from its atom
+    (:func:`atom_images_exact`): the positions of a moved structure, averaged
+    over the group in floating point, may differ from exact images in their
+    last bits, and the sums then differ from those of every point by about
+    that much.
     """
 
     if reduction is None or int(getattr(reduction, "group_order", 1)) <= 1:
@@ -134,8 +153,12 @@ def orbit_sum_points(grid, atoms: Sequence, reduction) -> tuple[np.ndarray | Non
     operations = group_operations(reduction)
     if operations is None:
         return None, "the operations of the symmetry reduction are not known"
-    if not atoms or not atom_images_exact(atoms, operations):
-        return None, "an image of an atom is not an atom of its species in every bit"
+    if not atoms or not atom_images_exact(atoms, operations, atom_tolerance):
+        return None, (
+            "an image of an atom is not an atom of its species in every bit"
+            if not atom_tolerance > 0.0
+            else f"an image of an atom is farther than {atom_tolerance:g} bohr from every atom of its species"
+        )
     try:
         representative = np.ascontiguousarray(
             np.asarray(grid.coordinates)[np.asarray(reduction.representative_rows)],

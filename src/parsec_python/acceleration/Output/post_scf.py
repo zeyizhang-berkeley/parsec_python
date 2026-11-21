@@ -12,7 +12,9 @@ here, after the accelerated SCF, with the readable post-processing of the refere
     :mod:`parsec_python.acceleration.SCF.kpoint_parallel` when a GPU is visible: the same eigensolves
     as the reference CLI makes after its own Gamma-point SCF, which runs on the host.  The SCF may
     solve in the sectors of the point group of the cell (``PARSEC_PERIODIC_SECTOR_BANDS=auto``):
-    :func:`band_hand_over` gives the bands what a full-grid SCF gives them.
+    :func:`band_hand_over` gives the bands what a full-grid SCF gives them, and the k-points of the path
+    are then solved in the sectors of their little groups under that group
+    (``PARSEC_BAND_KPOINT_SECTORS=auto``, :mod:`..SCF.band_sectors`).
 
 ``Create_DOS`` of a cluster (``dos.F90`` l.149-168)
     :func:`parsec_python.cli._run_dos`: the histogram of the occupations of the accelerated levels.
@@ -145,9 +147,22 @@ def run_post_scf_outputs(system, translation, result, reporter, write, directory
     text_reporter = getattr(reporter, "reference", reporter)
     reference_system = getattr(system, "reference", system)
     if bands:
+        from ..SCF.band_sectors import band_kpoint_sectors_setting, band_symmetry_of, last_band_sector_record
+
+        # The k-points of the path in the sectors of their little groups where the SCF ran in sectors
+        # (PARSEC_BAND_KPOINT_SECTORS; off: every k-point on the whole grid, as before).
+        symmetry = band_symmetry_of(system) if band_kpoint_sectors_setting() == "auto" else None
         _run_band_structure(
-            reference_system, translation, band_hand_over(system, result), text_reporter, directory
+            reference_system, translation, band_hand_over(system, result), text_reporter, directory,
+            **({} if symmetry is None else {"symmetry": symmetry}),
         )
+        record = last_band_sector_record() if symmetry is not None else {}
+        if record:
+            write(
+                f" Band k-points in the sectors of their little groups: {record['split']} of {record['kpoints']} "
+                f"k-points split, at most {record['largest']} sectors, under the {record['group']} operations of the "
+                "SCF potential (PARSEC_BAND_KPOINT_SECTORS=auto)"
+            )
     if dos:
         _run_dos(reference_system, translation, result, text_reporter, directory)
     write(f" Post-SCF band structure / DOS wall time [sec] : {time.perf_counter() - started:11.2f}")

@@ -201,7 +201,13 @@ Currently supported:
     SCF loops (`Polarizability`, `Electric_Field`, file `polar.dat`), fixed
     point charges (`Add_Point_Charges`, with their energy and forces) and the
     point-group symmetrization of the density of a cluster
-    (`Symmetrize_Charge_Density`); these three run on the reference solver;
+    (`Symmetrize_Charge_Density`); these three run on the reference solver
+    and, for a cluster, on the accelerated SCF too (`acceleration/README.md`:
+    the field loops and the point charges without a point group, the
+    symmetrized density of an unpolarized cluster on the orbits of its
+    symmetry sectors, `acceleration/SCF/density_symmetry.py`, a spin-polarized
+    one on the full grid); the symmetrized density of a periodic cell stays on
+    the reference solver, and the MPI runner refuses all three;
   - wire and slab cells (`Boundary_Conditions: wire` / `slab`, PARSEC's 1-D
     and 2-D periodic boundary conditions with `Boundary_Sphere_Radius` the
     radius of the cylinder or half height of the slab, charged sheets of a slab
@@ -212,7 +218,16 @@ Currently supported:
     and weighted or irreducible k-points), relaxation and molecular dynamics
     (`Relaxation.wire_slab_backend`), Fortran's space group of a wire or slab
     (`alatt` with `4 rmax` along the confined directions; a slab has none
-    unless bands, spin-orbit or NSCF turn it on) with `Monkhorst_Pack_Shift`
+    unless bands, spin-orbit or NSCF turn it on, or, beyond PARSEC 1.5, a
+    Monkhorst-Pack mesh of scalar or collinear-spin LDA/GGA orbitals:
+    `PARSEC_SLAB_MESH_SYMMETRY`, the operations that keep its grid and its
+    mesh and permute the lattice directions, h-BN 6 x 6 x 1 on 13 of 20
+    points with the energy of the whole mesh; not with a four-fold rotation
+    without a diagonal mirror on a mesh through the zone boundary, nor with
+    the Ylm-projected DOS; charged sheets that are not symmetric about
+    z = 0 drop z -> -z; `full` adds the three- and six-fold rotations,
+    7 points, within the finite-difference error) with
+    `Monkhorst_Pack_Shift`
     and `Symmetrize_Charge_Density`, `Polarizability`, parsec.dat with
     `Restart_Run` and `nscf_kpoints`, `Super_Cell`/`Super_Cell_Vac`,
     `Create_DOS` and LDA+U (at Gamma, with k-points, spin and bands; the
@@ -985,12 +1000,40 @@ solves, ACE and the exchange term on the GPUs; both give the numbers of the
 host loop to round-off ([acceleration/README.md](acceleration/README.md),
 "Hybrid functionals of periodic cells on the device"):
 
-- **k-points.** The exchange operator sums over the full mesh, so the space
-  group does not reduce it: a hybrid takes the mesh reduced by time reversal
-  only (`qpoints.dat` and the report list those points). The SCF solves the
-  representatives `k` (weight `2/N`, or `1/N` where `-k = k` modulo a
-  reciprocal lattice vector); the factor at `-k` is `conj(u_k)`, exact for the
-  finite-difference Bloch operator (`H_{-k} = conj(H_k)`).
+- **k-points.** The exchange operator sums over the full mesh. A single
+  point with a Monkhorst-Pack mesh solves its irreducible wedge
+  (`PARSEC_HYBRID_KPOINT_WEDGE`): under `auto` (since 20 November 2026) the
+  semilocal start runs on the time-reversal pairs, bit for bit as `off`, and
+  the Fock loop moves to the wedge where that start has no partly filled state
+  (`Grid/kpoints.py`, `partly_filled_states`: no occupation within 1e-6 of the
+  inside of [0, 1]; `SCF/hybrid_periodic.py`, `BlochExchange.after_start`),
+  else keeps the pairs for the whole run, bit for bit as `off`: a metal's
+  level partly filled at equivalent k-points can break the crystal symmetry in
+  the Fock loop of the pairs (exact exchange favours integer occupations; hcp
+  and fcc Au 7e-4 to 1e-3 Ry below the symmetric state), which the wedge cannot
+  hold; `on` runs the wedge always, the symmetric state. The wedge takes the
+  operations of the space group that map the grid, its finite-difference
+  operators and the mesh onto themselves, on any grid, with time
+  reversal, the density symmetrized over them; the
+  factor at an image `k' = M^-T k` is `u_k` with its grid points permuted (up
+  to a constant phase, which drops out of the exchange), as Quantum
+  ESPRESSO's `exxinit` rotates the wavefunctions of its irreducible points
+  (`V_xc/bloch_exchange.py`, `MeshStars`; `SCF/hybrid_periodic.py`,
+  `hybrid_mesh_stars`; on the Fortran-derived routines the density average
+  keeps the whole space group, the wedge and the images only the operations
+  that keep the mesh). Forces, moving atoms, a `Kpoint_List`, a mesh that
+  time reversal does not keep (a shift other than 0 or 1/2) and
+  `PARSEC_HYBRID_KPOINT_WEDGE=off` take the mesh reduced by time reversal
+  only (`qpoints.dat` and the report list the points solved). The SCF then
+  solves the representatives `k` (weight `2/N`, or `1/N` where `-k = k`
+  modulo a reciprocal lattice vector); the factor at `-k` is `conj(u_k)`,
+  exact for the finite-difference Bloch operator (`H_{-k} = conj(H_k)`). On
+  an orthorhombic grid the images are the factors of their points to the
+  eigensolver's tolerance; on the general grid of a non-orthogonal cell the
+  finite-difference operator keeps the lattice's operations only to its
+  discretization (primitive Si, 2x2x2: `E_x` of the images 3.1e-6 Ry from that of
+  the mesh solved at 0.5 bohr, 4.5e-7 Ry at 0.35 bohr), as the semilocal wedge
+  of those grids does.
 - **Pair potentials.** For a Bloch factor `u_nk` and an occupied `u_mk'` the
   pair density `conj(u_mk') u_nk / dV` is the periodic part of a Bloch
   function of `q = k - k'`; its potential is `w = ifftn(K(q + G) fftn(rho))`
@@ -1802,6 +1845,20 @@ threefold or sixfold axis) and that is not partly filled at the start; one
 that the first filter of a large system leaves unresolved and whose sector
 state ends invariant and integer; a state that passes through a partly filled
 multiplet during the SCF and returns to an invariant integer one.
+Since 19 November 2026 a point group larger than its abelian subgroup (Td,
+Oh, D4h, ...) gives both channels the weighted sectors of a subgroup in one
+process, as an unpolarized run has them (`PARSEC_ORBITAL_GROUP_SPIN=auto`;
+`off` keeps the abelian sectors): one state stands for its degenerate
+partners, each channel's density is averaged over the whole group, and the
+guard counts that state as its partner levels in distinct sectors (a triplet
+held by one state with one electron is a partly filled multiplet of three
+levels; partners of one level with unequal integer occupations fail test 3 as
+well, since test 2 sees no asymmetry in an averaged density). With
+`occup.in`, every step also checks that the partners of a level (those of one
+weighted state, and degenerate ones that several sectors hold, such as the e
+of Td in two sectors of D2d) take equal entries in each channel. A run the guard
+or that check stops there starts again in the abelian sectors, and from there,
+where their guard stops it too, on the full grid (two `NOTE`s).
 The reference solver (`reference_main.py`) and the MPI runner keep the
 full grid in every case; without `Spin_Polarization` the keyword is ignored
 with a WARNING. `Generate_Complete_Parsec_In` writes it for a spin-polarized hybrid

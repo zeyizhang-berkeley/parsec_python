@@ -63,6 +63,8 @@ BLOCKS_PER_MULTIPROCESSOR = 4
 KERNEL = "stencil_major_chebyshev6"
 WIDTH = 6
 _LOOP = "    for (int slot = 0; slot < slot_count; ++slot) {\n"
+# The parameter of two-byte codes (cupy_stencil_major.WIDE_CODES), by which a source says it reads them.
+_WIDE_CODES = "const unsigned short* __restrict__ coefficient_codes"
 _VECTOR, _ROW_STRIDE, _COLUMN_STRIDE = "current", "current_row_stride", "current_column_stride"
 
 
@@ -81,7 +83,7 @@ def takes_fast_path(slot_count, width, row_stride, slots):
     return int(slot_count) == int(slots) and int(width) == WIDTH and int(row_stride) == 1
 
 
-def _fast_path(slots, tile):
+def _fast_path(slots, tile, code_type="unsigned char"):
     lines = []
     emit = lines.append
 
@@ -102,7 +104,7 @@ def _fast_path(slots, tile):
         emit("        const long long meta_step = row_count;")
         emit("        const unsigned int row_shift = 0u;")
     emit("        const int* __restrict__ meta_n = neighbors + meta_base;")
-    emit("        const unsigned char* __restrict__ meta_c = coefficient_codes + meta_base;")
+    emit(f"        const {code_type}* __restrict__ meta_c = coefficient_codes + meta_base;")
     for column in range(6):
         emit(f"        const double* __restrict__ column_{column} = {_VECTOR} + {column} * {_COLUMN_STRIDE};")
     emit("        const int self_row = static_cast<int>(row);")
@@ -158,15 +160,18 @@ def pipelined_source(base, slots, tile):
 
     The fast path goes in front of the slot loop of :data:`KERNEL`, whose former loop becomes its
     ``else`` branch, and the kernel is declared with launch bounds; every other byte of ``base``,
-    ``stencil_major_spmm6`` among them, stays as it is.
+    ``stencil_major_spmm6`` among them, stays as it is.  The fast path reads the codes in the type
+    ``base`` declares them in: one byte, or two in the source of a sector stencil of two-byte codes
+    (``cupy_stencil_major.code_source``).
     """
     if base.count(_LOOP) != 2:
         raise RuntimeError("production stencil ABI changed")
     if int(slots) < 1:
         raise ValueError("a stencil has at least one slot")
+    code_type = "unsigned short" if _WIDE_CODES in base else "unsigned char"
     start = base.index(f"void {KERNEL}(")
     at = base.index(_LOOP, start)
-    source = base[:at] + _fast_path(int(slots), int(tile)) + base[at:]
+    source = base[:at] + _fast_path(int(slots), int(tile), code_type) + base[at:]
     return source.replace(
         f"void {KERNEL}(", f"void __launch_bounds__({THREADS}, {BLOCKS_PER_MULTIPROCESSOR}) {KERNEL}(", 1)
 

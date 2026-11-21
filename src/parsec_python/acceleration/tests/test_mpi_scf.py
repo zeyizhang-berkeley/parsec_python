@@ -841,6 +841,20 @@ class MPISCFTests(unittest.TestCase):
                 with patch.dict('os.environ', PARSEC_CUPY_DISTRIBUTED_STATE=policy):
                     self.assertEqual([distributed_state.shared_basis_devices(operator, 5) for operator in built],
                                      [None] * 4)
+            # Nor does the driver give the sectors of the control device groups: it deals them cyclically
+            # (PARSEC_CUPY_SECTOR_PLACEMENT=cyclic), where one process places them by size by default since
+            # 2026-11-19, with the device pool and shared bases.  A launcher that names size gets that.
+            from parsec_python.acceleration.Eigensolvers.symmetry import (
+                process_sector_device_groups, process_sector_placement_setting)
+            from parsec_python.acceleration.backends.implicit_stencil import FilterPlan
+            self.assertEqual(process_sector_placement_setting(), 'cyclic')
+            sectors = SimpleNamespace(representation_count=5, sector_weights=None,
+                                      sector_sizes=(2_000_000, 1_960_600, 1_980_200, 1_960_600, 1_980_200))
+            large = FilterPlan(states=20000, buffer=16, applications=200)
+            self.assertIsNone(process_sector_device_groups(sectors, (0, 1, 2, 3), large, divided=True))
+            with patch.dict('os.environ', PARSEC_CUPY_SECTOR_PLACEMENT='size'):
+                self.assertEqual(process_sector_device_groups(sectors, (0, 1, 2, 3), large, divided=True),
+                                 {sector: (0, 1, 2, 3) for sector in range(5)})
             # The former rule of the state storage where the launcher names neither value, and the former
             # download of a basis that it spills.  The values themselves stay the launcher's, and the share
             # of a device belongs to the rule that the control does not ask.

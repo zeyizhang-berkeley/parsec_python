@@ -94,6 +94,9 @@ def build_row_domain(metadata, owner, rank, size, local_rows=None) -> RowDomain:
         raise RuntimeError('incomplete halo mapping')
     if len(rows) + len(ghosts) > np.iinfo(np.int32).max:
         raise ValueError('local index storage exceeds int32')
+    if np.asarray(metadata.coefficient_codes).dtype != np.uint8:
+        # domain_apply reads one-byte codes (a sector stencil of more than 256 coefficients has two-byte ones)
+        raise ValueError('row domains take stencils of one-byte coefficient codes')
     return RowDomain(rows, ghosts, np.ascontiguousarray(slots, dtype=np.int32),
                      np.ascontiguousarray(metadata.coefficient_codes[:, rows]),
                      np.asarray(metadata.coefficient_palette, dtype=np.float64),

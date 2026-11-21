@@ -174,21 +174,67 @@ class CommandLineRoutingTests(unittest.TestCase):
     def test_dynamics_manual_moves_fixed_atoms_and_fortran_routines_keep_the_full_grid(self) -> None:
         fixed = (
             BFGS.replace("Minimization", "Move_Flag: 4\nMinimization"),
-            "Move_Flag fixes atoms",
+            "Move_Flag fixes atoms (PARSEC_MOVE_FLAG_SUBGROUP=off)",
+            {"PARSEC_MOVE_FLAG_SUBGROUP": "off"},
         )
-        for extra, reason in (
-            (DYNAMICS, "molecular dynamics"),
-            (MANUAL, "manual movements"),
+        # the Fortran-derived routines under PARSEC_FORTRAN_SECTOR_FORCES=off (under auto, the default since
+        # 2026-11-19, they keep the sectors: test_fortran_sector_forces), and a relaxation with fixed
+        # atoms on those routines under auto, whose forces are symmetrized with their own group
+        fortran_off = {"PARSEC_FORTRAN_SECTOR_FORCES": "off"}
+        for extra, reason, environment in (
+            (DYNAMICS, "molecular dynamics", None),
+            (MANUAL, "manual movements", None),
             fixed,
-            ("Use_Fortran_Routines: .true.\n" + FORCES, "Use_Fortran_Routines"),
-            ("Use_Fortran_Routines: .true.\n" + BFGS, "Use_Fortran_Routines"),
+            ("Use_Fortran_Routines: .true.\n" + FORCES, "Use_Fortran_Routines", fortran_off),
+            ("Use_Fortran_Routines: .true.\n" + BFGS, "Use_Fortran_Routines", fortran_off),
+            ("Use_Fortran_Routines: .true.\n" + BFGS.replace("Minimization", "Move_Flag: 4\nMinimization"),
+             "Move_Flag fixes atoms of a cell on the Fortran-derived routines", None),
         ):
             with self.subTest(extra=extra):
-                self.assertEqual(self.route(extra), ("prepared", "off"))
-                outcome = self.route(extra, ("--symmetry", "on"))
+                self.assertEqual(self.route(extra, environment=environment), ("prepared", "off"))
+                outcome = self.route(extra, ("--symmetry", "on"), environment)
                 self.assertEqual(outcome[:2], ("exit", 2), outcome)
                 self.assertIn("--symmetry on cannot be used with", outcome[2])
                 self.assertIn(reason, outcome[2])
+
+    def test_fixed_atoms_keep_the_sectors_of_their_subgroup(self) -> None:
+        # PARSEC_MOVE_FLAG_SUBGROUP=auto (the default): a relaxation with Move_Flag keeps the sectors, the fixed atoms
+        # a species of their own for the detection; a single point with forces moves no atom and keeps them too.
+        seen = {}
+
+        def keywords(extra, environment=None):
+            self.count += 1
+            path = write_silicon(self.directory / f"case{self.count}", extra)
+
+            def prepare(problem, **given):
+                seen.clear()
+                seen.update(given)
+                raise _Prepared
+
+            variables = {"PARSEC_PERIODIC_SECTOR_FORCES": "auto", **(environment or {})}
+            with mock.patch.dict(os.environ, variables), mock.patch.object(
+                cli_module, "prepare_single_point", side_effect=prepare
+            ), redirect_stdout(StringIO()), redirect_stderr(StringIO()):
+                try:
+                    cli_module.main([str(path), "--quiet", "--no-archive", "--device", "cpu"])
+                except _Prepared:
+                    return dict(seen)
+            return None
+
+        relaxed = keywords(BFGS.replace("Minimization", "Move_Flag: 5\nMinimization"))
+        self.assertEqual(relaxed["symmetry"], "auto")
+        self.assertEqual(relaxed["symmetry_fixed_atoms"], (False,) * 5 + (True,) * 3)
+        forces = keywords(FORCES + "Move_Flag: 5\n")
+        self.assertEqual(forces["symmetry"], "auto")
+        self.assertIsNone(forces["symmetry_fixed_atoms"])
+        self.assertEqual(self.route(BFGS.replace("Minimization", "Move_Flag: 5\nMinimization"), ("--symmetry", "on")),
+                         ("prepared", "on"))
+        off = keywords(BFGS.replace("Minimization", "Move_Flag: 5\nMinimization"), {"PARSEC_MOVE_FLAG_SUBGROUP": "off"})
+        self.assertEqual(off["symmetry"], "off")
+        self.assertIsNone(off["symmetry_fixed_atoms"])
+        outcome = self.route(BFGS, environment={"PARSEC_MOVE_FLAG_SUBGROUP": "sometimes"})
+        self.assertEqual(outcome[:2], ("exit", 2))
+        self.assertIn("PARSEC_MOVE_FLAG_SUBGROUP must be auto or off", outcome[2])
 
     def test_ignore_symmetry_keeps_the_full_grid_unless_the_command_line_asks(self) -> None:
         self.assertEqual(self.route("Ignore_Symmetry: .true.\n" + FORCES), ("prepared", "off"))
@@ -226,7 +272,14 @@ class CommandLineRoutingTests(unittest.TestCase):
             self.assertIsNone(refusal(translation(relaxation=SimpleNamespace(method="bfgs"))))
             self.assertIn("supercell", refusal(translation(), supercell=True))
             self.assertIn("no forces", refusal(translation(compute_forces=False)))
-            self.assertIn("Move_Flag", refusal(translation(movable=[True, False])))
+            # PARSEC_MOVE_FLAG_SUBGROUP=auto: the flags of a single point move nothing; a relaxation keeps the
+            # sectors of the subgroup that maps the fixed atoms onto fixed atoms
+            self.assertIsNone(refusal(translation(movable=[True, False])))
+            self.assertIsNone(
+                refusal(translation(movable=[True, False], relaxation=SimpleNamespace(method="bfgs")))
+            )
+            with mock.patch.dict(os.environ, {"PARSEC_MOVE_FLAG_SUBGROUP": "off"}):
+                self.assertIn("Move_Flag", refusal(translation(movable=[True, False])))
             self.assertIn("manual", refusal(translation(relaxation=SimpleNamespace(method="manual"))))
             self.assertIn("molecular dynamics", refusal(translation(molecular_dynamics=object())))
             self.assertIn("Restart_From_Wfndat", refusal(translation(restart_run=True, restart_from_wfndat=True)))

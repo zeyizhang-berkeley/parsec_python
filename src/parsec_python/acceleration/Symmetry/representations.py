@@ -155,6 +155,10 @@ class ReflectionRepresentationDecomposition:
     _sector_orbit_lists: dict[int, np.ndarray] = field(
         default_factory=dict, init=False, repr=False, compare=False
     )
+    # The projector tables of the units of irreducible representations (projection_tables), kept likewise.
+    _projection_tables: dict[int, tuple] = field(
+        default_factory=dict, init=False, repr=False, compare=False
+    )
 
     @property
     def representation_count(self) -> int:
@@ -177,6 +181,129 @@ class ReflectionRepresentationDecomposition:
         if weights is None:
             return np.ones(self.representation_count, dtype=np.int64)
         return np.asarray(weights, dtype=np.int64)
+
+    @property
+    def sector_partner_masks(self) -> tuple[int, ...] | None:
+        """Per sector, a bit mask of the representations of the full group whose partners several solved states share.
+
+        Bit ``g`` is set where the sector holds representation ``g`` of the full point group and that level's
+        partners lie in more than one solved state (:attr:`.axis_reflection.PointGroupReduction.sector_partner_irreps`);
+        ``None`` for the groups of before.  Two degenerate states whose masks share a bit may be partners of one
+        level (``Occupations.partner_occupations``).
+        """
+
+        held = getattr(self.reduction, "sector_partner_irreps", None)
+        if held is None:
+            return None
+        return tuple(sum(1 << int(g) for g in irreps) for irreps in held)
+
+    @property
+    def sector_shares(self) -> np.ndarray | None:
+        """The expected share of the states of every unit of irreducible representations (``PARSEC_ORBITAL_IRREPS``,
+        :func:`.orbital_groups.irrep_units`), ``None`` for the sectors of before (even shares)."""
+
+        shares = getattr(self.reduction, "sector_shares", None)
+        return None if shares is None else np.asarray(shares, dtype=np.float64)
+
+    def sector_projected(self, representation: int) -> bool:
+        """Whether sector ``representation`` is a unit that keeps only some representations of its character."""
+
+        projected = getattr(self.reduction, "sector_projected", None)
+        return bool(projected is not None and projected[int(representation)])
+
+    @property
+    def projected_sectors(self) -> tuple[int, ...]:
+        """The units with a projector (:meth:`sector_projected`)."""
+
+        projected = getattr(self.reduction, "sector_projected", None)
+        return () if projected is None else tuple(int(index) for index in np.flatnonzero(projected))
+
+    def projection_tables(self, representation: int) -> tuple[np.ndarray, np.ndarray] | None:
+        """The projector of a unit onto its irreducible representations of ``G``, on its sector's coefficients.
+
+        ``None`` for a sector solved whole.  Otherwise ``(indices, scales)``, both ``terms x sector_size``: the
+        projection of a sector vector ``x`` is ``(P x)[s] = sum_t scales[t, s] * x[indices[t, s]]``.  For the right
+        coset representatives ``k`` of ``G = union H k`` (the identity first) with ``b_k != 0``
+        (``reduction.sector_projections``), and ``g^-1 = h k``:
+
+        ``P_Gamma f = (levels / |G|) sum_g chi(g) f(g^-1 r)``, so ``(P x)_w = sum_k b_k lambda(h_k) sqrt(|O_w| / |O_w'|)
+        x_w'`` where ``k r_w = h_k r_w'`` (``r_w`` the representative of orbit ``w`` of ``H``; ``lambda(h_k)`` is the
+        phase of the row ``k r_w`` in the sector, zero where that orbit is not in it).  Built once per unit.
+        """
+
+        index = int(representation)
+        if not self.sector_projected(index):
+            return None
+        cached = self._projection_tables.get(index)
+        if cached is not None:
+            return cached
+        reduction = self.reduction
+        grid = getattr(reduction, "grid", None)
+        if grid is None or getattr(reduction, "coset_operations", None) is None:
+            raise RuntimeError("the projector of a unit needs the grid and the cosets of the full group")
+        coefficients = np.asarray(reduction.sector_projections[index], dtype=np.float64)
+        orbits = self.sector_orbit_indices(index)
+        representatives = reduction.representative_rows[orbits]
+        mapping = self.orbit_to_sector[index]
+        multiplicities = reduction.multiplicities.astype(np.float64)
+        translations = getattr(reduction, "coset_translations", None)
+        size = orbits.size
+        indices: list[np.ndarray] = []
+        scales: list[np.ndarray] = []
+        for coset, coefficient in enumerate(coefficients):
+            if abs(coefficient) < 1.0e-14:
+                continue
+            if coset == 0:
+                # the identity coset (orbital_groups: the identity first)
+                indices.append(np.arange(size, dtype=np.int64))
+                scales.append(np.full(size, coefficient, dtype=np.float64))
+                continue
+            rows = _grid_row_mapping_operation(
+                grid, reduction.coset_operations[coset], 1.0e-10, representatives,
+                translation=None if translations is None else translations[coset],
+            )
+            if rows is None:
+                raise RuntimeError("a coset representative of the full group no longer maps the grid")
+            images = reduction.full_to_wedge[rows]
+            columns = mapping[images]
+            phase = self.phases[index, rows].astype(np.float64)
+            admitted = columns >= 0
+            scale = np.where(
+                admitted, coefficient * phase * np.sqrt(multiplicities[orbits] / multiplicities[images]), 0.0
+            )
+            indices.append(np.where(admitted, columns, 0).astype(np.int64))
+            scales.append(scale)
+        tables = (np.ascontiguousarray(np.vstack(indices)), np.ascontiguousarray(np.vstack(scales)))
+        for array in tables:
+            array.setflags(write=False)
+        self._projection_tables[index] = tables
+        return tables
+
+    def project_vectors(self, values: np.ndarray, representation: int) -> np.ndarray:
+        """``P x`` of sector vectors on the host (rows x columns, or one vector): :meth:`projection_tables`."""
+
+        tables = self.projection_tables(representation)
+        array = np.asarray(values, dtype=np.float64)
+        if tables is None:
+            return array.copy()
+        indices, scales = tables
+        if array.ndim == 1:
+            return np.sum(scales * array[indices], axis=0)
+        out = np.zeros_like(array)
+        for row_indices, row_scales in zip(indices, scales):
+            out += row_scales[:, None] * array[row_indices]
+        return out
+
+    def sector_rank(self, representation: int) -> int:
+        """The dimension of the space a sector solves: its rows, or the trace of a unit's projector."""
+
+        index = int(representation)
+        tables = self.projection_tables(index)
+        if tables is None:
+            return self.sector_size(index)
+        indices, scales = tables
+        own = np.arange(indices.shape[1], dtype=np.int64)
+        return int(round(float(np.sum(np.where(indices == own[None, :], scales, 0.0)))))
 
     @property
     def wedge_size(self) -> int:
@@ -272,8 +399,15 @@ class ReflectionRepresentationDecomposition:
         rows = order if not isinstance(reduction, PointGroupReduction) else characters.shape[0]
         if characters.shape != (rows, order):
             raise RuntimeError("failed to construct the reflection character table")
-        gram = characters.astype(np.int64) @ characters.astype(np.int64).T
-        if not np.array_equal(gram, order * np.eye(rows, dtype=np.int64)):
+        # The units of the irreducible representations of the full group (PARSEC_ORBITAL_IRREPS) may share a
+        # character of the subgroup: its distinct rows are the ones that must be orthogonal.
+        distinct = (
+            np.unique(characters, axis=0)
+            if getattr(reduction, "sector_projected", None) is not None
+            else characters
+        )
+        gram = distinct.astype(np.int64) @ distinct.astype(np.int64).T
+        if not np.array_equal(gram, order * np.eye(distinct.shape[0], dtype=np.int64)):
             raise RuntimeError("reflection characters are not orthogonal")
 
         representatives = reduction.representative_rows

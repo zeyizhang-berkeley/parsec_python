@@ -1,7 +1,12 @@
 # Multi-GPU SCF
 
 The CuPy backend distributes exact symmetry representations across GPUs within
-one process. Large orbital blocks remain on their assigned devices. The SCF
+one process, by their cost as the MPI runner places the sectors of one rank
+(`PARSEC_CUPY_SECTOR_PLACEMENT=size`, since 2026-11-19: the device pool where
+the sectors do not divide the GPUs and give each at least
+`PARSEC_CUPY_SECTOR_POOL_MIN_BYTES` of basis there, the one sector of the identity shared by
+all of them; `cyclic` deals sector s to GPU s mod the GPU count, as before).
+Large orbital blocks remain on their assigned devices. The SCF
 driver combines the eigenvalue spectrum and sector densities, so this is one
 coupled physical calculation, not a collection of independent jobs. Across
 nodes the same sectors are solved by one MPI rank per node
@@ -117,7 +122,9 @@ electrons on 1, 4 and 16 GPUs, 14,680 on 4, 23,768 on 8 and 16, 29,576 on 8
 and 39,368 on 16.
 
 These are the settings of the measured runs, not the defaults of the code.
-Unset, the ionic backend is `native`, the Hartree linear backend `auto`
+Unset, the ionic backend is `auto` (since 2026-11-19 the GPU sums of
+the launch settings wherever CuPy finds a device; `native` before, the
+host sums of every grid point), the Hartree linear backend `auto`
 (the GPU CG of the series wherever the orbitals run on a GPU, since
 2026-11-07; `native` for the host CG of the code before), the resident
 Hartree chain `auto` (since the same day: on the wedge of the sectors the
@@ -145,6 +152,17 @@ left both unnamed. The inputs of the series set
 `tests/data/C795H300_parsec.in` of the reference package is the smallest of
 them, with `FF_MaxIter: 4`.
 
+`Restart_Run` (since 2026-11-19): the root reads `parsec.dat` beside the
+input once the system is prepared and starts the first SCF loop, also that of
+forces, a relaxation or molecular dynamics, from its potential, as `main.py`
+does (before, the runner ignored the keyword, started from the atomic
+densities and printed the restart header all the same); without the file the
+run stops before its preparation with PARSEC's error 371.
+`Restart_From_Wfndat` is refused, and so is a spin-polarized restart, whose
+two channels `main.py` solves on the full grid of one device, except with
+`--serial-control`, which takes that rule. `PARSEC_MPI_RESTART_RUN=off`
+keeps the former runner.
+
 ### Relaxations and forces on several nodes
 
 The same runner and launch script take an input with `Minimization: bfgs` or
@@ -165,22 +183,41 @@ adds them). The local forces are summed on the GPUs of the root node over the
 symmetry wedge of the grid.
 
 The ranks divide the symmetry sectors of the structure. A structure without
-point-group symmetry, a relaxation whose `Move_Flag` breaks the symmetry, a
+point-group symmetry, a relaxation whose `Move_Flag` breaks the symmetry under
+`PARSEC_MOVE_FLAG_SUBGROUP=off` (under `auto` it keeps the sectors of the
+subgroup that maps the fixed atoms onto fixed atoms), a
 `manual` relaxation and molecular dynamics have one sector: one rank solves it
 on the GPUs of one node, or one rank per GPU on several nodes
 (`scripts/run_multi_gpu_scf.sh --rank-per-gpu`), whose ranks share its basis
 (`Eigensolvers/mpi_shared_basis.py`; numbers in
-`../FORCES_AND_RELAXATION.md`, "On GPUs and several nodes").
+`../FORCES_AND_RELAXATION.md`, "On GPUs and several nodes"). With
+`Eigensolver: chebff` the default layout, one rank per node, shares it as well,
+every rank over the GPUs of its node ("Nested sharing" below). Without nested
+sharing (a CHEBDAV first solve, `PARSEC_MPI_NESTED_SHARING=off`) one rank per
+node on several nodes would hold its share on the first GPU of each node
+(diamond 6^3 without symmetry: 327.0 s on 2 nodes against 36.8 s on one) and
+is refused with that advice, also where the detection finds no group
+(`PARSEC_SINGLE_SECTOR_NODE_LAYOUT=allow` runs it as before;
+`experimental/mpi_scf.py::single_sector_layout_refusal`). A spin-polarized
+cell has no such sector: its channels need the abelian sectors of a group,
+and one without is refused (`driver.spin_cell_group_refusal`).
 
-A symmetric cluster with fewer sectors than nodes (one rank per node leaves
-the other nodes idle, and the runner refuses more ranks than sectors) runs
-with one rank per GPU as well: the ranks are divided into groups of
-consecutive ranks (a group may span nodes), and each group shares the bases
-of its sectors as above, in a communicator of its own; the commands of the
-SCF, the density and the forces stay on the world communicator, and only the
-first rank of a group reports the Ritz values of its sector. One rank per
-node keeps the node-local route of before, which is the faster one where it
-can use all the nodes.
+A symmetric cluster with fewer sectors than nodes runs with one rank per GPU
+as well: the ranks are divided into groups of consecutive ranks (a group may
+span nodes), and each group shares the bases of its sectors as above, in a
+communicator of its own; the commands of the SCF, the density and the forces
+stay on the world communicator, and only the first rank of a group reports
+the Ritz values of its sector. One rank per node keeps the node-local route of
+before by default where every node has a sector, the faster one where it can
+use all the nodes. With `Eigensolver: chebff` it shares fewer sectors than
+nodes in such groups too (since 2026-11-20; before, the preparation stopped
+with "MPI ranks must be between one and the representation count"), each rank
+spreading its shares over its GPUs, and `PARSEC_MPI_NESTED_SHARING=groups`
+also where groups balance more sectors better ("Nested sharing" below).
+Without a layout for them (a CHEBDAV first solve, or
+`PARSEC_MPI_NESTED_SHARING=off`) the run stops in its preparation with a
+message that names `Eigensolver: chebff`, `--rank-per-gpu` and the most nodes
+the sectors can use.
 
 Since 2026-11-18 the sectors are placed by their cost, rows times first state
 count (`PARSEC_SECTOR_PLACEMENT=size`, `experimental/mpi_scf.sector_rank_plan`
@@ -201,8 +238,17 @@ lowers the fullest GPU by more than 5 %). The sectors, their counts and so the
 results are those of the placement by count, up to the order of MPI sums.
 Diamond of 22^3 cubes (85,184 atoms) with the default settings and
 `--rank-per-gpu` on 16 A100 ran in 322.9 s with 66.4 GiB on the fullest GPU,
-where the placement by count ran out of memory (one rank per node still cuts
-the margin of its ten nearly equal sectors on four nodes).
+where the placement by count ran out of memory. One rank per node cuts the
+margin of its ten nearly equal sectors on four nodes
+(`PARSEC_CUPY_SECTOR_MARGIN=auto`: 1044 s, 18 steps). The full margin fits
+there after all with `PARSEC_CUPY_SECTOR_MARGIN=fixed`: 264.2 s (226.0 s of
+SCF, 8 iterations, 76.8 GiB at the fullest GPU of 80, close to the limit,
+which is why `auto` cuts it). `PARSEC_MPI_NESTED_SHARING=groups` gives one
+rank per node groups of two nodes with five sectors each, which hold the full
+margin too, at twice the time of `fixed` for 1.9 GiB less at the fullest GPU:
+518.6 s (478.2 s of SCF, 8 iterations, the energy of the full margin to the
+last digit, 74.9 GiB). Where a margin is cut and that value would form groups,
+`parsec.out` says so in a NOTE that names the three ways with these numbers.
 `PARSEC_SECTOR_PLACEMENT=cyclic` keeps the placement by count of before: one
 group of consecutive ranks per sector with balanced counts
 (`sector_rank_groups`), or sector `s` on rank `s mod size` with one rank per
@@ -215,6 +261,79 @@ sectors): one rank per node on 2 nodes, the most it can use, 212.0 s and
 35.3 GiB; groups on the same 2 nodes 266.2 s and 61.4 GiB. The four sectors
 of the k14 nanodiamond (16 GPUs): one rank per node 208.6 s and 59.7 GiB, groups of
 four 268.9 s and 60.4 GiB. The energies agree to 2e-10 Ry.
+
+**Nested sharing** (since 2026-11-19, `PARSEC_MPI_NESTED_SHARING=auto`, the
+default; `Eigensolvers/mpi_nested_basis.py`). With one rank per node and a
+CHEBFF first solve the ranks that share the basis of a sector spread their
+shares over the GPUs of their nodes: the R ranks of D GPUs act as R x D ranks
+of `mpi_shared_basis`, one `MPIShardGroup` per GPU on a thread of its own
+(its columns, a replica of the sector operator and its filter graphs on that
+GPU). The collectives of those threads are carried out by the main thread of
+the rank, the only one that calls MPI, once all of them have posted the same
+one: the pieces of an `Alltoallv` between two GPUs of a node as device copies,
+those between nodes as `Isend`/`Irecv` of device buffers on a duplicate of the
+group's communicator; an `Allreduce` sums the GPUs of a rank in their order and
+then the ranks; the helpers of the small solve stay on the GPUs of the root's
+node. The runner sets `MPICH_GPU_SUPPORT_ENABLED=1` for such a launch where the
+MPI library has its GPU transport layer: Cray MPICH stops in `MPI_Init` when
+the flag asks for one that is not linked, so since 2026-11-20 the runner looks
+for `libmpi_gtl_cuda` in the map of the process once mpi4py is loaded (it is
+linked where mpi4py was built with `craype-accel-nvidia80` loaded, as
+`--rank-per-gpu` and hybrids need anyway) and otherwise stages the exchanges
+through the host and says why in `parsec.out`;
+`PARSEC_MPI_SHARED_TRANSPORT=host` stages them through the host as well
+(diamond 6^3 on 2 nodes: 271.8 s of SCF instead of 43.1 s, against 327.0 s
+with the shares on the first GPU of each node). The ranks of a group agree
+before they attach the nested group of a sector whether every GPU of each can
+filter its operator (the stencil-major and fused projector kernels, which a
+switch or a failed build can take away on one rank): where one cannot, all of
+them stop with an error that names that rank, since a group of one GPU per
+rank filters with the same kernels; before, such a rank attached that group
+alone and the others waited for it.
+Under `auto` this serves the one sector that all nodes share (a structure
+without a point group, molecular dynamics, a fixed-atom relaxation of a cell,
+`PARSEC_PERIODIC_SYMMETRY=off`), and fewer sectors than nodes, which one rank
+per node cannot place otherwise: diamond 6^3 (1,728 atoms) without symmetry on
+2 nodes took 42.6 s of SCF, against 327.0 s with the shares on the first GPU
+of each node and 36.8 s on one node, and 36.1 s on 4 nodes; 11 iterations and
+the same energy to the last digit on one, two and four nodes and with
+`--rank-per-gpu`, and the forces of one relaxation step on two nodes within
+4e-14 Ry/bohr of those on one. A relaxation of three steps from an atom moved
+by 0.1 bohr (the projectors move with the atoms on every GPU) printed the same
+energies, forces and positions on two nodes as on one. A structure this small
+gains no time from more nodes (one relaxation step 36.3 s on one node, 48.5 s
+on two; the three steps 76.3 and 108.3 s of SCF), only memory
+(the fullest GPU 12.7 GiB on one node, 9.9 GiB on two, 7.7 GiB on four), and
+one rank per GPU stays faster where it can be launched, since each of its ranks
+has a network interface of its own (26.4 s on two nodes, 16.8 s on four).
+Since 2026-11-20 `auto` also shares fewer sectors than nodes, which one rank
+per node could not place before (the preparation stopped with "MPI ranks must
+be between one and the representation count"): Si28H36 with an atom moved by
+0.1 bohr (two sectors) on 3 nodes ran as one group of the three nodes over
+both sectors, 20 iterations and the energy of one node within 2.3e-12 Ry
+(2.6 s of SCF against 2.3 s on one node), and spin-polarized O2 in Cs (two
+sectors, both channels, `PARSEC_CUPY_DISTRIBUTED_FILTER=0`) within 6e-14 Ry
+of one node in the same 58 iterations. The driver still keeps a group of
+before that divides among the nodes over a larger one with fewer sectors than
+nodes (`MPISectorContext.divides`).
+`PARSEC_MPI_NESTED_SHARING=groups` also gives one rank per node the groups of
+`--rank-per-gpu` placed by size: groups of nodes where they balance the
+sectors better than one node each, and a larger group of fewer sectors than
+nodes where the driver keeps a smaller one that divides under `auto` (the
+three weighted sectors of D2d on four nodes keep the abelian group under
+`auto`). It is not the default: every rank sends its exchanges
+through one network interface (GPU-aware MPI between two A100 nodes about
+17 GB/s for one rank, against 94 GB/s between two GPUs of a node), so a basis
+shared across nodes pays for its transposes what it saves in filter work:
+the five sectors of diamond 15^3 on 4 nodes took 150.9 s of SCF as one group
+of the four nodes against 48.8 s with one node per sector (the fourth node
+holding two sectors on two GPUs each), the same energy to the last digit, the
+fullest GPU 29.8 against 21.4 GiB. It pays where one node per sector would
+cut margins (diamond 22^3 above). A run that shares sectors this way says so in
+`parsec.out` after the sector placement (`Nested sharing (...)`: the groups and
+how the exchanges between nodes travel); one that shares none prints as before.
+`PARSEC_MPI_NESTED_SHARING=off` keeps the layout of before:
+one sector shared by such ranks on the first GPU of each.
 
 Only `Eigensolver: chebff` divides the basis of a shared sector among the
 ranks of its group (`run_distributed_chebff`, a `SharedBasis`), and with it the
@@ -283,15 +402,26 @@ run on several nodes takes the decisions of one node.
   staged (`benchmarks/exchange_transport.py`).
 - A spin-polarized run, hybrid or semilocal, divides the sectors of both
   channels: every command names its channel, and a rank keeps a subspace of
-  each channel in each of its sectors. A run that the symmetry guard sends to
-  the full grid is prepared again and finished in the process of the root, on
-  the GPUs of its node, while the other ranks wait (every rank first lets the
-  exchange of the sectors go); spin channels on the full grid are otherwise
-  refused on several ranks. Single points only: the forces, relaxations and
-  molecular dynamics of a spin-polarized run are refused on several ranks
-  (the force terms of both channels summed over the ranks are not validated
-  yet). Measured on 2 nodes against one rank: O2 PBE dE -2.8e-14 Ry, O2 PBE0
-  -3.3e-13, O2 Hartree-Fock 1.4e-14, each with the iterations of one node.
+  each channel in each of its sectors. With `PARSEC_SPIN_FLIP_SYMMETRY=auto`
+  and an antiferromagnetic start that has a spin-flip operation the root
+  sends the commands of the up channel alone and forms the down channel as
+  its image (`SCF/spin_flip.py`; Cr4 on 4 ranks: eigensolve 1.05 -> 0.63 s,
+  dE 3e-11 Ry). A run that the symmetry guard sends to
+  the full grid is prepared again and finished in the process of the root,
+  on the GPUs of its node, while the other ranks wait (every rank first lets the
+  exchange of the sectors go); where that full grid would not fit the root's
+  first GPU a semilocal run is prepared again on every rank as one sector of
+  the identity that the ranks share (`PARSEC_SPIN_FALLBACK_SHARED`: the root
+  sends the input with the `reprepare` command, every rank calls `configure`
+  again and its worker loop serves the new solver); spin channels on the full
+  grid are otherwise refused on several ranks. The forces and relaxations
+  (`bfgs`, `simple`) of a spin-polarized run that keeps its sectors run on
+  several ranks under `PARSEC_SPIN_SECTOR_FORCES=auto` (the `spin_forces`
+  command sums the nonlocal terms of both channels; V- in diamond 3^3 on 4
+  ranks: the relaxation of `main.py` to 9e-13 Ry and 1.9e-10 Ry/bohr);
+  molecular dynamics stays refused. Measured on 2 nodes against one rank:
+  O2 PBE dE -2.8e-14 Ry, O2 PBE0 -3.3e-13, O2 Hartree-Fock 1.4e-14, each with
+  the iterations of one node.
 - Each rank counts what a build holds on its devices (its sectors' `W`, the
   new replicas of the other ranks' orbitals with the columns they had, its
   parts of their `W`, two chunks of a message of its sectors (columns it
@@ -369,7 +499,8 @@ the Cartesian signed permutations that map the atoms modulo the lattice and the
 periodic grid onto themselves (the row maps wrap around the cell); since
 2026-11-18 also about a symmetric site off the origin, where the group about
 the origin is the identity alone, and on grids of a different step on each
-axis (README "Point groups of periodic cells"). Where it
+axis, since 2026-11-19 about a defect off the origin of a large cell
+(`PARSEC_PERIODIC_DEFECT_CENTRE`) (README "Point groups of periodic cells"). Where it
 finds one, the orbitals take its sectors as a cluster's do, with the weighted
 sectors of a larger subgroup where they solve less (Td of diamond about an
 atom: D2d, 1/16 of the grid times the states; Oh of rocksalt: D4h, 1/32), and
@@ -377,13 +508,23 @@ the ranks divide the sectors as for a cluster (above). A cell that repeats a
 smaller one adds the translations by half the cell to that group
 (`PARSEC_PERIODIC_TRANSLATIONS=auto`; diamond supercells: 96 or 192 operations,
 5 or 10 sectors of a subgroup of 16 or 32; README "Translations by half the
-cell"). Without
+cell"). `PARSEC_ORBITAL_IRREPS=split` (default off) solves the 192 operations
+of an even diamond cube in 20 units of their irreducible representations
+instead, each representation once (64,000 atoms on 16 A100: SCF 208.7 ->
+170.0 and 175.9 s in two runs, the peak 1.4 % higher, 46.0 -> 46.6 GiB; README
+"Units of the irreducible representations"). Without
 one, or with `PARSEC_PERIODIC_SYMMETRY=off`, the cell is one sector of the
 identity (every grid point an orbit, `AxisReflectionReduction.identity`), the
 sector of a molecular dynamics run: on several nodes one rank per GPU shares
 its orbitals (molecular dynamics of a cell on several nodes needs
-`--rank-per-gpu`: one rank per node there is refused)
-(`Eigensolvers/mpi_shared_basis.py`), on one node one rank shares them among
+`--rank-per-gpu`, or `Eigensolver: chebff`, with which one rank per node shares
+them over its GPUs; otherwise one rank per node there is refused, since
+2026-11-19 for every run of one sector, whose share of each rank would lie on
+the first GPU of its node: `PARSEC_SINGLE_SECTOR_NODE_LAYOUT`; a
+spin-polarized cell has no such sector, its channels need the abelian sectors
+of a group, and one without is refused, before the preparation under
+`PARSEC_PERIODIC_SYMMETRY=off` and right after the detection otherwise)
+(`Eigensolvers/mpi_shared_basis.py`, `Eigensolvers/mpi_nested_basis.py`), on one node one rank shares them among
 the GPUs of its node (`Eigensolvers/distributed_state.py`) or one rank per
 GPU does. Inside the allocation of `N` nodes with four GPUs each:
 
@@ -421,14 +562,20 @@ a k-point"), which become the tasks of the pools, planned by their sizes
 What does not run there is refused by name before any rank prepares
 (`driver.periodic_sector_refusal`, `_refuse_unsupported_periodic` of the
 runner): k-points beyond Gamma (`parsec_python/main.py --mpi`, whose ranks
-take the k-points), spin, spin-orbit and non-collinear runs, hybrids,
+take the k-points; since 2026-11-19 the single point of a mesh of one or two
+points per axis that `PARSEC_KPOINT_SUPERCELL=auto` takes runs here as the
+Gamma point of its supercell, by the rule of the command line without its
+GPU count, README "The kinetic term of a k-point"; `timing.json` then holds
+the energies and electrons of the input cell in `energies_ry` and
+`electron_count`, the supercell's in `kpoint_mesh_supercell`), spin,
+spin-orbit and non-collinear runs, hybrids,
 meta-GGAs, libxc functionals, oblique cells, wires and slabs, LDA+U, the TS
 correction, the band structure and `nscf` runs (all `parsec_python/main.py`,
 on its own routes: the band structure of a Gamma cell keeps the sectors of its
 SCF there, `PARSEC_PERIODIC_SECTOR_BANDS`), the forces and moves of the
-Fortran-derived routines and of a k-point supercell (`PARSEC_KPOINT_SUPERCELL`),
-and Fortran's general grid (`Use_Fortran_Routines` with sides of different
-steps).
+Fortran-derived routines and of a k-point supercell
+(`PARSEC_KPOINT_SUPERCELL=on`), and Fortran's general grid
+(`Use_Fortran_Routines` with sides of different steps).
 
 Since 2026-11-18 the runner computes the forces (`Skip_Force: false`) and runs
 the `bfgs`/`simple` relaxations of a cell in the sectors of its point group,
@@ -439,13 +586,25 @@ one atom per orbit, and the ranks compare the shape and a digest of the
 projector labels before the sum (a mismatch stops every rank); the root adds
 the Ewald and local terms and averages the total over the full group of the
 sectors; every rank moves the projectors of its sectors (`geometry`, the
-projectors alone on ranks without the ionic potential). Molecular dynamics,
-manual movements, a `Move_Flag` fixing atoms and `PARSEC_PERIODIC_SECTOR_FORCES=off`
-run as one sector of the identity (one rank, or `--rank-per-gpu`).
+projectors alone on ranks without the ionic potential). A `Move_Flag` fixing
+atoms keeps the sectors of its subgroup (`PARSEC_MOVE_FLAG_SUBGROUP=auto`).
+Molecular dynamics, manual movements, a `Move_Flag` fixing atoms under
+`PARSEC_MOVE_FLAG_SUBGROUP=off` and `PARSEC_PERIODIC_SECTOR_FORCES=off`
+run as one sector of the identity (one rank, `--rank-per-gpu`, or one rank per
+node with `Eigensolver: chebff`). Under
+`--serial-control` (one process) a small cell's SCF alone takes the size floor
+of `PARSEC_PERIODIC_SECTOR_FLOOR` (the full grid below 2^24 grid points x
+states), while its forces and relaxations in sectors keep them (since
+2026-11-19, `prepare_single_point(sector_forces=True)`, as on `main.py`).
 `timing.json` records the device memory after each force call
 (`memory_observations`, `forces_<n>`). Inputs whose species use `Cubic_Spline`
 (`make_diamond.py`) put the forces of a Gamma cell on the Fortran-derived
-routines by default: give them `Use_Fortran_Routines: .false.`. Measured on
+routines by default; since 2026-11-19 their single-point forces and optimizer
+relaxations take the sectors as well (`PARSEC_FORTRAN_SECTOR_FORCES=auto`, the
+force terms of those routines, the nonlocal rows summed by the ranks as above);
+their other moving runs, their `Restart_Run` (this runner reads no
+`parsec.dat`), their spin-polarized cells and everything of theirs under `off`
+stay with `main.py`, and the refusal names which. Measured on
 A100 (2026-11-18): displaced Si8 and Si 2 x 2 x 2, two BFGS moves on 1 x 1, 1 x 4
 and 2 x 1 ranks, the trajectory of `main.py` within 1e-13 bohr and the full
 grid within 5e-9 bohr; diamond 6^3 with bonds displaced, sectors against one
@@ -455,10 +614,10 @@ of perfect diamond cubes on 16 A100 (one rank per node): 6^3 9.6 s, 10^3 14.6 s,
 GPU), 22^3 (85,184 atoms, `PARSEC_CUPY_SECTOR_MARGIN=fixed`,
 `PARSEC_CUPY_FORCE_PREFETCH=off`) 304.1 s at 79.1 GiB. A single process takes the sectors of the point
 group of the cell where it has one; one sector of the identity with
-`PARSEC_CUPY_SINGLE_SECTOR=on`, whose basis stays on the first GPU of the
-process (`main.py` has no sector context to give it a device group; the
-runner shares it among the GPUs of its node even with one rank);
-otherwise a cell keeps the full grid of one GPU, as before.
+`PARSEC_CUPY_SINGLE_SECTOR=on`, whose basis the GPUs of the process share
+after a CHEBFF first solve, as the runner's GPUs of one rank do
+(`PARSEC_CUPY_SECTOR_PLACEMENT=size`; under `cyclic` it stays on the first
+GPU); otherwise a cell keeps the full grid of one GPU, as before.
 
 Measured on A100 nodes (2026-11-08, bulk diamond `examples/3d_diamond_benchmark`,
 18 points per cubic edge, PBE, the eigensolver and mixing of the nanodiamond
@@ -1564,12 +1723,19 @@ The shared-basis tests run on one GPU named two and four times.
 
 This implementation parallelizes exact real one-dimensional symmetry sectors.
 In one process (`main.py`) the useful GPU count is bounded by the number and
-balance of those sectors; the nanodiamond examples have four. The MPI runner
+balance of those sectors, where their bases are not divided (a CHEBDAV first
+solve, or sectors below the threshold of the generalized Ritz step); a CHEBFF
+first solve lets the GPUs share the bases of sectors that do not divide them
+(the device pool, `PARSEC_CUPY_SECTOR_PLACEMENT=size`), where the mean sector
+gives each GPU at least `PARSEC_CUPY_SECTOR_POOL_MIN_BYTES` (24 MiB) of basis
+there: smaller sectors are solved faster whole on disjoint GPUs. The MPI runner
 (`benchmarks/mpi_full_scf.py`, one rank per node) divides the devices of a
 rank among the sectors it owns, and the devices of a sector share its basis,
 so that four sectors use 8 or 16 GPUs on two or four nodes of four. No sector
 is spread over ranks, and through
-`main.py` an asymmetric system uses one GPU. A hybrid functional puts every
+`main.py` an asymmetric system uses one GPU on the full grid, or all the GPUs
+of the process as the one sector of `PARSEC_CUPY_SINGLE_SECTOR=on` after a
+CHEBFF first solve. A hybrid functional puts every
 sector basis on one GPU and its exchange on all GPUs of all ranks (above).
 
 A self-consistent hybrid functional (`../README.md`, "Self-consistent hybrid
@@ -1589,8 +1755,15 @@ of one node (`--serial-control` of the runner).
 
 A hybrid of a periodic cell (`README.md`, "Hybrid functionals of periodic
 cells on the device") uses the GPUs of one process in two ways. At the Gamma
-point without spin it is the loop above on the full grid (one eigensolver
-GPU, the pair tiles on all of them). With k-points or spin the k-point pool
+point without spin it is the loop above: for a cell whose basis (grid points
+times `States_Num`) reaches 2^24 entries in the real sectors of its abelian
+group with the half-cell translations (`PARSEC_GAMMA_HYBRID_SECTORS=auto`,
+since 2026-11-19), their orbitals unfolded once into one full-grid block for
+the pair tiles (`PARSEC_CUPY_EXCHANGE_POOL`; diamond 512 atoms PBE0 337.4 ->
+111.4 s of SCF on one node), on the full grid below that floor and under
+`off` (one eigensolver GPU, the pair tiles on all of them); the MPI runner
+refuses a hybrid of a periodic cell (run it with `main.py`). With k-points or
+spin the k-point pool
 deals the k-points (and spin channels) to one worker per GPU, each keeping its
 k-points' orbitals, `W` and `xi` on its device; the pair tiles of a build go
 to every GPU, each of which holds a copy of the occupied columns of the whole
@@ -1606,7 +1779,15 @@ its own subspace there. The memory rules count the subspaces of both
 channels, and sector states spilled to the host take the former staging
 (no persistent host buffers, which are one per sector). Without the sectors
 (`off`, or a run the symmetry guard sends to the full grid) both channels
-stay on one device.
+stay on one device, unless they would not fit there after the guard fired:
+then both are one sector of the identity whose basis the GPUs of the process
+share (`PARSEC_SPIN_FALLBACK_SHARED`, `CuPySymmetrySCFEigensolver`'s
+`process_device_group`; the neutral vacancy in diamond 5^3: 8.6 GiB on the
+busiest of four A100 where one ran out of memory). A spin cell that `main.py`
+solves on the full grid from its start (molecular dynamics, manual
+movements, `Move_Flag`, `Ignore_Symmetry`) is planned the same way from its
+input (`driver.spin_full_grid_plan`) and keeps the 1x1x1 k-point driver
+where no layout fits.
 
 The pair densities of sector orbitals are solved in reflection-parity
 classes on the octant of the Kronecker box (`../README.md`): a tile gathers
@@ -1628,6 +1809,24 @@ whole k04 run 386 -> 100 s (one GPU) and 111 -> 38 s (four), k05 1174 -> 277 s
 (four); peak device memory lower in every case. Energies agree with the
 full-grid path within the round-off of the Kronecker solver (1e-11 to 8e-10
 Ry, `acceleration/benchmarks/exchange_parity.py` for the builds alone).
+
+The fields of an SCF step (the Hartree solve, the exchange-correlation
+potential, the mixer and the energies) run on the root rank while the other
+ranks wait; the Hartree CG of the root takes every GPU of its process for
+operators of 2,097,152 rows or more (`PARSEC_HARTREE_CG_DEVICES`). Their
+share of the SCF steps, from the `timing.json` of first runs on 16 A100 (one
+rank per node, 2026-11-15 to 11-18; the initial Hartree and XC fields before
+the first step add 0.6-4.6 s): Td nanodiamonds 6.8 % (k18, 251 s), 8.3 %
+(k16, 108 s) and 13.4 % (k14, 45.0 s, of which the Hartree solve 4.9 s, XC
+0.14 s, mixing and energies 0.99 s); diamond cells at the Gamma point 3.6 %
+(20^3, 105.6 s) and 1.2-2.6 % (22^3). The Hartree solve is most of it. It
+was not spread over the ranks (an estimate, not measured: the k14 solve takes
+about 0.5 s a step for some hundred CG iterations, a few milliseconds each on
+the GPUs of one node, and spread over the nodes every iteration would wait
+for halo exchanges and two reductions over the network, for at most the
+share above); fields
+kept on the orbits of the full group instead of the solved subgroup would
+shrink it by the ratio of their orders (three times for Td in D2d).
 
 Record the GPU model, active GPU count, allocated and active CPU counts,
 precision, input hashes, code revision, iterations, and peak memory. Separate

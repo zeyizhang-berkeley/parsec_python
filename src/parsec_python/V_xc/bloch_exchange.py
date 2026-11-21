@@ -51,9 +51,21 @@ two factors): there is no separate energy constant.  Those are the representativ
 mesh under time reversal (:class:`BlochOrbitalSet`): the finite-difference
 Bloch operator satisfies ``H_{-k} = conj(H_k)`` exactly, so the factor at
 ``-k`` is ``conj(u_k)``, used with the label ``-k`` (never moved by a
-reciprocal lattice vector).  At the Gamma point alone the orbitals are real
-and :class:`PeriodicPairPoisson` serves the exchange operator of
-:mod:`parsec_python.V_xc.exchange_operator` unchanged (``q = 0``).
+reciprocal lattice vector).  Or (``PARSEC_HYBRID_KPOINT_WEDGE``, since
+2026-11-19; under ``auto`` for the Fock loop of an insulating start) the
+irreducible wedge of the mesh under the operations of the space group that map
+the grid, its finite-difference operators and the mesh onto themselves and time reversal
+(:class:`MeshStars`; a mesh that time reversal does not keep keeps the pairs,
+and the whole space group of a density average on the Fortran-derived
+routines is not used for the images): the factor at an image ``k' = M^-T k`` is ``u_k`` with
+the grid points permuted (``P_g u_k``, up to a constant phase that drops out
+of ``u conj(u)``), as Quantum ESPRESSO's ``exxinit`` rotates the
+wavefunctions of the irreducible k-points for the q-sum; the targets of
+``V_x`` (the ACE operators, the energies with the wedge's weights) are the
+k-points solved, the sources every point of the mesh.  At the Gamma point
+alone the orbitals are real and :class:`PeriodicPairPoisson` serves the
+exchange operator of :mod:`parsec_python.V_xc.exchange_operator` unchanged
+(``q = 0``).
 
 ACE per k-point
 ---------------
@@ -397,6 +409,133 @@ def time_reversal_partners(k_points, box_reciprocal) -> np.ndarray:
 
 
 @dataclass(frozen=True)
+class MeshStars:
+    """The points of a uniform mesh as images of the k-points solved (an irreducible wedge) under operations of the
+    grid and time reversal (``PARSEC_HYBRID_KPOINT_WEDGE``, :func:`mesh_stars`).
+
+    An operation ``g: f -> M (f - t)`` of the space group (fractional coordinates) that maps the grid onto itself
+    commutes with the Hamiltonian, so ``P_g psi_k`` (``(P_g psi)(r) = psi(g^-1 r)``) is an orbital at
+    ``k' = M^-T k`` (reciprocal coordinates), and its Bloch factor is ``e^{2 pi i k.t} P_g u_k``: the factor at
+    ``k'`` is ``u_k`` with its grid points permuted, up to one constant phase, which drops out of the exchange
+    (the source enters as ``u conj(u)``).  ``-k'`` takes the complex conjugate (time reversal).  Each point of the
+    mesh is used with the label ``k'`` of its image (never moved by a reciprocal lattice vector, as the partner
+    ``-k`` of the time-reversal sets).
+
+    ``sources`` holds ``(rep, operation, conjugate, k')`` (Cartesian ``k'``) for every point of the mesh, each
+    once, the identity (``operation`` -1) first: the representative itself, then its partner ``-k`` where that is
+    another point of the mesh (``partners``), then the images by the operations.  ``gathers[operation]`` are the
+    rows ``P_g u = u[gathers[operation]]``; ``point_counts[rep]`` the points of the mesh the representative stands
+    for (its weight times ``mesh_size``).
+    """
+
+    mesh_size: int
+    sources: tuple
+    gathers: dict
+    point_counts: np.ndarray
+    partners: np.ndarray
+
+    def rotated(self, block, operation: int, conjugate: bool):
+        """The source columns of ``block`` (rows of the grid, an ``xp`` array) under ``operation``, conjugated."""
+
+        if operation >= 0:
+            block = block[self.gathers[operation]]
+        return block.conj() if conjugate else block
+
+
+def mesh_stars(k_points, weights, counts, shift, reciprocal, symmetry, *, usable=None) -> MeshStars:
+    """:class:`MeshStars` of the k-points ``k_points`` (Cartesian, rows) of weights ``weights`` in the mesh
+    ``(i + shift)/counts`` (reciprocal coordinates along the rows of ``reciprocal``) under the operations of
+    ``symmetry`` (a :class:`parsec_python.Grid.space_group.PeriodicGridSymmetry`: the fractional matrices ``M`` and
+    the grid points each operation maps a point to) and time reversal.
+
+    Only operations whose reciprocal rotation, with time reversal where the image is conjugated, maps the whole mesh
+    onto itself are used (those of :func:`parsec_python.Grid.kpoints.hybrid_wedge_group`): the exchange operator of
+    the mesh commutes with these alone, so only they carry an orbital of the Hamiltonian onto one.  ``symmetry`` may
+    hold more (the density average of the Fortran-derived routines takes the whole space group for any mesh).
+    ``usable`` (one flag per operation of ``symmetry``, or ``None`` for all): the operations the wedge was reduced
+    by beyond the mesh test (those that keep the finite-difference operators of the grid,
+    ``PARSEC_HYBRID_KPOINT_WEDGE``); the others are not used for images.
+    Raises ``NotImplementedError`` where the images do not make up the mesh, each point once, with the weights given
+    (``w = count / N``).
+    """
+
+    k_points = np.atleast_2d(np.asarray(k_points, dtype=np.float64))
+    weights = np.asarray(weights, dtype=np.float64).reshape(-1)
+    counts = np.asarray([int(value) for value in counts], dtype=np.int64)
+    shift = np.asarray([float(value) for value in shift], dtype=np.float64)
+    reciprocal = np.asarray(reciprocal, dtype=np.float64)
+    size = int(np.prod(counts))
+    fractions = k_points @ np.linalg.inv(reciprocal)
+    matrices = np.asarray(getattr(symmetry, "matrices", np.zeros((0, 3, 3))), dtype=np.float64)
+    images = getattr(symmetry, "images", None)
+    # the reciprocal rotations M^-T of the operations, with the identity (-1) first
+    operations = [(-1, np.eye(3))] + [
+        (index, np.linalg.inv(matrix).T)
+        for index, matrix in enumerate(matrices)
+        if usable is None or bool(usable[index])
+    ]
+
+    def mesh_index(fraction):
+        steps = fraction * counts - shift
+        rounded = np.round(steps)
+        if np.max(np.abs(steps - rounded)) > 1.0e-6:
+            return None
+        return int(np.ravel_multi_index(tuple(int(value) % int(n) for value, n in zip(rounded, counts)), tuple(counts)))
+
+    # f -> +-R f maps the mesh f = (i + s)/n onto itself when n (+-R f) - s is whole for every i: an affine function
+    # of i, tested on the corners of one cell of the mesh (Grid.kpoints.mesh_preserving_operations)
+    corners = (np.array([[a, b, c] for a in (0, 1) for b in (0, 1) for c in (0, 1)], dtype=np.float64) + shift) / counts
+
+    def keeps_mesh(rotation, conjugate):
+        target = (-1.0 if conjugate else 1.0) * (corners @ rotation.T) * counts - shift
+        return bool(np.max(np.abs(target - np.round(target))) <= 1.0e-6)
+
+    admissible = [
+        (index, rotation, conjugate)
+        for index, rotation in operations
+        for conjugate in (False, True)
+        if keeps_mesh(rotation, conjugate)
+    ]
+    covered: dict[int, tuple] = {}
+    used: set[int] = set()
+    for rep, fraction in enumerate(fractions):
+        for index, rotation, conjugate in admissible:
+            image = rotation @ fraction
+            point = -image if conjugate else image
+            found = mesh_index(point)
+            if found is None or found in covered:
+                continue
+            covered[found] = (rep, int(index), bool(conjugate), point @ reciprocal)
+            if index >= 0:
+                used.add(int(index))
+    point_counts = np.bincount([value[0] for value in covered.values()], minlength=k_points.shape[0])
+    expected = weights * float(size)
+    if len(covered) != size or not np.allclose(point_counts, expected, rtol=0.0, atol=1.0e-8):
+        kept = len({index for index, _rotation, _conjugate in admissible if index >= 0})
+        raise NotImplementedError(
+            "the exchange of a periodic cell on an irreducible wedge needs the images of its k-points under the "
+            f"operations of the grid that keep the {'x'.join(str(n) for n in counts)} mesh ({kept} of "
+            f"{len(matrices)}) and time reversal to make up the mesh with the weights of the wedge: {len(covered)} of "
+            f"{size} points reached, points per k-point {point_counts.tolist()} against "
+            f"{[round(float(value), 6) for value in expected]} from the weights; PARSEC_HYBRID_KPOINT_WEDGE=off keeps "
+            "the time-reversal pairs"
+        )
+    sources = tuple(sorted(covered.values(), key=lambda item: (item[0], item[1] >= 0, item[1], item[2])))
+    gathers = {}
+    for index in sorted(used):
+        mapped = np.asarray(images[index], dtype=np.int64)
+        # (P_g u)[images[i]] = u[i]: the rows of P_g u are those of u at the inverse permutation
+        gather = np.empty_like(mapped)
+        gather[mapped] = np.arange(mapped.size, dtype=np.int64)
+        gathers[index] = gather
+    partners = np.array(
+        [any(source[0] == rep and source[1] < 0 and source[2] for source in sources) for rep in range(k_points.shape[0])],
+        dtype=bool,
+    )
+    return MeshStars(size, sources, gathers, point_counts.astype(np.int64), partners)
+
+
+@dataclass(frozen=True)
 class BlochOrbitalSet:
     """The Bloch factors of one spin channel (or of both, ``spin_weight`` 2) at the k-points solved.
 
@@ -405,7 +544,10 @@ class BlochOrbitalSet:
     weights (``2/N``, or ``1/N`` where ``partners`` is false: ``-k = k``
     modulo a reciprocal lattice vector).  ``orbitals[t]`` is the ``(points,
     states)`` complex block of k-point ``t`` and ``occupations[t]`` its
-    occupations (``[0, 1]`` per spin).
+    occupations (``[0, 1]`` per spin).  ``stars`` (:class:`MeshStars`) makes
+    the k-points an irreducible wedge of the mesh under operations of the grid
+    as well (``PARSEC_HYBRID_KPOINT_WEDGE``): the weights are those of the
+    stars, and the points of the mesh are the images of the representatives.
     """
 
     k_points: np.ndarray
@@ -415,28 +557,71 @@ class BlochOrbitalSet:
     spin_weight: float
     partners: np.ndarray
     mesh_size: int
+    stars: MeshStars | None = None
+
+    @property
+    def point_counts(self) -> np.ndarray:
+        """The points of the mesh each k-point stands for (its share of the norm of the outer DIIS)."""
+
+        if self.stars is not None:
+            return np.asarray(self.stars.point_counts, dtype=np.float64)
+        return np.where(np.asarray(self.partners, dtype=bool), 2.0, 1.0)
+
+    def mesh_sources(self) -> tuple:
+        """``(rep, operation, conjugate, k')`` of every point of the mesh (operation -1: the representative or its
+        partner ``-k``; see :class:`MeshStars`)."""
+
+        if self.stars is not None:
+            return tuple(self.stars.sources)
+        found = []
+        for rep, k_point in enumerate(self.k_points):
+            found.append((rep, -1, False, np.asarray(k_point, dtype=np.float64)))
+            if self.partners[rep]:
+                found.append((rep, -1, True, -np.asarray(k_point, dtype=np.float64)))
+        return tuple(found)
 
     def sources(self, occupation_threshold: float = OCCUPATION_THRESHOLD):
         """``(k', occupied columns of u_k', their occupations)`` of every point of the full mesh."""
 
         sources = []
-        for t, (k_point, block, values) in enumerate(zip(self.k_points, self.orbitals, self.occupations)):
+        for rep, operation, conjugate, k_source in self.mesh_sources():
+            values = self.occupations[rep]
             occupied = np.flatnonzero(np.asarray(values) > occupation_threshold)
             if not occupied.size:
                 continue
-            columns = np.ascontiguousarray(block[:, occupied])
+            columns = np.ascontiguousarray(self.orbitals[rep][:, occupied])
+            if self.stars is not None:
+                columns = np.ascontiguousarray(self.stars.rotated(columns, operation, conjugate))
+            elif conjugate:
+                columns = np.conj(columns)
             weights = np.asarray(values, dtype=np.float64)[occupied]
-            sources.append((np.asarray(k_point, dtype=np.float64), columns, weights))
-            if self.partners[t]:
-                sources.append((-np.asarray(k_point, dtype=np.float64), np.conj(columns), weights))
+            sources.append((np.asarray(k_source, dtype=np.float64), columns, weights))
         return sources
 
 
-def bloch_orbital_set(k_points, weights, orbitals, occupations, spin_weight: float, box: GridBox) -> BlochOrbitalSet:
-    """A :class:`BlochOrbitalSet`, checked to be a time-reversal-reduced uniform mesh."""
+def bloch_orbital_set(
+    k_points, weights, orbitals, occupations, spin_weight: float, box: GridBox, stars: MeshStars | None = None
+) -> BlochOrbitalSet:
+    """A :class:`BlochOrbitalSet`, checked to be a time-reversal-reduced uniform mesh, or with ``stars`` the
+    irreducible wedge those describe (checked by :func:`mesh_stars`)."""
 
     k_points = np.atleast_2d(np.asarray(k_points, dtype=np.float64))
     weights = np.asarray(weights, dtype=np.float64)
+    if stars is not None:
+        expected = np.asarray(stars.point_counts, dtype=np.float64) / float(stars.mesh_size)
+        if weights.shape != (k_points.shape[0],) or not np.allclose(weights, expected, rtol=0.0, atol=1.0e-10):
+            raise NotImplementedError("the weights of the k-points are not those of the stars of the wedge")
+        blocks = tuple(np.asarray(block, dtype=np.complex128) for block in orbitals)
+        values = tuple(np.asarray(item, dtype=np.float64) for item in occupations)
+        if len(blocks) != k_points.shape[0] or len(values) != k_points.shape[0]:
+            raise ValueError("one orbital block and one set of occupations per k-point are needed")
+        for block, item in zip(blocks, values):
+            if block.ndim != 2 or block.shape[0] != box.size or item.shape != (block.shape[1],):
+                raise ValueError("the orbital blocks must have shape (grid points, states) with one occupation per state")
+        return BlochOrbitalSet(
+            k_points, weights, blocks, values, float(spin_weight), np.asarray(stars.partners, dtype=bool),
+            int(stars.mesh_size), stars,
+        )
     partners = time_reversal_partners(k_points, box.reciprocal)
     mesh_size = int(np.sum(np.where(partners, 2, 1)))
     expected = np.where(partners, 2.0, 1.0) / float(mesh_size)
@@ -545,13 +730,13 @@ def apply_bloch_exchange(
         target_lists.append([column for column in wanted if column not in done])
     target_sets = [set(items) for items in target_lists]
     occupied_sets = [set(items) for items in occupied_columns]
-    # The points of the full mesh with occupied states: (rep, sign), +k_r with u, -k_r (a partner) with conj(u).
+    # The points of the full mesh with occupied states: (rep, sign, operation, k'), +k_r with u, -k_r (a partner)
+    # with conj(u); on a wedge (orbital_set.stars) also the images of the representatives under the operations of
+    # the grid (their rows permuted, conjugated where the sign is negative).
     sources = []
-    for r in range(count):
+    for r, operation, conjugate, k_source in orbital_set.mesh_sources():
         if occupied_columns[r]:
-            sources.append((r, 1))
-            if orbital_set.partners[r]:
-                sources.append((r, -1))
+            sources.append((r, -1 if conjugate else 1, int(operation), np.asarray(k_source, dtype=np.float64)))
     covered: set = set()
     pair_solves = 0
     poisson_seconds = 0.0
@@ -562,28 +747,31 @@ def apply_bloch_exchange(
             continue
         block = orbital_set.orbitals[t]
         k_point = np.asarray(orbital_set.k_points[t], dtype=np.float64)
-        for r, sign in sources:
+        for r, sign, operation, k_source in sources:
             columns_r = list(occupied_columns[r])
             source_block = orbital_set.orbitals[r][:, columns_r]
-            if sign < 0:
+            if orbital_set.stars is not None:
+                source_block = orbital_set.stars.rotated(source_block, operation, sign < 0)
+            elif sign < 0:
                 source_block = np.conj(source_block)
             source_occupations = orbital_set.occupations[r][columns_r]
-            q = k_point - sign * np.asarray(orbital_set.k_points[r], dtype=np.float64)
+            q = k_point - k_source
             # (target column n, source position j, mirrored pair or None)
             pairs = []
             for n in targets:
                 for j, m in enumerate(columns_r):
-                    if (t, n, r, sign, m) in covered:
+                    if (t, n, r, sign, operation, m) in covered:
                         continue
                     mirror = None
                     if (
                         pair_symmetry
+                        and operation < 0
                         and n in occupied_sets[t]
                         and m in target_sets[r]
                         and not (r == t and m == n)
                         and (sign > 0 or orbital_set.partners[t])
                     ):
-                        mirror = (r, m, t, sign, n)
+                        mirror = (r, m, t, sign, -1, n)
                         covered.add(mirror)
                     pairs.append((n, j, mirror))
             for begin in range(0, len(pairs), batch_size):
@@ -602,7 +790,7 @@ def apply_bloch_exchange(
                     if mirror is None:
                         continue
                     # W_r[:, m] -= (1/N) f_tn s_tn w', s_tn = u_tn (w' = conj(w)) or conj(u_tn) (w' = w)
-                    _, m, _, _, _ = mirror
+                    m = mirror[1]
                     if sign > 0:
                         term = block[:, n] * np.conj(solved[:, index])
                     else:
@@ -716,6 +904,7 @@ __all__ = [
     "BlochOrbitalSet",
     "DEFAULT_BATCH_SIZE",
     "GridBox",
+    "MeshStars",
     "PeriodicPairPoisson",
     "PeriodicPairPotentials",
     "apply_bloch_exchange",
@@ -724,6 +913,7 @@ __all__ = [
     "compress_bloch_exchange",
     "fft_workers",
     "kernel_coefficients",
+    "mesh_stars",
     "periodic_exchange_kernel",
     "periodic_pair_solver",
     "time_reversal_partners",

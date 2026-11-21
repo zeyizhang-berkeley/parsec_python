@@ -108,9 +108,27 @@ def periodic_sector_local_forces_setting() -> str:
 
 def _auto_off(name: str) -> str:
     value = os.environ.get(name, "auto").strip().lower() or "auto"
+    if value in {"0", "false", "no"}:
+        # as the other auto/off switches of the cell routes read them (PARSEC_GAMMA_SPIN_SECTORS)
+        value = "off"
     if value not in _AUTO_OFF:
         raise ValueError(f"{name} must be auto or off, not {value!r}")
     return value
+
+
+def validate_local_force_settings() -> None:
+    """Read every switch of the local forces of a cell, so that a value they do not know stops a run before its SCF.
+
+    ``PARSEC_PERIODIC_FORCE_SERIES``, ``PARSEC_PERIODIC_SECTOR_LOCAL_FORCES``, ``PARSEC_PERIODIC_LOCAL_ORBITS`` and
+    ``PARSEC_PERIODIC_LOCAL_BALLS`` are read where the forces are formed, after the whole first SCF; the preparation
+    of a run (``acceleration.driver.prepare_single_point``, the command line and the MPI runner) calls this first
+    (since 2026-11-19).  Nothing else changes: the values are read again where they are used.
+    """
+
+    periodic_force_series_setting()
+    periodic_sector_local_forces_setting()
+    periodic_local_orbits_setting()
+    periodic_local_balls_setting()
 
 
 def periodic_local_orbits_setting() -> str:
@@ -934,12 +952,17 @@ def orbit_periodic_local_forces(
     return orbit_local_forces(summed_terms, atoms, operations)
 
 
-def orbit_local_forces(local_terms, atoms: Sequence[Atom], operations) -> tuple[LocalForceTerms, dict]:
+def orbit_local_forces(
+    local_terms, atoms: Sequence[Atom], operations, *, self_consistency: bool = False
+) -> tuple[LocalForceTerms, dict]:
     """The local forces of :func:`orbit_periodic_local_forces` from any routine of them: ``local_terms(chosen)``
     returns the :class:`LocalForceTerms` of the atoms ``chosen`` (whose sums need no other atom), here those of one atom
     per orbit of ``operations`` and of up to :data:`_SAMPLED_ORBITS` checked atoms, in one call.  Returns the terms of
     every atom and ``details`` as :func:`orbit_periodic_local_forces` does; the density and exchange-correlation
-    potential that ``local_terms`` reads must be invariant under ``operations``.
+    potential that ``local_terms`` reads must be invariant under ``operations``.  ``self_consistency`` turns the
+    self-consistency term of the Fortran-derived routines (``(V_out - V_in)`` times the slope of the atomic valence
+    density, ``forcloc.f90``) onto the orbits as well, whose residual potential must then be invariant too; without
+    it that term is zero, as the default routines have none.
     """
 
     count = len(atoms)
@@ -952,16 +975,22 @@ def orbit_local_forces(local_terms, atoms: Sequence[Atom], operations) -> tuple[
     own = slice(0, representatives.size)
     ionic = turn_onto_orbits(terms.ionic[own], operations, images, representatives, sizes, count)
     core_correction = turn_onto_orbits(terms.core_correction[own], operations, images, representatives, sizes, count)
+    residual = (
+        turn_onto_orbits(terms.self_consistency[own], operations, images, representatives, sizes, count)
+        if self_consistency
+        else np.zeros((count, 3))
+    )
     site = 0.0
     if summed.size:
         site = float(
             max(
                 np.max(np.abs(ionic[summed] - terms.ionic)),
                 np.max(np.abs(core_correction[summed] - terms.core_correction)),
+                np.max(np.abs(residual[summed] - terms.self_consistency)) if self_consistency else 0.0,
             )
         )
     details = {"representatives": int(representatives.size), "sampled": int(sampled.size), "site_asymmetry": site}
-    return LocalForceTerms(ionic=ionic, self_consistency=np.zeros((count, 3)), core_correction=core_correction), details
+    return LocalForceTerms(ionic=ionic, self_consistency=residual, core_correction=core_correction), details
 
 
 def _device_module():
@@ -1006,4 +1035,5 @@ __all__ = [
     "periodic_local_orbits_setting",
     "periodic_sector_local_forces_setting",
     "turn_onto_orbits",
+    "validate_local_force_settings",
 ]

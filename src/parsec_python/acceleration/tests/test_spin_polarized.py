@@ -378,17 +378,33 @@ class SciPyBackendTests(_BackendCases, unittest.TestCase):
                 driver.prepare_single_point(problem, backend=self.backend, mpi_context=context)
 
     def test_mpi_runner_refuses_ionic_steps_of_spin_runs_on_several_ranks(self) -> None:
+        # PARSEC_SPIN_SECTOR_FORCES=off: the rule of before, every forces, relaxation and dynamics run of spin on
+        # several ranks refused; auto: those that keep the sectors run (a cluster whose structure keeps its group).
+        import os
+        from unittest import mock
+
         from parsec_python.acceleration.benchmarks.mpi_full_scf import _refuse_spin_ionic_steps
 
         scf = SimpleNamespace(spin_polarized=True)
-        single = SimpleNamespace(problem=SimpleNamespace(scf=scf), compute_forces=False,
-                                 relaxation=None, molecular_dynamics=None)
-        _refuse_spin_ionic_steps(single, 2)  # a single point is divided among the ranks
-        for changed in (dict(compute_forces=True), dict(relaxation=object()), dict(molecular_dynamics=object())):
-            translation = SimpleNamespace(**{**vars(single), **changed})
-            with self.assertRaisesRegex(ValueError, "spin-polarized calculation are not available on several ranks"):
-                _refuse_spin_ionic_steps(translation, 2)
-            _refuse_spin_ionic_steps(translation, 1)  # one rank (a serial control) is one process
+        single = SimpleNamespace(problem=SimpleNamespace(scf=scf, periodic_cell=None), compute_forces=False,
+                                 relaxation=None, molecular_dynamics=None, ignore_symmetry=False, use_symmetry=True)
+        with mock.patch.dict(os.environ, {"PARSEC_SPIN_SECTOR_FORCES": "off"}):
+            _refuse_spin_ionic_steps(single, 2)  # a single point is divided among the ranks
+            for changed in (dict(compute_forces=True), dict(relaxation=object()), dict(molecular_dynamics=object())):
+                translation = SimpleNamespace(**{**vars(single), **changed})
+                with self.assertRaisesRegex(ValueError, "spin-polarized calculation are not available on several ranks"):
+                    _refuse_spin_ionic_steps(translation, 2)
+                _refuse_spin_ionic_steps(translation, 1)  # one rank (a serial control) is one process
+        with mock.patch.dict(os.environ, {"PARSEC_SPIN_SECTOR_FORCES": "auto"}):
+            _refuse_spin_ionic_steps(SimpleNamespace(**{**vars(single), "compute_forces": True}), 2)
+            for changed, reason in (
+                (dict(molecular_dynamics=object()), "molecular dynamics uses no symmetry"),
+                (dict(compute_forces=True, ignore_symmetry=True), "uses no point group"),
+            ):
+                translation = SimpleNamespace(**{**vars(single), **changed})
+                with self.subTest(reason=reason), self.assertRaisesRegex(ValueError, reason):
+                    _refuse_spin_ionic_steps(translation, 2)
+                _refuse_spin_ionic_steps(translation, 1)
 
 
 @unittest.skipUnless(native_available(), "native extension is unavailable")

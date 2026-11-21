@@ -1,8 +1,9 @@
 """A complex CSR matrix on the device with a block product on row-major complex blocks.
 
 The operators of the sectors of a k-point (:mod:`..SCF.kpoint_sectors`) are complex sparse matrices of no
-stencil form: the reduced kinetic term (``-nabla^2 - 2ik.grad + |k|^2`` or the Bloch Laplacian, about as many
-entries per row as the stencil) and the reduced Bloch projectors.  The CuPy product of a complex CSR matrix and
+stencil form: the reduced Bloch projectors and, with ``PARSEC_KPOINT_SECTOR_STENCIL=off`` (or kinetic matrices that
+are no axial stencil of the grid; else :mod:`.sector_bloch_stencil`), the reduced kinetic term (``-nabla^2 - 2ik.grad
++ |k|^2`` or the Bloch Laplacian, about as many entries per row as the stencil).  The CuPy product of a complex CSR matrix and
 a row-major block (cuSPARSE, with the conversions of the block and the result between the two layouts) ran about
 forty times below the stencil kernel per row and column on A100 (diamond 7^3, 2 x 2 x 2 mesh).  Here one thread
 forms one entry of the result, ``out[r, c] = sum_p M[r, j_p] x[j_p, c]`` (plus ``d[r] x[r, c]`` where a diagonal

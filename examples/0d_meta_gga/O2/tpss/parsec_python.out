@@ -4,7 +4,7 @@
   PARSEC-PYTHON - Modular real-space DFT program
   PARSEC-like report; Python real-space implementation
 
- starting run on 08-Nov-2026 04:12:50 -0800
+ starting run on 20-Nov-2026 14:42:22 -0800
  input file: examples/0d_meta_gga/O2/tpss/parsec.in
 
  =================================================================
@@ -182,17 +182,19 @@ WARNING: Use_LibXC: PARSEC 1.5 evaluates the first SCF iteration of every libxc 
 
  Setup timings [sec]
  --------------------------------------------------
- Pseudopotential loading       :     0.009801
- Grid-domain construction      :     0.034538
- Finite-difference construction:     0.009929
- Local ionic potential setup   :     0.032242
- Nonlocal ionic projector setup:     0.010891
- Initial valence-density setup :     0.016926
- Core-density setup            :     0.000784
- Ion-ion energy setup           :     0.000100
- Hartree boundary estimate/tail :     0.060205
- Preparation wall time          :     0.175644
+ Pseudopotential loading       :     0.010170
+ Grid-domain construction      :     0.033905
+ Finite-difference construction:     0.009039
+ Local ionic potential setup   :     0.251653
+ Nonlocal ionic projector setup:     0.010441
+ Initial valence-density setup :     0.059126
+ Core-density setup            :     0.001383
+ Ion-ion energy setup           :     0.000120
+ Hartree boundary estimate/tail :     0.060899
+ Preparation wall time          :     0.124665
  --------------------------------------------------
+
+ The local ionic, density and ion-ion setups above ran on a thread beside the symmetry and sector setup and are not part of the preparation wall time.  Thread [sec] = 0.312285, wait at its join [sec] = 0.000022.
 
  The reference setup above describes the constructed full grid.  The GPU orbital solve is decomposed into the exact symmetry representations reported below.
 
@@ -204,6 +206,7 @@ WARNING: Use_LibXC: PARSEC 1.5 evaluates the first SCF iteration of every libxc 
  Device            = CUDA:0 (NVIDIA A100-SXM4-80GB)
  gpu_stencil_kernel = deferred_to_symmetry_sector_operators
  gpu_later_subspace_filter_precision = deferred_to_symmetry_sector_operators
+ symmetry_detection = exact Cartesian axis-reflection subgroup detected
  symmetry_cache_directory = disabled
  orbital_symmetry = CuPy real one-dimensional reflection representations
  finite_difference_builder = C++17 compressed-grid CSR builder (exact stencil parity)
@@ -215,18 +218,18 @@ WARNING: Use_LibXC: PARSEC 1.5 evaluates the first SCF iteration of every libxc 
  hartree_symmetry = normalized Cartesian axis-reflection wedge
  native_openmp_max_threads = 16
  Detailed backend settings: set Output_Level: 2
- Backend initialization [sec] =     0.115632
+ Backend initialization [sec] =     0.040369
 
  Execution resources:
  --------------------
  Device            = GPU (gpu, --gpus)
  GPUs              = 1 of 1 visible, index 0; --gpus 1
- CPU threads       = 16 of 128 CPUs allowed (affinity of the process); OMP_NUM_THREADS=16
+ CPU threads       = 16 of 32 CPUs allowed (affinity of the process); OMP_NUM_THREADS=16
 
  SCF iter #   1
 
- Diagonalization time [sec] :       5.34,      tdiag_sum =        5.34
- Iteration time [sec]       :       5.74
+ Diagonalization time [sec] :       3.81,      tdiag_sum =        3.81
+ Iteration time [sec]       :       3.95
 
  Eigensolver residual max [Ry] :   2.5383e-05
 
@@ -286,8 +289,8 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
  SCF iter #   2
 
- Diagonalization time [sec] :       0.57,      tdiag_sum =        5.91
- Iteration time [sec]       :       0.68
+ Diagonalization time [sec] :       0.34,      tdiag_sum =        4.16
+ Iteration time [sec]       :       0.45
 
  Electrons in up, down spins:    7.00    5.00
  Net magnetic moment (in Bohr magnetons):    2.00
@@ -340,14 +343,14 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
    Total Energy =           -63.64952025 [Ry]
    Energy/atom  =          -433.00132133 [eV]
 
-  0-  2 up SRE of pot. & charge weighted pot =   5.8816688121   0.3955286200
+  0-  2 up SRE of pot. & charge weighted pot =   5.8816688119   0.3955286200
 
-  0-  2 dn SRE of pot. & charge weighted pot =   3.7245111056   0.2928449774
+  0-  2 dn SRE of pot. & charge weighted pot =   3.7245111051   0.2928449774
 
  SCF iter #   3
 
- Diagonalization time [sec] :       0.34,      tdiag_sum =        6.24
- Iteration time [sec]       :       0.45
+ Diagonalization time [sec] :       0.33,      tdiag_sum =        4.49
+ Iteration time [sec]       :       0.43
 
  Electrons in up, down spins:    7.00    5.00
  Net magnetic moment (in Bohr magnetons):    2.00
@@ -400,14 +403,14 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
    Total Energy =           -63.70310933 [Ry]
    Energy/atom  =          -433.36588243 [eV]
 
-  0-  3 up SRE of pot. & charge weighted pot =   6.4444482460   0.0452364580
+  0-  3 up SRE of pot. & charge weighted pot =   6.4444482458   0.0452364580
 
-  0-  3 dn SRE of pot. & charge weighted pot =   4.2649976456   0.0770189772
+  0-  3 dn SRE of pot. & charge weighted pot =   4.2649976450   0.0770189772
 
  SCF iter #   4
 
- Diagonalization time [sec] :       0.40,      tdiag_sum =        6.65
- Iteration time [sec]       :       0.52
+ Diagonalization time [sec] :       0.33,      tdiag_sum =        4.82
+ Iteration time [sec]       :       0.44
 
  Electrons in up, down spins:    7.00    5.00
  Net magnetic moment (in Bohr magnetons):    2.00
@@ -460,14 +463,14 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
    Total Energy =           -63.70454770 [Ry]
    Energy/atom  =          -433.37566756 [eV]
 
-  0-  4 up SRE of pot. & charge weighted pot =   6.8928097974   0.0892100751
+  0-  4 up SRE of pot. & charge weighted pot =   6.8928097973   0.0892100751
 
-  0-  4 dn SRE of pot. & charge weighted pot =   4.4982304672   0.0781879753
+  0-  4 dn SRE of pot. & charge weighted pot =   4.4982304674   0.0781879753
 
  SCF iter #   5
 
- Diagonalization time [sec] :       0.40,      tdiag_sum =        7.05
- Iteration time [sec]       :       0.52
+ Diagonalization time [sec] :       0.34,      tdiag_sum =        5.16
+ Iteration time [sec]       :       0.45
 
  Electrons in up, down spins:    7.00    5.00
  Net magnetic moment (in Bohr magnetons):    2.00
@@ -477,9 +480,9 @@ up State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
     1        -2.4534462349       -33.3810987823    1.0000        1
     2        -1.5417924448       -20.9773196450    1.0000        8
     3        -1.0119801223       -13.7687991483    1.0000        6
-    4        -1.0119758234       -13.7687406575    1.0000        7
+    4        -1.0119758234       -13.7687406576    1.0000        7
     5        -0.9957679171       -13.5482191267    1.0000        1
-    6        -0.5124673513        -6.9725282880    1.0000        3
+    6        -0.5124673513        -6.9725282881    1.0000        3
     7        -0.5124618921        -6.9724540109    1.0000        2
     8         0.0118009152         0.1605608926    0.0000        1
     9         0.0671875531         0.9141404097    0.0000        8
@@ -520,14 +523,14 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
    Total Energy =           -63.70835039 [Ry]
    Energy/atom  =          -433.40153684 [eV]
 
-  0-  5 up SRE of pot. & charge weighted pot =   5.1331107583   0.0055055548
+  0-  5 up SRE of pot. & charge weighted pot =   5.1331107582   0.0055055548
 
-  0-  5 dn SRE of pot. & charge weighted pot =   3.3754956622   0.0064720349
+  0-  5 dn SRE of pot. & charge weighted pot =   3.3754956619   0.0064720349
 
  SCF iter #   6
 
- Diagonalization time [sec] :       0.34,      tdiag_sum =        7.38
- Iteration time [sec]       :       0.46
+ Diagonalization time [sec] :       0.33,      tdiag_sum =        5.50
+ Iteration time [sec]       :       0.44
 
  Electrons in up, down spins:    7.00    5.00
  Net magnetic moment (in Bohr magnetons):    2.00
@@ -538,7 +541,7 @@ up State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
     2        -1.5540084792       -21.1435285660    1.0000        8
     3        -1.0218478072       -13.9030568950    1.0000        6
     4        -1.0218447759       -13.9030156526    1.0000        7
-    5        -1.0066146624       -13.6957977742    1.0000        1
+    5        -1.0066146624       -13.6957977743    1.0000        1
     6        -0.5240206433        -7.1297200682    1.0000        3
     7        -0.5240167304        -7.1296668310    1.0000        2
     8         0.0119529480         0.1626294200    0.0000        1
@@ -580,14 +583,14 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
    Total Energy =           -63.70870226 [Ry]
    Energy/atom  =          -433.40393060 [eV]
 
-  0-  6 up SRE of pot. & charge weighted pot =   2.7168341341   0.0197175720
+  0-  6 up SRE of pot. & charge weighted pot =   2.7168341339   0.0197175720
 
-  0-  6 dn SRE of pot. & charge weighted pot =   1.8549926083   0.0191829705
+  0-  6 dn SRE of pot. & charge weighted pot =   1.8549926082   0.0191829705
 
  SCF iter #   7
 
- Diagonalization time [sec] :       0.34,      tdiag_sum =        7.72
- Iteration time [sec]       :       0.45
+ Diagonalization time [sec] :       0.33,      tdiag_sum =        5.83
+ Iteration time [sec]       :       0.44
 
  Electrons in up, down spins:    7.00    5.00
  Net magnetic moment (in Bohr magnetons):    2.00
@@ -640,14 +643,14 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
    Total Energy =           -63.70904772 [Ry]
    Energy/atom  =          -433.40628076 [eV]
 
-  0-  7 up SRE of pot. & charge weighted pot =   1.6395448583   0.0014976838
+  0-  7 up SRE of pot. & charge weighted pot =   1.6395448584   0.0014976838
 
   0-  7 dn SRE of pot. & charge weighted pot =   1.1176026573   0.0015231699
 
  SCF iter #   8
 
- Diagonalization time [sec] :       0.33,      tdiag_sum =        8.06
- Iteration time [sec]       :       0.45
+ Diagonalization time [sec] :       0.33,      tdiag_sum =        6.16
+ Iteration time [sec]       :       0.44
 
  Electrons in up, down spins:    7.00    5.00
  Net magnetic moment (in Bohr magnetons):    2.00
@@ -700,14 +703,14 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
    Total Energy =           -63.70912827 [Ry]
    Energy/atom  =          -433.40682874 [eV]
 
-  0-  8 up SRE of pot. & charge weighted pot =   1.0486092752   0.0016030137
+  0-  8 up SRE of pot. & charge weighted pot =   1.0486092753   0.0016030137
 
   0-  8 dn SRE of pot. & charge weighted pot =   0.6726802395   0.0016589915
 
  SCF iter #   9
 
- Diagonalization time [sec] :       0.33,      tdiag_sum =        8.39
- Iteration time [sec]       :       0.45
+ Diagonalization time [sec] :       0.33,      tdiag_sum =        6.49
+ Iteration time [sec]       :       0.44
 
  Electrons in up, down spins:    7.00    5.00
  Net magnetic moment (in Bohr magnetons):    2.00
@@ -762,23 +765,23 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
   0-  9 up SRE of pot. & charge weighted pot =   1.0833727861   0.0038828240
 
-  0-  9 dn SRE of pot. & charge weighted pot =   0.7478897152   0.0042219217
+  0-  9 dn SRE of pot. & charge weighted pot =   0.7478897150   0.0042219217
 
  SCF iter #  10
 
- Diagonalization time [sec] :       0.33,      tdiag_sum =        8.72
- Iteration time [sec]       :       0.45
+ Diagonalization time [sec] :       0.33,      tdiag_sum =        6.82
+ Iteration time [sec]       :       0.44
 
  Electrons in up, down spins:    7.00    5.00
  Net magnetic moment (in Bohr magnetons):    2.00
 
 up State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
-    1        -2.4500321213       -33.3346470366    1.0000        1
+    1        -2.4500321213       -33.3346470365    1.0000        1
     2        -1.5429432939       -20.9929778684    1.0000        8
     3        -1.0111419546       -13.7573952060    1.0000        6
     4        -1.0111401382       -13.7573704926    1.0000        7
-    5        -0.9951484388       -13.5397906283    1.0000        1
+    5        -0.9951484388       -13.5397906282    1.0000        1
     6        -0.5131703303        -6.9820928795    1.0000        3
     7        -0.5131679201        -6.9820600876    1.0000        2
     8         0.0148176229         0.2016056136    0.0000        1
@@ -822,11 +825,11 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
   0- 10 up SRE of pot. & charge weighted pot =   1.1584592192   0.0096437442
 
-  0- 10 dn SRE of pot. & charge weighted pot =   0.7742620286   0.0096040651
+  0- 10 dn SRE of pot. & charge weighted pot =   0.7742620285   0.0096040651
 
  SCF iter #  11
 
- Diagonalization time [sec] :       0.33,      tdiag_sum =        9.06
+ Diagonalization time [sec] :       0.33,      tdiag_sum =        7.16
  Iteration time [sec]       :       0.44
 
  Electrons in up, down spins:    7.00    5.00
@@ -851,7 +854,7 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
     1        -2.3574479916       -32.0749658836    1.0000        1
     2        -1.3953693643       -18.9851164968    1.0000        8
-    3        -0.9413628825       -12.8079951064    1.0000        1
+    3        -0.9413628825       -12.8079951065    1.0000        1
     4        -0.8483254658       -11.5421466221    1.0000        7
     5        -0.8483251652       -11.5421425326    1.0000        6
     6        -0.3075769391        -4.1848303179    0.0000        2
@@ -882,12 +885,12 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
   0- 11 up SRE of pot. & charge weighted pot =   0.3689003671   0.0026374655
 
-  0- 11 dn SRE of pot. & charge weighted pot =   0.2429088583   0.0028617129
+  0- 11 dn SRE of pot. & charge weighted pot =   0.2429088584   0.0028617129
 
  SCF iter #  12
 
- Diagonalization time [sec] :       0.33,      tdiag_sum =        9.39
- Iteration time [sec]       :       0.45
+ Diagonalization time [sec] :       0.33,      tdiag_sum =        7.49
+ Iteration time [sec]       :       0.44
 
  Electrons in up, down spins:    7.00    5.00
  Net magnetic moment (in Bohr magnetons):    2.00
@@ -946,7 +949,7 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
  SCF iter #  13
 
- Diagonalization time [sec] :       0.33,      tdiag_sum =        9.72
+ Diagonalization time [sec] :       0.33,      tdiag_sum =        7.82
  Iteration time [sec]       :       0.45
 
  Electrons in up, down spins:    7.00    5.00
@@ -970,7 +973,7 @@ up State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
     1        -2.3603022647       -32.1138005531    1.0000        1
-    2        -1.3974107488       -19.0128911662    1.0000        8
+    2        -1.3974107488       -19.0128911661    1.0000        8
     3        -0.9434655684       -12.8366038310    1.0000        1
     4        -0.8504967935       -11.5716892733    1.0000        7
     5        -0.8504967735       -11.5716890014    1.0000        6
@@ -1002,11 +1005,11 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
   0- 13 up SRE of pot. & charge weighted pot =   0.1768173076   0.0013346557
 
-  0- 13 dn SRE of pot. & charge weighted pot =   0.0907252903   0.0012816570
+  0- 13 dn SRE of pot. & charge weighted pot =   0.0907252904   0.0012816570
 
  SCF iter #  14
 
- Diagonalization time [sec] :       0.33,      tdiag_sum =       10.06
+ Diagonalization time [sec] :       0.33,      tdiag_sum =        8.15
  Iteration time [sec]       :       0.45
 
  Electrons in up, down spins:    7.00    5.00
@@ -1066,7 +1069,7 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
  SCF iter #  15
 
- Diagonalization time [sec] :       0.32,      tdiag_sum =       10.38
+ Diagonalization time [sec] :       0.32,      tdiag_sum =        8.47
  Iteration time [sec]       :       0.43
 
  Electrons in up, down spins:    7.00    5.00
@@ -1120,14 +1123,14 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
    Total Energy =           -63.70917178 [Ry]
    Energy/atom  =          -433.40712471 [eV]
 
-  0- 15 up SRE of pot. & charge weighted pot =   0.0683145283   0.0000477511
+  0- 15 up SRE of pot. & charge weighted pot =   0.0683145284   0.0000477511
 
   0- 15 dn SRE of pot. & charge weighted pot =   0.0374658507   0.0000583118
 
  SCF iter #  16
 
- Diagonalization time [sec] :       0.30,      tdiag_sum =       10.68
- Iteration time [sec]       :       0.42
+ Diagonalization time [sec] :       0.36,      tdiag_sum =        8.83
+ Iteration time [sec]       :       0.47
 
  Electrons in up, down spins:    7.00    5.00
  Net magnetic moment (in Bohr magnetons):    2.00
@@ -1180,14 +1183,14 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
    Total Energy =           -63.70917181 [Ry]
    Energy/atom  =          -433.40712490 [eV]
 
-  0- 16 up SRE of pot. & charge weighted pot =   0.0626000191   0.0000679233
+  0- 16 up SRE of pot. & charge weighted pot =   0.0626000192   0.0000679233
 
   0- 16 dn SRE of pot. & charge weighted pot =   0.0338067389   0.0000798201
 
  SCF iter #  17
 
- Diagonalization time [sec] :       0.28,      tdiag_sum =       10.96
- Iteration time [sec]       :       0.40
+ Diagonalization time [sec] :       0.35,      tdiag_sum =        9.18
+ Iteration time [sec]       :       0.46
 
  Electrons in up, down spins:    7.00    5.00
  Net magnetic moment (in Bohr magnetons):    2.00
@@ -1240,13 +1243,13 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
    Total Energy =           -63.70917182 [Ry]
    Energy/atom  =          -433.40712498 [eV]
 
-  0- 17 up SRE of pot. & charge weighted pot =   0.0435425132   0.0000461842
+  0- 17 up SRE of pot. & charge weighted pot =   0.0435425133   0.0000461842
 
-  0- 17 dn SRE of pot. & charge weighted pot =   0.0230925042   0.0000571576
+  0- 17 dn SRE of pot. & charge weighted pot =   0.0230925043   0.0000571576
 
  SCF iter #  18
 
- Diagonalization time [sec] :       0.27,      tdiag_sum =       11.23
+ Diagonalization time [sec] :       0.26,      tdiag_sum =        9.44
  Iteration time [sec]       :       0.38
 
  Electrons in up, down spins:    7.00    5.00
@@ -1300,13 +1303,13 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
    Total Energy =           -63.70917183 [Ry]
    Energy/atom  =          -433.40712502 [eV]
 
-  0- 18 up SRE of pot. & charge weighted pot =   0.0223425087   0.0000166674
+  0- 18 up SRE of pot. & charge weighted pot =   0.0223425090   0.0000166674
 
-  0- 18 dn SRE of pot. & charge weighted pot =   0.0119449990   0.0000122729
+  0- 18 dn SRE of pot. & charge weighted pot =   0.0119449992   0.0000122729
 
  SCF iter #  19
 
- Diagonalization time [sec] :       0.25,      tdiag_sum =       11.48
+ Diagonalization time [sec] :       0.25,      tdiag_sum =        9.69
  Iteration time [sec]       :       0.36
 
  Electrons in up, down spins:    7.00    5.00
@@ -1315,7 +1318,7 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 up State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
     1        -2.4565543096       -33.4233866259    1.0000        1
-    2        -1.5485265530       -21.0689425743    1.0000        8
+    2        -1.5485265530       -21.0689425744    1.0000        8
     3        -1.0167506894       -13.8337065299    1.0000        6
     4        -1.0167506869       -13.8337064958    1.0000        7
     5        -1.0007906918       -13.6165579941    1.0000        1
@@ -1360,14 +1363,14 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
    Total Energy =           -63.70917183 [Ry]
    Energy/atom  =          -433.40712504 [eV]
 
-  0- 19 up SRE of pot. & charge weighted pot =   0.0115381862   0.0000127367
+  0- 19 up SRE of pot. & charge weighted pot =   0.0115381864   0.0000127367
 
-  0- 19 dn SRE of pot. & charge weighted pot =   0.0070282376   0.0000179953
+  0- 19 dn SRE of pot. & charge weighted pot =   0.0070282377   0.0000179953
 
  SCF iter #  20
 
- Diagonalization time [sec] :       0.25,      tdiag_sum =       11.73
- Iteration time [sec]       :       0.36
+ Diagonalization time [sec] :       0.29,      tdiag_sum =        9.97
+ Iteration time [sec]       :       0.40
 
  Electrons in up, down spins:    7.00    5.00
  Net magnetic moment (in Bohr magnetons):    2.00
@@ -1391,7 +1394,7 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
     1        -2.3595695406       -32.1038312561    1.0000        1
     2        -1.3967892760       -19.0044355318    1.0000        8
-    3        -0.9428297411       -12.8279528908    1.0000        1
+    3        -0.9428297410       -12.8279528908    1.0000        1
     4        -0.8499032066       -11.5636130488    1.0000        7
     5        -0.8499032006       -11.5636129661    1.0000        6
     6        -0.3089870645        -4.2040162026    0.0000        2
@@ -1420,13 +1423,13 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
    Total Energy =           -63.70917183 [Ry]
    Energy/atom  =          -433.40712505 [eV]
 
-  0- 20 up SRE of pot. & charge weighted pot =   0.0084007040   0.0000288447
+  0- 20 up SRE of pot. & charge weighted pot =   0.0084007039   0.0000288447
 
   0- 20 dn SRE of pot. & charge weighted pot =   0.0052222830   0.0000339186
 
  SCF iter #  21
 
- Diagonalization time [sec] :       0.25,      tdiag_sum =       11.97
+ Diagonalization time [sec] :       0.25,      tdiag_sum =       10.22
  Iteration time [sec]       :       0.34
 
  Electrons in up, down spins:    7.00    5.00
@@ -1486,7 +1489,7 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
  SCF iter #  22
 
- Diagonalization time [sec] :       0.25,      tdiag_sum =       12.22
+ Diagonalization time [sec] :       0.25,      tdiag_sum =       10.47
  Iteration time [sec]       :       0.35
 
  Electrons in up, down spins:    7.00    5.00
@@ -1542,12 +1545,12 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
   0- 22 up SRE of pot. & charge weighted pot =   0.0057402854   0.0000111944
 
-  0- 22 dn SRE of pot. & charge weighted pot =   0.0031822429   0.0000123794
+  0- 22 dn SRE of pot. & charge weighted pot =   0.0031822428   0.0000123794
 
  SCF iter #  23
 
- Diagonalization time [sec] :       0.29,      tdiag_sum =       12.52
- Iteration time [sec]       :       0.40
+ Diagonalization time [sec] :       0.25,      tdiag_sum =       10.72
+ Iteration time [sec]       :       0.35
 
  Electrons in up, down spins:    7.00    5.00
  Net magnetic moment (in Bohr magnetons):    2.00
@@ -1576,7 +1579,7 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
     5        -0.8499250103       -11.5639097054    1.0000        6
     6        -0.3090082656        -4.2043046605    0.0000        2
     7        -0.3090082588        -4.2043045675    0.0000        3
-    8         0.0291770636         0.3969772922    0.0000        1
+    8         0.0291770636         0.3969772921    0.0000        1
     9         0.0930511424         1.2660352329    0.0000        8
    10         0.1080296373         1.4698296385    0.0000        6
    11         0.1080296624         1.4698299803    0.0000        7
@@ -1606,8 +1609,8 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
  SCF iter #  24
 
- Diagonalization time [sec] :       0.25,      tdiag_sum =       12.76
- Iteration time [sec]       :       0.36
+ Diagonalization time [sec] :       0.39,      tdiag_sum =       11.11
+ Iteration time [sec]       :       0.50
 
  Electrons in up, down spins:    7.00    5.00
  Net magnetic moment (in Bohr magnetons):    2.00
@@ -1666,7 +1669,7 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
  SCF iter #  25
 
- Diagonalization time [sec] :       0.25,      tdiag_sum =       13.01
+ Diagonalization time [sec] :       0.25,      tdiag_sum =       11.36
  Iteration time [sec]       :       0.36
 
  Electrons in up, down spins:    7.00    5.00
@@ -1726,8 +1729,8 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
  SCF iter #  26
 
- Diagonalization time [sec] :       0.28,      tdiag_sum =       13.29
- Iteration time [sec]       :       0.39
+ Diagonalization time [sec] :       0.25,      tdiag_sum =       11.60
+ Iteration time [sec]       :       0.36
 
  Electrons in up, down spins:    7.00    5.00
  Net magnetic moment (in Bohr magnetons):    2.00
@@ -1786,8 +1789,8 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
  SCF iter #  27
 
- Diagonalization time [sec] :       0.25,      tdiag_sum =       13.53
- Iteration time [sec]       :       0.36
+ Diagonalization time [sec] :       0.27,      tdiag_sum =       11.88
+ Iteration time [sec]       :       0.39
 
  Electrons in up, down spins:    7.00    5.00
  Net magnetic moment (in Bohr magnetons):    2.00
@@ -1846,8 +1849,8 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
  SCF iter #  28
 
- Diagonalization time [sec] :       0.25,      tdiag_sum =       13.78
- Iteration time [sec]       :       0.36
+ Diagonalization time [sec] :       0.27,      tdiag_sum =       12.15
+ Iteration time [sec]       :       0.38
 
  Electrons in up, down spins:    7.00    5.00
  Net magnetic moment (in Bohr magnetons):    2.00
@@ -1870,7 +1873,7 @@ up State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
     1        -2.3595990385       -32.1042325976    1.0000        1
-    2        -1.3968121622       -19.0047469168    1.0000        8
+    2        -1.3968121622       -19.0047469167    1.0000        8
     3        -0.9428521394       -12.8282576384    1.0000        1
     4        -0.8499256715       -11.5639187019    1.0000        7
     5        -0.8499256685       -11.5639186599    1.0000        6
@@ -1900,14 +1903,14 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
    Total Energy =           -63.70917184 [Ry]
    Energy/atom  =          -433.40712508 [eV]
 
-  0- 28 up SRE of pot. & charge weighted pot =   0.0005950580   0.0000049147
+  0- 28 up SRE of pot. & charge weighted pot =   0.0005950581   0.0000049147
 
   0- 28 dn SRE of pot. & charge weighted pot =   0.0001385050   0.0000058217
 
  SCF iter #  29
 
- Diagonalization time [sec] :       0.25,      tdiag_sum =       14.03
- Iteration time [sec]       :       0.37
+ Diagonalization time [sec] :       0.24,      tdiag_sum =       12.39
+ Iteration time [sec]       :       0.36
 
  Electrons in up, down spins:    7.00    5.00
  Net magnetic moment (in Bohr magnetons):    2.00
@@ -1966,7 +1969,7 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
  SCF iter #  30
 
- Diagonalization time [sec] :       0.24,      tdiag_sum =       14.28
+ Diagonalization time [sec] :       0.24,      tdiag_sum =       12.64
  Iteration time [sec]       :       0.36
 
  Electrons in up, down spins:    7.00    5.00
@@ -2026,14 +2029,14 @@ dn State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
 Self-consistency convergence achieved.
 
-Time for self-consistent field [sec] :      20.73,    tdiag_sum =       14.28
-Time spent on Hartree potential [sec] :        0.70
+Time for self-consistent field [sec] :      18.40,    tdiag_sum =       12.64
+Time spent on Hartree potential [sec] :        0.69
 
  Tot. charge (user input) [e] =   0.00000000
  Tot. charge (computed) [e] =   0.00000000
  Dipole components [Debye]:
- x-component =  -0.00000000
- y-component =   0.00000000
+ x-component =   0.00000000
+ y-component =  -0.00000000
  z-component =   0.00000000
 
  Density at the sphere: the sphere adds an estimated 9.5E-07 Ry to the total energy (decay constant 0.83 /bohr: a factor 10 per 0.73 ang)
@@ -2045,24 +2048,24 @@ Time spent on Hartree potential [sec] :        0.70
 
  Initial Hamiltonian component timings [sec]
  --------------------------------------------------
- Finite-difference (-nabla^2) :     0.009929
- V_ion diagonal/local         :     0.032242
- V_ion nonlocal projectors    :     0.010891
- Initial V_xc (LIBXC:MGGA_X_TPSS+MGGA_C_TPSS)             :     1.325646
- Component subtotal             :     1.378708
+ Finite-difference (-nabla^2) :     0.009039
+ V_ion diagonal/local         :     0.251653
+ V_ion nonlocal projectors    :     0.010441
+ Initial V_xc (LIBXC:MGGA_X_TPSS+MGGA_C_TPSS)             :     1.295441
+ Component subtotal             :     1.566573
  --------------------------------------------------
 
  SCF timing analysis [sec]
  --------------------------------------------------
- Initial Hartree potential      :     0.290491
- Initial exchange-correlation   :     1.325646
- Hamiltonian binding subtotal  :     0.316356
- Diagonalization subtotal       :    14.278469
- Occupation/density subtotal   :     1.441951
- Hartree potential subtotal     :     0.696865
- Exchange-correlation subtotal  :     0.452607
- Mixing/energy subtotal         :     0.722277
- SCF wall time                   :    20.243482
+ Initial Hartree potential      :     0.101081
+ Initial exchange-correlation   :     1.295441
+ Hamiltonian binding subtotal  :     0.303852
+ Diagonalization subtotal       :    12.636560
+ Occupation/density subtotal   :     1.411022
+ Hartree potential subtotal     :     0.687596
+ Exchange-correlation subtotal  :     0.215332
+ Mixing/energy subtotal         :     0.685770
+ SCF wall time                   :    17.984051
  --------------------------------------------------
 
 Forces and MPI statistics
@@ -2078,28 +2081,28 @@ are not calculated by this Python single-point implementation.
  Total H application time [sec] =     0.000000
  Average H application [sec] =     0.000000
  Local-potential updates =           60
- Local update time [sec] =     0.009145
+ Local update time [sec] =     0.007799
  Per-H device timing = disabled (would synchronize every recurrence)
  GPU initial-eigensolver calls =           16
- GPU initial-eigensolver synchronized time [sec] =     5.326726
+ GPU initial-eigensolver synchronized time [sec] =     3.804830
  GPU SUBSPACE calls =          464
- GPU SUBSPACE synchronized time [sec] =     8.799904
+ GPU SUBSPACE synchronized time [sec] =     8.689958
  GPU representation scheduler batches =           60
- GPU representation scheduler wall time [sec] =    14.173109
+ GPU representation scheduler wall time [sec] =    12.538290
  Final active states by representation = up: 7 7 7 6 6 7 7 7; down: 7 7 7 6 6 7 7 7
- Requested-eigenpair download [sec] =     0.021252
+ Requested-eigenpair download [sec] =     0.020914
  GPU density builds =          360
- GPU density build/download [sec] =     0.084287
- Final wavefunction download [sec] =     0.375810
+ GPU density build/download [sec] =     0.084739
+ Final wavefunction download [sec] =     0.332307
  Accelerated Hartree solves =           31
- Accelerated Hartree total [sec] =     0.983028
- Hartree boundary/RHS [sec] =     0.226435
- Hartree linear solve [sec] =     0.750229
+ Accelerated Hartree total [sec] =     0.784817
+ Hartree boundary/RHS [sec] =     0.093523
+ Hartree linear solve [sec] =     0.685276
  Host-to-device time [sec] =     0.000000
- Device kernel time [sec] =    14.126630
- Device-to-host time [sec] =     0.021252
- Pre-SCF setup/reporting wall time [sec] :    9.476113
- Post-SCF finalization/reporting [sec] :    0.043769
- Total accelerated Python wall time [sec] :       30.25
+ Device kernel time [sec] =    12.494788
+ Device-to-host time [sec] =     0.020914
+ Pre-SCF setup/reporting wall time [sec] :    8.629204
+ Post-SCF finalization/reporting [sec] :    0.030203
+ Total accelerated Python wall time [sec] :       27.07
  parsec.dat: examples/0d_meta_gga/O2/tpss/parsec.dat (potential and density of 2 spin channel(s) on 1413968 points, 12 wavefunction(s))
 Text log: examples/0d_meta_gga/O2/tpss/parsec.out
