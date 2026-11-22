@@ -313,6 +313,9 @@ GiB). By default the margin is cut for memory, a sector then misses states and g
 step, and that growth runs out of memory: the GPUs of a rank hold three sector bases of 19.3 GiB each. One rank per GPU
 (sector groups of ranks) does not fit either: the ranks are dealt to the sectors in equal numbers, not by their sizes.
 Since 2026-11-18 the default margin converges there (the SCF loop no longer holds the basis of a regrowing sector: 1044 s, 18 steps), and with the sectors placed by their cost (`PARSEC_SECTOR_PLACEMENT=size`) one rank per GPU (`--rank-per-gpu`, `Eigensolver: chebff`) runs n = 22 with the default settings in 322.9 s, 8 steps, without a margin cut, 66.4 GiB on the fullest GPU.
+Since 2026-11-21 a sector that grows keeps the vectors a later pass has refined, with the CHEBFF eigensolver these
+inputs name (`PARSEC_CUPY_SECTOR_WARM_GROWTH=auto`): the default margin then converges in 11 steps, 571.5 s, 70.1 GiB on
+the fullest GPU (one rank per node, as for the 1044 s).
 
 ### Gamma point: forces and relaxations in the sectors (2026-11-21)
 
@@ -329,24 +332,27 @@ Since 2026-11-19 the forces and relaxations of the Fortran-derived routines keep
 (`PARSEC_FORTRAN_SECTOR_FORCES=auto`, README of `acceleration`), so `--set 'Skip_Force: false'` alone runs in them too
 (with the force terms of those routines); measured on one node with `run_case.py --gpus 4` there, program time of first
 runs with an empty kernel cache (warm reruns in brackets): forces of 4^3 on the full grid
-(`PARSEC_FORTRAN_SECTOR_FORCES=off`) -> in the sectors 33.9 -> 11.8 s (26.9 -> 7.5 s), of 6^3 (which did not fit one
-A100 on the full grid) 20.3 s (12.4 s), one relaxation step of 10^3 63.3 s (53.2 s).
+(`PARSEC_FORTRAN_SECTOR_FORCES=off`) -> in the sectors 33.7 -> 11.6 s (26.8 -> 7.2 s), of 6^3 (which did not fit one
+A100 on the full grid) 20.1 s (12.1 s), one relaxation step of 10^3 62.7 s (52.3 s).
 
 One relaxation step (the SCF and the forces of the perfect cubes, whose forces vanish by symmetry: the largest is
-1.6-3.9e-4 Ry/bohr at the SCF criterion of 2e-4 Ry) on 16 A100, one rank per node:
+1.5-3.7e-4 Ry/bohr at the SCF criterion of 2e-4 Ry) on 16 A100, one rank per node:
 
 | n | atoms | whole run | SCF | forces | fullest GPU |
 |---|---:|---:|---:|---:|---:|
-| 6 | 1,728 | 3.7 s | 1.0 s | 0.45 s | 0.8 GiB |
-| 10 | 8,000 | 10.1 s | 3.7 s | 1.7 s | 2.0 GiB |
-| 20 | 64,000 | 149.4 s | 106.8 s | 11.6 s | 46.0 GiB |
-| 22 | 85,184 | 282.3 s | 225.7 s | 15.5 s | 76.8 GiB |
+| 6 | 1,728 | 3.2 s | 0.8 s | 0.45 s | 0.8 GiB |
+| 10 | 8,000 | 10.2 s | 3.7 s | 1.7 s | 2.0 GiB |
+| 20 | 64,000 | 148.7 s | 106.3 s | 11.7 s | 46.0 GiB |
+| 22 | 85,184 | 281.8 s | 225.2 s | 15.4 s | 76.8 GiB |
 
-The forces differ from those of 2026-11-18 on the second sublattice only: its atoms sit on grid points of these grids,
-where the projector gradients now divide by the first radial sample as `nonloc.F90` does
-(`PARSEC_PROJECTOR_CENTER=auto`; `off` gives the former forces), by 1.5-4.3e-5 Ry/bohr in this table and 2.4-5.3e-4 on
-the Fortran-derived routines (there with about 1e-5 from `PARSEC_SPLINE_FORCE_CENTER`), the energies by less than
-1e-9 Ry.
+On these routines (`Use_Fortran_Routines: .false.`) the forces equal those of 2026-11-18 within 1.6e-9 Ry/bohr (n = 6;
+5.5e-11 to 5.7e-10 for n = 10 to 22), and the energies agree within 1e-9 Ry. The atoms of the second sublattice sit on
+grid points of these grids, where the projector gradients follow `PARSEC_PROJECTOR_CENTER`: `auto` takes the gradient
+within 3e-3 bohr of an atom at that distance, and on the carbon table this is the slope that the 1e-3 bohr floor of
+`off` (the forces of 2026-11-18) gives as well; `tip` gives forces up to 4.3e-5 Ry/bohr apart on that sublattice. On
+the Fortran-derived routines the forces of that sublattice shrink against those of `tip`: the largest component of the
+one-process runs above is 7.5e-6 instead of 2.6e-5 Ry/bohr at 4^3, 1.8e-5 instead of 5.3e-5 at 6^3 and 2.6e-5 instead
+of 5.0e-5 at 10^3. These cubes are perfect, so the forces vanish by symmetry whatever the gradient at those points.
 
 n = 22 with `PARSEC_CUPY_SECTOR_MARGIN=fixed` and `PARSEC_CUPY_FORCE_PREFETCH=off` (the gradients built beside the SCF
 take the last GiB otherwise); its energy is that of the SCF alone above. Before the local terms of the orbits and the

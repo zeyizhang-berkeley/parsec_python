@@ -428,6 +428,10 @@ class OrbitalGroupPlan:
     # the rows times states of the plan of the least rows times states (``cost`` itself unless a fixed cost per
     # sector chose another plan, :func:`orbital_group_plan`): what the comparison with the abelian group reads
     least_cost: float = float("nan")
+    # per solved sector, the representations of ``G`` it holds at multiplicity two or more (``m(lambda, Gamma) > 1``):
+    # all partners of such a level can lie in this one sector, as two degenerate states of one label (the E of the
+    # 192 operations of an fcc or rock-salt cell in a sector of weight 1), which the spin guard must tell apart
+    repeated_irreps: tuple[tuple[int, ...], ...] = ()
 
 
 def _plan_for(table, representations, members, order, characters=None, inverses=None):
@@ -497,6 +501,7 @@ def _plan_for(table, representations, members, order, characters=None, inverses=
     partner_irreps = tuple(
         tuple(int(g) for g in np.flatnonzero((multiplicity[i] > 0) & (solved_counts > 1))) for i in solved
     )
+    repeated_irreps = tuple(tuple(int(g) for g in np.flatnonzero(multiplicity[i] > 1)) for i in solved)
     levels = np.array([rep.levels for rep in representations])
     states = multiplicity @ levels / order
     cost = float(sum(states[i] for i in solved)) / size
@@ -516,6 +521,7 @@ def _plan_for(table, representations, members, order, characters=None, inverses=
         cost=cost,
         abelian_cost=float("nan"),
         partner_irreps=partner_irreps,
+        repeated_irreps=repeated_irreps,
     )
 
 
@@ -785,7 +791,7 @@ def orbital_group_plan(
         raise RuntimeError("no orbital subgroup was admitted")
     plan = OrbitalGroupPlan(best.subgroup, best.characters, best.weights, best.cosets, best.cost,
                             abelian.cost if abelian is not None else float("nan"), best.partner_irreps,
-                            least_cost=least.cost)
+                            least_cost=least.cost, repeated_irreps=best.repeated_irreps)
     if units is not None:
         plan = replace(plan, units=irrep_units(table, plan, units, representations))
     return plan

@@ -1145,7 +1145,7 @@ class MPISectorContext:
             if self.rank != self.root:
                 solver._sector_counts = list(payload['counts'])
             result = solver._run_local_sector_jobs(requested, payload['counts'], payload['settings'],
-                                                   reset=payload['reset'])
+                                                   reset=payload['reset'], grow=payload.get('grow', False))
             latest.update(result)
             retained.update(result)
             if self.rank != self.root:

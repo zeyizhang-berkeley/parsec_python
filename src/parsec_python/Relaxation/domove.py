@@ -44,6 +44,9 @@ METHODS = (STEEPEST_DESCENT, BFGS, MANUAL)
 #: the force criterion of :func:`domove` does.
 LBFGSB_TOLERANCE = 1.0e-15
 
+#: Environment switch of :func:`bfgs_first_step_setting`.
+BFGS_FIRST_STEP_ENV = "PARSEC_BFGS_FIRST_STEP"
+
 #: Error flags of ``domove.f90``.
 ERROR_LBFGSB = 541
 ERROR_LBFGSB_ABNORMAL = 542
@@ -127,6 +130,40 @@ def steepest_descent_displacement(
     return np.where(gradient == 0.0, 0.0, -np.sign(gradient) * step)
 
 
+def bfgs_first_step_setting() -> float | None:
+    """``PARSEC_BFGS_FIRST_STEP``: limit on the first trial move of ``bfgs``, in bohr.
+
+    ``off`` (default) is PARSEC 1.5: ``lnsrlb`` of ``lbfgsb.f`` starts an
+    unbounded run along the force with a step of norm 1 bohr over all
+    coordinates, whatever the size of the force.  While the energy keeps
+    falling each further trial of its line search extrapolates (on a constant
+    force 1, 5, 21, 85 ... times the first), and only ``Max_Step`` bounds the
+    whole run.  In a small cell one atom can move by most of a bohr in the
+    first trial and leave the basin of the input structure.  A positive
+    number is the largest displacement of any atom in that first trial; the
+    trial is only ever shortened, and the rules of the line search and of the
+    later iterations are unchanged, so later trials can still extrapolate.
+    Runs with ``Max_Step`` bounds and runs continued from a saved BFGS state
+    are not affected; a ``relax_restart.dat`` without a BFGS block starts
+    BFGS afresh, and the limit acts.
+    """
+
+    import os
+
+    text = os.environ.get(BFGS_FIRST_STEP_ENV, "off").strip().lower() or "off"
+    if text == "off":
+        return None
+    try:
+        value = float(text)
+    except ValueError:
+        value = float("nan")
+    if not (np.isfinite(value) and value > 0.0):
+        raise ValueError(
+            f"{BFGS_FIRST_STEP_ENV} must be off or a positive length in bohr, not {text!r}"
+        )
+    return value
+
+
 def _print_level(output_level: int) -> int:
     """``iprint`` of ``domove.f90`` for a PARSEC output level."""
 
@@ -139,6 +176,7 @@ def _drive_lbfgsb(
     gradient: np.ndarray,
     output_level: int,
     sink,
+    first_step: float | None = None,
 ) -> str:
     """Call ``setulb`` until it asks for a new energy and gradient, or stops.
 
@@ -165,6 +203,7 @@ def _drive_lbfgsb(
             LBFGSB_TOLERANCE,
             iprint=_print_level(output_level),
             output=sink,
+            first_step=first_step,
         )
         task = solver.task
         if task[:2] == "FG":
@@ -290,12 +329,23 @@ def domove(
     if settings.method == STEEPEST_DESCENT:
         state.current = state.current + steepest_descent_displacement(negative, settings)
     elif settings.method == BFGS:
+        first_step = None
+        if state.number == 0 and (restart is None or restart.lbfgsb is None):
+            limit = bfgs_first_step_setting()
+            if limit is not None and maximum > 0.0:
+                first_step = limit / maximum
+                if state.bound_step <= 0.0 and first_step < 1.0 / float(np.linalg.norm(negative)):
+                    messages.append(
+                        f" First BFGS trial limited to {limit:.6f} bohr on the atom with the "
+                        f"largest force ({BFGS_FIRST_STEP_ENV})"
+                    )
         word = _drive_lbfgsb(
             state,
             total_energy,
             negative.reshape(-1),
             output_level,
             lambda unit, text: optimizer_output.append((unit, text)),
+            first_step,
         )
         task = state.lbfgsb.task
         if word != "FG":
@@ -356,6 +406,7 @@ def domove(
 
 __all__ = [
     "BFGS",
+    "BFGS_FIRST_STEP_ENV",
     "DEFAULT_RELAXATION_MAXIMUM_STEP",
     "ERROR_LBFGSB",
     "ERROR_LBFGSB_ABNORMAL",
@@ -366,6 +417,7 @@ __all__ = [
     "MovementState",
     "RelaxationSettings",
     "STEEPEST_DESCENT",
+    "bfgs_first_step_setting",
     "domove",
     "steepest_descent_displacement",
 ]

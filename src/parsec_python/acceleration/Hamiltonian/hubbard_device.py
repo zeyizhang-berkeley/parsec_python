@@ -70,7 +70,8 @@ bohr the columns of every atom (:func:`ldau_orbits_exact`).
 abelian sectors; alone it keeps the weighted sectors below, so the former
 bits of an LDA+U run take ``PARSEC_LDAU_WEIGHTED_SECTORS=off`` too, for a cell
 ``PARSEC_GAMMA_LDAU_SECTORS=off`` (its default before that date) and for a
-spin run ``PARSEC_LDAU_SPIN_SECTORS=off``.
+spin run ``PARSEC_LDAU_SPIN_SECTORS=off`` (the default again since the evening
+of that date).
 
 Weighted sectors (``PARSEC_LDAU_WEIGHTED_SECTORS``, since 2026-11-21).  The
 one-dimensional sectors of a subgroup ``H`` of the point group ``G`` with
@@ -148,7 +149,12 @@ def ldau_orbits_exact(reduction, atoms, grid) -> bool:
     operation detected maps the atoms within it) and for a reduction without orbits.
     """
 
-    from ..Symmetry.axis_reflection import abelian_sector_operations, atom_image_table, symmetry_atom_tolerance
+    from ..Symmetry.axis_reflection import (
+        abelian_sector_operations,
+        atom_image_table,
+        sector_orbits_exact_setting,
+        symmetry_atom_tolerance,
+    )
 
     if reduction is None or getattr(reduction, "atom_representatives", None) is None or not atoms:
         return True
@@ -161,6 +167,8 @@ def ldau_orbits_exact(reduction, atoms, grid) -> bool:
         None if translations is None else np.asarray(translations, dtype=np.int64).reshape(-1, 3),
         grid,
         LDAU_EXACT_ORBIT_TOLERANCE,
+        # the distance itself; under PARSEC_SECTOR_ORBITS_EXACT=off the search of before, up to twice it
+        within_tolerance=sector_orbits_exact_setting() != "off",
     )
     return images is not None
 

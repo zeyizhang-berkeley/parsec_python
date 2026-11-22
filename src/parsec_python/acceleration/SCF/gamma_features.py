@@ -21,9 +21,9 @@ before the SCF):
     Since 2026-11-21 the sectors carry the KB and LDA+U columns of one atom per orbit and the occupation matrices
     of the other atoms are those of the representatives turned with the d harmonics of the operations
     (``PARSEC_LDAU_PROJECTOR_ORBITS=auto``, ``hubbard_device.HubbardOrbits``; ``off``: the columns of every atom, as
-    before).  A spin cell takes the spin sectors under ``PARSEC_LDAU_SPIN_SECTORS=auto``
-    (:func:`ldau_spin_sector_setting`), each channel with its own potential matrices; under ``off`` it keeps its
-    route of before.
+    before).  A spin cell takes the spin sectors only under the opt-in ``PARSEC_LDAU_SPIN_SECTORS=auto`` or ``on``
+    (:func:`ldau_spin_sector_setting`), each channel with its own potential matrices; under ``off``, the default, it
+    keeps its route of before (the 1x1x1 k-point driver of the reference CLI).
 ``PARSEC_GAMMA_META_GGA_SECTORS``
     a meta-GGA (native SCAN or a libxc ``mgga_`` functional, which also needs ``PARSEC_GAMMA_LIBXC_SECTORS``):
     ``tau`` of the sector orbitals and the term ``-div(vtau grad)`` as the derivatives between the sectors
@@ -165,23 +165,25 @@ def ldau_sector_forces_setting() -> str:
     return value
 
 
-#: Whether a spin-polarized LDA+U run takes the spin sectors: ``auto`` a Gamma cell, ``on`` a cluster too, ``off``
-#: neither (the refusal of before).
+#: Whether a spin-polarized LDA+U run takes the spin sectors: ``off`` (the default) neither a cell nor a cluster (the
+#: refusal of before); opt-in, ``auto`` a Gamma cell, ``on`` a cluster too.
 LDAU_SPIN_SWITCH = "PARSEC_LDAU_SPIN_SECTORS"
-LDAU_SPIN_DEFAULT = "auto"
+LDAU_SPIN_DEFAULT = "off"
 
 
 def ldau_spin_sector_setting() -> str:
-    """``PARSEC_LDAU_SPIN_SECTORS``: ``auto``, ``on`` or ``off`` (``0``, ``false``, ``no`` mean ``off``).
+    """``PARSEC_LDAU_SPIN_SECTORS``: ``off`` (the default), ``auto`` or ``on`` (``0``, ``false``, ``no`` mean ``off``).
 
-    The two channels of a spin-polarized LDA+U run take the spin sectors, each channel with its own potential
-    matrices written into the shared sector operators before its solve (``Hamiltonian/hubbard_device.py``), with
-    the guard of :mod:`.spin_sectors`: under ``auto`` (the default since 2026-11-21) a bulk cell at the Gamma point
-    where its unpolarized twin takes the sectors (the LDA+U switch :data:`LDAU_SWITCH` of this module, then the
-    spin route of :mod:`.gamma_spin`; before, the 1x1x1 k-point driver of the reference CLI, which did not converge
-    for the antiferromagnetic MnO and NiO cells measured), under ``on`` also a cluster (``Spin_Symmetry_Sectors``,
-    ``driver._spin_sector_refusal``; a cluster keeps the full grid of the driver under ``auto``, which was faster
-    where the guard stopped the sectors).  ``off`` keeps the refusal of before for both.
+    ``off`` keeps the routes of before: a spin-polarized bulk cell at the Gamma point with LDA+U on the 1x1x1
+    k-point driver of the reference CLI, a spin cluster with LDA+U on the full grid of the driver.  The opt-in values
+    let the two channels take the spin sectors, each channel with its own potential matrices written into the shared
+    sector operators before its solve (``Hamiltonian/hubbard_device.py``), with the guard of :mod:`.spin_sectors`:
+    ``auto`` a bulk cell at the Gamma point where its unpolarized twin takes the sectors (the LDA+U switch
+    :data:`LDAU_SWITCH` of this module, then the spin route of :mod:`.gamma_spin`), ``on`` also a cluster
+    (``Spin_Symmetry_Sectors``, ``driver._spin_sector_refusal``).  Opt-in since 2026-11-21 (``auto`` was the default
+    for that day): the sectors can end, without a note of the guard, in another magnetic state than the k-point
+    driver (bcc Cr16 AFM, U = 2 eV, seeds +/-0.02 on 100^3 points: the non-magnetic -303.52817316 Ry, where the
+    k-point driver stays magnetic near -306.549 Ry; README, the row of this switch).
     """
 
     value = os.environ.get(LDAU_SPIN_SWITCH, LDAU_SPIN_DEFAULT).strip().lower() or LDAU_SPIN_DEFAULT
@@ -190,6 +192,59 @@ def ldau_spin_sector_setting() -> str:
     if value not in ("auto", "on", "off"):
         raise ValueError(f"{LDAU_SPIN_SWITCH} must be auto, on or off, not {value!r}")
     return value
+
+
+#: Whether a spin-polarized LDA+U cell below the floor of :data:`LDAU_SWITCH` leaves the 1x1x1 k-point driver of the
+#: reference CLI for the full grid of the accelerated driver (:func:`ldau_spin_full_grid`).  Opt-in: the route is faster
+#: but can converge to another magnetic state.
+LDAU_SPIN_FULL_GRID_SWITCH = "PARSEC_LDAU_SPIN_FULL_GRID"
+LDAU_SPIN_FULL_GRID_DEFAULT = "off"
+
+
+def ldau_spin_full_grid_setting() -> str:
+    """``PARSEC_LDAU_SPIN_FULL_GRID``: ``off`` (the default), ``auto`` or ``on`` (``0``, ``false``, ``no`` mean ``off``).
+
+    ``off`` keeps a spin-polarized bulk cell at the Gamma point with LDA+U below the floor of the sectors
+    (:data:`MINIMUM_ENTRIES`) on the 1x1x1 k-point driver of the reference CLI.  ``auto`` and ``on`` are opt-in: a
+    single point of such a cell is solved on the full grid of one device of the accelerated driver
+    (:func:`ldau_spin_full_grid` says for which inputs).  That is faster, but the two drivers do not follow the same
+    SCF path and can end in different magnetic states, which nothing in the input tells apart (A100, k-point driver
+    -> full grid: bcc Cr16 AFM, U = 2 eV, seeds +/-0.1 to 0.3, -306.35013065 Ry at moment 0 -> -306.38211140 at 5.41;
+    seeds +/-0.05, -306.75421598 -> not converged in 200 iterations; MnO AFM-I 8 atoms, ``Net_Charges`` +1,
+    -242.46453788 at moment 0 -> -242.47139075 at 1.00).
+    """
+
+    value = (
+        os.environ.get(LDAU_SPIN_FULL_GRID_SWITCH, LDAU_SPIN_FULL_GRID_DEFAULT).strip().lower()
+        or LDAU_SPIN_FULL_GRID_DEFAULT
+    )
+    if value in {"0", "false", "no"}:
+        value = "off"
+    if value not in ("auto", "on", "off"):
+        raise ValueError(f"{LDAU_SPIN_FULL_GRID_SWITCH} must be auto, on or off, not {value!r}")
+    return value
+
+
+def _shares_spin_start(problem) -> bool:
+    """Whether the k-point driver starts this spin input from the start of the accelerated driver.
+
+    The accelerated driver takes the start of ``initchrg.f90`` for every input, each species with its own
+    ``Initial_Spin_Polarization``.  The k-point loop takes it under ``PARSEC_SPIN_START=initchrg`` and, under
+    ``auto``, where the species start with values of both signs (an antiferromagnetic or broken-symmetry start of two
+    labels); elsewhere it starts from one polarization fraction of the whole cell, and ``auto`` of
+    ``PARSEC_LDAU_SPIN_FULL_GRID`` leaves those inputs on the k-point driver (MnO in 64 atoms with one value for every
+    species reached two states 4.9e-3 Ry apart, both at 70 Bohr magnetons).  The same start does not make the same
+    path: the opt-in note of :func:`ldau_spin_full_grid_setting` lists inputs with this start that end elsewhere.
+    """
+
+    from parsec_python.SCF.spin_polarized import spin_start_setting
+
+    setting = spin_start_setting()
+    if setting != "auto":
+        return setting == "initchrg"
+    specifications = problem.pseudopotentials
+    values = [float(specifications[atom.symbol].initial_spin_polarization) for atom in problem.atoms]
+    return bool(values) and min(values) < 0.0 < max(values)
 
 
 def _has_hubbard(problem) -> bool:
@@ -235,6 +290,12 @@ def process_device_count() -> int:
     return len(selected_device_ids(int(cp.cuda.Device().id)))
 
 
+def _floor_refusal(reason: str, switch: str) -> str:
+    """The refusal of a cell whose basis is below the floor of ``switch`` under ``auto``."""
+
+    return f"{reason} (a basis below {MINIMUM_ENTRIES[switch]} grid points x states under {switch}=auto; on takes it)"
+
+
 def _refused(
     problem, switch: str, reason: str, *, features: bool, refused: bool = False, auto_refusal: str | None = None
 ) -> str | None:
@@ -251,10 +312,7 @@ def _refused(
         if auto_refusal is not None:
             return f"{reason} ({auto_refusal} under {switch}=auto; on takes it)"
         if _below_floor(problem, switch):
-            return (
-                f"{reason} (a basis below {MINIMUM_ENTRIES[switch]} grid points x states under {switch}=auto; "
-                "on takes it)"
-            )
+            return _floor_refusal(reason, switch)
         devices = MINIMUM_DEVICES.get(switch)
         if devices is not None and process_device_count() < devices:
             return f"{reason} (fewer than {devices} CUDA devices in this process under {switch}=auto; on takes it)"
@@ -285,8 +343,8 @@ def meta_gga_or_libxc_refusal(problem, *, features: bool) -> str | None:
 def correction_refusal(problem, *, features: bool) -> str | None:
     """The refusal of LDA+U or of the TS correction by the route of the Gamma sectors, or ``None``.
 
-    LDA+U stays refused with a hybrid, and for a spin-polarized cell only under ``PARSEC_LDAU_SPIN_SECTORS=off``:
-    under ``auto`` (the default since 2026-11-21) a spin cell takes the spin sectors where its switch
+    LDA+U stays refused with a hybrid, and for a spin-polarized cell under ``PARSEC_LDAU_SPIN_SECTORS=off`` (the
+    default): under the opt-in ``auto`` or ``on`` a spin cell takes the spin sectors where its switch
     (:data:`LDAU_SWITCH`, from 2^26 grid points x states under ``auto``) takes the unpolarized one.  TS of a
     spin-polarized cell takes the spin sectors only under ``on``: under ``auto`` it keeps the 1x1x1 k-point driver,
     which was faster (Si216 spin PBE + TS, 72^3 x 502, four A100, first runs, in both orders: SCF 27.3 -> 39.8 s and
@@ -311,6 +369,46 @@ def correction_refusal(problem, *, features: bool) -> str | None:
             auto_refusal="a spin-polarized cell, which keeps the 1x1x1 k-point driver," if spin else None,
         )
     return None
+
+
+def ldau_spin_full_grid(problem, refusal: str | None) -> bool:
+    """Whether a spin LDA+U cell that the sectors refuse takes the full grid of the accelerated driver.
+
+    ``refusal`` is what :func:`parsec_python.acceleration.driver.periodic_sector_refusal` said of ``problem`` in one
+    process.  Only a cell below the floor of LDA+U (:data:`MINIMUM_ENTRIES`) with ``PARSEC_GAMMA_LDAU_SECTORS=auto``
+    qualifies, refused for that floor or for ``PARSEC_LDAU_SPIN_SECTORS=off`` (the default), so every other reason
+    (``PARSEC_GAMMA_LDAU_SECTORS`` at ``on`` or ``off``, k-points, an oblique cell, a wire or slab) keeps the k-point
+    driver, as do ``J != 0`` (which the accelerated driver refuses), a hybrid, TS, a meta-GGA and libxc beside LDA+U.
+    The
+    default ``PARSEC_LDAU_SPIN_FULL_GRID=off`` takes none; the opt-in ``auto`` takes the inputs that both drivers start
+    alike (:func:`_shares_spin_start`), ``on`` the others too.
+    """
+
+    from parsec_python.V_xc.libxc import is_libxc_functional
+
+    setting = ldau_spin_full_grid_setting()
+    if setting == "off" or refusal is None:
+        return False
+    if refusal != _floor_refusal(LDAU_REASON, LDAU_SWITCH) and not (
+        refusal == LDAU_REASON
+        and ldau_spin_sector_setting() == "off"
+        and gamma_feature_setting(LDAU_SWITCH) == "auto"
+        and _below_floor(problem, LDAU_SWITCH)
+    ):
+        return False
+    scf = problem.scf
+    if (
+        not getattr(scf, "spin_polarized", False)
+        or getattr(scf, "is_hybrid", False)
+        or getattr(scf, "is_meta_gga", False)
+        or getattr(scf, "van_der_waals", False)
+        or is_libxc_functional(getattr(scf, "xc_functional", "ca"))
+    ):
+        return False
+    species = getattr(problem, "pseudopotentials", {}).values()
+    if any(getattr(item, "has_hubbard", False) and float(item.hubbard_j) != 0.0 for item in species):
+        return False
+    return setting == "on" or _shares_spin_start(problem)
 
 
 def ts_ignore_symmetry_note(translation, *, backend_is_cupy) -> str | None:
@@ -375,6 +473,8 @@ __all__ = [
     "LDAU_FORCES_DEFAULT",
     "LDAU_FORCES_SWITCH",
     "LDAU_SPIN_DEFAULT",
+    "LDAU_SPIN_FULL_GRID_DEFAULT",
+    "LDAU_SPIN_FULL_GRID_SWITCH",
     "LDAU_SPIN_SWITCH",
     "LDAU_SWITCH",
     "LIBXC_SWITCH",
@@ -384,6 +484,8 @@ __all__ = [
     "gamma_feature_setting",
     "gamma_feature_settings",
     "ldau_sector_forces_setting",
+    "ldau_spin_full_grid",
+    "ldau_spin_full_grid_setting",
     "ldau_spin_sector_setting",
     "meta_gga_or_libxc_refusal",
     "taken_features",

@@ -272,7 +272,7 @@ class NativeIonicBuilders:
         square_root_volume = float(np.sqrt(grid.volume_element))
         tables = {}
         # The native kernel divides the harmonics by min(rs(2), 1e-6 bohr) near the atom; under
-        # PARSEC_PROJECTOR_CENTER=auto the few points within the first radial sample are evaluated again here with
+        # PARSEC_PROJECTOR_CENTER=auto or tip the few points within the first radial sample are evaluated again here with
         # the reference's rule (nonloc.F90's rnorm = rs(2)).
         from parsec_python.V_ion.ionic_potential import (
             projector_center_radius,
@@ -280,7 +280,7 @@ class NativeIonicBuilders:
             real_spherical_harmonics,
         )
 
-        recentre = projector_center_setting() == "auto"
+        recentre = projector_center_setting() != "off"
         splines = {}
 
         for atom_index, atom in enumerate(atoms):

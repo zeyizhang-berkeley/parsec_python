@@ -159,6 +159,24 @@ def _projector_inverse_radius(radius, potential, setting):
     return rule(radius, potential, setting)
 
 
+def _projector_gradient_samples(radius, potential, setting):
+    """``(distance, 1/distance, inside)`` of a spin-orbit projector gradient (``PARSEC_PROJECTOR_CENTER``).
+
+    ``auto``: the distance of :func:`parsec_python.V_ion.ionic_potential.projector_gradient_distance`, at which the
+    radial functions, their slopes and the direction are taken.  ``tip`` and ``off``: the true distance, with the
+    centre radius of :func:`parsec_python.Forces.periodic._projector_inverse_radius`.
+    """
+
+    from ..V_ion.ionic_potential import projector_gradient_distance, projector_gradient_rule
+
+    setting = projector_gradient_rule(potential, setting)
+    if setting == "floor":
+        sampled = projector_gradient_distance(radius, potential)
+        return sampled, 1.0 / sampled, None
+    inverse, inside = _projector_inverse_radius(radius, potential, setting)
+    return radius, inverse, inside
+
+
 def _interpolant_slope(points, knots, values):
     from .periodic import interpolant_slope
 
@@ -179,8 +197,11 @@ def build_spin_orbit_projector_gradients(
     ``exp(-i k.(r - T))``; each image contributes
     ``sqrt(dV) [R'(|d|) Y d/|d| + R grad Y]`` with ``R'`` the slope of the
     linear interpolant of the radial table (``np.interp`` with the first value
-    continued inwards and zero beyond the table), the exact derivative of the
-    sampled projector.  The phase does not depend on the atom position, so
+    continued inwards and zero beyond the table), the derivative of the
+    sampled projector; under ``PARSEC_PROJECTOR_CENTER=auto`` a point within
+    3e-3 bohr of the atom takes it at that distance, the slope of the energy
+    over the steps of a relaxation (:func:`_projector_gradient_samples`).  The
+    phase does not depend on the atom position, so
     ``-grad_r`` of a projector is its derivative with respect to the atom.
     With ``grid.settings.double_grid_order > 1`` the gradients are those of
     the double-grid projectors (:func:`_double_grid_spin_orbit_projector_gradients`).
@@ -236,7 +257,7 @@ def build_spin_orbit_projector_gradients(
             radial_ion, radial_so, _ = potential.spin_orbit_projectors(angular_momentum, local_l)
             for rows, relative, radius, phase in images:
                 # the centre radius of the harmonics (PARSEC_PROJECTOR_CENTER, Forces.periodic._projector_inverse_radius)
-                inverse, inside = _projector_inverse_radius(radius, potential, center_setting)
+                sampled, inverse, inside = _projector_gradient_samples(radius, potential, center_setting)
                 unit = relative * inverse[:, None]
                 harmonics, harmonic_gradients = complex_harmonics_with_gradients(
                     angular_momentum, unit, inverse, inside=inside
@@ -245,9 +266,9 @@ def build_spin_orbit_projector_gradients(
                 phase_column = phase if np.isscalar(phase) else phase[:, None]
                 for offset, radial in ((0, radial_ion), (8, radial_so)):
                     value = np.interp(
-                        radius, potential.radii, radial, left=radial[0], right=0.0
+                        sampled, potential.radii, radial, left=radial[0], right=0.0
                     )
-                    slope = _interpolant_slope(radius, potential.radii, radial)
+                    slope = _interpolant_slope(sampled, potential.radii, radial)
                     for component in range(3):
                         gradients[
                             component, local_rows, offset + column : offset + column + width
@@ -281,7 +302,7 @@ def _double_grid_spin_orbit_projector_gradients(
     :func:`parsec_python.V_ion.double_grid.double_grid_support`) and carries
     the Bloch phase of the coarse point.  Each fine sample contributes the
     gradient of :func:`build_spin_orbit_projector_gradients` (slope of the
-    linear interpolant, exact derivative of the sampled projector) times its
+    linear interpolant; next to the atom as in the single-grid builder) times its
     weight; the same support rows (union over the images) as the projectors.
     As for the Kleinman-Bylander double grid, the support itself (which
     coarse points have a fine point inside ``r_c``) is held fixed: the
@@ -342,7 +363,7 @@ def _double_grid_spin_orbit_projector_gradients(
                 radius = support.radius.reshape(-1)
                 relative = support.relative.reshape(-1, 3)
                 # the centre radius of the harmonics (PARSEC_PROJECTOR_CENTER, Forces.periodic._projector_inverse_radius)
-                inverse, inside = _projector_inverse_radius(radius, potential, center_setting)
+                sampled, inverse, inside = _projector_gradient_samples(radius, potential, center_setting)
                 unit = relative * inverse[:, None]
                 harmonics, harmonic_gradients = complex_harmonics_with_gradients(
                     angular_momentum, unit, inverse, inside=inside
@@ -351,9 +372,9 @@ def _double_grid_spin_orbit_projector_gradients(
                 phase_column = phase if np.isscalar(phase) else phase[:, None]
                 for offset, radial in ((0, radial_ion), (8, radial_so)):
                     value = np.interp(
-                        radius, potential.radii, radial, left=radial[0], right=0.0
+                        sampled, potential.radii, radial, left=radial[0], right=0.0
                     )
-                    slope = _interpolant_slope(radius, potential.radii, radial)
+                    slope = _interpolant_slope(sampled, potential.radii, radial)
                     for component in range(3):
                         sample = (slope * unit[:, component])[:, None] * harmonics + value[
                             :, None
@@ -554,6 +575,11 @@ def compute_spin_orbit_forces(system, result, *, symmetrize: bool = True, operat
     lattice = None if cell is None else np.asarray(cell.lattice_vectors, dtype=np.float64)
     positions = np.array([atom.position for atom in atoms], dtype=np.float64)
     density, residual, xc = spinor_force_fields(result)
+    if getattr(system.input, "periodic_cell", None) is not None:
+        from .periodic import core_force_xc
+
+        # a periodic cell: the potential of the core term with the average potshift removed (PARSEC_CORE_FORCE_XC)
+        xc = core_force_xc(system, result, xc)
 
     charged = None
     if lattice is None:

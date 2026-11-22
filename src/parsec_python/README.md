@@ -246,10 +246,17 @@ Currently supported:
     point instead, the first Brillouin zone, `PARSEC_KPOINT_FOLD=shortest`
     since 2026-11-21, which differs from the folded point on an oblique cell
     only, where a point of the zone boundary takes all its equally short
-    images with equal shares of its weight; `centred` folds as before), and
+    images with equal shares of its weight; `centred` folds as before; the
+    Fortran-derived routines where they were not requested do the same for a
+    mesh with a free finite-difference level below zero,
+    `PARSEC_KPOINT_MESH_GUARD`), and
     the density is
     symmetrized over the space group (`Symmetrize_Charge_Density`, then true by
-    default); weighted `Kpoint_List` rows; reference solver only.  Without the
+    default); weighted `Kpoint_List` rows (on an oblique cell at the shortest
+    images of their points where `PARSEC_KPOINT_LIST_FOLD=auto` takes them: the
+    default routines, or a written point with a free finite-difference level
+    below zero on Fortran-derived routines that were not requested); reference
+    solver only.  Without the
     shift block the shift is zero, as in PARSEC 1.5 (its `mpshift` keeps its
     static zero and `irrbz` reduces every Monkhorst-Pack grid): the input runs
     as with a zero block on either set of routines, without selecting the

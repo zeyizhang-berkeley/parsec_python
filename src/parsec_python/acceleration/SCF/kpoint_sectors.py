@@ -98,6 +98,7 @@ beyond ``H_k`` (those of the cell group and of the atoms the sectors assume).
 
 from __future__ import annotations
 
+import dataclasses
 import math
 import os
 import threading
@@ -108,7 +109,7 @@ import numpy as np
 import scipy.sparse as sp
 
 from ...Hamiltonian.kpoint_operator import KPointKohnShamHamiltonian
-from ...SCF.kpoint_solver import KPointJob
+from ...SCF.kpoint_solver import KPointJob, job_eigval_settings
 from ...SCF.orbital_density import weighted_square_sum
 from ..Symmetry.axis_reflection import (
     SignedPermutationReduction,
@@ -122,6 +123,7 @@ from ..Symmetry.axis_reflection import (
     _periodic_row_major,
     _space_group_operations,
     compress_projectors_for_sectors,
+    sector_orbits_exact,
 )
 from ..Symmetry.orbital_groups import multiplication_table
 from ..Symmetry.representations import ReflectionRepresentationDecomposition
@@ -174,6 +176,17 @@ def sector_margin() -> float:
     if not value >= 1.0:
         raise ValueError(f"{_MARGIN_SWITCH} must be at least 1, not {raw!r}")
     return value
+
+
+def reported_level_tolerance(tolerance: float) -> float:
+    """The relative residual :meth:`SectorKPointSolver.solve_reported` asks of the reported levels: 1 % of
+    ``tolerance`` (``Diag_Tolerance``), but not below ``1e-10`` unless ``tolerance`` itself is.
+
+    The test of every state of a sector left the reported levels far below ``tolerance``, since the margin states
+    above them converge last.  A test of the reported levels at ``tolerance`` itself moved them by up to 1.8e-7 Ry from
+    those of that test, at 10 % of it by 1.7e-9 Ry and at 1 % by 1.9e-11 Ry (diamond 216 to 1000 atoms, silicon 216)."""
+
+    return max(0.01 * float(tolerance), min(float(tolerance), 1.0e-10))
 
 
 def sector_guard_setting() -> str:
@@ -1387,6 +1400,11 @@ def plan_sectors(job: KPointJob, notes: list | None = None) -> list[KPointSector
         if key not in decompositions:
             decomposition = None
             reduction = little_group_reduction(cell, elements, generators)
+            if reduction is not None and not sector_orbits_exact(reduction, cell.atoms, grid):
+                # atoms off the group by more than 1e-6 bohr (a loose PARSEC_SYMMETRY_ATOM_TOLERANCE): the projectors
+                # of every atom, since one atom per orbit would copy the offset of its representative
+                # (PARSEC_SECTOR_ORBITS_EXACT)
+                reduction = dataclasses.replace(reduction, atom_representatives=None, atom_orbit_sizes=None)
             if reduction is not None:
                 try:
                     decomposition = ReflectionRepresentationDecomposition.build(grid, reduction)
@@ -1761,6 +1779,121 @@ class SectorKPointSolver:
             f"the sectors of the k-points did not hold the lowest levels after {_ATTEMPTS} attempts; "
             f"{_SWITCH}=off solves each k-point whole"
         )
+
+    def reported_test_available(self, filter_degree: int) -> bool:
+        """Whether the inner solver can make the first solves of :meth:`solve_reported` (the MPI pools cannot) and the
+        memory holds their subspaces; decides where these wait between the parts."""
+
+        prepare = getattr(self._inner, "prepare_reported", None)
+        if prepare is None:
+            return False
+        return bool(prepare(int(job_eigval_settings(self.job, filter_degree).safety_buffer)))
+
+    def _reported_cuts(self, values) -> dict[int, float]:
+        """The highest level each k-point reports (no limit where it stays whole or its sectors hold too few)."""
+
+        states = int(self.job.number_of_states)
+        cuts: dict[int, float] = {}
+        for k_index, plan in enumerate(self._plans):
+            cuts[k_index] = float("inf")
+            if plan is None:
+                continue
+            union = np.sort(
+                np.concatenate([np.asarray(values[self._position[(k_index, s)]], float) for s in range(plan.order)])
+            )
+            if union.size >= states:
+                cuts[k_index] = float(union[states - 1])
+        return cuts
+
+    def solve_reported(self, potentials: dict, filter_degree: int) -> list[np.ndarray]:
+        """The levels of :meth:`solve` for a single converged first solve whose test covers the reported states.
+
+        The band k-points (:mod:`.band_sectors`) report the lowest ``number_of_states`` levels of the union of their
+        sectors, so the margin of a sector above them (:func:`sector_margin`) need not converge; which levels those are
+        is known only from all the sectors.  Every sector makes its fixed cycles; then each goes on from where it stood
+        until the levels it holds at or below the highest level of its k-point pass the relative test
+        (:func:`reported_level_tolerance`).  With the levels of all the sectors, now close to their limits, the test is
+        made again on every pair with ``e - r <= cut`` (the highest level of the k-point), and the sectors that miss it
+        go on, up to the extra cycles of
+        :func:`~parsec_python.Eigensolvers.eigval.first_solve_extra_cycles`.  That condition is a heuristic: it does not
+        prove that no level is missing from a sector.  Sectors that then hold too few grow as in :meth:`solve`.  The order
+        of the decisions depends on the levels alone, not on the timing of the workers.
+
+        A k-point that stays whole has no margin: its task makes the one first solve of before, with its test at
+        ``Diag_Tolerance``, whatever k-points share its chunk.  It runs in the first part, in its place among the
+        tasks (the largest first), so that its whole basis is not filtered next to the subspaces of all the sectors.
+        """
+
+        from parsec_python.Eigensolvers.eigval import first_solve_extra_cycles
+
+        settings = job_eigval_settings(self.job, filter_degree)
+        relative = reported_level_tolerance(settings.chebdav.convergence_tolerance)
+        cap = int(settings.chebff.filter_cycles) + first_solve_extra_cycles()
+        whole = frozenset(self._task_of[p] for p in self._solved if self._items[p][1] is None)
+        self._inner.set_reported_cuts({}, relative, whole)
+        values = self._expanded(self._inner.solve(potentials, filter_degree))
+        growths = 0
+        fixed = set(self._task_of.values()) - whole  # the tasks that have made only their fixed cycles
+        while True:
+            progress = self._inner.reported_progress()
+            cuts = self._reported_cuts(values)
+            pending: dict[int, tuple[int, float]] = {}
+            for position in self._solved:
+                k_index, sector = self._items[position]
+                if sector is None:
+                    continue
+                task = self._task_of[position]
+                norms, cycles = progress[task]
+                if cycles >= cap:
+                    continue
+                levels = np.asarray(values[position], dtype=float)[: norms.size]
+                cut = cuts[k_index]
+                held = int(np.count_nonzero(levels <= cut))
+                within = levels - norms <= cut
+                within[:held] = True
+                scale = max(float(np.max(np.abs(levels))), 1.0e-8)
+                if np.any(norms[within] > relative * scale):
+                    # from the fixed cycles: the levels the sector holds; later also the pairs that can reach the cut
+                    pending[task] = (held, float("-inf") if task in fixed else cut)
+            fixed.clear()
+            if pending:
+                self._inner.set_reported_cuts(pending, relative, whole)
+                values = self._expanded(self._inner.solve(potentials, filter_degree, None, tasks=sorted(pending)))
+                continue
+            short = self._short_sectors(values)
+            if not short:
+                break
+            growths += 1
+            if growths > _ATTEMPTS:
+                raise RuntimeError(
+                    f"the sectors of the k-points did not hold the lowest levels after {_ATTEMPTS} attempts; "
+                    f"{_SWITCH}=off solves each k-point whole"
+                )
+            self._inner.set_reported_cuts({}, relative, whole)
+            values = self._grow(short, potentials, filter_degree, None, values)
+            fixed.update(self._inner_task(self._position[item]) for item in short)
+        self._reported_norms = {task: found[0] for task, found in self._inner.reported_progress().items()}
+        self._whole_residuals = self._inner.residuals()
+        self._inner.set_reported_cuts(None)
+        return self._union(values)
+
+    def reported_residuals(self) -> list[float]:
+        """Largest residual of the levels each k-point reports, after :meth:`solve_reported`."""
+
+        result = []
+        for k_index, plan in enumerate(self._plans):
+            if plan is None:
+                result.append(float(self._whole_residuals[self._inner_task(self._position[(k_index, None)])]))
+                continue
+            owners, indices = self._kept[k_index]
+            worst = 0.0
+            for sector in range(plan.order):
+                mask = owners == sector
+                if np.any(mask):
+                    norms = self._reported_norms[self._inner_task(self._position[(k_index, sector)])]
+                    worst = max(worst, float(np.max(norms[indices[mask]])))
+            result.append(worst)
+        return result
 
     def _union(self, values) -> list[np.ndarray]:
         states = int(self.job.number_of_states)

@@ -1504,6 +1504,72 @@ class BfgsReplayTests(unittest.TestCase):
         self.assertGreater(report_length(loud_reports), report_length(quiet_reports))
 
 
+class BfgsFirstStepTests(unittest.TestCase):
+    """``PARSEC_BFGS_FIRST_STEP``: an opt-in limit on the first trial of ``bfgs``."""
+
+    SETTINGS = RelaxationSettings(method="bfgs", minimum_force=0.005)
+    FORCE = np.array([[0.3, -0.2, 0.1], [-0.25, 0.4, 0.15], [0.2, 0.1, -0.35]])
+
+    def first_move(self, value, settings=None):
+        environment = {key: text for key, text in os.environ.items() if key != "PARSEC_BFGS_FIRST_STEP"}
+        if value is not None:
+            environment["PARSEC_BFGS_FIRST_STEP"] = value
+        with patch.dict(os.environ, environment, clear=True):
+            return domove(
+                MovementState(), settings or self.SETTINGS, ASYMMETRIC, [True] * 3, self.FORCE, -34.0
+            )
+
+    def test_unset_and_off_are_the_fortran_step(self) -> None:
+        """A step of norm 1 bohr along the force, bit for bit under ``off``."""
+
+        unset = self.first_move(None)
+        off = self.first_move("off")
+        self.assertEqual(unset.positions.tobytes(), off.positions.tobytes())
+        self.assertEqual(off.messages, ())
+        self.assertAlmostEqual(float(np.linalg.norm(off.positions - ASYMMETRIC)), 1.0, delta=1e-14)
+
+    def test_limit_is_the_largest_move_of_an_atom(self) -> None:
+        report = self.first_move("0.1")
+        move = report.positions - ASYMMETRIC
+        self.assertAlmostEqual(float(np.max(np.linalg.norm(move, axis=1))), 0.1, delta=1e-14)
+        np.testing.assert_allclose(move / np.linalg.norm(move), self.FORCE / np.linalg.norm(self.FORCE), atol=1e-14)
+        self.assertEqual(len(report.messages), 1)
+        self.assertIn("PARSEC_BFGS_FIRST_STEP", report.messages[0])
+
+    def test_limit_never_lengthens_the_step(self) -> None:
+        off = self.first_move("off")
+        report = self.first_move("5")
+        self.assertEqual(report.positions.tobytes(), off.positions.tobytes())
+        self.assertEqual(report.messages, ())
+
+    def test_bounded_run_is_not_affected(self) -> None:
+        settings = RelaxationSettings(method="bfgs", minimum_force=0.005, maximum_step=0.2)
+        off = self.first_move("off", settings)
+        report = self.first_move("0.01", settings)
+        self.assertEqual(report.positions.tobytes(), off.positions.tobytes())
+        self.assertEqual(report.messages, ())
+
+    def test_relaxation_reaches_the_same_minimum(self) -> None:
+        settings = RelaxationSettings(method="bfgs", max_movements=60, minimum_force=1e-4)
+        ends = []
+        for value in ("off", "0.05"):
+            with patch.dict(os.environ, {"PARSEC_BFGS_FIRST_STEP": value}):
+                surface = _SurfaceBackend()
+                outcome = run_relaxation(_molecule(ASYMMETRIC), settings, surface.backend(), symmetrize=False)
+            self.assertTrue(outcome.minimum_force_found)
+            ends.append(outcome.positions)
+        np.testing.assert_allclose(ends[0], ends[1], atol=2e-3)
+
+    def test_unknown_value_stops_before_the_first_scf_loop(self) -> None:
+        settings = RelaxationSettings(method="bfgs", max_movements=3, minimum_force=1e-3)
+        for value in ("fast", "0", "-0.1", "nan", "inf"):
+            surface = _SurfaceBackend()
+            with patch.dict(os.environ, {"PARSEC_BFGS_FIRST_STEP": value}):
+                with self.assertRaisesRegex(ValueError, "PARSEC_BFGS_FIRST_STEP"):
+                    run_relaxation(_molecule(ASYMMETRIC), settings, surface.backend())
+            self.assertEqual(surface.scf_calls, [])
+
+
 class MoveReportTests(unittest.TestCase):
     BFGS = RelaxationSettings(method="bfgs", minimum_force=0.005)
     #: A force that does not depend on the positions, in Ry/bohr.

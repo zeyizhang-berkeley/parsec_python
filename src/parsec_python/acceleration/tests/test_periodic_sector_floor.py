@@ -19,7 +19,7 @@ from unittest import mock
 from parsec_python.acceleration.tests.test_cli_periodic_sector_forces import displaced_positions, write_silicon
 
 
-def _silicon(directory: Path):
+def _silicon(directory: Path, extra: str = ""):
     from parsec_python.Input import parse_parsec_input
 
     settings = {
@@ -30,8 +30,11 @@ def _silicon(directory: Path):
         "Diag_Tolerance": "1.0e-10",
         "Correlation_Type": "pbe",
     }
-    path = write_silicon(directory, positions=displaced_positions(0.0), settings=settings)
+    path = write_silicon(directory, extra, positions=displaced_positions(0.0), settings=settings)
     return parse_parsec_input(path).problem
+
+
+SPIN = "Spin_Polarization: true\nInitial_Spin_Polarization: 0.1\n"
 
 
 class FloorSettingTests(unittest.TestCase):
@@ -80,6 +83,83 @@ class FloorSettingTests(unittest.TestCase):
                     )
         with mock.patch("parsec_python.Grid.pbc.build_periodic_grid", side_effect=AssertionError("built")):
             self.assertEqual(periodic_grid_points(problem), 18**3)
+
+
+class SpinFloorTests(unittest.TestCase):
+    """The floor of a spin-polarized cell (``PARSEC_PERIODIC_SPIN_SECTOR_FLOOR``)."""
+
+    def test_the_switch(self) -> None:
+        from parsec_python.acceleration.driver import periodic_spin_sector_floor_setting
+
+        for value, expected in (("", 0), ("auto", 0), ("OFF", 0), ("2097152", 1 << 21), ("0", 0)):
+            with mock.patch.dict(os.environ, {"PARSEC_PERIODIC_SPIN_SECTOR_FLOOR": value}):
+                self.assertEqual(periodic_spin_sector_floor_setting(), expected)
+        for value in ("on", "-3", "1e6"):
+            with mock.patch.dict(os.environ, {"PARSEC_PERIODIC_SPIN_SECTOR_FLOOR": value}):
+                with self.assertRaisesRegex(ValueError, "PARSEC_PERIODIC_SPIN_SECTOR_FLOOR"):
+                    periodic_spin_sector_floor_setting()
+
+    def test_each_kind_of_cell_compares_with_its_own_floor(self) -> None:
+        from parsec_python.acceleration import driver
+
+        with tempfile.TemporaryDirectory() as name:
+            plain = _silicon(Path(name) / "plain")
+            spin = _silicon(Path(name) / "spin", SPIN)
+        rows, states = driver._periodic_basis_below_floor(spin, None, 1 << 40)
+        basis = rows * states
+        decide = driver._cell_below_sector_floor
+        found, floor, switch = decide(spin, None, spin_polarized=True, floor=0, spin_floor=basis + 1)
+        self.assertEqual((found, floor, switch), ((rows, states), basis + 1, "PARSEC_PERIODIC_SPIN_SECTOR_FLOOR"))
+        self.assertIsNone(decide(spin, None, spin_polarized=True, floor=basis + 1, spin_floor=basis)[0])
+        self.assertIsNone(decide(spin, None, spin_polarized=True, floor=0, spin_floor=0)[0])
+        found, _, switch = decide(plain, None, spin_polarized=False, floor=basis + 1, spin_floor=0)
+        self.assertEqual((found, switch), ((rows, states), "PARSEC_PERIODIC_SECTOR_FLOOR"))
+        # an MPI run, forces averaged over the group and the inputs of other switches keep the sectors
+        self.assertIsNone(decide(spin, object(), spin_polarized=True, floor=0, spin_floor=basis + 1)[0])
+        self.assertIsNone(
+            decide(spin, None, spin_polarized=True, floor=0, spin_floor=basis + 1, sector_forces=True)[0]
+        )
+        with mock.patch.object(driver, "periodic_sector_refusal", return_value="LDA+U"):
+            self.assertIsNone(decide(spin, None, spin_polarized=True, floor=0, spin_floor=basis + 1)[0])
+
+    def test_opposite_starts_keep_their_route(self) -> None:
+        from dataclasses import replace
+
+        from parsec_python.acceleration import driver
+
+        with tempfile.TemporaryDirectory() as name:
+            spin = _silicon(Path(name), SPIN)
+        label = spin.atoms[0].symbol
+        species = spin.pseudopotentials[label]
+
+        def started(values):
+            atoms = tuple(
+                replace(atom, symbol=f"Si_{index % len(values)}") for index, atom in enumerate(spin.atoms)
+            )
+            table = {
+                f"Si_{index}": replace(species, initial_spin_polarization=value) for index, value in enumerate(values)
+            }
+            return replace(spin, atoms=atoms, pseudopotentials=table)
+
+        self.assertFalse(driver._opposite_spin_starts(spin))
+        for values, expected in (
+            ((0.5, -0.5), True),
+            ((0.1, -0.4, 0.0), True),
+            ((0.5, 0.2), False),
+            ((-0.5, -0.2), False),
+            ((0.5, 0.0), False),
+            ((0.0, 0.0), False),
+        ):
+            with self.subTest(values=values):
+                problem = started(values)
+                self.assertIs(driver._opposite_spin_starts(problem), expected)
+                found = driver._cell_below_sector_floor(
+                    problem, None, spin_polarized=True, floor=0, spin_floor=1 << 40
+                )[0]
+                self.assertEqual(found is None, expected)
+        # a label without atoms does not count
+        unused = replace(spin, pseudopotentials={label: species, "Si_x": replace(species, initial_spin_polarization=-0.5)})
+        self.assertFalse(driver._opposite_spin_starts(unused))
 
 
 def _cli_route(directory: Path, extra: str, environment=None) -> dict:
@@ -163,6 +243,32 @@ class FloorRouteTests(unittest.TestCase):
         text, energy = self._run("1")
         self.assertIn("exact", text)
         self.assertAlmostEqual(energy, sector_energy, delta=1e-12)
+
+
+@unittest.skipUnless(_cupy_ready(), "needs a CUDA device")
+class SpinFloorRouteTests(unittest.TestCase):
+    def _run(self, setting: str):
+        from parsec_python.acceleration import driver
+
+        with tempfile.TemporaryDirectory() as name:
+            problem = _silicon(Path(name), SPIN)
+            with mock.patch.dict(os.environ, {"PARSEC_PERIODIC_SPIN_SECTOR_FLOOR": setting}), warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                system = driver.prepare_single_point(problem, backend="cupy", symmetry="auto")
+                result = driver.run_scf(system)
+        return dict(system.backend_info.details).get("symmetry_detection", ""), float(result.energies.total)
+
+    def test_a_floor_keeps_a_small_spin_cell_on_the_full_grid(self) -> None:
+        floor_text, floor_energy = self._run(str(1 << 21))
+        sector_text, sector_energy = self._run("off")
+        default_text, default_energy = self._run("auto")
+        self.assertIn("below the floor of the sectors", floor_text)
+        self.assertIn("PARSEC_PERIODIC_SPIN_SECTOR_FLOOR", floor_text)
+        self.assertIn("exact", sector_text)
+        self.assertAlmostEqual(floor_energy, sector_energy, delta=2e-6)
+        # the default takes no floor: the route of off, bit for bit
+        self.assertEqual(default_text, sector_text)
+        self.assertEqual(default_energy, sector_energy)
 
 
 @unittest.skipUnless(_cupy_ready(), "needs a CUDA device")

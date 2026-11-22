@@ -1257,6 +1257,10 @@ class PointGroupReduction(SignedPermutationReduction):
     # of D2d); ``None``: not known.  Fixed occupations must fill those partners alike (the weighted density is
     # averaged over ``G``), which ``Occupations.partner_occupations`` checks.
     sector_partner_irreps: tuple = None
+    # Per solved sector, the representations of ``G`` it holds at multiplicity two or more, whose partners can be
+    # degenerate states of this one sector (:attr:`.orbital_groups.OrbitalGroupPlan.repeated_irreps`; the spin guard,
+    # ``SCF/spin_sectors.partner_levels``); ``None``: not known.
+    sector_repeated_irreps: tuple = None
     # Per solved sector (row of ``sector_characters``), whether every representation of ``G`` it holds has partners
     # in two or more sectors of the abelian group of the atoms, the group a calculation that leaves these sectors
     # takes (:func:`.orbital_groups.abelian_split_sectors`; the spin guard, ``SCF/spin_sectors.abelian_partner_labels``);
@@ -1550,11 +1554,14 @@ def symmetry_atom_tolerance() -> float:
 
     The positions are not symmetrized: a larger tolerance accepts the operations of a structure symmetric only to
     within it, and the sectors then solve the Hamiltonian averaged over the group (its orbit averages of the local
-    potential, the projectors of one atom per orbit), which differs from that of the input by about the distance the
-    atoms are off.  Weighted sectors average the local fields over the full group, not only over the subgroup they
-    solve (``PARSEC_SECTOR_INPUT_GROUP_AVERAGE``, ``PARSEC_SECTOR_FIELD_GROUP``); their projectors remain those of
-    one atom per orbit of the subgroup.  Forces and moves in the sectors check the atoms to 1e-6 bohr and refuse a
-    structure off by more.
+    potential), which differs from that of the input by about the distance the atoms are off.  Weighted sectors average
+    the local fields over the full group, not only over the subgroup they solve
+    (``PARSEC_SECTOR_INPUT_GROUP_AVERAGE``, ``PARSEC_SECTOR_FIELD_GROUP``).  The projectors of one atom per orbit copy
+    the offset of the representative to its whole orbit, an error far larger than that distance suggests (fcc Ag108
+    with one atom 5e-4 bohr off: 1.24e-3 Ry from its full grid, against about 8e-5 with the projectors of every atom),
+    so a structure that keeps the group only to more than 1e-6 bohr takes the projectors of every atom
+    (:func:`sector_orbits_exact`, ``PARSEC_SECTOR_ORBITS_EXACT``).  Forces and moves in the sectors check the atoms to
+    1e-6 bohr and refuse a structure off by more.
     """
 
     raw = os.environ.get(_ATOM_TOLERANCE_SWITCH, "").strip()
@@ -2289,10 +2296,59 @@ def sector_projector_orbits_setting() -> str:
     return value
 
 
-def atom_image_table(atoms, operations, translations, grid, tolerance: float):
+_ORBITS_EXACT_SWITCH = "PARSEC_SECTOR_ORBITS_EXACT"
+
+#: Distance (bohr) within which the atoms must keep the operations of the sectors for the sectors to take the
+#: projectors of one atom per orbit (that of the forces and moves in the sectors, and of the LDA+U columns,
+#: ``Hamiltonian/hubbard_device.LDAU_EXACT_ORBIT_TOLERANCE``).
+EXACT_ORBIT_TOLERANCE = 1.0e-6
+
+
+def sector_orbits_exact_setting() -> str:
+    """``PARSEC_SECTOR_ORBITS_EXACT``: ``auto`` (default) gives the sectors the projectors of one atom per orbit only
+    for a structure that keeps their operations within :data:`EXACT_ORBIT_TOLERANCE` (:func:`sector_orbits_exact`);
+    ``off`` takes the orbits at the tolerance of the detection (``PARSEC_SYMMETRY_ATOM_TOLERANCE``), bit for bit as
+    before.  The two differ only for a tolerance above 1e-6 bohr and atoms off the group by more than that."""
+
+    value = os.environ.get(_ORBITS_EXACT_SWITCH, "auto").strip().lower() or "auto"
+    if value not in {"auto", "off"}:
+        raise ValueError(f"{_ORBITS_EXACT_SWITCH} must be auto or off, not {value!r}")
+    return value
+
+
+def sector_orbits_exact(reduction, atoms, grid) -> bool:
+    """Whether the sectors of ``reduction`` may take the projectors of one atom per orbit of ``atoms``.
+
+    The columns of a representative stand for its whole orbit only where the operations of the sectors carry the atoms
+    onto each other; a structure accepted within a loose ``PARSEC_SYMMETRY_ATOM_TOLERANCE`` would give every atom of an
+    orbit the offset of its representative.  ``False`` where an operation misses an atom by more than
+    :data:`EXACT_ORBIT_TOLERANCE`.  ``True`` under ``PARSEC_SECTOR_ORBITS_EXACT=off``, for a reduction that knows no
+    orbits, and at once at a detection tolerance of at most that distance (no atom is then checked).
+    """
+
+    if sector_orbits_exact_setting() == "off":
+        return True
+    if reduction is None or getattr(reduction, "atom_representatives", None) is None or not atoms:
+        return True
+    if float(symmetry_atom_tolerance()) <= EXACT_ORBIT_TOLERANCE:
+        return True
+    translations = getattr(reduction, "translations", None)
+    images = atom_image_table(
+        tuple(atoms),
+        abelian_sector_operations(reduction),
+        None if translations is None else np.asarray(translations, dtype=np.int64).reshape(-1, 3),
+        grid,
+        EXACT_ORBIT_TOLERANCE,
+        within_tolerance=True,
+    )
+    return images is not None
+
+
+def atom_image_table(atoms, operations, translations, grid, tolerance: float, *, within_tolerance: bool = False):
     """``images[g, a]``: the atom that operation ``g`` (``r -> R r + t``, ``t`` in grid steps along the axes of a
     periodic cell, images modulo its lattice) carries atom ``a`` onto, or ``None`` where an image matches no atom of
-    its species within ``tolerance``."""
+    its species.  The search accepts up to twice ``tolerance`` (an image and its atom may each be off by it);
+    ``within_tolerance`` compares the distance with ``tolerance`` itself."""
 
     if not atoms:
         return None
@@ -2303,7 +2359,7 @@ def atom_image_table(atoms, operations, translations, grid, tolerance: float):
     if translations is not None:
         counts = np.asarray(grid.points_per_axis, dtype=np.float64)
         steps = np.diag(np.asarray(grid.cell.lattice_vectors, dtype=np.float64)) / counts
-    radius = 2.0 * (tolerance * (1.0 + 1.0e-9) + 1.0e-12)
+    radius = (1.0 if within_tolerance else 2.0) * (tolerance * (1.0 + 1.0e-9) + 1.0e-12)
     images = np.empty((len(operations), positions.shape[0]), dtype=np.int64)
     for symbol in np.unique(symbols):
         members = np.flatnonzero(symbols == symbol)
@@ -2790,6 +2846,7 @@ def detect_point_group_reduction(
     )
     weights = np.asarray(plan.weights, dtype=np.int64)
     partner_irreps = tuple(tuple(int(g) for g in held) for held in plan.partner_irreps)
+    repeated_irreps = tuple(tuple(int(g) for g in held) for held in plan.repeated_irreps)
     unit_fields = {}
     units = plan.units
     by_units = units is not None and (
@@ -2814,6 +2871,8 @@ def detect_point_group_reduction(
         weights = np.asarray([unit.weight for unit in units], dtype=np.int64)
         # the partner representations of every unit, as sector_partner_irreps counts the rows
         partner_irreps = tuple(tuple(int(g) for g in unit.partners) for unit in units)
+        # (``IrrepUnit.partners``: the representations of the unit at multiplicity two or more)
+        repeated_irreps = partner_irreps
         unit_fields = {
             "sector_projected": np.asarray([unit.projection is not None for unit in units], dtype=bool),
             "sector_projections": np.asarray(
@@ -2863,6 +2922,7 @@ def detect_point_group_reduction(
         sector_characters=np.ascontiguousarray(characters),
         sector_weights=weights,
         sector_partner_irreps=partner_irreps,
+        sector_repeated_irreps=repeated_irreps,
         sector_abelian_split=abelian_split,
         coset_images=np.ascontiguousarray(coset_images),
         coset_operations=np.ascontiguousarray([candidates[index] for index in plan.cosets], dtype=np.int8),
@@ -3108,12 +3168,15 @@ __all__ = [
     "_fast_maps_requested",
     "_grid_row_mapping_operation",
     "abelian_sector_operations",
+    "EXACT_ORBIT_TOLERANCE",
     "attach_abelian_atom_orbits",
     "compress_projectors_for_sectors",
     "defect_centre_note",
     "detect_point_group_reduction",
     "orbital_group_max_cost",
     "projector_orbit_counts",
+    "sector_orbits_exact",
+    "sector_orbits_exact_setting",
     "diagonal_subgroup_reduction",
     "lost_operations_note",
     "orbital_group_policy",

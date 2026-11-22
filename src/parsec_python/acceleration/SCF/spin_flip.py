@@ -391,6 +391,11 @@ class FlippedOrbitals:
     def spin_channel(self) -> int:
         return 1
 
+    def with_source(self, source) -> "FlippedOrbitals":
+        """The images of ``source``: the up orbitals of a result, which list every partner of a weighted state."""
+
+        return FlippedOrbitals(source, self.operation)
+
     def release_intermediate_storage(self) -> None:
         """Nothing of its own: the up channel's orbitals release theirs."""
 

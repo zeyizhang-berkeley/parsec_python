@@ -127,7 +127,8 @@ def validate_local_force_settings() -> None:
     again where they are used.
     """
 
-    from parsec_python.Forces.periodic import spline_force_center_setting
+    from parsec_python.Forces.periodic import core_force_xc_setting, spline_force_center_setting
+    from parsec_python.Forces.wire_slab import wire_slab_gaussian_setting
     from parsec_python.V_ion.ionic_potential import projector_center_setting
 
     periodic_force_series_setting()
@@ -136,6 +137,8 @@ def validate_local_force_settings() -> None:
     periodic_local_balls_setting()
     spline_force_center_setting()
     projector_center_setting()
+    core_force_xc_setting()
+    wire_slab_gaussian_setting()
 
 
 def periodic_local_orbits_setting() -> str:

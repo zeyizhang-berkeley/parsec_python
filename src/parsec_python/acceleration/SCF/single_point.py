@@ -84,6 +84,9 @@ class AcceleratedPreparedSinglePointSystem:
     # sectors goes back to the full grid when its occupations are
     # fractional (driver._SpinSectorFallback); ``None`` everywhere else.
     spin_sector_fallback: object | None = None
+    # PARSEC_PERIODIC_SPIN_SECTOR_FLOOR: a spin-polarized cell that the floor keeps on the full grid (the run says so
+    # where it ends with a partly filled pair of degenerate levels, driver._say_floor_doublet).
+    spin_floor_full_grid: bool = False
     # PARSEC_SPIN_FLIP_SYMMETRY=auto: the operation that carries the up channel
     # onto the down channel (.spin_flip.SpinFlipOperation); the spin loop then
     # solves the up channel alone.  ``None`` everywhere else.

@@ -28,6 +28,7 @@ from .distributed_state import (
     sector_device_group,
 )
 from .handover import ritz_handover_policy
+from .sector_growth import SavedColumns, host_bytes, host_room, saved_columns, staged_on_every_rank
 from .subspace import (
     DeviceSubspaceResult,
     DeviceSubspaceState,
@@ -188,6 +189,12 @@ class CuPyEigvalSolver:
                 timing_stats=self.timing_stats,
             )
         self._state: CuPyEigvalDeviceState | None = None
+        # The saved columns that the next first solve starts from (stage_growth_start).
+        self._growth_start: SavedColumns | None = None
+        self._growth_solves = 0
+        # Growths of this solver: from the saved vectors, and from random vectors because the host had no room,
+        # staging failed on this rank, or another rank of a shared basis could not stage.
+        self.growth_record = dict(saved=0, no_room=0, failed=0, other_rank=0)
 
     @classmethod
     def from_reference_hamiltonian(
@@ -217,6 +224,63 @@ class CuPyEigvalSolver:
         """Discard the reusable GPU eigensubspace."""
 
         self._state = None
+        self._growth_start = None
+        self._growth_solves = 0
+
+    def stage_growth_start(self, requested_states: int, settings: EigvalSettings | None = None) -> bool:
+        """Move the saved vectors to the host for the first solve of a larger count, and drop the saved state.
+
+        For a sector that grows during the SCF (:mod:`sector_growth`): the
+        next :meth:`solve` starts from these columns and new random ones.
+        The device then holds no more than for a first solve from random
+        vectors.  Only for a CHEBFF first solve (``settings``, else those of
+        the solver) and vectors that a later pass refined.  Where the host has
+        no room for them, the copy fails, or another MPI rank that shares the
+        basis could not stage its columns, the sector starts from random
+        vectors as before; the ranks of a shared basis agree on that before
+        any of them solves.  Returns whether the next solve starts from the
+        saved vectors.
+        """
+
+        if settings is not None:
+            self.update_settings(settings)
+        state = self._state
+        self._growth_start = None
+        self._growth_solves = 0
+        self._state = None
+        if (
+            state is None
+            or state.solves_completed < 2
+            or self.settings.initial_method != "chebff"
+        ):
+            return False
+        solves = int(state.solves_completed)
+        record = getattr(self, "growth_record", None)
+        if record is None:
+            record = self.growth_record = dict(saved=0, no_room=0, failed=0, other_rank=0)
+        vectors = state.subspace.vectors
+        keep = min(int(vectors.shape[1]), self._working_state_count(int(requested_states)))
+        saved = None
+        with host_room(host_bytes(vectors, keep)) as fits:
+            if not fits:
+                record["no_room"] += 1
+            else:
+                try:
+                    saved = saved_columns(vectors, keep)
+                except Exception:  # noqa: BLE001 - any failure of the copy falls back to random vectors
+                    saved = None
+                    record["failed"] += 1
+        if not staged_on_every_rank(vectors, saved is not None):
+            if saved is not None:
+                record["other_rank"] += 1
+            saved = None
+        del state, vectors
+        if saved is None:
+            return False
+        record["saved"] += 1
+        self._growth_start = saved
+        self._growth_solves = solves
+        return True
 
     def _handover(self) -> str:
         """What the Ritz steps of the next solve are asked to hand over: ``rotation`` or ``triangular``."""
@@ -702,6 +766,7 @@ class CuPyEigvalSolver:
         handover_steps = None
 
         if previous_state is None or reason is not None:
+            start_columns, self._growth_start = getattr(self, "_growth_start", None), None
             if self.settings.initial_method == "chebff":
                 # Several devices serving this one sector may hold its basis
                 # jointly.  Only the CHEBFF first solve creates such a basis,
@@ -714,6 +779,10 @@ class CuPyEigvalSolver:
                 first_solver = run_chebdav
                 first_settings = self.settings.chebdav
             first_options = {"settings": first_settings}
+            if start_columns is not None and first_solver is not run_chebdav:
+                # Only CHEBFF starts from saved columns (stage_growth_start).
+                first_options["start_columns"] = start_columns
+            del start_columns
             if first_solver is run_distributed_chebff:
                 first_options["group"] = group
             if spectral_bound is not None:
@@ -764,6 +833,10 @@ class CuPyEigvalSolver:
                 requested_states,
                 self.settings.initial_method,
             )
+            if getattr(self, "_growth_solves", 0):
+                # A basis that continues refined vectors counts as refined: a second growth keeps it too.
+                self._state = replace(self._state, solves_completed=self._growth_solves + 1)
+                self._growth_solves = 0
             solver_path = (
                 "chebff"
                 if first_solver in (run_chebff, run_distributed_chebff)

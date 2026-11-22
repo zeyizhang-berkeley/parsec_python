@@ -279,7 +279,8 @@ def build_double_grid_projector_gradients(
     :func:`parsec_python.Forces.nonlocal_force.double_grid_projector_gradients`
     (``nonloc.F90:544-568``): every fine point within the projector radius
     adds its weight times ``w(|d|) grad Y + w'(|d|) Y d/|d|`` with ``|d|``
-    clamped below to the first radial sample.  Columns, rows and labels are
+    clamped below to the first radial sample (``PARSEC_PROJECTOR_CENTER=tip``
+    and ``off``) or to 3e-3 bohr (``auto``).  Columns, rows and labels are
     those of :func:`build_double_grid_projectors` before the cut of zero
     values, as in the readable builder.  ``atom_indices`` builds the columns
     of those atoms only, in the order given and labelled with their index in
@@ -293,7 +294,9 @@ def build_double_grid_projector_gradients(
         real_harmonics_with_gradients,
     )
     from parsec_python.Pseudopotential.radial_derivatives import spline_derivative
+    from parsec_python.V_ion.ionic_potential import projector_center_setting, projector_gradient_clamp
 
+    center_setting = projector_center_setting()
     order = double_grid_order(grid) if order is None else int(order)
     displacements, fine_weights = double_grid_points(order, float(grid.spacing))
     sqrt_dv = np.sqrt(grid.volume_element)
@@ -315,7 +318,7 @@ def build_double_grid_projector_gradients(
         support = _atom_support(grid, atom, potential, displacements, fine_weights)
         points, fine = support.radius.shape
         relative = support.relative.reshape(-1, 3)
-        clamped = np.maximum(support.radius.reshape(-1), potential.radii[0])
+        clamped = projector_gradient_clamp(support.radius.reshape(-1), potential, center_setting)
         inverse = 1.0 / clamped
         unit = relative * inverse[:, None]
         columns = []

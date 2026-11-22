@@ -263,6 +263,29 @@ def _join_orbitals(up, down):
     return SpinOrbitalBlocks(up, down), (up, down)
 
 
+def _public_channels(eigenvalues, occupations, representations, wavefunctions, state_weights) -> list[tuple]:
+    """:func:`_public_states` of both channels.
+
+    A down channel that is the image of the up channel (PARSEC_SPIN_FLIP_SYMMETRY) is rebound to the up orbitals of
+    the result, which carry the weights: its columns are then the images of every partner, one per listed level.
+    """
+
+    public = [
+        _public_states(
+            eigenvalues[spin], occupations[spin], representations[spin], wavefunctions[spin], state_weights[spin]
+        )
+        for spin in range(2)
+    ]
+    rebind = getattr(wavefunctions[1], "with_source", None)
+    if (
+        callable(rebind)
+        and getattr(wavefunctions[1], "source", None) is wavefunctions[0]
+        and public[0][3] is not wavefunctions[0]
+    ):
+        public[1] = (*public[1][:3], rebind(public[0][3]))
+    return public
+
+
 def _spin_flip_of(system, *, exchange_term, meta, hubbard_projectors, ionic_potential):
     """``(operation, refusal)``: the spin-flip operation the loop takes the down channel from, or why not.
 
@@ -1162,12 +1185,7 @@ def _run_spin_loop(
         mixing_energy_total += mixing_energy_seconds
 
         # Weighted sectors: every partner of a weighted state, as the full grid lists them (run_scf).
-        public = [
-            _public_states(
-                eigenvalues[spin], occupations[spin], representations[spin], wavefunctions[spin], state_weights[spin]
-            )
-            for spin in range(2)
-        ]
+        public = _public_channels(eigenvalues, occupations, representations, wavefunctions, state_weights)
         # The record holds the channels end to end in two halves: as many levels of each (at least States_Num).
         listed = min(len(public[0][0]), len(public[1][0]))
         diagnostic = SCFIteration(
@@ -1340,12 +1358,7 @@ def _run_spin_loop(
     )
     # Weighted sectors: the lists of every partner of a weighted state (run_scf), and the states the
     # sectors solved with their occupations times their weights (the nonlocal forces of the sectors).
-    public = [
-        _public_states(
-            eigenvalues[spin], occupations[spin], representations[spin], wavefunctions[spin], state_weights[spin]
-        )
-        for spin in range(2)
-    ]
+    public = _public_channels(eigenvalues, occupations, representations, wavefunctions, state_weights)
     # The orbitals are stored once: host channels are views of the joined
     # array, device channels the blocks the backend returned.
     stacked, channel_orbitals = _join_orbitals(public[0][3], public[1][3])

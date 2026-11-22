@@ -512,7 +512,16 @@ def _periodic_local_terms(system, atoms, specifications, lattice, result, operat
     other run, and ``off``, sums every atom (``details`` ``None``).  The values agree to round-off.
     """
 
-    fields = (system.pseudopotentials, specifications, lattice, result.density, result.xc_potential)
+    from .periodic import core_force_xc
+
+    # the potential of the core term with the average potshift removed (PARSEC_CORE_FORCE_XC)
+    fields = (
+        system.pseudopotentials,
+        specifications,
+        lattice,
+        result.density,
+        core_force_xc(system, result, result.xc_potential),
+    )
     if operations is not None and len(operations) > 1 and getattr(system, "density_symmetry", None) is not None:
         from ..acceleration.Forces.periodic_local import orbit_local_forces, periodic_local_orbits_setting
 

@@ -642,7 +642,8 @@ run as one sector of the identity (one rank, `--rank-per-gpu`, or one rank per
 node with `Eigensolver: chebff`). Under
 `--serial-control` (one process) a small cell's SCF alone takes the size floor
 of `PARSEC_PERIODIC_SECTOR_FLOOR` (the full grid below 2^24 grid points x
-states), while its forces and relaxations in sectors keep them (since
+states; a spin-polarized cell only under an integer
+`PARSEC_PERIODIC_SPIN_SECTOR_FLOOR`), while its forces and relaxations in sectors keep them (since
 2026-11-19, `prepare_single_point(sector_forces=True)`, as on `main.py`).
 `timing.json` records the device memory after each force call
 (`memory_observations`, `forces_<n>`). Inputs whose species use `Cubic_Spline`

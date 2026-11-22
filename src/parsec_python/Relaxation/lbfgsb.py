@@ -1949,6 +1949,7 @@ def _lnsrlb(
     isave: np.ndarray,
     dsave: np.ndarray,
     out: OutputSink | None,
+    first_step: float | None = None,
 ) -> tuple[
     float, float, float, float, float, float, float, float, int, int, int, int, str, str
 ]:
@@ -1958,6 +1959,8 @@ def _lnsrlb(
     when a trial point is requested ``x`` is overwritten with it.  Returns
     ``(fold, gd, gdold, stp, dnorm, dtd, xstep, stpmx, ifun, iback, nfgv,
     info, task, csave)``; ``info = -4`` flags an ascent direction.
+    ``first_step`` (not in ``lbfgsb.f``) shortens the first trial of an
+    unbounded run: see :func:`setulb`.
     """
     if task[:5] != "FG_LN":
         dtd = _ddot(d, d)
@@ -1991,6 +1994,8 @@ def _lnsrlb(
 
         if iter_ == 0 and not boxed:
             stp = _fmin(_div(1.0, dnorm), stpmx)
+            if first_step is not None:
+                stp = _fmin(stp, first_step)
         else:
             stp = 1.0
 
@@ -2335,6 +2340,7 @@ def _mainlb(
     iprint: int,
     out: OutputSink | None,
     clock: Clock | None,
+    first_step: float | None = None,
 ) -> float:
     """``mainlb``: the L-BFGS-B iteration in reverse communication.
 
@@ -2628,7 +2634,7 @@ def _mainlb(
             ) = _lnsrlb(
                 n, l, u, nbd, x, f, fold, gd, gdold, g, d, r, t, z, stp, dnorm,
                 dtd, xstep, stpmx, iter_, ifun, iback, nfgv, info, task, boxed,
-                cnstnd, csave, isave[21:23], dsave[16:29], out,
+                cnstnd, csave, isave[21:23], dsave[16:29], out, first_step,
             )
             if info != 0 or iback >= 20:
                 # Restore the previous iterate.
@@ -2823,6 +2829,7 @@ def setulb(
     iprint: int = -1,
     output: OutputSink | None = None,
     clock: Clock | None = None,
+    first_step: float | None = None,
 ) -> float:
     """One reverse-communication call of L-BFGS-B (``setulb`` of ``lbfgsb.f``).
 
@@ -2871,6 +2878,12 @@ def setulb(
         Optional CPU-time function (for example ``time.process_time``) for
         the timing slots ``dsave(6:10)`` and the printed times.  Without it
         those slots stay zero.
+    first_step:
+        Not in ``lbfgsb.f``.  An upper limit on the first trial ``stp`` of
+        the first line search of an unbounded run, which ``lnsrlb`` starts
+        at ``min(1/|d|, stpmx)``; later trials can extrapolate beyond it.
+        ``None`` (the default) is the Fortran path, bit for bit.  It is read
+        only when that line search starts.
 
     Returns
     -------
@@ -2990,6 +3003,7 @@ def setulb(
             iprint,
             output,
             clock,
+            first_step,
         )
 
 

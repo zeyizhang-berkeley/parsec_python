@@ -261,15 +261,16 @@ class RefusalTests(unittest.TestCase):
             # the hybrid route of the sectors takes the hybrid, not the TS correction with it
             self.assertIn("Tkatchenko", self.refusal(problem, _all("on"), features=True, hybrid_sectors=True))
         spin_silver = replace(self.silver, scf=replace(self.silver.scf, spin_polarized=True))
-        # PARSEC_LDAU_SPIN_SECTORS: auto (the default since 2026-11-21) and on let the spin cell take the spin
-        # sectors under the LDA+U switch; off keeps the refusal of before (the 1x1x1 k-point driver)
+        # PARSEC_LDAU_SPIN_SECTORS: the opt-in auto and on let the spin cell take the spin sectors under the LDA+U
+        # switch; off, the default, keeps the refusal of before (the 1x1x1 k-point driver)
         for value in ("auto", "on"):
             spin = {gamma_features.LDAU_SPIN_SWITCH: value}
             self.assertIsNone(self.refusal(spin_silver, {**_all("on"), **spin}, features=True))
             self.assertEqual(self.refusal(spin_silver, {**_all("off"), **spin}, features=True), "LDA+U")
         with mock.patch.dict(os.environ):
             os.environ.pop(gamma_features.LDAU_SPIN_SWITCH, None)
-            self.assertIsNone(self.refusal(spin_silver, _all("on"), features=True))
+            self.assertEqual(gamma_features.LDAU_SPIN_DEFAULT, "off")
+            self.assertEqual(self.refusal(spin_silver, _all("on"), features=True), "LDA+U")
         off = {gamma_features.LDAU_SPIN_SWITCH: "off"}
         self.assertEqual(self.refusal(spin_silver, {**_all("on"), **off}, features=True), "LDA+U")
         # the spin cell takes TS, a meta-GGA and libxc under their switches
@@ -329,6 +330,159 @@ class RefusalTests(unittest.TestCase):
         with mock.patch.dict(os.environ, _all("auto")):
             with self.assertRaisesRegex(ValueError, "a meta-GGA functional of a periodic cell is not available"):
                 _refuse_unsupported_periodic(translation)
+
+
+class LDAUSpinFullGridTests(unittest.TestCase):
+    """``PARSEC_LDAU_SPIN_FULL_GRID``: small spin LDA+U cells on the full grid of the driver, not the k-point driver."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.folder = Path(tempfile.mkdtemp(prefix="parsec_ldau_full_grid_"))
+        cls.addClassCleanup(shutil.rmtree, cls.folder, True)
+        given = _translation(write_silver(cls.folder / "ag", "Spin_Polarization: .true.\n"))
+        cls.translation = given
+        cls.problem = given.problem
+
+    def environment(self, **values):
+        cleared = {
+            "PARSEC_GAMMA_SPIN_SECTORS": "auto",
+            gamma_features.LDAU_SWITCH: "auto",
+            gamma_features.LDAU_SPIN_SWITCH: "auto",
+            gamma_features.LDAU_SPIN_FULL_GRID_SWITCH: "auto",
+            "PARSEC_SPIN_START": "auto",
+        }
+        cleared.update(values)
+        return mock.patch.dict(os.environ, cleared)
+
+    def with_starts(self, values):
+        """The cell with one label per atom, ``values`` their ``Initial_Spin_Polarization``."""
+
+        atoms = tuple(replace(atom, symbol=f"Ag{index}") for index, atom in enumerate(self.problem.atoms))
+        species = self.problem.pseudopotentials["Ag"]
+        table = {
+            f"Ag{index}": replace(species, initial_spin_polarization=float(values[index % len(values)]))
+            for index in range(len(atoms))
+        }
+        return replace(self.problem, atoms=atoms, pseudopotentials=table)
+
+    def takes(self, problem) -> bool:
+        from parsec_python.acceleration.driver import periodic_sector_refusal
+
+        return gamma_features.ldau_spin_full_grid(problem, periodic_sector_refusal(problem, features=True))
+
+    def route(self, translation=None, *, fits=True, **keywords) -> bool:
+        from parsec_python.acceleration import driver
+        from parsec_python.acceleration.SCF.gamma_spin import gamma_spin_on_sector_route
+
+        plan = mock.Mock(fits_one_device=fits)
+        with mock.patch.object(driver, "spin_full_grid_plan", return_value=plan):
+            return gamma_spin_on_sector_route(
+                self.translation if translation is None else translation,
+                mpi=False,
+                backend_is_cupy=lambda: True,
+                **keywords,
+            )
+
+    def test_values(self) -> None:
+        name = gamma_features.LDAU_SPIN_FULL_GRID_SWITCH
+        with mock.patch.dict(os.environ):
+            os.environ.pop(name, None)
+            self.assertEqual(gamma_features.ldau_spin_full_grid_setting(), "off")
+        for value, expected in (("auto", "auto"), ("ON", "on"), (" off ", "off"), ("0", "off"), ("no", "off")):
+            with mock.patch.dict(os.environ, {name: value}):
+                self.assertEqual(gamma_features.ldau_spin_full_grid_setting(), expected)
+        with mock.patch.dict(os.environ, {name: "sectors"}), self.assertRaisesRegex(ValueError, name):
+            gamma_features.ldau_spin_full_grid_setting()
+        with self.environment(**{name: "sectors"}), self.assertRaisesRegex(ValueError, name):
+            self.route()
+        # also on the runs that leave the route first (several MPI ranks)
+        from parsec_python.acceleration.SCF.gamma_spin import gamma_spin_on_sector_route
+
+        with self.environment(**{name: "sectors"}), self.assertRaisesRegex(ValueError, name):
+            gamma_spin_on_sector_route(self.translation, mpi=True, backend_is_cupy=lambda: True)
+
+    def test_the_default_keeps_the_kpoint_driver(self) -> None:
+        # the route can reach another magnetic state: an input without the switch never takes it, whatever
+        # PARSEC_LDAU_SPIN_SECTORS says
+        antiferromagnetic = replace(self.translation, problem=self.with_starts((0.8, -0.8)))
+        for popped in (
+            (gamma_features.LDAU_SPIN_FULL_GRID_SWITCH,),
+            (gamma_features.LDAU_SPIN_FULL_GRID_SWITCH, gamma_features.LDAU_SPIN_SWITCH),
+        ):
+            with self.subTest(popped=popped), self.environment():
+                for name in popped:
+                    os.environ.pop(name, None)
+                self.assertEqual(gamma_features.LDAU_SPIN_FULL_GRID_DEFAULT, "off")
+                self.assertFalse(self.takes(antiferromagnetic.problem))
+                self.assertFalse(self.takes(self.problem))
+                self.assertFalse(self.route(antiferromagnetic))
+                self.assertFalse(self.route())
+
+    def test_the_opt_in_also_takes_a_cell_the_default_spin_switch_refuses(self) -> None:
+        # PARSEC_LDAU_SPIN_SECTORS=off (the default) refuses every spin LDA+U cell before the floor is asked; the
+        # opt-in full grid takes those below the floor alike, and not those above it
+        antiferromagnetic = replace(self.translation, problem=self.with_starts((0.8, -0.8)))
+        with self.environment():
+            os.environ.pop(gamma_features.LDAU_SPIN_SWITCH, None)
+            self.assertTrue(self.takes(antiferromagnetic.problem))
+            self.assertTrue(self.route(antiferromagnetic))
+            with mock.patch.dict(gamma_features.MINIMUM_ENTRIES, {gamma_features.LDAU_SWITCH: 1}):
+                self.assertFalse(self.takes(antiferromagnetic.problem))
+                self.assertFalse(self.route(antiferromagnetic))
+
+    def test_the_inputs_whose_two_drivers_share_the_start(self) -> None:
+        with self.environment():
+            self.assertTrue(self.takes(self.with_starts((0.8, -0.8))))  # both signs: initchrg.f90 on both drivers
+            self.assertFalse(self.takes(self.problem))  # one value: one fraction of the cell on the k-point driver
+            self.assertFalse(self.takes(self.with_starts((0.8, 0.0))))  # several values of one sign
+        with self.environment(**{gamma_features.LDAU_SPIN_FULL_GRID_SWITCH: "on"}):
+            self.assertTrue(self.takes(self.problem))
+            self.assertTrue(self.takes(self.with_starts((0.8, 0.0))))
+        with self.environment(PARSEC_SPIN_START="initchrg"):
+            self.assertTrue(self.takes(self.problem))
+            self.assertTrue(self.takes(self.with_starts((0.8, 0.0))))
+        with self.environment(PARSEC_SPIN_START="weighted"):
+            self.assertFalse(self.takes(self.with_starts((0.8, -0.8))))
+
+    def test_every_other_refusal_keeps_the_kpoint_driver(self) -> None:
+        for values in (
+            {gamma_features.LDAU_SPIN_FULL_GRID_SWITCH: "off"},
+            {gamma_features.LDAU_SWITCH: "off"},
+            {gamma_features.LDAU_SWITCH: "on", gamma_features.LDAU_SPIN_SWITCH: "off"},
+            {"PARSEC_GAMMA_SPIN_SECTORS": "off"},
+        ):
+            with self.subTest(values=values), self.environment(**values):
+                antiferromagnetic = self.with_starts((0.8, -0.8))
+                self.assertFalse(self.takes(antiferromagnetic))
+                self.assertFalse(self.route(replace(self.translation, problem=antiferromagnetic)))
+        problem = self.with_starts((0.8, -0.8))
+        with self.environment():
+            for changed in (
+                replace(problem, scf=replace(problem.scf, van_der_waals=True)),
+                replace(problem, scf=replace(problem.scf, spin_polarized=False)),
+                replace(
+                    problem,
+                    pseudopotentials={
+                        name: replace(item, hubbard_j=0.01) for name, item in problem.pseudopotentials.items()
+                    },
+                ),
+            ):
+                self.assertFalse(self.takes(changed))
+            # above the floor the sectors take the cell: no refusal to act on
+            self.assertFalse(gamma_features.ldau_spin_full_grid(problem, None))
+
+    def test_the_command_line_route(self) -> None:
+        from parsec_python.acceleration.SCF.gamma_spin import gamma_spin_on_sector_route
+
+        antiferromagnetic = replace(self.translation, problem=self.with_starts((0.8, -0.8)))
+        with self.environment():
+            self.assertTrue(self.route(antiferromagnetic))
+            self.assertFalse(self.route())  # one value: the k-point driver
+            self.assertFalse(self.route(antiferromagnetic, fits=False))  # the full grid does not fit one device
+            self.assertFalse(self.route(antiferromagnetic, symmetry_on=True))  # --symmetry on asks for the sectors
+            self.assertFalse(self.route(replace(antiferromagnetic, compute_forces=True)))
+            self.assertFalse(gamma_spin_on_sector_route(antiferromagnetic, mpi=True, backend_is_cupy=lambda: True))
+            self.assertFalse(gamma_spin_on_sector_route(antiferromagnetic, mpi=False, backend_is_cupy=lambda: False))
 
 
 class AtomOrbitTests(unittest.TestCase):

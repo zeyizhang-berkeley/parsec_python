@@ -66,6 +66,50 @@ class SwitchTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, BAND_CONVERGENCE_SWITCH):
                 band_convergence_setting()
 
+    def test_reported_residuals_values(self) -> None:
+        from parsec_python.SCF.bands import (
+            BAND_REPORTED_RESIDUALS_SWITCH,
+            band_reported_residuals_setting,
+            validate_band_settings,
+        )
+
+        for value, expected in (("", "auto"), ("auto", "auto"), ("OFF", "off")):
+            with mock.patch.dict(os.environ, {BAND_REPORTED_RESIDUALS_SWITCH: value}):
+                self.assertEqual(band_reported_residuals_setting(), expected)
+        with mock.patch.dict(os.environ, {BAND_REPORTED_RESIDUALS_SWITCH: "on"}):
+            with self.assertRaisesRegex(ValueError, BAND_REPORTED_RESIDUALS_SWITCH):
+                band_reported_residuals_setting()
+            with self.assertRaisesRegex(ValueError, BAND_REPORTED_RESIDUALS_SWITCH):
+                validate_band_settings()
+
+    def test_the_scope_of_the_residual_is_named(self) -> None:
+        import tempfile
+        from pathlib import Path
+
+        from parsec_python.Output.bands import load_band_structure_archive, save_band_structure_archive
+        from parsec_python.Output.parsec_output import ParsecTextReporter
+        from parsec_python.models import BandStructureResult
+
+        def result(scope):
+            return BandStructureResult(
+                mode="scalar", channels=("all",), segment_names=("G-X",), segment_counts=np.asarray([2]),
+                k_points=np.asarray([[0.0, 0.0, 0.0], [0.1, 0.0, 0.0]]), eigenvalues=np.zeros((1, 2, 3)),
+                residual_norms=np.full((1, 2), 1.0e-6), fermi_level=0.0, residual_scope=scope,
+            )
+
+        for scope, suffix in ((None, "[Ry]"), ("reported levels", "[Ry] (reported levels)")):
+            written = []
+            reporter = ParsecTextReporter.__new__(ParsecTextReporter)
+            reporter.write = written.append
+            reporter.band_structure(result(scope))
+            line = next(row for row in written[0].splitlines() if "Largest eigenpair residual" in row)
+            self.assertTrue(line.endswith(suffix), line)
+            with tempfile.TemporaryDirectory() as folder:
+                path = save_band_structure_archive(Path(folder) / "bands.npz", result(scope))
+                with np.load(path) as archive:
+                    self.assertEqual("residual_scope" in archive.files, scope is not None)
+                self.assertEqual(load_band_structure_archive(path).residual_scope, scope)
+
     def test_settings_of_the_band_k_points(self) -> None:
         chebff = _settings(3)
         with mock.patch.dict(os.environ, {BAND_CONVERGENCE_SWITCH: "auto"}):

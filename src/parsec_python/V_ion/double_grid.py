@@ -21,8 +21,8 @@ The harmonics of a fine point closer to the atom than the first radial
 sample divide the vector by that sample, as ``ylm_real`` of ``nonloc.F90``
 does with its clamped distance and as the projectors of
 :func:`parsec_python.V_ion.build_nonlocal_projectors` do
-(``PARSEC_PROJECTOR_CENTER=auto``, since 2026-11-21); under ``off`` they take
-the true direction, as before.
+(``PARSEC_PROJECTOR_CENTER=auto`` and ``tip``, since 2026-11-21); under ``off``
+they take the true direction, as before.
 """
 
 from __future__ import annotations
@@ -147,7 +147,7 @@ def build_double_grid_projectors(
         real_spherical_harmonics,
     )
 
-    # the centre radius of the harmonics: rs(2) under PARSEC_PROJECTOR_CENTER=auto, the true direction under off
+    # the centre radius of the harmonics: rs(2) under PARSEC_PROJECTOR_CENTER=auto and tip, the true direction under off
     center_setting = projector_center_setting()
     if order is None:
         order = int(getattr(grid.settings, "double_grid_order", 1))

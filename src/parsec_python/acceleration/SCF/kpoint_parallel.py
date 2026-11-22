@@ -46,10 +46,11 @@ from parsec_python.SCF.kpoint_solver import (
     residual_max,
     resized_job,
     set_parallel_backend,
+    task_rows,
     task_states,
 )
 
-from ..Eigensolvers.chebff_spinor import SpinorEigvalState, solve_spinor_eigval
+from ..Eigensolvers.chebff_spinor import ReportedFirstSolve, SpinorEigvalState, solve_spinor_eigval
 from .kpoint_real import as_complex, matched_state, psi_gauge_for, real_gamma_applies
 from .kpoint_sectors import carried_state
 from ..Parallel import WORKERS_ENV, make_pool, mpi
@@ -58,6 +59,7 @@ SOLVER_ENV = "PARSEC_KPOINT_SOLVER"  # device (default) | host
 STORAGE_ENV = "PARSEC_KPOINT_STATE_STORAGE"  # auto (default) | device | host
 FIRST_SOLVE_ENV = "PARSEC_KPOINT_FIRST_SOLVE"  # refine (default) | chebdav
 _AUTO_FRACTION = 0.75  # of the device memory the subspaces (and one transient copy set) may take
+_REPORTED_HOST_FRACTION = 0.75  # of the available host memory the subspaces of a first solve in parts may take
 
 
 def _device_solver_requested() -> bool:
@@ -74,6 +76,13 @@ def _first_solve_on_host() -> bool:
     if value not in ("refine", "chebdav"):
         raise ValueError(f"{FIRST_SOLVE_ENV} must be refine or chebdav, not {value!r}")
     return value == "chebdav"
+
+
+def _available_host_bytes() -> int | None:
+    """Bytes of host memory available now (``None`` where the system does not say)."""
+    from ..Eigensolvers.spill_buffers import host_available_bytes
+
+    return host_available_bytes()
 
 
 def _storage_mode() -> str:
@@ -147,6 +156,15 @@ class _SolveWorker:
         self._spill: bool | None = None
         # export_states hands the device subspaces as they are (the SCF loops of a hybrid's Fock loop)
         self.device_states = False
+        # A first solve in parts whose test covers the reported pairs (the band k-points in sectors,
+        # SectorKPointSolver.solve_reported): None, or the (count, cut) of the pairs each task's test covers
+        # (ReportedFirstSolve; a task missing from it makes its fixed cycles); per task the residuals of its pairs and
+        # the cycles made.
+        self.reported_cuts: dict[int, tuple[int, float]] | None = None
+        self.reported_tolerance: float | None = None
+        self.reported_progress: dict[int, tuple[np.ndarray, int]] = {}
+        # the tasks of whole k-points among them: one first solve with the test of all their pairs, as before
+        self.reported_whole: frozenset[int] = frozenset()
 
     def _tick(self, name: str, start: float) -> None:
         """Add the seconds since ``start`` to the worker's ``worker_<name>_seconds`` counter."""
@@ -196,6 +214,7 @@ class _SolveWorker:
         self._tick("upload", start)
         requested = task_states(self.job, task)
         solve_start = time.perf_counter()
+        reported = None
         # a real subspace into a complex solve, a complex one (or one of another gauge) dropped before a real solve
         # (.kpoint_real)
         state = matched_state(
@@ -235,6 +254,13 @@ class _SolveWorker:
             eigenvalues = np.asarray(host.eigenvalues, dtype=float)
             self.residual[task] = residual_max(host.residual_norms)
         else:
+            if (
+                self.reported_cuts is not None
+                and task not in self.reported_whole
+                and first_solve_converges(settings)
+            ):
+                part = self.reported_cuts.get(task)
+                reported = ReportedFirstSolve() if part is None else ReportedFirstSolve(count=part[0], cut=part[1])
             result = solve_spinor_eigval(
                 operator,
                 requested,
@@ -246,10 +272,14 @@ class _SolveWorker:
                 # more cycles to the same residual test
                 # and the CHEBFF band k-points under PARSEC_BAND_CONVERGENCE=auto
                 converge_first=first_solve_converges(settings),
+                tolerance=None if reported is None else self.reported_tolerance,
+                reported=reported,
             )
             new_state = result.state
             eigenvalues = result.eigenvalues
             self.residual[task] = residual_max(result.residual_norms)
+            if reported is not None:
+                self.reported_progress[task] = (np.asarray(result.residual_norms), int(new_state.cursor.cycles))
             for name, value in result.stats.items():
                 self.stats[name] = self.stats.get(name, 0.0) + value
         self._tick("solve", solve_start)
@@ -347,6 +377,32 @@ class _SolveWorker:
         their next solves take the lowest of them (:func:`.kpoint_sectors.carried_state`)."""
         self.job = resized_job(self.job, counts)
         yield None, None
+
+    def prepare_reported(self, buffer: int):
+        """``(can, on the host, bytes)`` of a first solve in the parts of :class:`ReportedFirstSolve`: whether this
+        worker can make one, whether its subspaces wait on the host between the parts (:meth:`_should_spill` for its
+        largest task: every subspace of the worker stays resident during the parts), and their size."""
+        if not self.device_solver or _first_solve_on_host():
+            yield None, (False, False, 0)
+            return
+        sizes = []
+        for task in self.tasks:
+            rows = task_rows(self.job, task, int(self.job.grid_points or 0))
+            sizes.append((rows, min(task_states(self.job, task) + int(buffer), rows)))
+        if sizes:
+            self._spill = self._should_spill(*max(sizes, key=lambda size: size[0] * size[1]))
+        yield None, (True, bool(self._spill), sum(rows * working * 16 for rows, working in sizes))
+
+    def set_reported_cuts(self, cuts, tolerance=None, whole=()):
+        """The pairs of the next first-solve part by task (:attr:`reported_cuts`), the relative residual its test asks
+        for and the tasks of whole k-points, which keep the first solve of before; ``cuts=None`` ends the parts."""
+        self.reported_cuts = None if cuts is None else dict(cuts)
+        self.reported_tolerance = tolerance
+        self.reported_whole = frozenset(whole)
+        yield None, None
+
+    def reported_progress_of(self):
+        yield None, dict(self.reported_progress)
 
     def keep_device_states(self):
         """Hand the device subspaces as they are from now on (no host copy in :meth:`export_states`)."""
@@ -484,6 +540,32 @@ class PooledKPointSolver:
         self.job = resized_job(self.job, counts)
         self.pool.results("trim_tasks", counts)
         return True
+
+    def prepare_reported(self, buffer: int) -> bool:
+        """Whether a first solve in parts can run: every worker has the device solver and, where the device is short
+        (``PARSEC_KPOINT_STATE_STORAGE=auto``) so that the subspaces wait on the host, the host has room for them."""
+        found = [part for _, part in self.pool.results("prepare_reported", int(buffer))]
+        if not all(part[0] for part in found):
+            return False
+        on_host = sum(part[2] for part in found if part[1])
+        if not on_host or _storage_mode() != "auto":
+            return True
+        available = _available_host_bytes()
+        return available is None or on_host <= _REPORTED_HOST_FRACTION * available
+
+    def set_reported_cuts(self, cuts, tolerance=None, whole=()) -> None:
+        """The next :meth:`solve` of a task continues its CHEBFF cycles until the pairs of ``cuts[task]``, ``(count,
+        cut)`` of :class:`ReportedFirstSolve`, reach the relative residual ``tolerance``; a task not in ``cuts`` makes
+        its fixed cycles, and a task in ``whole`` (a whole k-point) the first solve of before; ``None`` goes back to
+        whole first solves."""
+        self.pool.results("set_reported_cuts", cuts, tolerance, whole)
+
+    def reported_progress(self) -> dict[int, tuple[np.ndarray, int]]:
+        """``task -> (residuals of its pairs, CHEBFF cycles made)`` of the solves in parts."""
+        merged: dict[int, tuple[np.ndarray, int]] = {}
+        for _, part in self.pool.results("reported_progress_of"):
+            merged.update(part)
+        return merged
 
     def accumulate(self, occupations: list[np.ndarray]) -> dict[str, np.ndarray]:
         """Sum of every task's density contribution for the given occupations."""

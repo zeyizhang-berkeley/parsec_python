@@ -7,8 +7,10 @@ against the reference solver and against exact diagonalization.
 
 from __future__ import annotations
 
+import os
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import numpy as np
 
@@ -28,6 +30,7 @@ from parsec_python.Eigensolvers.subspace import SubspaceSettings
 from parsec_python.SCF.self_consistent_soc import run_self_consistent_soc as run_reference
 from parsec_python.SCF.single_point import prepare_single_point
 from parsec_python.acceleration.Eigensolvers.chebff_spinor import (
+    ReportedFirstSolve,
     solve_spinor_eigval,
     spinor_density_on_device,
 )
@@ -182,6 +185,107 @@ class SpinorEigvalTests(unittest.TestCase):
         error = lambda r: float(np.max(np.abs(r.eigenvalues - self.exact[:6])))
         self.assertLess(error(refined), error(plain))
         self.assertGreater(refined.stats["extra_cycles"], 0)
+
+    def _loose(self) -> EigvalSettings:
+        return EigvalSettings(
+            safety_buffer=4,
+            initial_method="chebff",
+            chebff=ChebFFSettings(polynomial_degree=6, filter_cycles=1, lanczos_steps=10, block_size=4),
+            subspace=SubspaceSettings(polynomial_degree=14, degree_delta=3, block_size=4),
+        )
+
+    def test_first_solve_in_parts_is_the_same_loop(self) -> None:
+        loose = self._loose()
+        options = {"settings": loose, "xp": np, "converge_first": True, "tolerance": 1.0e-5, "max_extra_cycles": 40}
+        whole = solve_spinor_eigval(self.operator, 6, **options)
+        self.assertGreater(whole.stats["extra_cycles"], 0)
+        first = solve_spinor_eigval(self.operator, 6, reported=ReportedFirstSolve(), **options)
+        self.assertEqual(first.state.cursor.cycles, loose.chebff.filter_cycles)
+        self.assertEqual(first.residual_norms.size, 6)
+        rest = solve_spinor_eigval(
+            self.operator, 6, state=first.state, reported=ReportedFirstSolve(count=6), **options
+        )
+        np.testing.assert_array_equal(rest.eigenvalues, whole.eigenvalues)
+        np.testing.assert_array_equal(rest.residual_norms, whole.residual_norms)
+        self.assertEqual(rest.state.cursor.cycles, loose.chebff.filter_cycles + int(whole.stats["extra_cycles"]))
+        self.assertEqual(int(rest.stats["extra_cycles"]), int(whole.stats["extra_cycles"]))
+
+    def test_first_solve_tests_the_pairs_up_to_the_cut(self) -> None:
+        loose = self._loose()
+        options = {"settings": loose, "xp": np, "converge_first": True, "tolerance": 1.0e-5, "max_extra_cycles": 40}
+        whole = solve_spinor_eigval(self.operator, 6, **options)
+        first = solve_spinor_eigval(self.operator, 6, reported=ReportedFirstSolve(), **options)
+        rest = solve_spinor_eigval(self.operator, 6, state=first.state, reported=ReportedFirstSolve(count=3), **options)
+        scale = float(np.max(np.abs(rest.eigenvalues)))
+        self.assertLessEqual(float(rest.residual_norms[:3].max()), 1.0e-5 * scale)
+        self.assertLess(rest.state.cursor.cycles, loose.chebff.filter_cycles + int(whole.stats["extra_cycles"]))
+        np.testing.assert_allclose(rest.eigenvalues[:3], self.exact[:3], atol=1.0e-5)
+        # a cut also holds the pairs that can reach it
+        again = solve_spinor_eigval(self.operator, 6, reported=ReportedFirstSolve(), **options)
+        cut = float(self.exact[4])
+        wider = solve_spinor_eigval(
+            self.operator, 6, state=again.state, reported=ReportedFirstSolve(count=3, cut=cut), **options
+        )
+        within = wider.eigenvalues - wider.residual_norms <= cut
+        within[:3] = True
+        self.assertGreater(int(within.sum()), 3)
+        self.assertLessEqual(float(wider.residual_norms[within].max()), 1.0e-5 * float(np.max(np.abs(wider.eigenvalues))))
+
+    def test_the_continued_part_keeps_no_reference_to_its_start(self) -> None:
+        from parsec_python.acceleration.Eigensolvers import chebff_spinor
+
+        options = {"settings": self._loose(), "xp": np, "converge_first": True, "tolerance": 1.0e-5}
+        first = solve_spinor_eigval(self.operator, 6, reported=ReportedFirstSolve(), **options)
+        seen = []
+        original = chebff_spinor._first_solve
+
+        def spy(*args, **kwargs):
+            seen.append(kwargs["resume"])
+            return original(*args, **kwargs)
+
+        with mock.patch.object(chebff_spinor, "_first_solve", spy):
+            solve_spinor_eigval(self.operator, 6, state=first.state, reported=ReportedFirstSolve(count=3), **options)
+        self.assertEqual(seen, [[]])
+        self.assertIsNotNone(first.state.cursor)
+
+    def test_where_the_subspaces_wait_between_the_parts(self) -> None:
+        from parsec_python.acceleration.SCF import kpoint_parallel
+
+        class _Pool:
+            def __init__(self, parts):
+                self.parts = parts
+
+            def results(self, name, *args):
+                self.called = (name, args)
+                return [(None, part) for part in self.parts]
+
+        def prepared(parts, available=None, storage="auto"):
+            solver = kpoint_parallel.PooledKPointSolver.__new__(kpoint_parallel.PooledKPointSolver)
+            solver.pool = _Pool(parts)
+            with mock.patch.dict(os.environ, {"PARSEC_KPOINT_STATE_STORAGE": storage}), mock.patch.object(
+                kpoint_parallel, "_available_host_bytes", return_value=available
+            ):
+                return solver.prepare_reported(6)
+
+        # a worker without the device solver: the former test
+        self.assertFalse(prepared([(True, False, 10), (False, False, 0)]))
+        # the device holds them: the host is not asked
+        self.assertTrue(prepared([(True, False, 10 ** 12)], available=1))
+        # the device is short: the subspaces go to the host if it has room for them (75 % of what is available)
+        self.assertTrue(prepared([(True, True, 60), (True, False, 500)], available=100))
+        self.assertFalse(prepared([(True, True, 60), (True, True, 60)], available=100))
+        # no figure for the host, or storage on the host asked for: not refused
+        self.assertTrue(prepared([(True, True, 10 ** 12)], available=None))
+        self.assertTrue(prepared([(True, True, 10 ** 12)], available=1, storage="host"))
+
+    def test_more_cycles_need_the_state_of_the_cycles_before(self) -> None:
+        options = {"settings": self._loose(), "xp": np, "converge_first": True}
+        with self.assertRaises(ValueError):
+            solve_spinor_eigval(self.operator, 6, reported=ReportedFirstSolve(count=3), **options)
+        plain = solve_spinor_eigval(self.operator, 6, settings=self.settings, xp=np)
+        self.assertIsNone(plain.state.cursor)
+        with self.assertRaises(ValueError):
+            solve_spinor_eigval(self.operator, 6, state=plain.state, reported=ReportedFirstSolve(count=3), **options)
 
     def test_states_are_orthonormal(self) -> None:
         first = solve_spinor_eigval(self.operator, 6, settings=self.settings, xp=np)

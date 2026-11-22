@@ -133,13 +133,15 @@ class BracketGrowthTests(unittest.TestCase):
                                                sector_weights=None)
         solver._margin_cut = dict(cut)
         solver.calls = []
+        solver.grow_flags = []
 
-        def run(representations, counts, settings, *, reset):
+        def run(representations, counts, settings, *, reset, grow=False):
             import weakref
 
             # What the bracket still holds of the results it replaces when the solves begin.
             alive = {index: solver.watched[index]() is not None for index in representations}
             solver.calls.append((tuple(representations), list(counts), reset, alive))
+            solver.grow_flags.append(grow)
             grown = {index: _Grown(eigenvalues=np.array(self.LEVELS[index][:counts[index]]), solver_path="chebff")
                      for index in representations}
             for index, result in grown.items():
@@ -157,9 +159,45 @@ class BracketGrowthTests(unittest.TestCase):
         results = [_Grown(eigenvalues=np.array(self.LEVELS[index][:count]), solver_path="chebff")
                    for index, count in enumerate(counts)]
         solver.watched = [weakref.ref(result) for result in results]
-        with patch.dict("os.environ", environment):
+        # These tests pin the growth from a new start; the one from the saved vectors has its own below.
+        with patch.dict("os.environ", {"PARSEC_CUPY_SECTOR_WARM_GROWTH": "off", **environment}):
             grown, restarted, reasons = solver._ensure_spectral_bracket(results, counts, 6, settings)
         return grown, restarted, reasons
+
+    def test_the_default_grows_from_the_saved_vectors_and_holds_no_result_of_them(self) -> None:
+        levels = (self.LEVELS[0], self.LEVELS[1], (0.2, 0.3, 0.4, 0.45, 0.6, 7.0, 8.0, 9.0))
+        with patch.object(BracketGrowthTests, "LEVELS", levels):
+            for environment in ({"PARSEC_CUPY_SECTOR_WARM_GROWTH": "auto"},
+                                {"PARSEC_CUPY_SECTOR_WARM_GROWTH": "auto", "PARSEC_CUPY_SECTOR_GROWTH_RELEASE": "off"}):
+                solver = self._solver({})
+                self._bracket(solver, [2, 2, 2], EigvalSettings(safety_buffer=1), environment)
+                self.assertTrue(solver.calls)
+                self.assertTrue(all(solver.grow_flags))
+                for _representations, _counts, reset, alive in solver.calls:
+                    self.assertTrue(reset)
+                    self.assertFalse(any(alive.values()))
+
+    def test_a_chebdav_growth_takes_no_saved_vectors_and_is_the_former_call(self) -> None:
+        levels = (self.LEVELS[0], self.LEVELS[1], (0.2, 0.3, 0.4, 0.45, 0.6, 7.0, 8.0, 9.0))
+        calls = {}
+        with patch.object(BracketGrowthTests, "LEVELS", levels):
+            for value in ("auto", "off"):
+                solver = self._solver({})
+                self._bracket(solver, [2, 2, 2], EigvalSettings(safety_buffer=1, initial_method="chebdav"),
+                              {"PARSEC_CUPY_SECTOR_WARM_GROWTH": value})
+                self.assertFalse(any(solver.grow_flags))
+                calls[value] = [(call[0], call[1], call[2]) for call in solver.calls]
+        self.assertTrue(calls["auto"])
+        self.assertEqual(calls["auto"], calls["off"])
+
+    def test_an_arpack_growth_takes_no_saved_vectors(self) -> None:
+        levels = (self.LEVELS[0], self.LEVELS[1], (0.2, 0.3, 0.4, 0.45, 0.6, 7.0, 8.0, 9.0))
+        with patch.object(BracketGrowthTests, "LEVELS", levels):
+            solver = self._solver({})
+            self._bracket(solver, [2, 2, 2], EigvalSettings(safety_buffer=1, initial_method="arpack"),
+                          {"PARSEC_CUPY_SECTOR_WARM_GROWTH": "auto"})
+        self.assertTrue(solver.calls)
+        self.assertFalse(any(solver.grow_flags))
 
     def test_cut_sectors_grow_alone_until_the_cutoff_is_theirs(self) -> None:
         # Sector 0 (cut) misses 1.2 and 1.4, which puts the cutoff at 2.6, the last value of sector 1.

@@ -2354,7 +2354,8 @@ class SinglePointInput:
     kpoint_shortest_representatives: bool = False
     """Whether the representatives of the irreducible wedge of ``monkhorst_pack_shift`` are the shortest images of
     the folded points modulo the reciprocal lattice (:func:`~parsec_python.Grid.kpoints.fold_to_shortest`): set by
-    the input reader for the default routines under ``PARSEC_KPOINT_FOLD=shortest``.  ``False``: folded into
+    the input reader for the default routines under ``PARSEC_KPOINT_FOLD=shortest``, and for a mesh whose free level
+    is below zero on Fortran-derived routines that were not requested (``PARSEC_KPOINT_MESH_GUARD``).  ``False``: folded into
     ``(-1/2, 1/2]`` (:func:`~parsec_python.Grid.kpoints.fold_to_centered_zone`)."""
     kpoint_tie_images: bool = False
     """Whether a point of the Monkhorst-Pack mesh of the default routines on an oblique cell with several shortest
@@ -2363,7 +2364,11 @@ class SinglePointInput:
     :func:`~parsec_python.Grid.kpoints.kpoint_sampling`) and the stars of the wedge of ``monkhorst_pack_shift``, split
     into the orbits of exact images (:func:`~parsec_python.Grid.kpoints.irreducible_monkhorst_pack` with ``ties``).
     Set by the input reader under ``PARSEC_KPOINT_FOLD=shortest`` except for a hybrid (whose exchange needs one point
-    per class) and for ``Create_DOS`` and ``Output_GW`` (one point per mesh point, BerkeleyGW's unfolding)."""
+    per class) and for ``Create_DOS`` and ``Output_GW`` (one point per mesh point, BerkeleyGW's unfolding), and for a
+    ``Kpoint_List`` that ``PARSEC_KPOINT_LIST_FOLD`` moves to its shortest images (``auto``, ``shared``)."""
+    kpoint_written_ties: bool = False
+    """Whether the ties of ``kpoint_tie_images`` are those of a written ``Kpoint_List``, found up to the precision of
+    the input (:func:`~parsec_python.Grid.kpoints.written_tie_images`) instead of to round-off."""
     force_space_group: object | None = None
     """The operations the forces and the moved positions are averaged over where they are more than those of
     ``space_group`` (a :class:`~parsec_python.Grid.space_group.SpaceGroup`): the operations that map the grid and the
@@ -2420,6 +2425,7 @@ class SinglePointInput:
             "embedding": self.embedding is None,
             "kpoint_shortest_representatives": not self.kpoint_shortest_representatives,
             "kpoint_tie_images": not self.kpoint_tie_images,
+            "kpoint_written_ties": not self.kpoint_written_ties,
             "force_space_group": self.force_space_group is None,
         }
         shown = [
@@ -2527,8 +2533,12 @@ class BandStructureResult:
     over the segments; ``segment_counts[i]`` consecutive k-points belong to
     segment ``i`` (``segment_names[i]``).  ``fermi_level`` is the SCF Fermi
     level in the same energy zero.  ``residual_norms`` (channel, k) is the
-    largest ``|H v - e v|`` over the reported states: the Fortran CHEBFF
-    solver has no convergence test, so this is the quality diagnostic.
+    largest ``|H v - e v|`` over the reported states (the Fortran CHEBFF
+    solver has no convergence test, so this is the quality diagnostic); at a
+    k-point solved in sectors under ``PARSEC_BAND_REPORTED_RESIDUALS=off`` it
+    also covers the margin states of the sectors, which are not reported.
+    ``residual_scope`` is ``"reported levels"`` where those margin states were
+    left out of the sector test (``auto``), ``None`` otherwise.
     ``spin_expectation`` (spinor Hamiltonians) is ``<sigma_x,y,z>`` of every
     state, shape ``(1, n_kpoints, n_states, 3)``.
     """
@@ -2545,6 +2555,7 @@ class BandStructureResult:
     attempts: np.ndarray | None = None
     """Diagonalization attempts per ``(channel, k-point)``: 1 unless the CHEBDAV
     re-solve with a larger block was needed (see :mod:`parsec_python.SCF.bands`)."""
+    residual_scope: str | None = None
 
     @property
     def segment_index(self) -> np.ndarray:
@@ -2694,6 +2705,9 @@ class SpinSectorFallbackRecord:
     # (route ``weighted``) the sectors of the abelian group would stop the same state, and the run goes straight to
     # the full grid, whose own record follows (PARSEC_WEIGHTED_GUARD_SHORTCUT=auto)
     abelian_skipped: bool = False
+    # what was found is a doublet whose partners are states of one sector (PARSEC_SPIN_GUARD_DOUBLETS); with ``route``
+    # ``doublet`` the run keeps its result and this record is only the note of it
+    doublet: bool = False
 
 
 @dataclass(frozen=True)

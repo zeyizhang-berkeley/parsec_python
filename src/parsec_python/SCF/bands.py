@@ -52,6 +52,7 @@ from .kpoints_soc import _eigval_settings, _k_point_operators, _spinor_hamiltoni
 MODES = ("scalar", "spin_polarized", "soc", "soc_spin_polarized", "noncollinear")
 
 BAND_CONVERGENCE_SWITCH = "PARSEC_BAND_CONVERGENCE"
+BAND_REPORTED_RESIDUALS_SWITCH = "PARSEC_BAND_REPORTED_RESIDUALS"
 
 
 def band_convergence_setting() -> str:
@@ -73,13 +74,31 @@ def band_convergence_setting() -> str:
     return value
 
 
+def band_reported_residuals_setting() -> str:
+    """``PARSEC_BAND_REPORTED_RESIDUALS``: which states the residual test of a converged first solve covers at a band
+    k-point solved in the sectors of its little group.  ``auto``: the levels the k-point reports and the pairs that a
+    residual bound leaves possibly among them, a heuristic that does not prove that no level is missing
+    (:meth:`parsec_python.acceleration.SCF.kpoint_sectors.SectorKPointSolver.solve_reported`).  A k-point that stays
+    whole keeps the test of all its states at ``Diag_Tolerance``.  ``off``: every state of every sector, with the
+    margin no k-point reports, as before."""
+
+    import os
+
+    value = os.environ.get(BAND_REPORTED_RESIDUALS_SWITCH, "auto").strip().lower() or "auto"
+    if value not in ("auto", "off"):
+        raise ValueError(f"{BAND_REPORTED_RESIDUALS_SWITCH} must be auto or off, not {value!r}")
+    return value
+
+
 def validate_band_settings() -> None:
     """Read the switches of the first solve of the band and ``nscf`` k-points (``PARSEC_BAND_CONVERGENCE``,
-    ``PARSEC_KPOINT_EXTRA_CYCLES``), so that a value they do not know is refused before the SCF."""
+    ``PARSEC_BAND_REPORTED_RESIDUALS``, ``PARSEC_KPOINT_EXTRA_CYCLES``), so that a value they do not know is refused
+    before the SCF."""
 
     from ..Eigensolvers.eigval import first_solve_extra_cycles
 
     band_convergence_setting()
+    band_reported_residuals_setting()
     first_solve_extra_cycles()
 
 
@@ -308,6 +327,7 @@ def run_band_structure(
         fermi_level=float(fermi_level),
         spin_expectation=bands.spin_expectation,
         attempts=bands.attempts,
+        residual_scope=bands.residual_scope,
     )
 
 
@@ -329,6 +349,9 @@ class KPointBands:
     # eigenvectors (Bloch factors ``u_nk``) of the reported levels; ``None``
     # otherwise.
     vectors: list | None = None
+    # ``"reported levels"`` where the residuals were tested on those levels alone in the sectors of the k-points
+    # (PARSEC_BAND_REPORTED_RESIDUALS=auto); ``None`` otherwise.
+    residual_scope: str | None = None
 
 
 def solve_kpoint_bands(
@@ -559,9 +582,10 @@ def solve_kpoint_bands(
         return point_values, point_residuals, point_attempts, point_sigma, point_vectors
 
     indices = None
+    residual_scope = None
     if symmetry is not None and mode == "scalar" and hubbard_matrices is None and not keep_vectors:
         # The k-points of a Gamma cell solved in sectors (acceleration/SCF/band_sectors.py): None where none splits.
-        from ..acceleration.SCF.band_sectors import solve_band_sectors
+        from ..acceleration.SCF.band_sectors import last_band_sector_record, solve_band_sectors
 
         found = solve_band_sectors(
             system,
@@ -577,6 +601,8 @@ def solve_kpoint_bands(
         )
         if found is not None:
             eigenvalues[0], residuals[0] = found
+            if last_band_sector_record().get("residuals_of_reported") and band_reported_residuals_setting() == "auto":
+                residual_scope = "reported levels"
             # A CHEBDAV first solver re-solves, whole and with its attempts below, a k-point whose largest residual
             # in the sectors exceeds residual_tolerance, and keeps the better of the two (CHEBFF: never retried).
             again = [k for k in range(n_k) if can_retry and not residuals[0, k] <= residual_tolerance]
@@ -586,6 +612,7 @@ def solve_kpoint_bands(
                     eigenvalues=eigenvalues,
                     residual_norms=residuals,
                     attempts=attempts,
+                    residual_scope=residual_scope,
                 )
             indices = again
 
@@ -636,6 +663,7 @@ def solve_kpoint_bands(
         attempts=attempts,
         spin_expectation=sigma,
         vectors=kept_vectors,
+        residual_scope=residual_scope,
     )
 
 

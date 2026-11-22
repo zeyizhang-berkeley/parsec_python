@@ -107,16 +107,15 @@ class PeriodicNonlocalForceTests(unittest.TestCase):
         np.testing.assert_allclose(case.forces(), gamma, atol=1.0e-12)
 
     def test_gradient_columns_of_an_atom_on_a_grid_point(self) -> None:
-        # PARSEC_PROJECTOR_CENTER=off (the rule of before 2026-11-21): the first samples of a POTRE table are rounding
-        # noise (u_l(r)/r is constant there instead of growing as r**l), the gradient of a p projector at the grid point
-        # on top of its atom is taken at 1e-3 bohr, where the radial functions are smooth, and the projector has no
-        # defined value at that point (the direction of a zero displacement), so only the columns are compared with
-        # finite differences of 1e-3 bohr.  auto (the default): within the first radial sample rs(2) the projector is
-        # w(rs(2)) P(d/rs(2)), continuous, and the gradient of the point on the atom is its exact derivative, which
-        # finite differences within rs(2) give (the energy derivative of the SCF, nonloc.F90's rnorm).
+        # PARSEC_PROJECTOR_CENTER=auto (the default) and off: the first samples of a POTRE table are rounding noise
+        # (u_l(r)/r is constant there instead of growing as r**l), the gradient of a p projector at the grid point on
+        # top of its atom is taken at 3e-3 (auto) or 1e-3 bohr, where the radial functions are smooth, so the columns are compared
+        # with finite differences of 1e-3 bohr.  tip: within the first radial sample rs(2) the projector is
+        # w(rs(2)) P(d/rs(2)), continuous, and the gradient of the point on the atom is its derivative for steps
+        # within rs(2) (nonloc.F90's rnorm).
         from parsec_python.V_ion import ionic_potential
 
-        for name, setting in ((name, setting) for name in _CELLS for setting in ("off", "auto")):
+        for name, setting in ((name, setting) for name in _CELLS for setting in ("off", "auto", "tip")):
             with self.subTest(cell=name, setting=setting), mock.patch.dict(
                 os.environ, {ionic_potential.PROJECTOR_CENTER_ENV: setting}
             ):
@@ -137,7 +136,7 @@ class PeriodicNonlocalForceTests(unittest.TestCase):
                     def central(step: float, axis=axis):
                         return (operator(step) - operator(-step)) / (2.0 * step)
 
-                    step = 1.0e-3 if setting == "off" else 0.05 * float(case.potentials["H"].radii[0])
+                    step = 1.0e-3 if setting != "tip" else 0.05 * float(case.potentials["H"].radii[0])
                     derivative = ((4.0 * central(step) - central(2.0 * step)) / 3.0).toarray()
                     analytic = -gradients.components[axis].toarray()
                     columns = [q for q, label in enumerate(gradients.labels) if label[0] == 0]

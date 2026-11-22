@@ -765,6 +765,18 @@ class NestedShardGroup:
         return NestedBasis(self, [value for _ok, value in outcomes], layout)
 
     @_ends_the_job_on_failure
+    def fill_leading(self, basis: NestedBasis, saved) -> None:
+        """Write saved columns into the leading columns on every device of this rank (:mod:`sector_growth`)."""
+
+        layout = basis.layout
+        blocks = basis.local_blocks
+
+        def fill(index, group):
+            group._fill_block(blocks[index], layout, saved)
+
+        self._raise_first(self.hub.run(self._device_jobs(fill)))
+
+    @_ends_the_job_on_failure
     def filter(self, basis: NestedBasis, blocks, lower, upper, reference, reset) -> NestedBasis:
         """Chebyshev-filter the columns of every device in place with the root's plan and interval."""
 

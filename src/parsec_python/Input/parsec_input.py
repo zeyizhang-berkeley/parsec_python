@@ -50,6 +50,8 @@ from ..Grid.kpoints import (
     hybrid_kpoint_force_wedge_setting,
     hybrid_kpoint_wedge_setting,
     kpoint_fold_setting,
+    kpoint_list_fold_setting,
+    kpoint_mesh_guard_setting,
     kpoint_force_group_setting,
     kpoint_force_wedge_setting,
     mesh_keeps_time_reversal,
@@ -3108,6 +3110,8 @@ def _parse_parsec_input(
     default_routines_mesh: tuple | None = None
     # the explicit list is the whole Monkhorst-Pack mesh of the default routines in shortest images (PARSEC_KPOINT_FOLD)
     default_mesh_list = False
+    # the explicit list is a Kpoint_List or Kpoint_File of the input (PARSEC_KPOINT_LIST_FOLD)
+    manual_kpoint_list = False
     # (its points on the zone boundary with several shortest images (an oblique cell), all its points)
     tied_mesh_points = (0, 0)
     kpoint_notes: list[str] = []
@@ -3483,6 +3487,7 @@ def _parse_parsec_input(
                 )
             except (OSError, ValueError) as error:
                 raise ParsecInputError(f"Kpoint_Method=manual: {error}") from error
+            manual_kpoint_list = True
             if wire_or_slab and np.any(
                 np.abs(explicit_kpoint_array[:, periodicity:]) > 1.0e-12
             ):
@@ -5087,6 +5092,8 @@ def _parse_parsec_input(
     soc_wedge_setting = soc_kpoint_wedge_setting()
     scalar_wedge_setting = scalar_kpoint_wedge_setting()
     shortest_kpoints = kpoint_fold_setting() == "shortest"
+    kpoint_list_fold_setting()
+    kpoint_mesh_guard_setting()
     force_group_setting = kpoint_force_group_setting()
     # PARSEC_MOVE_FLAG_SPACE_GROUP: read for every input, so that a wrong value stops here
     move_flag_space_group_setting()
@@ -5329,7 +5336,8 @@ def _parse_parsec_input(
             explicit_kpoint_array = None
             explicit_kpoint_weights = None
         if weighted_list and periodicity == 3 and not (atoms_move or single_point_forces):
-            # A Kpoint_List of unequal weights runs as given; Symmetrize_Charge_Density averages its density over
+            # A Kpoint_List of unequal weights keeps its weights (its points: _folded_kpoint_list);
+            # Symmetrize_Charge_Density averages its density over
             # the operations that map the grid onto itself (an irreducible wedge; scalar orbitals, no hybrid: any
             # other request went to the Fortran-derived routines above).
             symmetrize_density, space_group = _default_routines_list_symmetry(
@@ -6565,6 +6573,22 @@ def _parse_parsec_input(
             "point each)"
         )
 
+    list_tie_images = False
+    # (a restarted Create_DOS replaces the list by the mesh of its DOS_MP_Grid)
+    if manual_kpoint_list and explicit_kpoint_array is not None:
+        # the points of a Kpoint_List on an oblique cell (PARSEC_KPOINT_LIST_FOLD)
+        explicit_kpoint_array, list_notes, list_tie_images = _folded_kpoint_list(
+            explicit_kpoint_array,
+            explicit_kpoint_weights,
+            periodic_cell,
+            grid,
+            routines=routines,
+            hybrid=bool(scf.is_hybrid),
+            one_image_per_point=bool(optional_bool("create_dos") or optional_bool("output_gw")),
+        )
+        warnings.extend(list_notes)
+        tie_images = tie_images or list_tie_images
+
     if scf.spin_polarized and not ignore_symmetry and not wire_or_slab:
         # labels of one species that hide operations of the atoms from the symmetry sectors (a parsec.out note)
         label_note = _identical_label_note(atoms, specifications, periodic_cell)
@@ -6602,8 +6626,20 @@ def _parse_parsec_input(
         ),
         # every shortest image of a point on the zone boundary (tie_images, above)
         **({"kpoint_tie_images": True} if tie_images else {}),
+        **({"kpoint_written_ties": True} if list_tie_images else {}),
         **({"force_space_group": force_space_group} if force_space_group is not None else {}),
     )
+    if is_periodic and (not manual_kpoint_list or explicit_kpoint_array is None):
+        # a k-point of the mesh whose free finite-difference level is below zero (PARSEC_KPOINT_MESH_GUARD)
+        problem, mesh_notes = _guarded_mesh(
+            problem,
+            routines,
+            one_image_per_point=bool(optional_bool("create_dos") or optional_bool("output_gw")),
+        )
+        warnings.extend(mesh_notes)
+    if is_periodic:
+        # the same level on the points of a band path or of nscf_kpoints (a warning, the points stay)
+        warnings.extend(_path_free_level_notes(band_settings, post_processing.nscf, periodic_cell, grid))
     output_all_states = optional_bool("output_all_states")
     output_level = _integer(one("output_level", "1"), label="Output_Level")
     # --esdf-lenient: the duplicates found since the warnings were collected
@@ -6989,6 +7025,204 @@ def _time_reversal_count(problem) -> int:
 _UNSHIFTED_MESH_NOTE_PREFIX = (
     "Monkhorst_Pack_Grid without Monkhorst_Pack_Shift: PARSEC 1.5's Gamma-centred mesh k = (i-1)/n (shift 0)"
 )
+
+
+def _free_level_text(points, levels, reciprocal) -> str:
+    """The k-point with the lowest free finite-difference level, for a note."""
+
+    worst = int(np.argmin(levels))
+    fraction = points[worst] @ np.linalg.inv(reciprocal)
+    return (
+        f"k = ({fraction[0]:.6f}, {fraction[1]:.6f}, {fraction[2]:.6f}) along the reciprocal lattice vectors, "
+        f"|k| = {float(np.linalg.norm(points[worst])):.4f} 1/bohr, has a free finite-difference level of "
+        f"{float(levels[worst]):.4f} Ry on this grid (no continuum state lies below zero)"
+    )
+
+
+def _folded_kpoint_list(points, weights, cell, grid, *, routines, hybrid, one_image_per_point):
+    """``(points, notes, tie_images)`` of a ``Kpoint_List`` under ``PARSEC_KPOINT_LIST_FOLD``
+    (:func:`~parsec_python.Grid.kpoints.kpoint_list_fold_setting`).
+
+    PARSEC 1.5 runs the written vectors (``usrinputfile.F90``, ``init_var.F90``), and so do orthogonal cells here.  On
+    an oblique cell the default routines take the shortest images of the points, the same points of the Brillouin zone
+    of a Hamiltonian that the finite-difference one only approximates; the Fortran-derived routines keep the written
+    vectors unless one of them has a free level below zero.
+    """
+
+    from ..Grid.kpoints import (
+        FREE_LEVEL_TOLERANCE,
+        lowest_free_levels,
+        negation_closed_written,
+        shortest_list_points,
+        written_tie_images,
+    )
+
+    lattice_vectors = cell.lattice_vectors
+    reciprocal = 2.0 * np.pi * np.linalg.inv(lattice_vectors).T
+    if not oblique_reciprocal_lattice(reciprocal):
+        return points, [], False
+    setting = kpoint_list_fold_setting()
+    levels = lowest_free_levels(points, cell, grid)
+    spurious = levels is not None and bool(np.any(levels < -FREE_LEVEL_TOLERANCE))
+    too_coarse = (
+        "this grid is too coarse for these k-points: no image of the point removes the level, and the run goes on"
+    )
+    requested_fortran = bool(routines.fortran and routines.requested is True)
+    if setting == "literal" or (setting == "auto" and requested_fortran):
+        if not spurious:
+            return points, [], False
+        how = "PARSEC_KPOINT_LIST_FOLD=literal" if setting == "literal" else "Use_Fortran_Routines: .true."
+        nearest, _ = shortest_list_points(points, lattice_vectors)
+        at_nearest = lowest_free_levels(nearest, cell, grid)
+        tail = (
+            f"; at the shortest images too: {too_coarse}"
+            if at_nearest is not None and bool(np.any(at_nearest < -FREE_LEVEL_TOLERANCE))
+            else "; PARSEC_KPOINT_LIST_FOLD=shared runs the shortest images of its points instead"
+        )
+        return (
+            points,
+            [
+                f"Kpoint_List: {_free_level_text(points, levels, reciprocal)}. The list runs at the written vectors "
+                f"({how}, as PARSEC 1.5), and its energy can be far too low{tail}"
+            ],
+            False,
+        )
+    if setting == "auto" and routines.fortran and not spurious:
+        return points, [], False
+    total = len(points)
+    folded, outside = shortest_list_points(points, lattice_vectors)
+    moved = outside
+    if hybrid and bool(np.allclose(weights, weights[0], rtol=1.0e-12, atol=0.0)):
+        # the images of the whole mesh of a hybrid: one per class, closed under k -> -k (exact time-reversal pairs),
+        # whatever the order of the lines
+        closed = negation_closed_written(points, lattice_vectors)
+        moved = np.any(np.abs(closed - points) > 1.0e-12, axis=1)
+        folded = points.copy()
+        folded[moved] = closed[moved]
+    tied = 0
+    if not (hybrid or one_image_per_point):
+        tied = sum(group.shape[0] > 1 for group in written_tie_images(folded @ np.linalg.inv(reciprocal), reciprocal))
+    notes = []
+    if setting == "auto" and routines.fortran and (np.any(moved) or tied):
+        notes.append(
+            f"Kpoint_List: {_free_level_text(points, levels, reciprocal)}. These Fortran-derived routines were not "
+            "requested, so the list runs at the shortest images of its points, as on the default routines "
+            "(PARSEC_KPOINT_LIST_FOLD=auto; literal keeps the written vectors)"
+        )
+    if np.any(outside):
+        notes.append(
+            f"Kpoint_List: {int(np.sum(outside))} of the {total} points are not the shortest of their images modulo the "
+            "reciprocal lattice of this oblique cell and run at their shortest images, the same points of the "
+            "Brillouin zone (the finite-difference Bloch operator is not invariant under k -> k + G); "
+            "PARSEC_KPOINT_LIST_FOLD=literal runs the written vectors, as PARSEC 1.5"
+        )
+    if tied:
+        notes.append(
+            f"Kpoint_List: {tied} of the {total} points lie on the boundary of the first Brillouin zone with "
+            "several equally short images, to the precision of the input; each runs as all of them with an equal "
+            "share of its weight (PARSEC_KPOINT_LIST_FOLD=literal keeps the written vectors)"
+        )
+    result = folded if np.any(moved) else points
+    after = lowest_free_levels(result, cell, grid)
+    if after is not None and bool(np.any(after < -FREE_LEVEL_TOLERANCE)):
+        notes.append(f"Kpoint_List: {_free_level_text(result, after, reciprocal)}, at its shortest image: {too_coarse}")
+    return result, notes, tied > 0
+
+
+def _guarded_mesh(problem, routines, *, one_image_per_point):
+    """``(problem, notes)``: a Monkhorst-Pack mesh with a free level below zero (``PARSEC_KPOINT_MESH_GUARD``).
+
+    On Fortran-derived routines that the input did not request, the mesh takes the shortest representatives of its
+    wedge and, outside a hybrid, the shared images of the zone boundary.  Otherwise its points stay, with a warning.
+    A mesh without such a point is returned as it is, without a note.
+    """
+
+    from ..Grid.kpoints import FREE_LEVEL_TOLERANCE, kpoint_sampling, lowest_free_levels
+
+    cell = problem.periodic_cell
+    if cell is None or problem.monkhorst_pack_dimensions is None and problem.kpoints is None:
+        return problem, []
+    reciprocal = 2.0 * np.pi * np.linalg.inv(cell.lattice_vectors).T
+    if not oblique_reciprocal_lattice(reciprocal):
+        return problem, []
+    try:
+        sampled = kpoint_sampling(problem)
+    except ValueError:
+        # (an input the run refuses by name later)
+        return problem, []
+    if sampled is None:
+        return problem, []
+    levels = lowest_free_levels(sampled[0], cell, problem.grid)
+    if levels is None or not bool(np.any(levels < -FREE_LEVEL_TOLERANCE)):
+        return problem, []
+    text = _free_level_text(sampled[0], levels, reciprocal)
+    movable = bool(
+        routines.fortran
+        and routines.requested is not True
+        and problem.monkhorst_pack_shift is not None
+        and problem.monkhorst_pack_dimensions is not None
+        and not one_image_per_point
+    )
+    if not movable or kpoint_mesh_guard_setting() == "off":
+        why = (
+            "Use_Fortran_Routines: .true."
+            if routines.fortran and routines.requested is True
+            else "PARSEC_KPOINT_MESH_GUARD=off"
+            if movable
+            else "these routines"
+        )
+        return problem, [
+            f"Monkhorst_Pack_Grid: {text}. The mesh keeps its points ({why}), and its energy can be far too low: use a "
+            "smaller Grid_Spacing"
+        ]
+    moved = replace(
+        problem,
+        kpoint_shortest_representatives=True,
+        **({} if problem.scf.is_hybrid else {"kpoint_tie_images": True}),
+    )
+    notes = [
+        f"Monkhorst_Pack_Grid: {text}. These Fortran-derived routines were not requested, so the mesh runs at the "
+        "shortest representatives of its points"
+        + ("" if problem.scf.is_hybrid else ", the images of a point of the zone boundary with equal shares")
+        + " (PARSEC_KPOINT_MESH_GUARD=off keeps the former points)"
+    ]
+    points = kpoint_sampling(moved)[0]
+    after = lowest_free_levels(points, cell, problem.grid)
+    if after is not None and bool(np.any(after < -FREE_LEVEL_TOLERANCE)):
+        notes.append(
+            f"Monkhorst_Pack_Grid: {_free_level_text(points, after, reciprocal)}, at its shortest image: this grid is "
+            "too coarse for these k-points: no image of the point removes the level, and the run goes on"
+        )
+    return moved, notes
+
+
+def _path_free_level_notes(band_settings, nscf, cell, grid) -> list[str]:
+    """Warnings for the points of a band path and of ``nscf_kpoints`` with a free level below zero (they stay)."""
+
+    from ..Grid.kpoints import FREE_LEVEL_TOLERANCE, lowest_free_levels
+
+    if cell is None:
+        return []
+    reciprocal = 2.0 * np.pi * np.linalg.inv(cell.lattice_vectors).T
+    if not oblique_reciprocal_lattice(reciprocal):
+        return []
+    notes = []
+    paths = []
+    if band_settings is not None:
+        from ..SCF.bands import band_path_cartesian
+
+        segments, _ = band_path_cartesian(band_settings, cell)
+        paths.append(("bandstruc", np.vstack(segments)))
+    if nscf is not None:
+        paths.append(("nscf_kpoints", np.asarray(nscf.k_points, dtype=np.float64)))
+    for name, points in paths:
+        levels = lowest_free_levels(points, cell, grid)
+        if levels is not None and bool(np.any(levels < -FREE_LEVEL_TOLERANCE)):
+            notes.append(
+                f"{name}: {_free_level_text(points, levels, reciprocal)}. The point runs as written and its levels "
+                "can be far too low: write its shortest image or use a smaller Grid_Spacing"
+            )
+    return notes
 
 
 def _unshifted_mesh_note(

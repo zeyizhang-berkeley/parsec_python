@@ -25,17 +25,24 @@ factors, the abelian little-group sectors of ``acceleration/SCF/kpoint_sectors.p
 
 What stays on that route with ``auto`` too (:func:`gamma_spin_sector_refusal`): spin-orbit species and spinors, a
 wire or slab of the Fortran-derived routines, k-points beyond Gamma, an oblique cell, a hybrid run, an LDA+U, a
-meta-GGA, libxc or TS run that its switch keeps off the sectors (LDA+U also under ``PARSEC_LDAU_SPIN_SECTORS=off``;
+meta-GGA, libxc or TS run that its switch keeps off the sectors (LDA+U also under ``PARSEC_LDAU_SPIN_SECTORS=off``, the default;
 the refusals of the unpolarized route:
 :mod:`.gamma_features`; under ``auto`` a cell below 2^27 (a meta-GGA), 2^28 (libxc) or 2^26 (LDA+U) grid points x
 states, and TS of every size, whose spin sectors were slower than this route), ``Spin_Symmetry_Sectors: off``, ``Symmetrize_Charge_Density``, the
-occupations of ``occup.in`` and a ``Restart_Run``.  The command line (:func:`gamma_spin_on_sector_route`) also keeps
+occupations of ``occup.in`` and a ``Restart_Run``.  (A single point with LDA+U below its floor leaves that route for
+the full grid of one device of this driver only on request, as it can reach another magnetic state:
+``PARSEC_LDAU_SPIN_FULL_GRID``, default ``off``, :func:`.gamma_features.ldau_spin_full_grid`.)  The command line
+(:func:`gamma_spin_on_sector_route`) also keeps
 ``--mpi`` (the k-point pools of ``main.py``) and a backend that does not resolve to CuPy on that route.  Andrew
 Grieder's slab (``Boundary_Conditions: slab`` on the default routines, a 3-D grid with
 ``PeriodicCell.dimensions = 2``) passes these refusals as its unpolarized twin does, and since this route exists its
 spin single point runs on the accelerated driver, on the full grid of one device (its symmetry detection refuses a
 grid that is not periodic along three axes): three H atoms in such a slab, CA, gave the energy of the 1x1x1 k-point
 driver of ``off`` to 1e-8 Ry on A100 (2026-11-19).
+
+Under an integer ``PARSEC_PERIODIC_SPIN_SECTOR_FLOOR`` (no floor by default) a single point with a native LDA or GGA in
+one process whose basis (grid points times states of a channel) is smaller reaches the driver on this route and keeps
+the full grid of one device there (:func:`parsec_python.acceleration.driver.periodic_spin_sector_floor_setting`).
 
 Forces and relaxations (``PARSEC_SPIN_SECTOR_FORCES``, :func:`spin_sector_forces_setting`): under ``auto`` (the
 default since 2026-11-19) the single-point forces of such a cell and its relaxations by an optimizer (``bfgs``,
@@ -191,6 +198,7 @@ def gamma_spin_on_sector_route(
     backend_is_cupy,
     supercell: bool = False,
     symmetry_off: bool = False,
+    symmetry_on: bool = False,
     notes: list | None = None,
 ) -> bool:
     """Whether the command line runs this spin-polarized periodic input on the accelerated Gamma sectors.
@@ -207,12 +215,19 @@ def gamma_spin_on_sector_route(
     reference CLI's 1x1x1 k-point driver for a spin-polarized cell).  A forces or moves run that the driver solves
     on the full grid (:func:`spin_full_grid_moves_plan`; ``symmetry_off``: ``Ignore_Symmetry`` or ``--symmetry off``)
     keeps that k-point driver too where the full grid of both channels fits neither one device nor the GPUs of the
-    process together; the NOTE that says so goes to ``notes``.
+    process together; the NOTE that says so goes to ``notes``.  Under the opt-in ``PARSEC_LDAU_SPIN_FULL_GRID`` (default
+    ``off``) a single point with LDA+U below the floor of the sectors takes the full grid of one device of the driver
+    where :func:`~parsec_python.acceleration.SCF.gamma_features.ldau_spin_full_grid` says so and that device holds it
+    (``symmetry_on``: ``--symmetry on``, which asks for the sectors, keeps the k-point driver).
     """
 
     problem = translation.problem
     if problem.periodic_cell is None or not getattr(problem.scf, "spin_polarized", False):
         return False
+    from .gamma_features import ldau_spin_full_grid_setting
+
+    # (read in every spin run, also those that leave here, so that a value it does not know is refused)
+    ldau_spin_full_grid_setting()
     if mpi or gamma_spin_sector_setting() == "off":
         return False
     # (read in every spin run, so that a value it does not know is refused)
@@ -244,13 +259,27 @@ def gamma_spin_on_sector_route(
             return False
         if periodic_sector_forces_refusal(translation) is not None and not _full_grid_moves(translation):
             return False
-    from ..driver import periodic_sector_refusal
+    from ..driver import periodic_sector_refusal, spin_full_grid_plan
+    from .gamma_features import ldau_spin_full_grid
 
     # one process: TS, a meta-GGA and libxc take the sectors under their switches (SCF/gamma_features.py)
-    if periodic_sector_refusal(problem, features=True) is not None:
+    refusal = periodic_sector_refusal(problem, features=True)
+    # A single point with LDA+U below the floor of the sectors, on request (PARSEC_LDAU_SPIN_FULL_GRID, default off):
+    # the full grid of one device of the driver, which takes no group for it; not under --symmetry on, which asks
+    # for the sectors.
+    ldau_full_grid = (
+        refusal is not None
+        and not symmetry_on
+        and not _moves_or_forces(translation)
+        and ldau_spin_full_grid(problem, refusal)
+    )
+    if refusal is not None and not ldau_full_grid:
         return False
     if not backend_is_cupy():
         return False
+    if ldau_full_grid:
+        full_grid = spin_full_grid_plan(problem)
+        return full_grid is not None and full_grid.fits_one_device
     # The full grid of both channels from the start (no point group): where it fits nowhere on this process, the
     # k-point driver of before (its abelian little-group sectors hold it).
     plan = spin_full_grid_moves_plan(translation, symmetry_off=symmetry_off)

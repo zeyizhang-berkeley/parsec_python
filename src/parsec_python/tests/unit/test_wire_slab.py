@@ -742,6 +742,49 @@ class SCFTests(unittest.TestCase):
             system.ionic_potential[first] - system.ionic_potential[second], direct, places=5
         )
 
+    def test_an_atom_on_a_grid_point_keeps_its_gaussian_terms(self) -> None:
+        # forcloc.f90 skips every term of a grid point within rs(2), also the Gaussian compensation charge, which is
+        # largest there; PARSEC_WIRE_SLAB_GAUSSIAN=auto keeps the Gaussian terms at every point
+        import os
+        from unittest import mock
+
+        from parsec_python.Forces import compute_forces
+        from parsec_python.SCF.single_point import run_scf
+        from parsec_python.SCF.wire_slab import prepare_wire_slab_single_point
+
+        probe = prepare_wire_slab_single_point(hydrogen_problem(2, atoms=[Atom("H", (0.3, 0.1, 0.65)), Atom("H", (-0.2, 0.0, -0.75))]))
+        coordinates = np.asarray(probe.grid.coordinates)
+        point = coordinates[int(np.argmin(np.linalg.norm(coordinates - [0.3, 0.1, 0.65], axis=1)))]
+
+        def run(atoms):
+            system = prepare_wire_slab_single_point(hydrogen_problem(2, atoms=atoms))
+            result = run_scf(system)
+            self.assertTrue(result.converged)
+            return system, result
+
+        atoms = [Atom("H", tuple(point)), Atom("H", (-0.2, 0.0, -0.75))]
+        system, result = run(atoms)
+        forces = {}
+        for setting in ("auto", "off"):
+            with mock.patch.dict(os.environ, {"PARSEC_WIRE_SLAB_GAUSSIAN": setting}):
+                forces[setting] = compute_forces(system, result, symmetrize=False)
+        # the atom away from every grid point: the same bits; the atom on the point: its Gaussian term changes
+        np.testing.assert_array_equal(forces["auto"].local.gaussian[1], forces["off"].local.gaussian[1])
+        self.assertGreater(float(np.max(np.abs(forces["auto"].local.gaussian[0] - forces["off"].local.gaussian[0]))), 1.0e-6)
+        step = 2.0e-3
+        energies = []
+        for sign in (1.0, -1.0):
+            moved = list(atoms)
+            moved[0] = Atom("H", tuple(np.asarray(point) + [0.0, 0.0, sign * step]))
+            energies.append(run(moved)[1].energies.total)
+        slope = -(energies[0] - energies[1]) / (2.0 * step)
+        auto_error = abs(float(forces["auto"].unsymmetrized[0, 2]) - slope)
+        off_error = abs(float(forces["off"].unsymmetrized[0, 2]) - slope)
+        self.assertLess(auto_error, 0.2 * off_error)
+        with mock.patch.dict(os.environ, {"PARSEC_WIRE_SLAB_GAUSSIAN": "on"}):
+            with self.assertRaisesRegex(ValueError, "PARSEC_WIRE_SLAB_GAUSSIAN"):
+                compute_forces(system, result, symmetrize=False)
+
     def test_slab_scf_forces_are_the_energy_derivative(self) -> None:
         from parsec_python.Forces import compute_forces
         from parsec_python.SCF.single_point import run_scf

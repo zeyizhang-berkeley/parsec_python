@@ -101,6 +101,7 @@ from .rayleigh_ritz import (
     solve_whitened_ritz,
     solve_whitened_ritz_on_device,
 )
+from .sector_growth import new_column_scale
 from .spectral_bounds import LanczosBoundResult, lanczos_upper_bound
 from .tall_product import transposed_product
 from .subspace import (
@@ -2629,6 +2630,28 @@ class SectorDeviceGroup:
                 cp.cuda.get_current_stream().synchronize()
         return DistributedBasis(self, blocks, layout)
 
+    def fill_leading(self, basis: DistributedBasis, saved) -> None:
+        """Write saved columns into the leading columns of ``basis`` and scale those behind them.
+
+        For the first solve of a sector that grows (:mod:`sector_growth`);
+        ``saved`` holds all its columns in one host array.
+        """
+
+        cp, _ = require_cupy()
+        array = saved.arrays[None]
+        scale = new_column_scale(int(basis.shape[0]))
+
+        def fill(index, _device):
+            block = basis.blocks[index]
+            for column, offset, count in basis.layout.spans(index):
+                held = max(0, min(column + count, int(saved.kept)) - column)
+                if held:
+                    block[:, offset : offset + held].set(np.asfortranarray(array[:, column : column + held]))
+                if count > held:
+                    block[:, offset + held : offset + count] *= scale
+
+        self.map(fill)
+
     def repartition(self, basis: DistributedBasis, layout) -> DistributedBasis:
         """Move whole columns between devices so that ``basis.layout == layout``."""
 
@@ -4410,6 +4433,7 @@ def run_distributed_chebff(
     spectral_bound: LanczosBoundResult | None = None,
     group: SectorDeviceGroup,
     handover: str = "rotation",
+    start_columns: Any = None,
 ) -> DeviceChebFFResult:
     """CHEBFF first solve with the trial basis spread over ``group``.
 
@@ -4418,6 +4442,8 @@ def run_distributed_chebff(
     solve; a failed stability audit falls back to QR on the owner.
     ``handover="triangular"`` gives the cycles the modes of
     :func:`chebff.first_solve_modes` (:meth:`SectorDeviceGroup.ritz_handover`).
+    ``start_columns``, for a sector that grows during the SCF
+    (:mod:`sector_growth`), replaces the leading columns of the trial basis.
     """
 
     cp, _ = require_cupy()
@@ -4428,6 +4454,8 @@ def run_distributed_chebff(
     blocks = uniform_filter_blocks(wanted_states, settings.block_size, settings.polynomial_degree)
     basis_generator = LapackRandom(settings.basis_seed)
     basis = group.random_basis(basis_generator, dimension, group.column_layout(blocks))
+    if start_columns is not None:
+        group.fill_leading(basis, start_columns)
     stats = getattr(operator, "timing_stats", None)
     if stats is not None and os.environ.get("PARSEC_CUPY_DEVICE_RANDOM", "0").lower() in {"1", "true", "on"}:
         stats.initial_random_device_values += dimension * wanted_states

@@ -223,14 +223,20 @@ too), with no skip where the gradient vanishes.
 
 | functional | this code | QE | difference | hybrid - PBE: difference |
 |---|---|---|---|---|
-| pbe | -0.018049 | -0.01806913 | +2.0e-05 |  |
-| pbe0 | -0.018962 | -0.01898746 | +2.5e-05 | +5.3e-06 |
-| hse06 | -0.018870 | -0.01889558 | +2.6e-05 | +5.4e-06 |
+| pbe | -0.018053 | -0.01806913 | +1.6e-05 |  |
+| pbe0 | -0.018966 | -0.01898746 | +2.1e-05 | +5.3e-06 |
+| hse06 | -0.018875 | -0.01889558 | +2.1e-05 | +4.4e-06 |
 
 Atom 2 of `Si_disp_k222` (moved by +0.05 bohr along x), forces after the net force is set to zero, as QE's; this
-code prints them to 1e-6 Ry/bohr. The PBE forces of the two codes differ by 2.0e-5 Ry/bohr (grid against cutoff), the hybrid forces by 2.5e-5 and 2.6e-5 Ry/bohr; the change of the force from PBE to the hybrid agrees with QE's to 5.3e-6 (PBE0) and 5.4e-6 Ry/bohr (HSE06). The exchange operator of norm-conserving pseudopotentials adds no
-explicit force term (Hellmann-Feynman forces of the hybrid orbitals and density); central differences of the PBE0
-energy of this cell (both atoms, step 1e-4 bohr, SCF 1e-10 Ry) give the analytic force after the net force is removed to 5e-8 Ry/bohr (PBE 4e-10).
+code prints them to 1e-6 Ry/bohr. The PBE forces of the two codes differ by 1.6e-5 Ry/bohr (grid against cutoff), the hybrid forces by 2.1e-5 Ry/bohr; the change of the force from PBE to the hybrid agrees with QE's to 5.3e-6 (PBE0) and 4.4e-6 Ry/bohr (HSE06). The exchange operator of norm-conserving pseudopotentials adds no
+explicit force term (Hellmann-Feynman forces of the hybrid orbitals and density). Atom 1 sits exactly on a grid point;
+the gradient of its projectors there is the slope of the smooth `c r^l` of the table (`PARSEC_PROJECTOR_CENTER=auto`),
+so its force before the net force is removed, 0.01806358 Ry/bohr with PBE, agrees with central differences of the
+energy (SCF 1e-10 Ry, Fortran-derived routines, steps 1e-3 and 2e-3 bohr) within 2.3e-9 and 9.2e-9 Ry/bohr (PBE),
+1.2e-6 (PBE0) and 4.8e-7 Ry/bohr (HSE06). A step of 1e-4 bohr lies inside the first samples of the Si FHI table, which
+are 25 to 48 % above `c r`, and gives 8e-6 Ry/bohr less; with the gradient `nonloc.F90` forms at the point
+(`PARSEC_PROJECTOR_CENTER=tip`, the former forces: 0.01805567 Ry/bohr with PBE) it is the other way round; under
+`tip` the rows above read -0.018049, -0.018962 and -0.018870.
 
 ## Error budget
 
@@ -261,9 +267,9 @@ energy of this cell (both atoms, step 1e-4 bohr, SCF 1e-10 Ry) give the analytic
 | Si_k444/hse06 | 1 | 47.4 | 46.7 | 4.50 | 2.21 | 249216 | 4 | 2.8 |
 | Si_k444/hse06_default | 1 | 47.6 | 46.8 | 4.58 | 2.25 | 249216 | 4 | 2.8 |
 | Si_k444/hf | 1 | 65.7 | 64.8 | 9.14 | 4.37 | 498432 | 8 | 3.0 |
-| Si_disp_k222/pbe | 1 | 6.0 | 5.0 |  |  |  |  | 0.7 |
-| Si_disp_k222/pbe0 | 1 | 10.8 | 9.9 | 0.26 | 0.09 | 6736 | 4 | 1.8 |
-| Si_disp_k222/hse06 | 1 | 12.1 | 11.2 | 0.41 | 0.22 | 6736 | 4 | 1.8 |
+| Si_disp_k222/pbe | 1 | 5.9 | 5.0 |  |  |  |  | 0.7 |
+| Si_disp_k222/pbe0 | 1 | 11.4 | 10.5 | 0.39 | 0.22 | 6736 | 4 | 1.8 |
+| Si_disp_k222/hse06 | 1 | 11.7 | 10.8 | 0.26 | 0.09 | 6736 | 4 | 1.8 |
 | C_k333/pbe | 1 | 17.8 | 17.1 |  |  |  |  | 1.3 |
 | C_k333/pbe0 | 1 | 20.7 | 19.9 | 1.00 | 0.44 | 40102 | 4 | 2.2 |
 | C_k333/hse06 | 1 | 17.3 | 16.6 | 0.76 | 0.32 | 30872 | 3 | 2.2 |

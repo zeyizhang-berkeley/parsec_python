@@ -141,25 +141,26 @@ SLOPES_ENV = "PARSEC_PERIODIC_FORCE_SLOPES"
 #: gradient of this distance instead of ``1/1e-15``, found when both sets of routines were compared), and the radius
 #: within which ``PARSEC_SPLINE_FORCE_CENTER=auto`` drops the spline slopes.  Far below any physical displacement,
 #: far above round-off.  The projectors take the same rule for their harmonics under ``off``
-#: (``V_ion.ionic_potential.PROJECTOR_CENTER_ROUND_OFF``); ``auto`` clamps at the first radial knot.
+#: (``V_ion.ionic_potential.PROJECTOR_CENTER_ROUND_OFF``); ``auto`` and ``tip`` clamp at the first radial knot.
 ROUND_OFF_DISTANCE = _ionic_potential.PROJECTOR_CENTER_ROUND_OFF
 
 
 def _projector_inverse_radius(radius: np.ndarray, potential: ParsecPseudopotential, setting: str):
     """``(1/|d|, inside)`` of the projector gradients with the slopes of the interpolant.
 
-    ``PARSEC_PROJECTOR_CENTER=auto`` (:func:`parsec_python.V_ion.ionic_potential.projector_center_setting`): the
+    ``PARSEC_PROJECTOR_CENTER=tip`` (:func:`parsec_python.V_ion.ionic_potential.projector_center_setting`): the
     distance clamped below to the first radial sample ``rs(2)`` (``nonloc.F90``'s ``rnorm``), for a point on the
     atom too, and ``inside`` the points closer than ``rs(2)``: their projector is ``w(rs(2)) P(d/rs(2))``, whose
-    gradient ``w(rs(2)) dP/du / rs(2)`` (:func:`real_harmonics_with_gradients` with ``inside``) is the exact
-    derivative of the projector the energy uses.  ``off``: ``min(rs(2), ROUND_OFF_DISTANCE)``, zero on the atom, as
-    before (``inside`` ``None``).  The 1/|d| of a round-off distance (an atom within round-off of a grid point) was
+    gradient ``w(rs(2)) dP/du / rs(2)`` (:func:`real_harmonics_with_gradients` with ``inside``) is its derivative for
+    displacements within ``rs(2)``.  ``off``: ``min(rs(2), ROUND_OFF_DISTANCE)``, zero on the atom, as
+    before (``inside`` ``None``).  (``auto`` does not come here: :func:`_interpolant_gradient_terms`.)  The 1/|d| of a
+    round-off distance (an atom within round-off of a grid point) was
     first clamped to ``ROUND_OFF_DISTANCE`` because ``1/1e-15`` made ``w(r0) grad Y`` 1e15 (Si64, h 0.513: nonlocal
     forces of 82 Ry/bohr); with the true direction of the harmonics down to 1e-6 bohr that left ``w(rs(2))/1e-6``
     at such a point, 13 (carbon POTRE) to 1000 (FHI tables) times the slope of a p projector.
     """
 
-    if setting == "auto":
+    if setting == "tip":
         center = float(potential.radii[0])
         inside = radius < center
         return 1.0 / np.maximum(radius, center), (inside if np.any(inside) else None)
@@ -167,6 +168,33 @@ def _projector_inverse_radius(radius: np.ndarray, potential: ParsecPseudopotenti
     nonzero = radius > 0.0
     inverse[nonzero] = 1.0 / np.maximum(radius[nonzero], min(potential.radii[0], ROUND_OFF_DISTANCE))
     return inverse, None
+
+
+def _interpolant_gradient_terms(radius, potential, radial_grid, spline, setting: str):
+    """``(w, w', 1/|d|, inside)`` of the projector gradients with the slopes of the interpolant or the spline.
+
+    ``PARSEC_PROJECTOR_CENTER=auto``: everything at
+    :func:`parsec_python.V_ion.ionic_potential.projector_gradient_distance`, which is ``|d|`` from 3e-3 bohr on and
+    that distance closer to the atom, the smooth slope of the table.
+    ``tip`` and ``off``: at the true distance, with :func:`_projector_inverse_radius`.
+    """
+
+    setting = _ionic_potential.projector_gradient_rule(potential, setting)
+    if setting == "floor":
+        at = _ionic_potential.projector_gradient_distance(radius, potential)
+        if spline is not None:
+            return spline(at), spline_derivative(spline, at), 1.0 / at, None
+        radial = np.interp(at, potential.radii, radial_grid, left=radial_grid[0], right=0.0)
+        return radial, interpolant_slope(at, potential.radii, radial_grid), 1.0 / at, None
+    if spline is not None:
+        clamped = np.maximum(radius, potential.radii[0])
+        radial = spline(clamped)
+        slope = np.where(radius > potential.radii[0], spline_derivative(spline, clamped), 0.0)
+    else:
+        radial = np.interp(radius, potential.radii, radial_grid, left=radial_grid[0], right=0.0)
+        slope = interpolant_slope(radius, potential.radii, radial_grid)
+    inverse, inside = _projector_inverse_radius(radius, potential, setting)
+    return radial, slope, inverse, inside
 
 
 def radial_slope_setting() -> str:
@@ -668,14 +696,17 @@ def build_periodic_projector_gradients(
     ``w(|d|) grad Y + w'(|d|) Y d/|d|`` with ``w'`` the slope of the
     interpolant (or of the spline at ``max(|d|, rs(2))``), and for a k-point
     it carries the image's Bloch phase ``exp(-i k.(r - T))``.  Columns are
-    complex for a k-point.
+    complex for a k-point.  Under ``PARSEC_PROJECTOR_CENTER=auto`` a point
+    within 3e-3 bohr of the atom takes all of this at that distance
+    (:func:`_interpolant_gradient_terms`).
 
     ``radial_slopes="tabulated"`` takes instead what ``nonloc.F90`` stores
     for ``forcnloc.f90``: the slope table ``dvw`` of ``pseudo.f90``
     (:func:`parsec_python.Pseudopotential.radial_derivatives.radial_projector_with_derivative`)
     with the distance clamped to ``rs(2)`` also in ``d/|d|``, as the forces of
-    an isolated system do.  That reproduces Fortran's nonlocal forces but is
-    not the derivative of the sampled projector (see :data:`RADIAL_SLOPES`).
+    an isolated system do.  That reproduces Fortran's nonlocal forces, under
+    every value of ``PARSEC_PROJECTOR_CENTER``, but is not the derivative of
+    the sampled projector (see :data:`RADIAL_SLOPES`).
 
     ``atom_indices`` (the representative atoms of the orbits of symmetry
     sectors) samples the projectors of those atoms only: their columns, in the
@@ -774,19 +805,10 @@ def build_periodic_projector_gradients(
                     inverse = 1.0 / clamped
                     inside = None
                 else:
-                    if spline is not None:
-                        clamped = np.maximum(radius, potential.radii[0])
-                        radial = spline(clamped)
-                        slope = np.where(
-                            radius > potential.radii[0], spline_derivative(spline, clamped), 0.0
-                        )
-                    else:
-                        radial = np.interp(
-                            radius, potential.radii, radial_grid, left=radial_grid[0], right=0.0
-                        )
-                        slope = interpolant_slope(radius, potential.radii, radial_grid)
-                    # the centre radius of the harmonics (PARSEC_PROJECTOR_CENTER, _projector_inverse_radius)
-                    inverse, inside = _projector_inverse_radius(radius, potential, center_setting)
+                    # the distance of the gradient and the centre radius of the harmonics (PARSEC_PROJECTOR_CENTER)
+                    radial, slope, inverse, inside = _interpolant_gradient_terms(
+                        radius, potential, radial_grid, spline, center_setting
+                    )
                 unit = relative * inverse[:, None]
                 harmonics, harmonic_gradients = real_harmonics_with_gradients(
                     angular_momentum, unit, inverse, inside=inside
@@ -855,8 +877,9 @@ def _double_grid_periodic_gradients(
     carries the Bloch phase ``exp(-i k.(r - T))`` of the coarse point itself
     (``nonloc.F90:505-657``, also for its ``vylmd``).  The gradient of each
     fine sample is that of :func:`build_periodic_projector_gradients`: the
-    slope of the interpolant with the true distance (exact derivative of the
-    sampled projector), or with ``tabulated`` Fortran's ``dvw`` with the
+    slope of the interpolant with the true distance (the derivative of the
+    sampled projector; under ``PARSEC_PROJECTOR_CENTER=auto`` at 3e-3 bohr
+    for a fine point closer to the atom), or with ``tabulated`` Fortran's ``dvw`` with the
     distance clamped to ``rs(2)`` (``nonloc.F90:544-568``).  The orthorhombic
     grid only (the input reader refuses the double grid on the general one).
     """
@@ -934,18 +957,10 @@ def _double_grid_periodic_gradients(
                     inverse = 1.0 / clamped
                     inside = None
                 else:
-                    if spline is not None:
-                        radial = spline(clamped)
-                        slope = np.where(
-                            radius > potential.radii[0], spline_derivative(spline, clamped), 0.0
-                        )
-                    else:
-                        radial = np.interp(
-                            radius, potential.radii, radial_grid, left=radial_grid[0], right=0.0
-                        )
-                        slope = interpolant_slope(radius, potential.radii, radial_grid)
-                    # the centre radius of the harmonics (PARSEC_PROJECTOR_CENTER, _projector_inverse_radius)
-                    inverse, inside = _projector_inverse_radius(radius, potential, center_setting)
+                    # the distance of the gradient and the centre radius of the harmonics (PARSEC_PROJECTOR_CENTER)
+                    radial, slope, inverse, inside = _interpolant_gradient_terms(
+                        radius, potential, radial_grid, spline, center_setting
+                    )
                 unit = relative * inverse[:, None]
                 harmonics, harmonic_gradients = real_harmonics_with_gradients(
                     angular_momentum, unit, inverse, inside=inside
@@ -1372,6 +1387,101 @@ def meta_gga_core_potential(result, xc_potential):
     return xc_potential if core is None else np.asarray(core, dtype=np.float64)
 
 
+#: The switch of the exchange-correlation potential of the core-correction force of a cell (:func:`core_force_xc_setting`).
+CORE_FORCE_XC_ENV = "PARSEC_CORE_FORCE_XC"
+
+
+def core_force_xc_setting() -> str:
+    """``PARSEC_CORE_FORCE_XC``: the exchange-correlation potential of the core-correction force of a 3-D cell.
+
+    PARSEC's ``potshift`` (``Zero_Average_Vxc``, the default of a 3-D cell without spin) removes the average of
+    ``V_xc`` from the potential the SCF loop keeps.  The core-correction force ``dV sum_r V_xc(r) d rho_c(r - R_a)/dR_a``
+    is the derivative of ``E_xc[rho + rho_c]`` only with the potential itself: with the average ``c`` removed it gains
+    ``c dQ_c/dR_a``, where ``Q_c = dV sum_r rho_c(r - R_a)`` is the grid sum of the core density, which changes as the
+    atom moves against the grid (5 to 7 % of the force of a Ge atom 0.01 to 0.1 bohr off its site, 3e-4 to 6e-3
+    Ry/bohr).
+    PARSEC 1.5 forms that term in G-space (``forpbc.f90``), where the average drops out.
+
+    ``auto`` (default): the average is added back (:func:`core_force_xc_average`).  ``shifted``: the potential as
+    the loop kept it, bit for bit as before.
+    """
+
+    import os
+
+    value = os.environ.get(CORE_FORCE_XC_ENV, "auto").strip().lower() or "auto"
+    if value not in ("auto", "shifted"):
+        raise ValueError(f"{CORE_FORCE_XC_ENV} must be auto or shifted, not {value!r}")
+    return value
+
+
+def _host_array(values) -> np.ndarray:
+    getter = getattr(values, "get", None)
+    return np.asarray(getter() if callable(getter) else values, dtype=np.float64)
+
+
+def _has_core_charge(potential) -> bool:
+    """Whether a pseudopotential carries a nonzero core density (``None`` and an array of zeros mean none)."""
+
+    core = getattr(potential, "core_density", None)
+    return core is not None and bool(np.any(np.asarray(core) != 0.0))
+
+
+def core_force_xc_average(system, result) -> float:
+    """The average of ``V_xc`` that ``potshift`` removed from the potential of ``result``, to be added back in the
+    core-correction force (``PARSEC_CORE_FORCE_XC=auto``); ``0.0`` where nothing was removed or nothing needs it.
+
+    Zero under ``shifted``, for a calculation without ``SCFSettings.zero_average_xc_potential``, for a wire or slab
+    (``potshift`` acts on 3-D cells only), without a species with a core density, and for a meta-GGA, whose core term
+    takes ``dE_xc/dn_core`` of its own record, which keeps its average.  Otherwise the potential of the density of the
+    result is evaluated once more without the shift (``evaluate_xc`` of the host system with ``zero_average=False``; a
+    collinear spin result: the mean of the channel averages, which is what the averaged potential of the core term
+    lost).  Zero also for a spin result that keeps only the total density (collinear spin with spin-orbit coupling
+    and an explicit ``Zero_Average_Vxc``), whose channel averages cannot be formed again.
+    """
+
+    if core_force_xc_setting() == "shifted":
+        return 0.0
+    # the host system of an accelerated one: its evaluate_xc takes the full-grid density of the result and the
+    # zero_average keyword (the device evaluator of the loop takes the loop's layout)
+    reference = getattr(system, "reference", None)
+    owner = reference if hasattr(reference, "evaluate_xc") else (system if hasattr(system, "evaluate_xc") else None)
+    settings = getattr(system, "input", None)
+    scf = getattr(settings, "scf", None)
+    if owner is None or scf is None or not getattr(scf, "zero_average_xc_potential", False):
+        return 0.0
+    if int(getattr(getattr(settings, "grid", None), "periodicity", 3) or 3) != 3:
+        return 0.0
+    if getattr(scf, "is_meta_gga", False):
+        return 0.0
+    potentials = getattr(system, "pseudopotentials", None) or getattr(owner, "pseudopotentials", {})
+    # the readers give a table without a core charge an array of zeros, not None: test the values, so a cell without
+    # a core charge pays no second evaluation of the functional (the term it would feed is zero anyway)
+    if not any(_has_core_charge(potential) for potential in potentials.values()):
+        return 0.0
+    channels = getattr(result, "spin", None)
+    if channels is not None or hasattr(result, "density_up"):
+        up, down = (
+            (channels[0].density, channels[1].density)
+            if channels is not None
+            else (result.density_up, result.density_down)
+        )
+        xc = owner.evaluate_xc_spin_polarized(_host_array(up), _host_array(down), zero_average=False)
+        return 0.5 * (float(np.mean(_host_array(xc.potential_up))) + float(np.mean(_host_array(xc.potential_down))))
+    if getattr(scf, "spin_polarized", False):
+        # a spin result that keeps the total density alone (collinear spin with spin-orbit coupling): the channel
+        # averages cannot be formed again, the potential stays as the loop left it
+        return 0.0
+    xc = owner.evaluate_xc(_host_array(result.density), zero_average=False)
+    return float(np.mean(_host_array(xc.potential)))
+
+
+def core_force_xc(system, result, xc_potential):
+    """``xc_potential`` with the average of :func:`core_force_xc_average` added (the potential of the core term)."""
+
+    shift = core_force_xc_average(system, result)
+    return xc_potential if shift == 0.0 else xc_potential + shift
+
+
 def periodic_force_fields(system, result) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """``(density, V_out - V_in, V_xc)`` of a periodic result for the local terms.
 
@@ -1379,7 +1489,8 @@ def periodic_force_fields(system, result) -> tuple[np.ndarray, np.ndarray, np.nd
     last input potential, where kept, is ``scf_input_potential``.  A
     collinear spin-polarized k-point result gives the total density and the
     averages over its two channels (``forpbc.f90``/``forcloc.f90``), from the
-    potentials ``keep_wavefunctions`` kept.
+    potentials ``keep_wavefunctions`` kept.  The potential of the core term is that of ``PARSEC_CORE_FORCE_XC``
+    (:func:`core_force_xc`).
     """
 
     if _is_spin_kpoint_result(result):
@@ -1402,7 +1513,7 @@ def periodic_force_fields(system, result) -> tuple[np.ndarray, np.ndarray, np.nd
             + (np.asarray(outputs[1]) - np.asarray(inputs[1]))
         )
         xc = 0.5 * (np.asarray(xc_channels[0]) + np.asarray(xc_channels[1]))
-        return density, residual, meta_gga_core_potential(result, xc)
+        return density, residual, meta_gga_core_potential(result, core_force_xc(system, result, xc))
 
     density = np.asarray(result.density, dtype=np.float64)
     output_potential = np.asarray(result.output_effective_potential, dtype=np.float64)
@@ -1415,7 +1526,8 @@ def periodic_force_fields(system, result) -> tuple[np.ndarray, np.ndarray, np.nd
         )
     else:
         residual = output_potential - np.asarray(result.input_effective_potential)
-    return density, residual, meta_gga_core_potential(result, np.asarray(result.xc_potential, dtype=np.float64))
+    xc = core_force_xc(system, result, np.asarray(result.xc_potential, dtype=np.float64))
+    return density, residual, meta_gga_core_potential(result, xc)
 
 
 def compute_periodic_forces(
@@ -1555,6 +1667,10 @@ __all__ = [
     "compute_periodic_forces",
     "interpolant_slope",
     "local_potential_slope",
+    "CORE_FORCE_XC_ENV",
+    "core_force_xc",
+    "core_force_xc_average",
+    "core_force_xc_setting",
     "periodic_force_fields",
     "periodic_local_forces",
     "periodic_nonlocal_forces",

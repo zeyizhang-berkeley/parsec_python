@@ -56,6 +56,7 @@ from .handover import (
     ritz_columns,
     validate_handover_settings,
 )
+from .sector_growth import sector_warm_growth_setting
 from .rayleigh_ritz import (
     gram_multiple,
     one_array_buffer_limit,
@@ -1080,8 +1081,10 @@ def sector_growth_release_setting() -> str:
 
     A sector that misses states in the spectral bracket
     (:meth:`CuPySymmetrySCFEigensolver._ensure_spectral_bracket`) is solved
-    again with more states by a first solve, which reads nothing of the
-    basis it replaces.  ``auto`` gives that basis back before the new one is
+    again with more states by a first solve, which from random vectors reads
+    nothing of the basis it replaces (where a CHEBFF solve starts from the saved
+    vectors, ``PARSEC_CUPY_SECTOR_WARM_GROWTH``, the basis waits on the host and leaves
+    the devices under either value).  ``auto`` gives that basis back before the new one is
     formed, for every growing sector, as the sectors whose margin was cut
     did already.  ``off`` keeps the basis of a sector that grows by half
     until its new one is formed, as before: its devices then hold both, 2.5
@@ -1318,6 +1321,7 @@ class CuPySymmetrySCFEigensolver:
         sector_growth_release_setting()
         cut_sectors_first_setting()
         regrown_trim_setting()
+        sector_warm_growth_setting()
 
         # A unit of irreducible representations without a function on the grid stops the run before its sizes
         # place the sectors (the driver refuses it earlier, with the first solve of the input).
@@ -3518,9 +3522,14 @@ class CuPySymmetrySCFEigensolver:
         settings: EigvalSettings,
         *,
         reset: bool,
+        grow: bool = False,
         spectral_bound: Any | None = None,
     ) -> CuPyEigvalResult:
-        """Run one independent solver on its assigned CUDA stream."""
+        """Run one independent solver on its assigned CUDA stream.
+
+        With ``grow`` the reset moves the saved vectors to the host for the
+        first solve to start from (:meth:`CuPyEigvalSolver.stage_growth_start`).
+        """
 
         cp, _ = require_cupy()
         spilled = getattr(self, "_host_spill_sector_states", False)
@@ -3546,7 +3555,10 @@ class CuPySymmetrySCFEigensolver:
                 if reset:
                     held = (getattr(solver, "_state", None) is not None
                             or getattr(solver, "device_state", None) is not None)
-                    solver.reset()
+                    if grow:
+                        solver.stage_growth_start(count, settings)
+                    else:
+                        solver.reset()
                     if held and not spilled:
                         # A sector that starts again with more states (a growth from a new start,
                         # _ensure_spectral_bracket): the cached blocks of its former basis go back to the
@@ -3728,12 +3740,13 @@ class CuPySymmetrySCFEigensolver:
         settings: EigvalSettings,
         *,
         reset: bool,
+        grow: bool = False,
     ) -> dict[int, CuPyEigvalResult]:
         context = getattr(self, "mpi_context", None)
         if context is None:
-            return self._run_local_sector_jobs(representations, counts, settings, reset=reset)
+            return self._run_local_sector_jobs(representations, counts, settings, reset=reset, grow=grow)
         return context.execute(self, "solve", dict(
-            representations=representations, counts=counts, settings=settings, reset=reset))
+            representations=representations, counts=counts, settings=settings, reset=reset, grow=grow))
 
     def _run_local_sector_jobs(
         self,
@@ -3742,11 +3755,17 @@ class CuPySymmetrySCFEigensolver:
         settings: EigvalSettings,
         *,
         reset: bool,
+        grow: bool = False,
     ) -> dict[int, CuPyEigvalResult]:
-        """Submit independent sectors and merge timing after synchronization."""
+        """Submit independent sectors and merge timing after synchronization.
+
+        With ``grow`` (and ``reset``) every sector starts its first solve
+        from its saved vectors (:mod:`sector_growth`).
+        """
 
         before = [item.as_dict() for item in self._sector_timing_stats]
         started = perf_counter()
+        from_saved = {"grow": True} if grow else {}
         spectral_bounds: dict[int, Any] = {}
         if getattr(self, "_precompute_bounds", False):
             bound_started = perf_counter()
@@ -3779,6 +3798,7 @@ class CuPySymmetrySCFEigensolver:
                     counts[representation],
                     settings,
                     reset=reset,
+                    **from_saved,
                     spectral_bound=spectral_bounds.get(representation),
                 )
                 for representation in representations
@@ -3793,6 +3813,7 @@ class CuPySymmetrySCFEigensolver:
                     representation: self._run_one_sector(
                         representation, counts[representation], settings,
                         reset=reset,
+                        **from_saved,
                         spectral_bound=spectral_bounds.get(representation),
                     )
                     for representation in representations
@@ -3820,6 +3841,7 @@ class CuPySymmetrySCFEigensolver:
                     counts[representation],
                     settings,
                     reset=reset,
+                    **from_saved,
                     spectral_bound=spectral_bounds.get(representation),
                 )
                 for representation in representations
@@ -3897,13 +3919,21 @@ class CuPySymmetrySCFEigensolver:
             if fresh and cut_sectors_first_setting() == "auto":
                 grow = list(fresh)
             kept = tuple(representation for representation in grow if representation not in cut)
-            # Every growth is a first solve, which reads nothing of the basis it replaces: the others
-            # give theirs back first as well (PARSEC_CUPY_SECTOR_GROWTH_RELEASE), or their devices hold
-            # it beside half as many columns more.  ARPACK continues the seed of the saved state.
+            # Every growth is a first solve.  From random vectors it reads nothing of the basis it replaces:
+            # the others give theirs back first as well (PARSEC_CUPY_SECTOR_GROWTH_RELEASE), or their devices
+            # hold it beside half as many columns more.  ARPACK continues the seed of the saved state.
             release = (
                 sector_growth_release_setting() == "auto"
                 and settings.initial_method not in DEVICE_ITERATIVE_SOLVERS
             )
+            # PARSEC_CUPY_SECTOR_WARM_GROWTH: a CHEBFF first solve starts from the vectors of the sector and new
+            # random columns; they wait on the host, so that the devices hold what they hold for a random start.
+            # CHEBDAV and ARPACK grow as before.
+            warm = (
+                sector_warm_growth_setting() == "auto"
+                and settings.initial_method == "chebff"
+            )
+            from_saved = {"grow": True} if warm else {}
             deficits = (
                 bracket_deficits(
                     [result.eigenvalues for result in results], self._sector_weight_array,
@@ -3931,13 +3961,13 @@ class CuPySymmetrySCFEigensolver:
             if fresh:
                 for representation in fresh:
                     results[representation] = None
-                grown.update(self._run_sector_jobs(fresh, counts, sector_settings, reset=True))
+                grown.update(self._run_sector_jobs(fresh, counts, sector_settings, reset=True, **from_saved))
                 self._regrown_from_new_start.update(fresh)
             if kept:
-                if release:
+                if release or warm:
                     for representation in kept:
                         results[representation] = None
-                grown.update(self._run_sector_jobs(kept, counts, sector_settings, reset=release))
+                grown.update(self._run_sector_jobs(kept, counts, sector_settings, reset=release or warm, **from_saved))
             for representation in grow:
                 results[representation] = grown[representation]
                 self._record_filter_precision(

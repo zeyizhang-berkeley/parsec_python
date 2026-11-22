@@ -43,7 +43,25 @@ from ..Hamiltonian.hubbard import (
     periodic_replica_translations,
 )
 from ..models import Atom
+from ..V_ion.ionic_potential import projector_center_setting, projector_gradient_distance, projector_gradient_rule
 from .nonlocal_force import real_harmonics_with_gradients
+
+
+def _gradient_samples(potential, distance: np.ndarray, setting: str) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """``(R_d, R_d', 1/|d|)`` of a gradient sample at ``distance`` (``PARSEC_PROJECTOR_CENTER``).
+
+    ``auto``: all three at :func:`parsec_python.V_ion.ionic_potential.projector_gradient_distance` (3e-3 bohr next to
+    the atom, ``|d|`` beyond), the rule of the Kleinman-Bylander gradients; the d tables follow ``c r^2`` from their
+    first sample on to 1e-5, so this changes the gradients by round-off and keeps every route on one rule.  ``tip`` and
+    ``off``: ``upot.F90``'s clamp of the distance at the first radial sample, as before.
+    """
+
+    if projector_gradient_rule(potential, setting) == "floor":
+        sampled = projector_gradient_distance(distance, potential)
+        radial, slope = interpolate_hubbard_radial(potential, sampled)
+        return radial, slope, 1.0 / sampled
+    radial, slope = interpolate_hubbard_radial(potential, distance)
+    return radial, slope, 1.0 / np.maximum(distance, potential.radii[0])
 
 
 def _double_grid_hubbard_gradients(
@@ -61,6 +79,7 @@ def _double_grid_hubbard_gradients(
     coordinates = np.asarray(grid.coordinates, dtype=np.float64)
     spacing = float(grid.spacing)
     position = np.asarray(position, dtype=np.float64)
+    setting = projector_center_setting()
     rows: list[np.ndarray] = []
     values: list[np.ndarray] = []
     for translation in translations:
@@ -72,8 +91,7 @@ def _double_grid_hubbard_gradients(
         points, fine = support.radius.shape
         distance = support.radius.reshape(-1)
         relative = support.relative.reshape(-1, 3)
-        radial, slope = interpolate_hubbard_radial(potential, distance)
-        inverse = 1.0 / np.maximum(distance, potential.radii[0])
+        radial, slope, inverse = _gradient_samples(potential, distance, setting)
         unit = relative * inverse[:, None]
         harmonics, harmonic_gradients = real_harmonics_with_gradients(
             HUBBARD_ANGULAR_MOMENTUM, unit, inverse
@@ -99,9 +117,11 @@ def build_hubbard_projector_gradients(
     """``grad phi_a,m`` for every column of ``projectors`` (x, y, z).
 
     The support entries and the radial interpolation are those of
-    :func:`parsec_python.Hamiltonian.hubbard.build_hubbard_projectors`.
+    :func:`parsec_python.Hamiltonian.hubbard.build_hubbard_projectors`; next to an atom the distance of the gradient
+    follows ``PARSEC_PROJECTOR_CENTER`` (:func:`_gradient_samples`).
     """
 
+    setting = projector_center_setting()
     translations = periodic_replica_translations(lattice_vectors)
     coordinates = np.asarray(grid.coordinates, dtype=np.float64)
     sqrt_volume = np.sqrt(grid.volume_element)
@@ -141,9 +161,8 @@ def build_hubbard_projector_gradients(
             tree=tree,
         )
         distance = np.linalg.norm(relative, axis=1)
-        radial, slope = interpolate_hubbard_radial(potential, distance)
-        # ylm_real sees rr/max(|rr|, rs(2)), as upot.F90 clamps rnorm.
-        inverse = 1.0 / np.maximum(distance, potential.radii[0])
+        # ylm_real sees rr/max(|rr|, rs(2)), as upot.F90 clamps rnorm (tip, off); auto: the distance of the KB gradients
+        radial, slope, inverse = _gradient_samples(potential, distance, setting)
         unit = relative * inverse[:, None]
         harmonics, harmonic_gradients = real_harmonics_with_gradients(
             HUBBARD_ANGULAR_MOMENTUM, unit, inverse

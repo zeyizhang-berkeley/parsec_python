@@ -25,6 +25,7 @@ from .rayleigh_ritz import (
     ritz_route_rows,
     streaming_ritz_requested,
 )
+from .sector_growth import SavedColumns, place_saved_columns
 from .spectral_bounds import LanczosBoundResult, lanczos_upper_bound
 
 
@@ -110,6 +111,7 @@ def run_chebff(
     settings: ChebFFSettings = ChebFFSettings(),
     spectral_bound: LanczosBoundResult | None = None,
     handover: str = "rotation",
+    start_columns: SavedColumns | None = None,
 ) -> DeviceChebFFResult:
     """Build the initial buffered eigensubspace without host round trips.
 
@@ -119,6 +121,9 @@ def run_chebff(
 
     ``handover="triangular"`` gives the cycles the modes of
     :func:`first_solve_modes`; a cycle on the QR route rotates.
+
+    ``start_columns``, for a sector that grows during the SCF
+    (:mod:`sector_growth`), replaces the leading columns of the trial basis.
     """
 
     cp, _ = require_cupy()
@@ -143,6 +148,8 @@ def run_chebff(
         )
         vectors = cp.asarray(host_trial, dtype=cp.float64, order="F")
         del host_trial
+    if start_columns is not None:
+        place_saved_columns(vectors, start_columns)
 
     if spectral_bound is None:
         from parsec_python.Eigensolvers.spectral_bounds import bound_request

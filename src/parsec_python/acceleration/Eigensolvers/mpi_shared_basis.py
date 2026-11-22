@@ -102,6 +102,7 @@ from .distributed_state import (
 )
 from .filter_graph import operator_filter
 from .lapack_random import LapackRandom
+from .sector_growth import new_column_scale
 from .rayleigh_ritz import (
     GeneralizedRitzStabilityError,
     _condition_policy,
@@ -721,6 +722,94 @@ class MPIShardGroup:
             cp.cuda.get_current_stream().synchronize()
         generator.seed = _skip(start, rows * layout.columns)
         return SharedBasis(self, block, layout)
+
+    @_ends_the_job_on_failure
+    def fill_leading(self, basis: SharedBasis, saved) -> None:
+        """Write saved columns into the leading columns of ``basis`` and scale those of this rank behind them.
+
+        For the first solve of a sector that grows (:mod:`sector_growth`).
+        Columns that another rank saved come by ``Alltoallv``, through host
+        buffers, in rounds of at most :func:`exchange_bytes` per rank.
+        """
+
+        self._fill_block(basis.local, basis.layout, saved)
+
+    def _fill_block(self, block, layout, saved) -> None:
+        """The columns of this (virtual) rank in ``block``: see :meth:`fill_leading`."""
+
+        cp, _ = require_cupy()
+        rows = int(block.shape[0])
+        kept = int(saved.kept)
+        spans = list(layout.spans(self.rank))
+
+        def write(columns, values):
+            # ``values`` holds the columns ``columns`` (ascending, of this rank in the new layout), side by side.
+            done = 0
+            while done < len(columns):
+                offset = layout.offset(self.rank, columns[done])
+                stop = done + 1
+                while (stop < len(columns) and columns[stop] == columns[stop - 1] + 1
+                       and layout.offset(self.rank, columns[stop]) == offset + stop - done):
+                    stop += 1
+                block[:, offset : offset + stop - done].set(np.asfortranarray(values[:, done : stop]))
+                done = stop
+
+        with cp.cuda.Device(int(block.device.id)):
+            if saved.layout is None:
+                for start, offset, count in spans:
+                    held = max(0, min(start + count, kept) - start)
+                    if held:
+                        block[:, offset : offset + held].set(
+                            np.asfortranarray(saved.arrays[None][:, start : start + held]))
+            else:
+                self._exchange_saved(rows, layout, saved, write)
+            scale = new_column_scale(rows)
+            for start, offset, count in spans:
+                held = max(0, min(start + count, kept) - start)
+                if count > held:
+                    block[:, offset + held : offset + count] *= scale
+            cp.cuda.get_current_stream().synchronize()
+
+    def _exchange_saved(self, rows, layout, saved, write) -> None:
+        """Bring the saved columns that this rank holds in ``layout`` from the ranks that saved them."""
+
+        kept = int(saved.kept)
+        old = saved.layout
+        array = saved.arrays[self.rank]
+        width = max(1, exchange_bytes() // (8 * max(rows, 1)))
+
+        def columns_of(part, first, last):
+            return [column for start, stop in part for column in range(max(start, first), min(stop, last))]
+
+        for first in range(0, kept, width):
+            last = min(kept, first + width)
+            mine_old = columns_of(old.parts[self.rank], first, last)
+            mine_new = columns_of(layout.parts[self.rank], first, last)
+            sends = [sorted(set(mine_old) & set(columns_of(layout.parts[rank], first, last)))
+                     for rank in range(self.size)]
+            receives = [sorted(set(mine_new) & set(columns_of(old.parts[rank], first, last)))
+                        for rank in range(self.size)]
+            send_counts = np.asarray([rows * len(item) for item in sends], dtype=np.int64)
+            receive_counts = np.asarray([rows * len(item) for item in receives], dtype=np.int64)
+            send = np.empty(int(send_counts.sum()), dtype=np.float64)
+            position = 0
+            for item in sends:
+                for column in item:
+                    send[position : position + rows] = array[:, old.offset(self.rank, column)]
+                    position += rows
+            receive = np.empty(int(receive_counts.sum()), dtype=np.float64)
+            send_spec, receive_spec = self._specs(send, send_counts, receive, receive_counts)
+            self.comm.Alltoallv(send_spec, receive_spec)
+            if not mine_new:
+                continue
+            into = np.empty((rows, len(mine_new)), dtype=np.float64, order="F")
+            place = {column: index for index, column in enumerate(mine_new)}
+            position = 0
+            for item in receives:
+                for column in item:
+                    into[:, place[column]] = receive[position : position + rows]
+                    position += rows
+            write(mine_new, into)
 
     @_ends_the_job_on_failure
     def filter(self, basis: SharedBasis, blocks, lower, upper, reference, reset) -> SharedBasis:

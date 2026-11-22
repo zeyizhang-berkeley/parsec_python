@@ -982,6 +982,135 @@ class WeightedChannelTests(unittest.TestCase):
         self.assertIsNone(_channel_state_weights(weights))
 
 
+class PublicChannelTests(unittest.TestCase):
+    """The down channel of a result of weighted sectors lists the images of every partner of the up channel."""
+
+    def test_the_columns_follow_the_listed_levels(self) -> None:
+        from dataclasses import dataclass
+        from types import SimpleNamespace
+
+        from parsec_python.SCF.spin_polarized import SpinOrbitalBlocks, _public_channels
+
+        @dataclass(frozen=True)
+        class Orbitals:
+            values: np.ndarray
+            state_weights: np.ndarray | None = None
+
+            @property
+            def shape(self):
+                return (self.values.shape[0], int(np.sum(self.state_weights)) if self.state_weights is not None
+                        else self.values.shape[1])
+
+            def to_full_host(self, block_states: int = 8) -> np.ndarray:
+                if self.state_weights is None:
+                    return self.values.copy()
+                return np.repeat(self.values, self.state_weights, axis=1)
+
+        up = Orbitals(np.array([[1.0, 4.0], [2.0, 5.0], [3.0, 6.0]]))
+        flip = SimpleNamespace(inverse_rows=np.array([2, 0, 1]))
+        down = FlippedOrbitals(up, flip)
+        weights = np.array([1, 3])
+        levels = np.array([-1.0, -0.5])
+        filled = np.array([1.0, 1.5])
+        sectors = np.array([1, 2])
+        public = _public_channels([levels, levels], [filled, filled], [sectors, sectors], [up, down], [weights, weights])
+        self.assertEqual(public[1][3].shape, (3, 4))
+        self.assertIs(public[1][3].source, public[0][3])
+        np.testing.assert_array_equal(public[1][0], [-1.0, -0.5, -0.5, -0.5])
+        joined = SpinOrbitalBlocks(public[0][3], public[1][3]).to_full_host()
+        self.assertEqual(joined.shape, (3, 8))
+        np.testing.assert_array_equal(joined[:, 4:], joined[:, :4][flip.inverse_rows])
+        # without weights the channels are those of the loop
+        plain = _public_channels([levels, levels], [filled, filled], [sectors, sectors], [up, down], [None, None])
+        self.assertIs(plain[0][3], up)
+        self.assertIs(plain[1][3], down)
+
+
+_IRON_PAIR = """Periodic_System: .true.
+Boundary_Conditions: bulk
+begin Cell_Shape
+  5.42000000 5.42000000 5.42000000
+end Cell_Shape
+Lattice_Vector_Scale: 1.0 bohr
+Coordinate_Unit: Cartesian_Bohr
+Grid_Spacing: 0.22
+Expansion_Order: 12
+States_Num: 16
+Fermi_Temp: 1000.0
+Max_Iter: 100
+Convergence_Criterion: 1.0e-6
+Diag_Tolerance: 1.0e-6
+Mixing_Method: Anderson
+Mixing_Param: 0.2
+Correlation_Type: pbe
+Spin_Polarization: true
+Atom_Types_Num: 2
+Atom_Type: Fe_a
+Element_Symbol: Fe
+Local_Component: s
+Initial_Spin_Polarization: 0.5
+begin Atom_Coord
+  0.0 0.0 0.0
+end Atom_Coord
+Atom_Type: Fe_b
+Element_Symbol: Fe
+Local_Component: s
+Initial_Spin_Polarization: -0.5
+begin Atom_Coord
+  2.71 2.71 2.71
+end Atom_Coord
+"""
+
+
+@unittest.skipUnless(cupy_available() and native_available(), "CUDA runtime or native extension is unavailable")
+class FlippedChannelFileTests(unittest.TestCase):
+    """``parsec.dat`` of antiferromagnetic bcc Fe2 in the weighted sectors with the down channel as the image."""
+
+    @staticmethod
+    def _run(directory: Path, setting: str):
+        from contextlib import redirect_stderr, redirect_stdout
+        from io import StringIO
+
+        import parsec_python.acceleration.cli as cli_module
+        from parsec_python.Output.parsec_dat import read_parsec_dat
+
+        directory.mkdir()
+        (directory / "parsec.in").write_text(_IRON_PAIR)
+        for label in ("Fe_a", "Fe_b"):
+            shutil.copyfile(DATA / "spin_pbe_Fe_POTRE.DAT", directory / f"{label}_POTRE.DAT")
+        errors = StringIO()
+        with mock.patch.dict(os.environ, {"PARSEC_SPIN_FLIP_SYMMETRY": setting}), redirect_stdout(StringIO()), \
+                redirect_stderr(errors):
+            status = cli_module.main([str(directory / "parsec.in"), "--quiet", "--backend", "cupy"])
+        log = (directory / "parsec.out").read_text(encoding="utf-8")
+        if status != 0:
+            raise AssertionError(f"{setting}: {errors.getvalue()}\n{log[-3000:]}")
+        return read_parsec_dat(directory / "parsec.dat"), log
+
+    def test_the_file_holds_the_images_of_every_partner(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as name:
+            flipped, log = self._run(Path(name) / "auto", "auto")
+            solved, _ = self._run(Path(name) / "off", "off")
+        self.assertIn("weights", log)
+        volume = float(np.prod(flipped.step))
+        for spin in range(2):
+            levels = flipped.levels[spin][0]
+            block = flipped.wavefunctions[spin][0]
+            count = int(np.flatnonzero(levels.occupations > 0.0)[-1]) + 1
+            self.assertEqual(block.vectors.shape[1], count)
+            np.testing.assert_array_equal(block.state_numbers, np.arange(1, count + 1))
+            # orthonormal columns, whose occupations give the density of the channel in the file
+            np.testing.assert_allclose(block.vectors.T @ block.vectors, np.eye(count), atol=2e-6)
+            density = np.sum(levels.occupations[:count] * block.vectors**2, axis=1) / volume
+            np.testing.assert_allclose(density, flipped.densities[spin], atol=2e-6)
+            # the levels and densities of both channels solved
+            np.testing.assert_allclose(levels.energies, solved.levels[spin][0].energies, atol=2e-6)
+            np.testing.assert_allclose(flipped.densities[spin], solved.densities[spin], atol=2e-5)
+        # the down orbitals are the images of the up ones: the same levels, the density moved to the other atom
+        np.testing.assert_array_equal(flipped.levels[0][0].energies, flipped.levels[1][0].energies)
+        self.assertGreater(float(np.max(np.abs(flipped.densities[0] - flipped.densities[1]))), 1.0e-3)
+
+
 @unittest.skipUnless(cupy_available() and native_available(), "CUDA runtime or native extension is unavailable")
 class SectorRunTests(unittest.TestCase):
     """Complete CuPy runs in the symmetry sectors: one channel solved against both, and against the full grid."""

@@ -329,6 +329,8 @@ def compute_periodic_forces(
         raise ValueError(
             "a periodic cell has no symmetrized forces: its structure is not reduced by space-group operations"
         )
+    from parsec_python.Forces.periodic import core_force_xc
+
     from .periodic_local import (
         fast_periodic_local_forces,
         orbit_periodic_local_forces,
@@ -352,7 +354,8 @@ def compute_periodic_forces(
         system.input.pseudopotentials,
         lattice,
         result.density,
-        result.xc_potential,
+        # the potential of the core term with the average potshift removed (PARSEC_CORE_FORCE_XC)
+        core_force_xc(system, result, result.xc_potential),
     )
     # In sectors the density and the exchange-correlation potential are averaged over G (PARSEC_PERIODIC_SECTOR_
     # LOCAL_FORCES=orbits): the local terms of one atom per orbit of G, turned onto the others.

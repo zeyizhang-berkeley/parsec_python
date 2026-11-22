@@ -851,7 +851,9 @@ Outputs (written next to `parsec.in`):
 * `bands.dat` and `bands_plot.dat` in Fortran's formats (eigenvalues in Ry / eV, not shifted by
   the Fermi level; `bands.dat` carries the SCF Fermi level),
 * `parsec_python_bands.npz` with the k-points, segment names, eigenvalues, residuals and (for
-  spinor Hamiltonians) `<sigma>` of every state,
+  spinor Hamiltonians) `<sigma>` of every state; the key `residual_scope` (`reported levels`), also named on the
+  residual line of `parsec.out`, says that the k-points solved in sectors left the margin states of their sectors
+  out of the test (`PARSEC_BAND_REPORTED_RESIDUALS`),
 * `bands_spin.dat` for spinor bands (spin-orbit, non-collinear): for every band a gnuplot block of
   `k index, path length [1/bohr], E [eV], <S_x>, <S_y>, <S_z>, level size`, with the spin in units of
   hbar/2 (the Pauli expectation, between -1 and 1) in the axes of the cell. Only the *sum* of the spin over a
@@ -1114,6 +1116,27 @@ level, the density and the band energy, and the density is that of the listed po
 moving atoms with such a list, and the average with spinors or a hybrid, keep the Fortran-derived routines (the forces
 of a wedge are completed over the space group there). `Symmetrize_Charge_Density: .true.` of any other input of these
 routines selects the Fortran-derived ones as before.
+
+PARSEC 1.5 runs a `Kpoint_List` at the written vectors. On an oblique cell the finite-difference Bloch operator is not
+invariant under `k -> k + G`, and far from the first Brillouin zone it can have levels below zero that no continuum
+state has (primitive bcc Na, 6x6x6 written in [0, 1), 0.6 bohr: -8.448 Ry against -0.472 Ry). Since 21 November 2026
+(`PARSEC_KPOINT_LIST_FOLD=auto`) the default routines run such a list at the shortest images of its points, a point of
+the zone boundary at all of them with equal shares of its weight, so a whole mesh written out gives the result of its
+`Monkhorst_Pack_Grid` for any choice of images (within 1.1e-9 Ry on seven oblique cells, at 1.03 to 1.73 times the time
+of the same list unshared). Zone-boundary points are recognized up to the precision of the input, but the rounding of
+the written coordinates stays in the result: a mesh written with 8, 6 and 4 decimals is about 3e-9, 3e-7 and 3e-5 Ry
+from the mesh on Au. The Fortran-derived routines keep the written vectors unless one of them has a free level below
+zero: where they were not requested the list is then treated in the same way, with a note, and under
+`Use_Fortran_Routines: .true.` it keeps its vectors with a warning that names the point. `literal` keeps the written
+vectors everywhere, as before; `shared` takes the shortest images on every route.
+
+A Monkhorst-Pack mesh with such a point on Fortran-derived routines that were not requested (a grid of at most
+`Expansion_Order` points along an axis, for instance) runs at the shortest representatives of its wedge
+(`PARSEC_KPOINT_MESH_GUARD=auto`; `off` keeps its points): primitive bcc Na, 6x6x6 at 0.6 bohr, -0.61897 -> -0.47216 Ry
+against -0.47199 Ry at 0.3 bohr. Under `Use_Fortran_Routines: .true.` the mesh keeps its points with a warning. Band paths
+and `nscf_kpoints` keep their points and get the same warning. A point inside the first zone can have such a level too
+on a very coarse grid (a primitive bcc cell of 5.5 bohr with 6 points per axis): no image removes it, and the run goes on
+with a warning that the grid is too coarse.
 
 The space group is found by a neighbour-tree search (`Grid.space_group.fast_crystal_operations`, the operations
 and translations of Fortran's `atftmt`; 0.8 s and a few MB for 4,096 atoms, where the statement-by-statement port

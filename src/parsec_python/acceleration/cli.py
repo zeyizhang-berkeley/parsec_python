@@ -1148,13 +1148,14 @@ def _gamma_spin_on_device(
     """
 
     from .Parallel import mpi
-    from .SCF.gamma_features import gamma_feature_settings
+    from .SCF.gamma_features import gamma_feature_settings, ldau_spin_full_grid_setting
     from .SCF.gamma_spin import gamma_spin_on_sector_route, gamma_spin_sector_setting, spin_sector_forces_setting
 
     gamma_spin_sector_setting()
     spin_sector_forces_setting()
     # (TS, a meta-GGA and libxc take this route under their switches: SCF/gamma_features.py)
     gamma_feature_settings()
+    ldau_spin_full_grid_setting()
 
     def backend_is_cupy() -> bool:
         try:
@@ -1169,6 +1170,7 @@ def _gamma_spin_on_device(
         backend_is_cupy=backend_is_cupy,
         supercell=supercell,
         symmetry_off=_spin_symmetry_off(arguments, translation),
+        symmetry_on=getattr(arguments, "symmetry", None) == "on",
         notes=notes,
     )
 
@@ -1816,6 +1818,9 @@ def _run(
         # PARSEC_MOVE_FLAG_SUBGROUP and PARSEC_SYMMETRIZED_DENSITY_SECTORS, read in every run so that a value they
         # do not know is refused.
         move_flag_subgroup_setting()
+        from parsec_python.Relaxation.domove import bfgs_first_step_setting
+
+        bfgs_first_step_setting()  # PARSEC_BFGS_FIRST_STEP, refused here too
         from .SCF.density_symmetry import symmetrized_density_sectors_setting
 
         symmetrized_density_sectors_setting()

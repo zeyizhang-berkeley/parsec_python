@@ -26,7 +26,9 @@ package (checked against finite differences of that energy at fixed orbitals in 
 
 The radial functions of the spin-orbit projectors are interpolated linearly in the Hamiltonian
 (:func:`parsec_python.Eigensolvers.perturbative_soc.build_spin_orbit_projectors`), so the gradient takes the slope of that
-interpolant and not a separate derivative table: the force is the derivative of the energy the SCF loop minimized.
+interpolant and not a separate derivative table: the force is the derivative of the energy the SCF loop minimized.  Next
+to an atom the gradient is taken at a fixed distance, where the table follows ``c r^l``
+(:func:`build_spin_orbit_projector_gradients`).
 """
 
 from __future__ import annotations
@@ -154,10 +156,13 @@ def build_spin_orbit_projector_gradients(
     """Gradients of the projectors that :func:`build_spin_orbit_projectors` made, atom by atom.
 
     ``projectors`` are those projectors (the images, support radius, Bloch phase and harmonic columns are rebuilt from
-    the same arguments, and the rows must come out equal).  Within ``_PROJECTOR_GRADIENT_FLOOR`` of an atom the
-    gradient is evaluated at that distance, as for the scalar projectors.
+    the same arguments, and the rows must come out equal).  Next to an atom the gradient is evaluated at a fixed
+    distance, as for the scalar projectors: 3e-3 bohr under ``PARSEC_PROJECTOR_CENTER=auto``
+    (:func:`parsec_python.V_ion.ionic_potential.projector_gradient_distance`), ``_PROJECTOR_GRADIENT_FLOOR`` (1e-3
+    bohr) under ``tip`` and ``off``.
     """
 
+    center_setting = _ionic.projector_center_setting()
     sqrt_dv = np.sqrt(grid.volume_element)
     result: list[AtomSpinOrbitGradients] = []
     for atom_projectors in projectors:
@@ -192,7 +197,11 @@ def build_spin_orbit_projector_gradients(
                 if k_point is None
                 else np.exp(-1j * ((grid.coordinates[support] - translation) @ np.asarray(k_point, dtype=float)))
             )
-            clamped = np.maximum(distance[support], max(potential.radii[0], _PROJECTOR_GRADIENT_FLOOR))
+            clamped = (
+                _ionic.projector_gradient_distance(distance[support], potential)
+                if _ionic.projector_gradient_rule(potential, center_setting) == "floor"
+                else np.maximum(distance[support], max(potential.radii[0], _PROJECTOR_GRADIENT_FLOOR))
+            )
             inverse = 1.0 / clamped
             unit = relative[support] * inverse[:, None]
             local_rows = np.searchsorted(rows_union, support_rows)

@@ -76,6 +76,37 @@ class SpinorEigvalState:
     # the gauge of the vectors where it is not the u gauge of the Bloch factor: "psi" at a time-reversal invariant
     # point solved in real arithmetic (..SCF.kpoint_real.PsiGauge); set by the k-point solvers
     gauge: str | None = None
+    # where the CHEBFF cycles of a first solve stand, for a solve that continues them (ReportedFirstSolve)
+    cursor: "FirstSolveCursor | None" = None
+
+
+@dataclass(frozen=True)
+class FirstSolveCursor:
+    """Where the CHEBFF cycles of a first solve stand: the filter bounds after the last cycle and the cycles made, so
+    that more cycles go on exactly as the same loop would."""
+
+    lower_bound: float
+    upper_bound: float
+    smallest_ritz: float
+    cycles: int
+
+
+@dataclass(frozen=True)
+class ReportedFirstSolve:
+    """A converged first solve whose test covers only the pairs a caller can report (the band k-points in sectors,
+    ``PARSEC_BAND_REPORTED_RESIDUALS``).
+
+    ``count=None``: the ``filter_cycles`` cycles alone, the residuals of all the requested pairs measured after them
+    and the :class:`FirstSolveCursor` kept in the state.  A number: the cycles continue from the cursor of ``state``
+    until the lowest ``count`` pairs and every pair with ``e - r <= cut`` pass the relative test, or the extra cycles
+    are spent.  That condition is a heuristic for the pairs that may still belong below ``cut``: a Hermitian operator
+    has an eigenvalue within the residual ``r`` of a Ritz value, which does not prove that no level is missing from
+    the subspace.  The default ``cut`` holds no pair: the levels of the first cycles lie well above their limits, so a
+    cut taken from them would hold margin pairs that are never reported.
+    """
+
+    count: int | None = None
+    cut: float = float("-inf")
 
 
 # Name kept for the earlier state type.
@@ -567,36 +598,49 @@ def _first_solve(
     *,
     max_cycles: int | None = None,
     converged: Callable[[Any, np.ndarray], bool] | None = None,
+    resume: "list | None" = None,
+    cursor_out: "list[FirstSolveCursor] | None" = None,
 ):
     """CHEBFF from a random start: ``filter_cycles`` cycles, plus more (up to ``max_cycles`` in all)
-    while ``converged(vectors, eigenvalues)`` says the pairs are not yet converged."""
-    dimension = int(operator.shape[0])
-    rows = _local_rows(operator, dimension)
-    context = _mpi(operator)
-    # each rank draws its own rows: the start of a distributed basis depends on the number of ranks
-    rng = xp.random.default_rng(settings.random_seed + (0 if context is None else 7919 * context.rank))
-    real = _real_arithmetic(operator)
-    vectors = xp.empty((rows, working), dtype=_basis_dtype(xp, operator))
-    for c0 in range(0, working, START_COLUMNS):
-        c1 = min(c0 + START_COLUMNS, working)
-        if real:
-            vectors[:, c0:c1] = rng.uniform(-1.0, 1.0, (rows, c1 - c0))
-            continue
-        vectors[:, c0:c1] = rng.uniform(-1.0, 1.0, (rows, c1 - c0)) + 1j * rng.uniform(
-            -1.0, 1.0, (rows, c1 - c0)
-        )
-    bound_rng = np.random.default_rng(settings.random_seed + 1)
-    bound_rule, bound_steps = bound_request(settings)
-    with stats.timed("lanczos_seconds"):
-        upper_bound, smallest_ritz = _lanczos_upper_bound(
-            xp, operator, dimension, bound_steps, bound_rng, rule=bound_rule
-        )
-    # chebff.f90z: lowb = (lowb0 + (lowb0 + upperb)) / 3
-    lower_bound = (2.0 * smallest_ritz + upper_bound) / 3.0
+    while ``converged(vectors, eigenvalues)`` says the pairs are not yet converged.  ``resume``: the list
+    ``[vectors, cursor]`` of earlier cycles, which go on from there as the same loop would; it is emptied, so that
+    no reference keeps the starting basis on the device during the first filter.
+    ``cursor_out`` receives the :class:`FirstSolveCursor` after the last cycle."""
+    if resume is None:
+        dimension = int(operator.shape[0])
+        rows = _local_rows(operator, dimension)
+        context = _mpi(operator)
+        # each rank draws its own rows: the start of a distributed basis depends on the number of ranks
+        rng = xp.random.default_rng(settings.random_seed + (0 if context is None else 7919 * context.rank))
+        real = _real_arithmetic(operator)
+        vectors = xp.empty((rows, working), dtype=_basis_dtype(xp, operator))
+        for c0 in range(0, working, START_COLUMNS):
+            c1 = min(c0 + START_COLUMNS, working)
+            if real:
+                vectors[:, c0:c1] = rng.uniform(-1.0, 1.0, (rows, c1 - c0))
+                continue
+            vectors[:, c0:c1] = rng.uniform(-1.0, 1.0, (rows, c1 - c0)) + 1j * rng.uniform(
+                -1.0, 1.0, (rows, c1 - c0)
+            )
+        bound_rng = np.random.default_rng(settings.random_seed + 1)
+        bound_rule, bound_steps = bound_request(settings)
+        with stats.timed("lanczos_seconds"):
+            upper_bound, smallest_ritz = _lanczos_upper_bound(
+                xp, operator, dimension, bound_steps, bound_rng, rule=bound_rule
+            )
+        # chebff.f90z: lowb = (lowb0 + (lowb0 + upperb)) / 3
+        lower_bound = (2.0 * smallest_ritz + upper_bound) / 3.0
+        first_cycle = 0
+    else:
+        vectors, cursor = resume
+        resume.clear()
+        lower_bound, upper_bound, smallest_ritz = cursor.lower_bound, cursor.upper_bound, cursor.smallest_ritz
+        first_cycle = int(cursor.cycles)
 
     eigenvalues = np.empty(working, dtype=float)
     total_cycles = settings.filter_cycles if converged is None else max(settings.filter_cycles, int(max_cycles or 0))
-    for cycle in range(total_cycles):
+    made = first_cycle
+    for cycle in range(first_cycle, total_cycles):
         half_span = 0.5 * (upper_bound - lower_bound)
         if half_span <= 0.0:
             raise ValueError("upper_bound must be greater than lower_bound")
@@ -643,12 +687,15 @@ def _first_solve(
                 largest_ritz + 0.001 * (upper_bound - smallest_ritz),
                 largest_ritz + 0.05 * abs(largest_ritz),
             )
+        made = cycle + 1
         if converged is not None and cycle + 1 >= settings.filter_cycles:
             if converged(vectors, eigenvalues):
-                stats.add("extra_cycles", cycle + 1 - settings.filter_cycles)
+                stats.add("extra_cycles", cycle + 1 - max(settings.filter_cycles, first_cycle))
                 break
             if cycle + 1 == total_cycles:
-                stats.add("extra_cycles", cycle + 1 - settings.filter_cycles)
+                stats.add("extra_cycles", cycle + 1 - max(settings.filter_cycles, first_cycle))
+    if cursor_out is not None:
+        cursor_out.append(FirstSolveCursor(float(lower_bound), float(upper_bound), float(smallest_ritz), made))
     return vectors, eigenvalues
 
 
@@ -766,6 +813,7 @@ def solve_spinor_eigval(
     tolerance: float | None = None,
     max_extra_cycles: int | None = None,
     residual_period: int | None = None,
+    reported: ReportedFirstSolve | None = None,
 ) -> SpinorEigvalResult:
     """One eigensolve of the SCF loop (``solve_eigval``'s policy on the device).
 
@@ -787,6 +835,9 @@ def solve_spinor_eigval(
     requested Ritz pairs after every Nth solve, one more application of the operator to the
     requested block (about 1/16 of a solve at filter degree 15); 0 measures them only where the
     first solve's convergence test needs them.
+
+    ``reported`` (with ``converge_first``): a first solve in the two parts of :class:`ReportedFirstSolve`, whose
+    test covers only the pairs the caller can report; ``None``: the test of all the requested pairs.
     """
     if xp is None:
         xp, _ = require_cupy()
@@ -807,7 +858,18 @@ def solve_spinor_eigval(
         and state.operator_dimension == dimension
         and state.working_states == working
     )
-    if not reusable:
+    resume = None
+    cursor_out: list[FirstSolveCursor] | None = None
+    if reported is not None:
+        if not converge_first:
+            raise ValueError("a first solve with a test of the reported pairs needs converge_first")
+        cursor_out = []
+        if reported.count is not None:
+            if not reusable or state.cursor is None:
+                raise ValueError("more CHEBFF cycles need the state of the cycles before them")
+            resume = [state.vectors, state.cursor]
+            state.vectors = None  # consumed
+    if not reusable or reported is not None:
         residuals = None
         converged = None
         extra = 0
@@ -826,7 +888,14 @@ def solve_spinor_eigval(
                     )
                 seen.append(norms)
                 scale = max(float(np.max(np.abs(values[:requested_states]))), 1.0e-8)
-                return bool(norms.max() <= relative * scale)
+                if reported is None:
+                    return bool(norms.max() <= relative * scale)
+                if reported.count is None:
+                    return False  # the fixed cycles: the caller tests them against the levels of every sector
+                within = np.asarray(values[:requested_states], dtype=float) - norms <= reported.cut
+                within[: int(reported.count)] = True
+                tested = norms[within]
+                return tested.size == 0 or bool(tested.max() <= relative * scale)
 
         vectors, eigenvalues = _first_solve(
             xp,
@@ -835,8 +904,10 @@ def solve_spinor_eigval(
             settings.chebff,
             chunk,
             stats,
-            max_cycles=settings.chebff.filter_cycles + extra,
+            max_cycles=settings.chebff.filter_cycles + (0 if reported is not None and reported.count is None else extra),
             converged=converged,
+            resume=resume,
+            cursor_out=cursor_out,
         )
         if converge_first:
             residuals = seen[-1] if seen else None
@@ -848,6 +919,7 @@ def solve_spinor_eigval(
             first_filter=True,
             filter_lower_bound=None,
             filters_completed=0,
+            cursor=cursor_out[-1] if cursor_out else None,
         )
         stats.add("first_solves", 1)
         if residuals is None and period > 0:

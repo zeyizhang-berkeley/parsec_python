@@ -100,8 +100,9 @@ def _make_solver(context):
     solver._configure_large_problem_allocator = lambda counts: None
     solver._update_local_potential = lambda potential: None
     solver.restore_memory_allocator = lambda: None
-    def run(this, representation, count, settings, *, reset, spectral_bound=None):
+    def run(this, representation, count, settings, *, reset, grow=False, spectral_bound=None):
         local = this._solvers[representation]
+        local.grown_from_saved = getattr(local, 'grown_from_saved', 0) + int(grow)
         if reset:
             local.reset()
         return local.solve(count, settings)
@@ -935,10 +936,14 @@ class MPISCFTests(unittest.TestCase):
                 return second.eigenvalues, second_density.values, solver
             results = self.run_protocol(size, root_action)
             all_results.append(results[0][:2])
+            grown = 0
             for solver in [results[0][2], *results[1:]]:
                 for local in solver._solvers:
                     if local is not None:
                         self.assertEqual(local.calls[-1][1], 12)
+                        grown += getattr(local, 'grown_from_saved', 0)
+            # The growth from the saved vectors reaches the rank of the sector.
+            self.assertGreaterEqual(grown, 1)
         for values, density in all_results[1:]:
             np.testing.assert_array_equal(values, all_results[0][0])
             np.testing.assert_array_equal(density, all_results[0][1])

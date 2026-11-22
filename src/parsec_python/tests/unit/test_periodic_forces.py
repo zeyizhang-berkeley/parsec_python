@@ -248,8 +248,9 @@ class ComponentDerivativeTests(unittest.TestCase):
             self._round_off_rule_off()
 
     def test_an_atom_within_the_first_knot_of_a_grid_point(self) -> None:
-        # PARSEC_PROJECTOR_CENTER=auto (default since 2026-11-21): nonloc.F90's rnorm = max(|d|, rs(2)), also on the
-        # atom itself; the gradient of a round-off distance and of an atom on the point is that of the clamp.
+        # PARSEC_PROJECTOR_CENTER=tip: nonloc.F90's rnorm = max(|d|, rs(2)), also on the atom itself; the gradient of a
+        # round-off distance and of an atom on the point is that of the clamp.  (auto takes the gradient next to an
+        # atom at 3e-3 bohr: tests/unit/test_projector_center_rule.py.)
         import os
         from unittest import mock
 
@@ -259,7 +260,7 @@ class ComponentDerivativeTests(unittest.TestCase):
         first_knot = self.si_potentials["Si"].radii[0]
 
         def gradients(offset):
-            with mock.patch.dict(os.environ, {"PARSEC_PROJECTOR_CENTER": "auto"}):
+            with mock.patch.dict(os.environ, {"PARSEC_PROJECTOR_CENTER": "tip"}):
                 return build_periodic_projector_gradients(
                     grid, [Atom("Si", node + offset)], self.si_potentials, self.si, cube.lattice_vectors
                 )
@@ -287,7 +288,7 @@ class ComponentDerivativeTests(unittest.TestCase):
         # just below and just above the knot: the derivative of the projectors themselves (the projector of a flat
         # table has a kink at the knot: w(rs(2)) |d|/rs(2) inside, w(|d|) outside, so the gradient steps there)
         def projectors(offset):
-            with mock.patch.dict(os.environ, {"PARSEC_PROJECTOR_CENTER": "auto"}):
+            with mock.patch.dict(os.environ, {"PARSEC_PROJECTOR_CENTER": "tip"}):
                 return build_nonlocal_projectors(
                     grid, [Atom("Si", node + offset)], self.si_potentials, self.si, cube.lattice_vectors
                 ).projectors.toarray()
@@ -435,6 +436,66 @@ class SelfConsistentForceTests(unittest.TestCase):
         forces = self.check(_hydrogen_cell(5.0 * np.eye(3), _H2))
         self.assertTrue(np.any(forces.local.core_correction != 0.0))
         self.assertTrue(np.any(forces.nonlocal_pseudopotential != 0.0))
+
+    def test_gamma_zero_average_xc_core_term(self) -> None:
+        # PARSEC's potshift (the default of a 3-D cell): the core term takes the potential with its average added back
+        # (PARSEC_CORE_FORCE_XC=auto), the derivative of the energy; shifted, as before, misses c dQ_c/dR
+        import os
+        from dataclasses import replace
+        from unittest import mock
+
+        problem = _hydrogen_cell(5.0 * np.eye(3), _H2)
+        problem = replace(problem, scf=replace(problem.scf, zero_average_xc_potential=True))
+        forces = self.check(problem)
+        self.assertTrue(np.any(forces.local.core_correction != 0.0))
+        backend = periodic_backend(None)
+        system = prepare_periodic_single_point(problem)
+        result = backend.run_scf(system)
+        from parsec_python.Forces.periodic import core_force_xc_average
+
+        average = core_force_xc_average(system, result)
+        self.assertNotEqual(average, 0.0)
+        with mock.patch.dict(os.environ, {"PARSEC_CORE_FORCE_XC": "shifted"}):
+            self.assertEqual(core_force_xc_average(system, result), 0.0)
+            shifted = backend.compute_forces(system, result, symmetrize=False)
+        auto = backend.compute_forces(system, result, symmetrize=False)
+        # only the core term changes, by the core term of the constant potential `average`
+        np.testing.assert_array_equal(auto.local.ionic, shifted.local.ionic)
+        np.testing.assert_array_equal(auto.nonlocal_pseudopotential, shifted.nonlocal_pseudopotential)
+        self.assertGreater(float(np.max(np.abs(auto.local.core_correction - shifted.local.core_correction))), 0.0)
+        with mock.patch.dict(os.environ, {"PARSEC_CORE_FORCE_XC": "bad"}):
+            with self.assertRaisesRegex(ValueError, "PARSEC_CORE_FORCE_XC"):
+                core_force_xc_average(system, result)
+
+    def test_core_term_average_skips_cells_without_a_core_charge(self) -> None:
+        # the readers give a table without a core charge an array of zeros: no second evaluation of the functional
+        from types import SimpleNamespace
+        from unittest import mock
+
+        from parsec_python.Forces.periodic import core_force_xc_average
+
+        scf = SimpleNamespace(zero_average_xc_potential=True, is_meta_gga=False, spin_polarized=False)
+
+        def stub(core):
+            evaluate = mock.Mock(return_value=SimpleNamespace(potential=np.full(4, -0.5)))
+            system = SimpleNamespace(
+                reference=None,
+                evaluate_xc=evaluate,
+                input=SimpleNamespace(scf=scf, grid=SimpleNamespace(periodicity=3)),
+                pseudopotentials={"C": SimpleNamespace(core_density=core)},
+            )
+            return system, evaluate
+
+        result = SimpleNamespace(density=np.ones(4))
+        system, evaluate = stub(np.zeros(6))
+        self.assertEqual(core_force_xc_average(system, result), 0.0)
+        evaluate.assert_not_called()
+        system, evaluate = stub(None)
+        self.assertEqual(core_force_xc_average(system, result), 0.0)
+        evaluate.assert_not_called()
+        system, evaluate = stub(np.array([0.0, 0.3, 0.1]))
+        self.assertEqual(core_force_xc_average(system, result), -0.5)
+        evaluate.assert_called_once()
 
     def test_gamma_general_cell(self) -> None:
         lattice = [[5.0, 0.0, 0.0], [1.5, 5.0, 0.0], [0.0, 0.0, 5.0]]

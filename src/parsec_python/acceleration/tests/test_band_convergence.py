@@ -52,7 +52,7 @@ def _settings(solver: str) -> dict:
     }
 
 
-def _bands(directory: Path, solver: str, convergence: str, sectors: str):
+def _bands(directory: Path, solver: str, convergence: str, sectors: str, reported: str = "auto"):
     import parsec_python.acceleration.cli as cli_module
     from parsec_python.acceleration.SCF import kpoint_sectors
 
@@ -75,6 +75,7 @@ def _bands(directory: Path, solver: str, convergence: str, sectors: str):
     variables = {
         "PARSEC_BAND_CONVERGENCE": convergence,
         "PARSEC_BAND_KPOINT_SECTORS": sectors,
+        "PARSEC_BAND_REPORTED_RESIDUALS": reported,
         "PARSEC_PERIODIC_SECTOR_BANDS": "auto",
     }
     with mock.patch.dict(os.environ, variables), mock.patch.object(kpoint_sectors, "_MINIMUM_ENTRIES", 0), \
@@ -110,13 +111,76 @@ class ConvergedBandTests(unittest.TestCase):
                     print(f"\n sectors {sectors}: residual auto {worst:.2e} off {loose:.2e} Ry, "
                           f"auto - chebdav {difference:.2e} Ry, off - chebdav "
                           f"{float(np.abs(np.asarray(fixed['eigenvalues_ry']) - expected).max()):.2e} Ry")
-                    # (A100: residuals 3.1e-7 Ry in the sectors and 1.0e-7 whole after the extra cycles to the
-                    # input's Diag_Tolerance 1e-7, against 1.2 Ry of one cycle, the bands within 1.2e-10 Ry of
+                    # (A100: residuals of the reported levels 2.0e-9 Ry in the sectors and 1.0e-7 whole after the
+                    # extra cycles to the input's Diag_Tolerance 1e-7, against 1.2 Ry of one cycle, the bands within
+                    # 1.2e-10 Ry of
                     # CHEBDAV's against 0.49 and 1.3 Ry; with CHEBDAV's default 1e-4 instead of Diag_Tolerance the
                     # residuals were 3.3e-4 and 1.0e-4 Ry)
                     self.assertLess(worst, 1.0e-5)
                     self.assertGreater(loose, 100.0 * worst)
                     np.testing.assert_allclose(values, expected, rtol=0, atol=1.0e-6)
+
+    def test_the_test_of_the_reported_levels_keeps_the_bands(self) -> None:
+        # PARSEC_BAND_REPORTED_RESIDUALS: the margin states of the sectors are no longer converged, the reported levels
+        # are those of the test of every state.  The cubic cell splits every k-point on its translations; the last two
+        # k-points of the path (on its general line) are kept whole, as k-points without a little group are, so that
+        # whole and split k-points share the chunks of the devices.
+        from parsec_python.acceleration.SCF import kpoint_sectors
+
+        original = kpoint_sectors.plan_sectors
+
+        def plans(job, notes=None):
+            found = original(job, notes)
+            if found is not None and len(found) > 2:
+                found[-2:] = [None, None]
+            return found
+
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as name, mock.patch.object(
+            kpoint_sectors, "plan_sectors", plans
+        ):
+            root = Path(name)
+            status, every, errors = _bands(root / "off", "chebff", "auto", "auto", "off")
+            self.assertEqual(status, 0, errors[-4000:])
+            status, reported, errors = _bands(root / "auto", "chebff", "auto", "auto", "auto")
+            self.assertEqual(status, 0, errors[-4000:])
+            difference = float(np.abs(np.asarray(reported["eigenvalues_ry"]) - np.asarray(every["eigenvalues_ry"])).max())
+            worst = float(np.nanmax(reported["residual_norms"]))
+            print(f"\n reported levels - every state's test {difference:.2e} Ry, residual {worst:.2e} Ry")
+            self.assertLess(worst, 1.0e-5)
+            np.testing.assert_allclose(reported["eigenvalues_ry"], every["eigenvalues_ry"], rtol=0, atol=1.0e-8)
+            self.assertEqual(str(reported["residual_scope"]), "reported levels")
+            self.assertNotIn("residual_scope", every)
+            # the whole k-points: their first solve and test are those of before, whatever k-points share their chunk
+            # (a test at 1 % of Diag_Tolerance would leave residuals far smaller)
+            np.testing.assert_allclose(
+                np.asarray(reported["residual_norms"])[:, -2:], np.asarray(every["residual_norms"])[:, -2:], rtol=1.0e-6
+            )
+            np.testing.assert_allclose(
+                np.asarray(reported["eigenvalues_ry"])[:, -2:], np.asarray(every["eigenvalues_ry"])[:, -2:],
+                rtol=0, atol=1.0e-12,
+            )
+
+    def test_a_short_device_keeps_the_subspaces_on_the_host_or_the_former_test(self) -> None:
+        from parsec_python.acceleration.SCF import kpoint_parallel
+
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as name:
+            root = Path(name)
+            status, reference, errors = _bands(root / "plain", "chebff", "auto", "auto", "auto")
+            self.assertEqual(status, 0, errors[-4000:])
+            # the device is short and the host has room: the parts run with the subspaces on the host
+            with mock.patch.object(kpoint_parallel, "_AUTO_FRACTION", 1.0e-12):
+                status, spilled, errors = _bands(root / "spilled", "chebff", "auto", "auto", "auto")
+            self.assertEqual(status, 0, errors[-4000:])
+            self.assertEqual(str(spilled["residual_scope"]), "reported levels")
+            np.testing.assert_allclose(spilled["eigenvalues_ry"], reference["eigenvalues_ry"], rtol=0, atol=1.0e-12)
+            # neither has room: the former test of every state
+            with mock.patch.object(kpoint_parallel, "_AUTO_FRACTION", 1.0e-12), mock.patch.object(
+                kpoint_parallel, "_available_host_bytes", return_value=1
+            ):
+                status, former, errors = _bands(root / "former", "chebff", "auto", "auto", "auto")
+            self.assertEqual(status, 0, errors[-4000:])
+            self.assertNotIn("residual_scope", former)
+            np.testing.assert_allclose(former["eigenvalues_ry"], reference["eigenvalues_ry"], rtol=0, atol=1.0e-8)
 
 
 if __name__ == "__main__":

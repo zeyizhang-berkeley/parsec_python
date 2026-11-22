@@ -867,41 +867,95 @@ the clamp of the nonlocal forces (``Forces.periodic.ROUND_OFF_DISTANCE``), under
 #: The switch of the centre radius of the projector harmonics and of their gradients (:func:`projector_center_setting`).
 PROJECTOR_CENTER_ENV = "PARSEC_PROJECTOR_CENTER"
 
+#: Bohr: under ``PARSEC_PROJECTOR_CENTER=auto`` the gradient of a projector at a grid point closer to its atom than this
+#: is evaluated at this distance (:func:`projector_gradient_distance`).  Every projector table of the package follows
+#: its ``c r^l`` from here on.  Next to the origin the POTRE tables are flat out to at most 2.7e-4 bohr, and the first
+#: eight samples of the FHI tables, out to 2.5e-3 bohr (Li), lie 25 to 48 % above ``c r`` for a p channel.
+PROJECTOR_GRADIENT_FLOOR = 3.0e-3
+
 
 def projector_center_setting() -> str:
-    """``PARSEC_PROJECTOR_CENTER``: the radius below which the harmonics of a projector divide by a fixed radius.
+    """``PARSEC_PROJECTOR_CENTER``: the projector harmonics within the first radial sample ``rs(2)`` and the gradients
+    of the projectors next to an atom.
 
-    ``auto`` (default since 2026-11-21): the first radial sample ``rs(2)``, the rule of ``nonloc.F90`` (``rnorm =
-    max(|d|, rrmin)`` in ``ylm_real``, ``ylm_cplx`` and the radial interpolation, for the projector values and their
-    gradients alike).  Inside the first sample a channel ``l`` is then ``w(rs(2)) Y_l(d/rs(2))``, which goes to its
-    zero limit like ``|d|^l`` (``w ~ r^l`` near the atom), and its gradient is ``w(rs(2))/rs(2)``, the slope of a p
-    projector.  ``off``: ``min(rs(2), 1e-6 bohr)`` (:data:`PROJECTOR_CENTER_ROUND_OFF`), as before: between 1e-6
-    bohr and the first sample the harmonics took the true direction, so the projector had the full ``w(rs(2))`` in
-    the direction of the atom and its gradient grew as ``w(rs(2))/|d|`` up to ``w(rs(2))/1e-6``; an atom within
-    round-off of a grid point got a nonlocal force of 0.1 Ry/bohr (carbon POTRE table, first sample 1.3e-5 bohr) to
-    0.75 Ry/bohr (carbon FHI table, 1.04e-3 bohr) from that one point.  The projectors that used the true direction
-    at every distance (the double grid, the spin-orbit projectors) take ``rs(2)`` under ``auto`` too.
+    ``auto`` (default): the projector *values* take the rule of ``nonloc.F90`` (``rnorm = max(|d|, rrmin)`` in
+    ``ylm_real``, ``ylm_cplx`` and the radial interpolation): inside the first sample a channel ``l`` is
+    ``w(rs(2)) Y_l(d/rs(2))``, which goes to its zero limit like ``|d|^l``.  The *gradients* deliberately depart from
+    PARSEC 1.5 there: within :data:`PROJECTOR_GRADIENT_FLOOR` of the atom they are evaluated at that distance
+    (:func:`projector_gradient_distance`), which is the gradient of the smooth ``c r^l`` the table follows.  The tables
+    are not ``c r^l`` next to the origin (Au ``l = 1``: ``w`` about -6.7e-6 out to 7e-6 bohr, then -0.9045 ``r``; the
+    first eight samples of an FHI table lie 25 to 48 % above ``c r``), so the value ``w(rs(2))/rs(2)`` that
+    ``nonloc.F90`` forms at the point is about 19 times the slope of a p projector on a POTRE table (350 times for d)
+    and 1.48 times on an FHI table: the exact derivative for displacements within ``rs(2)`` (4e-7 to 2e-3 bohr), but
+    not the slope of the energy over the steps a relaxation takes.
+
+    ``tip``: the same values, with the gradients as ``nonloc.F90`` forms them at the point on the Fortran-derived
+    routines, clusters, wires, slabs and the double grid, and on the default routines of a cell within ``rs(2)`` (from
+    there to 1e-3 bohr their gradient is taken at 1e-3 bohr, and that of their spin-orbit projectors at every distance
+    below it): the forces of ``auto`` as first published.
+
+    ``off``: ``min(rs(2), 1e-6 bohr)`` (:data:`PROJECTOR_CENTER_ROUND_OFF`), as before that: between 1e-6 bohr and the
+    first sample the harmonics took the true direction, so the projector had the full ``w(rs(2))`` in the direction
+    of the atom and its gradient grew as ``w(rs(2))/|d|`` up to ``w(rs(2))/1e-6``; an atom within round-off of a grid
+    point got a nonlocal force of 0.1 Ry/bohr (carbon POTRE table, first sample 1.3e-5 bohr) to 0.75 Ry/bohr (carbon
+    FHI table, 1.04e-3 bohr) from that one point.  The projectors that used the true direction at every distance (the
+    double grid, the spin-orbit projectors) take ``rs(2)`` under ``auto`` and ``tip``.
     """
 
     import os
 
     value = os.environ.get(PROJECTOR_CENTER_ENV, "auto").strip().lower() or "auto"
-    if value not in ("auto", "off"):
-        raise ValueError(f"{PROJECTOR_CENTER_ENV} must be auto or off, not {value!r}")
+    if value not in ("auto", "tip", "off"):
+        raise ValueError(f"{PROJECTOR_CENTER_ENV} must be auto, tip or off, not {value!r}")
     return value
+
+
+def projector_gradient_rule(potential, setting: str) -> str:
+    """The rule of the projector gradients of ``potential`` under ``setting``: ``"floor"`` where ``auto`` evaluates them
+    at :data:`PROJECTOR_GRADIENT_FLOOR` (a table whose first radial sample lies below it: every table of the package with
+    projectors; the H and He FHI tables, first samples 6.25e-3 and 3.1e-3 bohr, have none),
+    else ``setting`` itself, with ``auto`` as ``tip``.  A table whose first sample lies at or beyond the floor (a coarse
+    test table) has the polynomial ``w(rs(2)) Y(d/rs(2))`` of the energy on every step a relaxation takes, whose
+    derivative ``tip`` gives."""
+
+    if setting == "auto":
+        return "floor" if float(potential.radii[0]) < PROJECTOR_GRADIENT_FLOOR else "tip"
+    return setting
+
+
+def projector_gradient_distance(radius, potential) -> np.ndarray:
+    """The distance at which ``PARSEC_PROJECTOR_CENTER=auto`` evaluates the gradient of a projector.
+
+    ``max(|d|, rs(2), PROJECTOR_GRADIENT_FLOOR)``.  With ``c`` that distance, ``u = d/c`` and the radial function and
+    its slope taken at ``c``, ``w(c) (dY/du - u (u . dY/du))/c + w'(c) Y(u) u`` is the gradient of ``c_l r^l Y_l`` for
+    a table that follows ``c_l r^l`` at ``c`` (for ``l <= 2`` exactly, also with the ``3 z^2 - 1`` form of the
+    harmonics), and it joins the gradient at the true distance continuously at ``|d| = c``.
+    """
+
+    return np.maximum(radius, max(float(potential.radii[0]), PROJECTOR_GRADIENT_FLOOR))
+
+
+def projector_gradient_clamp(radius, potential, setting: str) -> np.ndarray:
+    """The distance of the gradients of the builders that clamp at the first radial sample (clusters, wires, slabs and
+    the double grid): :func:`projector_gradient_distance` under ``auto`` (:func:`projector_gradient_rule`),
+    ``max(|d|, rs(2))`` (``nonloc.F90``) under ``tip`` and ``off``."""
+
+    if projector_gradient_rule(potential, setting) == "floor":
+        return projector_gradient_distance(radius, potential)
+    return np.maximum(radius, potential.radii[0])
 
 
 def projector_center_radius(potential, setting: str | None = None, *, off_radius: float | None = None) -> float:
     """The centre radius of the projector harmonics of ``potential`` under ``setting`` (read when ``None``).
 
-    ``auto``: the first radial sample.  ``off``: ``off_radius`` when given (the builders that used the true
+    ``auto`` and ``tip``: the first radial sample.  ``off``: ``off_radius`` when given (the builders that used the true
     direction pass 0), else ``min(first sample, PROJECTOR_CENTER_ROUND_OFF)``.
     """
 
     first = float(potential.radii[0])
     if setting is None:
         setting = projector_center_setting()
-    if setting == "auto":
+    if setting in ("auto", "tip"):
         return first
     if off_radius is not None:
         return float(off_radius)

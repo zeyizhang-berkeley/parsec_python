@@ -1617,6 +1617,10 @@ def execute(args, cp, comm, MPI, initialization_seconds, initial_affinity=None):
     restart_notes = [*restart_notes, *position_notes]
     # PARSEC_MOVE_FLAG_SUBGROUP, read in every run so that a value it does not know is refused on every rank alike.
     move_flag_subgroup_setting()
+    # PARSEC_BFGS_FIRST_STEP likewise: the root moves the atoms, but every rank refuses a value it does not know.
+    from parsec_python.Relaxation.domove import bfgs_first_step_setting
+
+    bfgs_first_step_setting()
     use_symmetry, symmetry_note = symmetry_decision(translation)
     # Whether the atoms stay in the point group of the first structure, which Ignore_Symmetry does not tell.
     # The command line may overrule that keyword, but not a run that leaves the group.

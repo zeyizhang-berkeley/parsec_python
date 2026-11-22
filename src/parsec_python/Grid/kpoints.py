@@ -461,20 +461,121 @@ def negation_closed_shortest(fractions, reciprocal, *, tolerance: float = SHORTE
     return chosen
 
 
-def tie_shared_points(k_points, weights, lattice_vectors, *, tolerance: float = SHORTEST_FOLD_TOLERANCE):
+#: A written k-point ties with its image ``k - G`` where ``|k - G|^2 - |k|^2 <= WRITTEN_TIE_TOLERANCE |G|^2``, twice its
+#: distance from the bisector of ``G`` in units of ``|G|``: a zone-boundary point written with four or more decimals.
+WRITTEN_TIE_TOLERANCE = 1.0e-3
+
+
+def written_tie_images(fractions, reciprocal, *, tolerance: float = WRITTEN_TIE_TOLERANCE) -> list[np.ndarray]:
+    """The images of each written point that are as short as its shortest image up to the precision of the input.
+
+    ``fractions`` are rows ``f`` of ``k = f B`` (``reciprocal``: the rows of ``B``).  Entry ``i`` is an ``(m, 3)`` array:
+    the shortest image ``s`` of the point (:func:`fold_to_shortest`) first, then every ``s - G`` with
+    ``|s - G|^2 - |s|^2 <= tolerance |G|^2``.  The test measures the distance from the bisector of each ``G`` in units
+    of ``|G|``, so a long cell, whose short reciprocal vectors have close mesh planes, does not join points that are
+    not ties, as a test against the largest ``|b_i|^2`` would.  A point written with few decimals is not moved onto
+    the boundary: each of its images keeps the rounding of the written point.
+    """
+
+    values = np.atleast_2d(fold_to_shortest(fractions, reciprocal))
+    if values.shape[0] == 0:
+        return []
+    basis = np.asarray(reciprocal, dtype=np.float64).reshape(3, 3)
+    metric = basis @ basis.T
+    radius = math.sqrt(max(float(np.max(np.einsum("...i,ij,...j->...", values, metric, values))), 0.0))
+    directions = np.linalg.norm(np.linalg.inv(basis), axis=0)
+    # (1 - tolerance) |G|^2 <= 2 s.G bounds |G| by 2 |s| / (1 - tolerance), and each component of G = n B with it
+    longest = 2.0 * radius / (1.0 - tolerance)
+    reach = [int(math.ceil(longest * float(value) + 1.0e-9)) for value in directions]
+    import itertools
+
+    shifts = np.asarray(
+        sorted(
+            (n for n in itertools.product(*(range(-r, r + 1) for r in reach)) if any(n)),
+            key=lambda n: (sum(abs(v) for v in n), n),
+        ),
+        dtype=np.float64,
+    ).reshape(-1, 3)
+    if shifts.shape[0] == 0:
+        return [row[None, :].copy() for row in values]
+    lengths = np.einsum("ci,ij,cj->c", shifts, metric, shifts)
+    within = lengths <= longest * longest * (1.0 + 1.0e-9)
+    shifts, lengths = shifts[within], lengths[within]
+    if shifts.shape[0] == 0:
+        return [row[None, :].copy() for row in values]
+    # |s - G|^2 - |s|^2 = |G|^2 - 2 s.G
+    excess = lengths[None, :] - 2.0 * (values @ metric @ shifts.T)
+    tied = excess <= tolerance * lengths[None, :]
+    found: list[np.ndarray] = []
+    for index in range(values.shape[0]):
+        rows = shifts[tied[index]]
+        found.append(np.vstack([values[index][None, :], values[index][None, :] - rows]))
+    return found
+
+
+def negation_closed_written(k_points, lattice_vectors) -> np.ndarray:
+    """The written points of a hybrid's whole mesh (Cartesian) at the images of that mesh, in the written order.
+
+    The image of a point with several shortest images depends on the points before it
+    (:func:`negation_closed_shortest`).  Here a component within ``1e-9`` of a half-integer is that half-integer (the
+    round trip through Cartesian coordinates leaves ``1/2`` on either side), the points are visited in the order of the
+    Monkhorst-Pack mesh (ascending in ``[0, 1)``, the last index fastest), and the images go back to the written rows,
+    so neither the order of the lines nor the round-off of the input chooses them.  Of a pair ``k``, ``-k`` the member
+    that comes first in the mesh takes the earlier of the two written rows: :func:`time_reversal_reduced` keeps the
+    first of a pair, and the exchange of a hybrid is not the same to the order of the discretization at ``k`` and at
+    ``-k`` (its pair densities are periodic with other reciprocal vectors).
+    """
+
+    points = np.atleast_2d(np.asarray(k_points, dtype=np.float64))
+    reciprocal = reciprocal_lattice(lattice_vectors)
+    fractions = points @ np.linalg.inv(reciprocal)
+    doubled = 2.0 * fractions
+    nearest = np.rint(doubled)
+    half = np.abs(doubled - nearest) < 2.0e-9
+    fractions = np.where(half, 0.5 * nearest, fractions)
+    wrapped = fractions - np.floor(fractions)
+    wrapped[np.abs(wrapped - 1.0) < 1.0e-9] = 0.0
+    keys = np.rint(wrapped * 1.0e9).astype(np.int64)
+    order = np.lexsort((keys[:, 2], keys[:, 1], keys[:, 0]))
+    images = np.zeros_like(wrapped)
+    images[order] = negation_closed_shortest(wrapped[order], reciprocal)
+    rank = np.empty(order.size, dtype=np.int64)
+    rank[order] = np.arange(order.size)
+    rows = {tuple(np.rint(row * 1.0e9).astype(np.int64).tolist()): index for index, row in enumerate(images)}
+    swapped = np.zeros(order.size, dtype=bool)
+    for index in range(order.size):
+        if swapped[index]:
+            continue
+        partner = rows.get(tuple(np.rint(-images[index] * 1.0e9).astype(np.int64).tolist()))
+        if partner is None or partner <= index:
+            continue
+        swapped[partner] = True
+        if rank[partner] < rank[index]:
+            images[[index, partner]] = images[[partner, index]]
+    return images @ reciprocal
+
+
+def tie_shared_points(
+    k_points, weights, lattice_vectors, *, tolerance: float = SHORTEST_FOLD_TOLERANCE, written: bool = False
+):
     """``(k_points, weights)`` with every point that has several shortest images (:func:`shortest_images`) replaced
     by all of them, each with an equal share of its weight; the other points keep their bits.
 
-    The whole Monkhorst-Pack mesh of the default routines on an oblique cell
-    (``SinglePointInput.kpoint_tie_images``): its result does not depend on which image a tie would keep, and the set
+    The whole Monkhorst-Pack mesh of the default routines on an oblique cell, and a ``Kpoint_List`` that
+    ``PARSEC_KPOINT_LIST_FOLD`` moves to its shortest images (``SinglePointInput.kpoint_tie_images``): its result does
+    not depend on which image a tie would keep, and the set of a whole mesh
     is closed under ``k -> -k`` exactly (the images of ``-f`` are the negatives of those of ``f``), so its
-    time-reversal pairs are exact.
+    time-reversal pairs are exact.  ``written``: the points of a ``Kpoint_List``, whose ties are found up to the
+    precision of the input (:func:`written_tie_images`).
     """
 
     k_points = np.atleast_2d(np.asarray(k_points, dtype=np.float64))
     weights = np.asarray(weights, dtype=np.float64)
     reciprocal = reciprocal_lattice(lattice_vectors)
-    images = shortest_images(k_points @ np.linalg.inv(reciprocal), reciprocal, tolerance=tolerance)
+    if written:
+        images = written_tie_images(k_points @ np.linalg.inv(reciprocal), reciprocal)
+    else:
+        images = shortest_images(k_points @ np.linalg.inv(reciprocal), reciprocal, tolerance=tolerance)
     if all(group.shape[0] == 1 for group in images):
         return k_points.copy(), weights.copy()
     rows, shares = [], []
@@ -717,7 +818,8 @@ def irreducible_monkhorst_pack(
     finite-difference Bloch operator (Si8, MP 2x2x2 shifted, h 0.64: 15 mRy).
     The counts, weights, ``grid_map`` and ``E_kin`` do not depend on it;
     ``fold=False`` gives PARSEC 1.5's set.  ``shortest`` (with ``fold``; the
-    default routines under ``PARSEC_KPOINT_FOLD=shortest``,
+    default routines under ``PARSEC_KPOINT_FOLD=shortest`` and a mesh under
+    ``PARSEC_KPOINT_MESH_GUARD``,
     ``SinglePointInput.kpoint_shortest_representatives``) moves each folded
     representative on to its shortest image modulo the reciprocal lattice
     (:func:`fold_to_shortest`), which differs from the folded one on an
@@ -1471,8 +1573,9 @@ def kpoint_fold_setting() -> str:
 
     The finite-difference Bloch operator of the u gauge is not invariant under ``k -> k + G``, so the choice changes
     the energy of an oblique cell at the order of the discretization.  The Fortran-derived routines keep the folded
-    points under both values (PARSEC 1.5's ``irrbz`` keeps them in ``[0, 1)``).  Any other value is refused before the
-    SCF."""
+    points under both values (PARSEC 1.5's ``irrbz`` keeps them in ``[0, 1)``), except a mesh with a free level below
+    zero on routines the input did not request (:func:`kpoint_mesh_guard_setting`).  Any other value is refused before
+    the SCF."""
 
     import os
 
@@ -1480,6 +1583,242 @@ def kpoint_fold_setting() -> str:
     if value not in ("shortest", "centred"):
         raise ValueError(f"{KPOINT_FOLD_ENV} must be shortest or centred, got {value!r}")
     return value
+
+
+KPOINT_LIST_FOLD_ENV = "PARSEC_KPOINT_LIST_FOLD"
+#: The value of PARSEC_KPOINT_LIST_FOLD without the variable.
+KPOINT_LIST_FOLD_DEFAULT = "auto"
+
+
+def kpoint_list_fold_setting() -> str:
+    """``PARSEC_KPOINT_LIST_FOLD``: the points of a ``Kpoint_List`` on an oblique cell.
+
+    The discrete Bloch operator ``-L - 2i k.G + k^2`` of an oblique grid has plane waves with ``-L < |G|^2``, so it is
+    not bounded below in ``k``: beyond some ``|k|``, in general outside the first Brillouin zone, it has levels below
+    zero that no continuum state has (:func:`lowest_free_levels`).  On an orthogonal grid ``-L >= |G|^2`` and every
+    value keeps the written vectors.
+
+    * ``auto`` (default): on the default routines every point runs at its shortest images modulo the reciprocal
+      lattice, a point of the zone boundary at all of them with equal shares of its weight (:func:`tie_shared_points`).
+      Ties are found up to the precision of the input (:data:`WRITTEN_TIE_TOLERANCE`, :func:`written_tie_images`), so a
+      whole mesh gives the result of its ``Monkhorst_Pack_Grid`` for any writing of its images; what stays is the
+      rounding of the written coordinates themselves (a mesh with 8, 6 and 4 decimals: about 3e-9, 3e-7 and 3e-5 Ry on
+      Au).  A hybrid keeps one image per point, those of the mesh whatever the order of the lines
+      (:func:`negation_closed_written`), and ``Create_DOS`` and ``Output_GW`` keep one point per mesh point.  The
+      Fortran-derived routines keep the written vectors, as PARSEC 1.5, unless a written point has a free level below
+      zero: where they run without being asked for, that list is then treated as on the default routines; under
+      ``Use_Fortran_Routines: .true.`` it keeps its vectors with a warning.
+    * ``shared``: the treatment of the default routines on every route, the Fortran-derived routines included.
+    * ``literal``: the written vectors on every route, bit for bit as before, with the same warning.
+
+    A first-zone point can have such a level too on a very coarse grid (a bcc cell of 5.5 bohr with 6 points per axis):
+    no image removes it, and the run goes on with a warning that the grid is too coarse.  Any other value is refused
+    before the SCF."""
+
+    import os
+
+    value = os.environ.get(KPOINT_LIST_FOLD_ENV, KPOINT_LIST_FOLD_DEFAULT).strip().lower() or KPOINT_LIST_FOLD_DEFAULT
+    if value not in ("auto", "shared", "literal"):
+        raise ValueError(f"{KPOINT_LIST_FOLD_ENV} must be auto, shared or literal, got {value!r}")
+    return value
+
+
+KPOINT_MESH_GUARD_ENV = "PARSEC_KPOINT_MESH_GUARD"
+
+
+def kpoint_mesh_guard_setting() -> str:
+    """``PARSEC_KPOINT_MESH_GUARD``: a Monkhorst-Pack mesh with a point whose free level is below zero
+    (:func:`lowest_free_levels`) on Fortran-derived routines that the input did not request.
+
+    * ``auto`` (default): the mesh runs at the shortest representatives of its wedge, and outside a hybrid with the
+      images of a zone-boundary point shared (``SinglePointInput.kpoint_shortest_representatives`` and
+      ``kpoint_tie_images``; ``Create_DOS`` and ``Output_GW`` keep their points), with a note.  A mesh without such a
+      point changes in nothing.
+    * ``off``: the points of the mesh as before, with a warning.
+
+    ``Use_Fortran_Routines: .true.`` keeps the mesh and the warning under both values.  Any other value is refused
+    before the SCF."""
+
+    import os
+
+    value = os.environ.get(KPOINT_MESH_GUARD_ENV, "auto").strip().lower() or "auto"
+    if value not in ("auto", "off"):
+        raise ValueError(f"{KPOINT_MESH_GUARD_ENV} must be auto or off, got {value!r}")
+    return value
+
+
+#: A free level counts as below zero under this value (Ry); exact levels are ``>= 0`` to round-off.
+FREE_LEVEL_TOLERANCE = 1.0e-8
+
+
+def _free_level_stencil(cell, settings):
+    """``(counts, lines, steps, periodic axes)`` of the operators of the grid of ``settings``, or ``None`` for a wire.
+
+    ``lines`` are the second differences ``(offset, weight)`` (weights in 1/bohr^2), ``steps`` the rows of the grid
+    step vectors, without building the grid: :func:`grid_stencil_lines` of a bulk cell; the in-plane counts of a slab,
+    whose confined axis is orthogonal to the plane and adds a non-negative term at no ``k``."""
+
+    lattice = np.asarray(cell.lattice_vectors, dtype=np.float64)
+    fortran = bool(getattr(settings, "fortran_routines", False))
+    confined = int(getattr(settings, "periodicity", 3))
+    if confined == 1 or int(cell.dimensions) == 1:
+        return None
+    if confined == 2:
+        from ..Laplacian.nonorthogonal import pbc_grid_coefficients
+        from .pbc import adjusted_steps
+
+        lengths = np.sqrt(np.sum(lattice**2, axis=1))
+        translations = getattr(settings, "fractional_translations", ()) or ((), (), ())
+        points, spacings = adjusted_steps(lengths[:2], settings.spacing, translations[:2])
+        spacings = np.asarray([*spacings, settings.spacing], dtype=np.float64)
+        coefficients = pbc_grid_coefficients(lattice, spacings)
+        lines = [
+            (tuple(int(v) for v in offset), float(value) / float(step) ** 2)
+            for offset, value, step in coefficients.stencil_terms(spacings)
+        ]
+        return np.asarray([*points, 1], dtype=np.int64), lines, (lattice / lengths[:, None]) * spacings[:, None], 2
+    if int(cell.dimensions) == 2:
+        in_plane = (2 * np.round(np.linalg.norm(lattice[:2], axis=1) / (2.0 * settings.spacing))).astype(np.int64)
+        counts = np.asarray([in_plane[0], in_plane[1], int(lattice[2, 2] / settings.spacing) + 2], dtype=np.int64)
+        return counts, default_stencil_lines(lattice, counts), lattice / counts[:, None], 2
+    counts, lines = grid_stencil_lines(cell, settings)
+    counts = np.asarray(counts, dtype=np.int64)
+    if fortran:
+        from .pbc import fortran_grid_counts
+
+        _, spacings = fortran_grid_counts(cell, settings)
+        lengths = np.sqrt(np.sum(lattice**2, axis=1))
+        return counts, lines, (lattice / lengths[:, None]) * np.asarray(spacings, dtype=np.float64)[:, None], 3
+    return counts, lines, lattice / counts[:, None], 3
+
+
+def _free_level_slices(counts, lines, inverse_steps, periodic, order):
+    """The symbols ``(A, D)`` of ``-L`` and the Cartesian gradient, one plane of waves of the first axis at a time.
+
+    Every wave of the grid is in a plane, or its negative is, which has the same ``A`` and ``-D``, so the planes
+    ``0 ... n_1 // 2`` hold them all.  ``A`` has shape ``(n_2, n_3)``, ``D`` ``(3, n_2, n_3)``."""
+
+    from ..Laplacian import first_derivative_coefficients, second_derivative_coefficients
+
+    width = int(order) // 2
+    second = np.asarray(second_derivative_coefficients(order), dtype=np.float64)
+    first = np.asarray(first_derivative_coefficients(order), dtype=np.float64)
+    angles = [
+        2.0 * np.pi * np.arange(int(count)) / int(count) if axis < periodic else np.zeros(1)
+        for axis, count in enumerate(counts)
+    ]
+    along = [
+        2.0 * sum(first[width + j] * np.sin(j * values) for j in range(1, width + 1)) for values in angles
+    ]
+
+    def second_symbol(phase):
+        # c_0 + 2 sum_j c_j cos(j phase), by Clenshaw's recurrence
+        x = np.cos(phase)
+        upper, lower = 0.0, 0.0
+        for j in range(width, 0, -1):
+            upper, lower = 2.0 * second[width + j] + 2.0 * x * upper - lower, upper
+        return second[width] + x * upper - lower
+
+    theta_2, theta_3 = np.meshgrid(angles[1], angles[2], indexing="ij")
+    along_2, along_3 = np.meshgrid(along[1], along[2], indexing="ij")
+    fixed = np.zeros_like(theta_2)
+    moving = []
+    for offset, weight in lines:
+        if offset[0] == 0:
+            fixed -= float(weight) * second_symbol(float(offset[1]) * theta_2 + float(offset[2]) * theta_3)
+        else:
+            moving.append((float(offset[0]), float(offset[1]) * theta_2 + float(offset[2]) * theta_3, float(weight)))
+    rest = np.stack([inverse_steps[c, 1] * along_2 + inverse_steps[c, 2] * along_3 for c in range(3)])
+    for plane in range(len(angles[0]) // 2 + 1):
+        laplacian = fixed.copy()
+        for factor, phase, weight in moving:
+            laplacian -= weight * second_symbol(factor * angles[0][plane] + phase)
+        gradient = rest + (inverse_steps[:, 0] * along[0][plane])[:, None, None]
+        yield laplacian, gradient
+
+
+@lru_cache(maxsize=8)
+def _free_level_reach(counts, lines, steps, periodic, order) -> float:
+    """The smallest ``|k|`` at which a wave of the grid has a level of zero (``inf``: none has at any ``k``)."""
+
+    inverse = np.linalg.inv(np.asarray(steps, dtype=np.float64).reshape(3, 3))
+    reach = math.inf
+    for laplacian, gradient in _free_level_slices(counts, lines, inverse, periodic, order):
+        squares = np.sum(gradient**2, axis=0)
+        unbounded = squares > laplacian + 1.0e-10
+        if np.any(unbounded):
+            size = squares[unbounded]
+            reach = min(reach, float(np.min(np.sqrt(size) - np.sqrt(size - laplacian[unbounded]))))
+    return reach
+
+
+def lowest_free_levels(k_points, cell, settings) -> np.ndarray | None:
+    """The lowest level of the free discrete Bloch operator ``-L - 2i k.G + k^2`` at each of ``k_points`` (Cartesian)
+    on the grid of ``settings`` where that level is below zero.  A value that is not below zero (``+inf`` for a point
+    too short to reach one) says only that no level is.  ``None`` where no point can have one (an orthogonal lattice
+    or a wire).
+
+    The operator is translation invariant, so the plane waves of the grid are its eigenvectors, with the level
+    ``A + 2 k.D + k^2`` of the symbols ``A`` of ``-L`` and ``D`` of the Cartesian gradient.  A wave with ``A >= |D|^2``
+    has a level ``>= |k + D|^2 >= 0`` at every ``k`` (on an orthogonal grid every wave: each second difference bounds
+    the square of its first difference), and any other reaches zero first at ``|k| = |D| - sqrt(|D|^2 - A)``.  Every
+    wave of the grid is visited, a plane at a time (:func:`_free_level_slices`, no more memory than one plane): once
+    for the smallest such ``|k|`` of the grid, and again only if a point lies beyond it.  The result depends on the
+    cell, the settings and the point alone, so every MPI rank gets the same.
+    """
+
+    points = np.atleast_2d(np.asarray(k_points, dtype=np.float64))
+    if not oblique_reciprocal_lattice(reciprocal_lattice(cell.lattice_vectors)):
+        return None
+    stencil = _free_level_stencil(cell, settings)
+    if stencil is None:
+        return None
+    counts, lines, steps, periodic = stencil
+    key_counts = tuple(int(value) for value in counts)
+    key_lines = tuple((tuple(int(v) for v in offset), float(weight)) for offset, weight in lines)
+    key_steps = tuple(float(value) for value in np.asarray(steps, dtype=np.float64).ravel())
+    order = int(settings.expansion_order)
+    reach = _free_level_reach(key_counts, key_lines, key_steps, int(periodic), order)
+    levels = np.full(points.shape[0], np.inf)
+    if not math.isfinite(reach):
+        return levels
+    lengths = np.sum(points**2, axis=1)
+    beyond = np.flatnonzero(lengths >= reach**2)
+    if beyond.size == 0:
+        return levels
+    inverse = np.linalg.inv(np.asarray(steps, dtype=np.float64))
+    chosen = points[beyond]
+    squared = lengths[beyond]
+    best = np.full(beyond.size, np.inf)
+    for laplacian, gradient in _free_level_slices(key_counts, key_lines, inverse, int(periodic), order):
+        unbounded = np.sum(gradient**2, axis=0) > laplacian + 1.0e-10
+        if not np.any(unbounded):
+            continue
+        waves = laplacian[unbounded]
+        vectors = gradient[:, unbounded]
+        for start in range(0, beyond.size, 64):
+            part = np.arange(start, min(start + 64, beyond.size))
+            # (the wave of -theta has the same A and -D)
+            values = waves[None, :] + squared[part, None] - 2.0 * np.abs(chosen[part] @ vectors)
+            best[part] = np.minimum(best[part], np.min(values, axis=1))
+    levels[beyond] = best
+    return levels
+
+
+def shortest_list_points(k_points, lattice_vectors, *, tolerance: float = SHORTEST_FOLD_TOLERANCE):
+    """``(points, moved)`` of Cartesian ``k_points``: each point longer than the shortest of its images modulo the
+    reciprocal lattice of ``lattice_vectors`` replaced by that image (:func:`fold_to_shortest`), ``moved`` flagging
+    them.  A point within ``tolerance`` (relative to the largest ``|b_i|^2``) of the shortest length keeps its bits."""
+
+    k_points = np.atleast_2d(np.asarray(k_points, dtype=np.float64))
+    reciprocal = reciprocal_lattice(lattice_vectors)
+    shortest = np.atleast_2d(fold_to_shortest(k_points @ np.linalg.inv(reciprocal), reciprocal, tolerance=tolerance))
+    shortest = shortest @ reciprocal
+    scale = float(np.max(np.sum(reciprocal**2, axis=1)))
+    moved = np.sum(k_points**2, axis=1) > np.sum(shortest**2, axis=1) + tolerance * scale
+    points = k_points.copy()
+    points[moved] = shortest[moved]
+    return points, moved
 
 
 KPOINT_FORCE_GROUP_ENV = "PARSEC_KPOINT_FORCE_GROUP"
@@ -1565,7 +1904,9 @@ def kpoint_sampling(problem) -> tuple[np.ndarray, np.ndarray] | None:
             # the whole mesh of the default routines on an oblique cell: every shortest image of a point on the zone
             # boundary with its share of the weight (exact time-reversal pairs)
             lattice = problem.periodic_cell.lattice_vectors
-            k_points, weights = tie_shared_points(k_points, weights, lattice)
+            k_points, weights = tie_shared_points(
+                k_points, weights, lattice, written=bool(getattr(problem, "kpoint_written_ties", False))
+            )
             if getattr(problem, "kpoint_time_reversal", False):
                 return time_reversal_reduced(k_points, weights, lattice)
             return k_points, weights
@@ -1603,6 +1944,14 @@ __all__ = [
     "shortest_images",
     "tie_shared_points",
     "kpoint_fold_setting",
+    "FREE_LEVEL_TOLERANCE",
+    "WRITTEN_TIE_TOLERANCE",
+    "kpoint_list_fold_setting",
+    "kpoint_mesh_guard_setting",
+    "lowest_free_levels",
+    "negation_closed_written",
+    "written_tie_images",
+    "shortest_list_points",
     "kpoint_force_group_setting",
     "scalar_kpoint_wedge_setting",
     "hybrid_kpoint_wedge_setting",

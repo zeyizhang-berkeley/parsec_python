@@ -201,8 +201,11 @@ def build_nonlocal_projector_gradients(
 
     The loops, column order, support radius and radial interpolation are
     those of :func:`parsec_python.V_ion.build_nonlocal_projectors` for an
-    isolated system.  As in ``nonloc.F90``, a distance below the first radial
-    sample is replaced by that sample, also in the direction ``d/|d|``.
+    isolated system.  A distance below the first radial sample is replaced
+    by that sample, also in the direction ``d/|d|``, as in ``nonloc.F90``
+    (``PARSEC_PROJECTOR_CENTER=tip`` and ``off``); under ``auto``, the default,
+    a distance below 3e-3 bohr is replaced by that distance
+    (:func:`parsec_python.V_ion.ionic_potential.projector_gradient_distance`).
     With ``Double_Grid_Order > 1`` the gradients are averaged over the double
     grid as the projectors are (:func:`double_grid_projector_gradients`).
 
@@ -218,6 +221,7 @@ def build_nonlocal_projector_gradients(
         return double_grid_projector_gradients(
             grid, atoms, potentials, specifications, order=order, atom_indices=atom_indices
         )
+    center_setting = _ionic.projector_center_setting()
     rows: list[np.ndarray] = []
     columns: list[np.ndarray] = []
     values: tuple[list[np.ndarray], list[np.ndarray], list[np.ndarray]] = ([], [], [])
@@ -241,7 +245,7 @@ def build_nonlocal_projector_gradients(
         support = radius <= support_radius
         support_rows = box_rows[support]
         relative = relative[support]
-        clamped = np.maximum(radius[support], potential.radii[0])
+        clamped = _ionic.projector_gradient_clamp(radius[support], potential, center_setting)
         inverse = 1.0 / clamped
         unit = relative * inverse[:, None]
 
@@ -318,7 +322,8 @@ def double_grid_projector_gradients(
     ``nonloc.F90:544-568``: every fine point of a coarse point that lies
     within the projector radius adds ``w(dx) w(dy) w(dz)`` times
     ``w(|d|)*grad Y + w'(|d|)*Y*d/|d|``, with ``|d|`` clamped below to the
-    first radial sample.  The coarse points and the column order are those of
+    first radial sample (``PARSEC_PROJECTOR_CENTER=tip`` and ``off``) or to
+    3e-3 bohr (``auto``).  The coarse points and the column order are those of
     :func:`parsec_python.V_ion.double_grid.build_double_grid_projectors`;
     ``order = 1`` gives :func:`build_nonlocal_projector_gradients` exactly;
     ``atom_indices`` selects atoms as there.
@@ -326,6 +331,7 @@ def double_grid_projector_gradients(
 
     from ..V_ion.double_grid import double_grid_support
 
+    center_setting = _ionic.projector_center_setting()
     rows: list[np.ndarray] = []
     columns: list[np.ndarray] = []
     values: tuple[list[np.ndarray], list[np.ndarray], list[np.ndarray]] = ([], [], [])
@@ -349,7 +355,7 @@ def double_grid_projector_gradients(
         )
         points, fine = support.radius.shape
         relative = support.relative.reshape(-1, 3)
-        clamped = np.maximum(support.radius.reshape(-1), potential.radii[0])
+        clamped = _ionic.projector_gradient_clamp(support.radius.reshape(-1), potential, center_setting)
         inverse = 1.0 / clamped
         unit = relative * inverse[:, None]
 
@@ -413,11 +419,12 @@ def double_grid_projector_gradients(
     )
 
 
-# Below this distance (bohr) from an atom the radial gradient of a projector is taken at this distance.  The first samples of
-# a POTRE table (r from 1e-6 bohr on) are rounding noise: u_l(r)/r flattens to a constant there instead of growing as r**l,
-# and ``nonloc.F90``'s replacement of a shorter distance by the first sample then multiplies noise by 1/r for the
-# gradient of the grid point of an atom that sits on a grid point (a p projector's gradient there came out 3 times
-# too large at 1e-4 bohr and 800 times at the first sample).  From 1e-3 bohr the tables are smooth.
+# Under ``PARSEC_PROJECTOR_CENTER=tip`` and ``off``: below this distance (bohr) from an atom the radial gradient of a projector
+# is taken at this distance.  The first samples of a POTRE table (r from 1e-6 bohr on) are rounding noise: u_l(r)/r flattens to
+# a constant there instead of growing as r**l, and ``nonloc.F90``'s replacement of a shorter distance by the first sample then
+# multiplies noise by 1/r for the gradient of the grid point of an atom that sits on a grid point (a p projector's gradient
+# there came out 3 times too large at 1e-4 bohr and 19 times at the first sample).  ``auto`` takes the distance
+# :data:`parsec_python.V_ion.ionic_potential.PROJECTOR_GRADIENT_FLOOR`, which covers the FHI tables as well.
 _PROJECTOR_GRADIENT_FLOOR = 1.0e-3
 
 
@@ -441,11 +448,13 @@ def build_periodic_projector_gradients(
     ``F_a = 4 sum_k w_k sum_n f_n sum_q s_q Re[conj(<beta_q|u_n>) <G_q|u_n>]``.
 
     The images, support radius, radial interpolation (spline or PARSEC's table) and column order are those of the
-    projector builder; with ``k_point=None`` the columns are real (the Gamma point).  Within
-    ``_PROJECTOR_GRADIENT_FLOOR`` of an atom the gradient is evaluated at that distance (see there), except within the
-    first radial sample ``rs(2)`` under ``PARSEC_PROJECTOR_CENTER=auto`` (the default since 2026-11-21), where the
-    projector is ``w(rs(2)) P(d/rs(2))`` and its gradient ``w(rs(2)) dP/du / rs(2)``, the exact derivative of the
-    projector of the energy, as on the Fortran-derived routines (``off``: the floor there too, as before).
+    projector builder; with ``k_point=None`` the columns are real (the Gamma point).  Under
+    ``PARSEC_PROJECTOR_CENTER=auto`` the gradient within 3e-3 bohr of an atom is evaluated at that distance
+    (:func:`parsec_python.V_ion.ionic_potential.projector_gradient_distance`): the slope of the energy over the steps
+    of a relaxation.  ``off``: within ``_PROJECTOR_GRADIENT_FLOOR`` (1e-3 bohr) at that distance.  ``tip``: the same,
+    except that the points within the first radial sample ``rs(2)`` take ``w(rs(2)) dP/du / rs(2)``, the derivative of
+    the projector ``w(rs(2)) P(d/rs(2))`` for displacements within ``rs(2)`` only (19 times that slope for the p
+    channel of a POTRE table).
     ``atom_indices`` builds the columns of those atoms only, in the order given and labelled with their index in
     ``atoms``: the columns of the whole build with these labels, bit for bit (the representative atoms of the
     symmetry sectors of a cell).  ``None`` builds every atom.
@@ -454,14 +463,13 @@ def build_periodic_projector_gradients(
     has no defined value at that point (the direction of a zero displacement; the harmonics of ``l >= 2`` evaluate to
     nonzero constants there), so the nonlocal energy has a small jump as the atom crosses the grid point.  The force
     is the derivative of the energy at the point, not of its smooth neighbours: for a hydrogen pair on a 0.7 bohr grid
-    they differ by about 3 %.  Under ``auto`` the projector is continuous there (``w(rs(2)) P(d/rs(2))``) and the force
-    of such an atom is the central difference of the energy (a 64-atom diamond cell: within 3e-8 Ry/bohr, the same as
-    the Fortran-derived routines within 6e-11).
+    they differ by about 3 %.  Under ``auto`` the projector is continuous there (``w(rs(2)) P(d/rs(2))``).
     """
 
     complex_valued = k_point is not None
-    # PARSEC_PROJECTOR_CENTER (V_ion.ionic_potential.projector_center_setting): under auto the points within the
-    # first radial sample rs(2) of an atom take the exact gradient of the projector the energy uses there
+    # PARSEC_PROJECTOR_CENTER (V_ion.ionic_potential.projector_center_setting): auto evaluates the gradient of every
+    # point within 3e-3 bohr at that distance, off within 1e-3 bohr; tip as off, with the value nonloc.F90 forms within
+    # rs(2)
     center_setting = _ionic.projector_center_setting()
     value_dtype = complex if complex_valued else float
     k_point = None if k_point is None else np.asarray(k_point, dtype=float)
@@ -493,15 +501,18 @@ def build_periodic_projector_gradients(
                 if k_point is None
                 else np.exp(-1j * ((grid.coordinates[support_rows] - translation) @ k_point))
             )
-            clamped = np.maximum(radius, max(potential.radii[0], _PROJECTOR_GRADIENT_FLOOR))
+            rule = _ionic.projector_gradient_rule(potential, center_setting)
+            clamped = (
+                _ionic.projector_gradient_distance(radius, potential)
+                if rule == "floor"
+                else np.maximum(radius, max(potential.radii[0], _PROJECTOR_GRADIENT_FLOOR))
+            )
             inside = None
-            if center_setting == "auto":
-                # Within rs(2) the projector is w(rs(2)) P(d/rs(2)) (nonloc.F90's rnorm, the projector builders under
-                # PARSEC_PROJECTOR_CENTER=auto): its gradient there is w(rs(2)) dP/du / rs(2), with no radial slope,
-                # as on the Fortran-derived routines (Forces.periodic._projector_inverse_radius).  The floor above
-                # evaluated such a point at 1e-3 bohr instead, which is not the derivative of that projector: an atom
-                # on a grid point of a carbon POTRE cell (rs(2) 1.3e-5 bohr) got nonlocal forces 1.3e-3 Ry/bohr off the
-                # central difference of the energy.  Points from rs(2) on keep the floor, as before.
+            if rule == "tip":
+                # Within rs(2) the projector is w(rs(2)) P(d/rs(2)) (nonloc.F90's rnorm): the value nonloc.F90 forms
+                # there is w(rs(2)) dP/du / rs(2), with no radial slope.  It is the derivative of that projector for
+                # displacements within rs(2) only; the table is flat there, so it is about 19 times the slope of the
+                # energy over a larger step of a p channel on a POTRE table, which auto gives.
                 center = float(potential.radii[0])
                 near = radius < center
                 if np.any(near):

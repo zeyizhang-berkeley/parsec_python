@@ -157,7 +157,7 @@ def build_spin_orbit_projectors(
         )
     from ..V_ion.ionic_potential import projector_center_radius, projector_center_setting
 
-    # the centre radius of the harmonics: rs(2) under PARSEC_PROJECTOR_CENTER=auto (nonloc.F90's ylm_cplx), else 0
+    # the centre radius of the harmonics: rs(2) under PARSEC_PROJECTOR_CENTER=auto and tip (nonloc.F90's ylm_cplx), else 0
     center_setting = projector_center_setting()
     sqrt_dv = np.sqrt(grid.volume_element)
     result: list[AtomSpinOrbitProjectors] = []
@@ -276,7 +276,7 @@ def _double_grid_spin_orbit_projectors(
     from ..V_ion.double_grid import double_grid_support
     from ..V_ion.ionic_potential import projector_center_radius, projector_center_setting
 
-    # the centre radius of the harmonics: rs(2) under PARSEC_PROJECTOR_CENTER=auto (nonloc.F90's ylm_cplx), else 0
+    # the centre radius of the harmonics: rs(2) under PARSEC_PROJECTOR_CENTER=auto and tip (nonloc.F90's ylm_cplx), else 0
     center_setting = projector_center_setting()
     sqrt_dv = np.sqrt(grid.volume_element)
     spacing = float(grid.spacing)

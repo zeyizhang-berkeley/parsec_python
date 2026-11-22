@@ -49,6 +49,8 @@ from ..Symmetry.axis_reflection import (
     attach_abelian_atom_orbits,
     compress_projectors_for_sectors,
     periodic_abelian_reduction,
+    sector_orbits_exact,
+    sector_orbits_exact_setting,
 )
 from ..Symmetry.representations import ReflectionRepresentationDecomposition
 from ..backends.cupy import cupy_available
@@ -169,7 +171,7 @@ class SwitchTests(unittest.TestCase):
 
 
 class SpinSwitchTests(unittest.TestCase):
-    """``PARSEC_LDAU_SPIN_SECTORS``: a Gamma cell under auto, a cluster too under on, neither under off."""
+    """``PARSEC_LDAU_SPIN_SECTORS``: neither under off (the default), a Gamma cell under auto, a cluster too under on."""
 
     def test_values_and_refusals(self) -> None:
         from types import SimpleNamespace
@@ -177,7 +179,7 @@ class SpinSwitchTests(unittest.TestCase):
         from ..SCF.gamma_features import ldau_spin_sector_setting
         from ..driver import _spin_sector_refusal
 
-        for value, expected in (("", "auto"), ("auto", "auto"), ("ON", "on"), ("off", "off"), ("0", "off")):
+        for value, expected in (("", "off"), ("auto", "auto"), ("ON", "on"), ("off", "off"), ("0", "off")):
             with self.subTest(value=value), mock.patch.dict(os.environ, {"PARSEC_LDAU_SPIN_SECTORS": value}):
                 self.assertEqual(ldau_spin_sector_setting(), expected)
         with mock.patch.dict(os.environ, {"PARSEC_LDAU_SPIN_SECTORS": "cells"}):
@@ -199,6 +201,13 @@ class SpinSwitchTests(unittest.TestCase):
             ("off", True): "LDA+U",
             ("off", False): "LDA+U",
         }
+        # without the switch: the routes of before for both (the cell on the 1x1x1 k-point driver, the cluster on
+        # the full grid of the driver)
+        with mock.patch.dict(os.environ):
+            os.environ.pop("PARSEC_LDAU_SPIN_SECTORS", None)
+            self.assertEqual(ldau_spin_sector_setting(), "off")
+            for periodic in (True, False):
+                self.assertIn("PARSEC_LDAU_SPIN_SECTORS=off", _spin_sector_refusal(problem(periodic)))
         for (value, periodic), reason in expected.items():
             with self.subTest(value=value, periodic=periodic), mock.patch.dict(
                 os.environ, {"PARSEC_LDAU_SPIN_SECTORS": value}
@@ -369,7 +378,7 @@ class GroupAverageTests(unittest.TestCase):
 
         from ..Hamiltonian.hubbard_device import ldau_orbits_exact
         from ..Symmetry.axis_reflection import detect_point_group_reduction
-        from ..driver import _ldau_keeps_orbits
+        from ..driver import _sectors_keep_orbits
 
         side = _AG_SIDE
         cube = [(0.0, 0.0, 0.0)]
@@ -433,14 +442,30 @@ class GroupAverageTests(unittest.TestCase):
                     self.assertTrue(ldau_orbits_exact(None, loose.atoms, loose.grid))
                     with_u = SimpleNamespace(hubbard=loose.hubbard, grid=loose.grid)
                     without_u = SimpleNamespace(hubbard=None, grid=loose.grid)
-                    self.assertFalse(_ldau_keeps_orbits(with_u, "auto", loose.reduction, loose.atoms))
-                    self.assertTrue(_ldau_keeps_orbits(without_u, "auto", loose.reduction, loose.atoms))
+                    self.assertFalse(_sectors_keep_orbits(with_u, "auto", loose.reduction, loose.atoms))
+                    # the KB columns of a run without LDA+U follow the same distance (PARSEC_SECTOR_ORBITS_EXACT)
+                    self.assertFalse(_sectors_keep_orbits(without_u, "auto", loose.reduction, loose.atoms))
+                    with mock.patch.dict(os.environ, {"PARSEC_SECTOR_ORBITS_EXACT": "off"}):
+                        self.assertTrue(_sectors_keep_orbits(without_u, "auto", loose.reduction, loose.atoms))
+                        # (LDA+U has its own switch)
+                        self.assertFalse(_sectors_keep_orbits(with_u, "auto", loose.reduction, loose.atoms))
                     exact_u = SimpleNamespace(hubbard=exact.hubbard, grid=exact.grid)
-                    self.assertTrue(_ldau_keeps_orbits(exact_u, "auto", exact.reduction, exact.atoms))
-                    self.assertFalse(_ldau_keeps_orbits(exact_u, "off", exact.reduction, exact.atoms))
+                    exact_plain = SimpleNamespace(hubbard=None, grid=exact.grid)
+                    self.assertTrue(_sectors_keep_orbits(exact_u, "auto", exact.reduction, exact.atoms))
+                    self.assertTrue(_sectors_keep_orbits(exact_plain, "auto", exact.reduction, exact.atoms))
+                    self.assertFalse(_sectors_keep_orbits(exact_u, "off", exact.reduction, exact.atoms))
                 # at a tolerance of 1e-6 bohr or less nothing is checked (every operation found maps the atoms)
                 with mock.patch.dict(os.environ, {"PARSEC_SYMMETRY_ATOM_TOLERANCE": "1e-6"}):
                     self.assertTrue(ldau_orbits_exact(loose.reduction, loose.atoms, loose.grid))
+                    self.assertTrue(sector_orbits_exact(loose.reduction, loose.atoms, loose.grid))
+
+    def test_the_switch_of_the_exact_orbits(self) -> None:
+        for value, expected in (("", "auto"), ("auto", "auto"), ("OFF", "off")):
+            with self.subTest(value=value), mock.patch.dict(os.environ, {"PARSEC_SECTOR_ORBITS_EXACT": value}):
+                self.assertEqual(sector_orbits_exact_setting(), expected)
+        with mock.patch.dict(os.environ, {"PARSEC_SECTOR_ORBITS_EXACT": "on"}):
+            with self.assertRaises(ValueError):
+                sector_orbits_exact_setting()
 
     def test_the_weighted_switch(self) -> None:
         from ..Hamiltonian.hubbard_device import ldau_weighted_sectors_setting

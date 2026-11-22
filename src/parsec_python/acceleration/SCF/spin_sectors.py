@@ -127,6 +127,19 @@ and returns to an invariant integer one, and a symmetric state with integer
 occupations that a rotation across a gap would lower (a closed shell in the
 sectors has the same exposure).
 
+Doublets within one sector (``PARSEC_SPIN_GUARD_DOUBLETS``, :func:`spin_guard_doublets_setting`).  A weighted plan can
+hold an E representation twice in a sector of weight 1: the two E of the 192 operations of an fcc or rock-salt cell, the
+E of the point group T (one such sector) and the two E of Th (two such sectors).  Both partners of such a level are
+states of one label, which tests 1 and 3 do not count, while the density is averaged over ``G``.  A half-filled doublet there passes as the symmetric ensemble.  That state can be a saddle: fcc Cr4 with three
+electrons removed (one up electron in the doublet, 100 K) ends at -79.70931261 Ry in the sectors and on the full grid
+from the same symmetric start, while the full-grid solution reached through a displacement of 1e-3 bohr and carried back
+to the exact atoms is converged at -79.73171383 Ry, 22.4 mRy lower, with integer occupations and 1.41 electrons of
+asymmetry.  Leaving the sectors does not find it by itself (the abelian sectors hold both partners in one sector too,
+and the full grid keeps the symmetric state of a symmetric start), so ``note``, the default, keeps the result and says so
+in ``parsec.out``; ``stop`` sends such a run to the full grid; ``off`` does not look.  Two states of a sector that holds
+a representation twice count as partners where they lie within :data:`MULTIPLET_WIDTH` (the partners of the cells
+measured agree to about 1e-6 Ry in every SCF iteration).
+
 Units Ry, bohr.  Nothing here prints or opens files.
 """
 
@@ -203,6 +216,9 @@ class FractionalOccupations:
     # the same state (``PARSEC_WEIGHTED_GUARD_SHORTCUT``): exactly for test 1 (the same start Hamiltonian), as
     # predicted from the weighted run's final occupations for test 3
     abelian: bool = False
+    # what was found is a doublet whose partners are states of one sector (PARSEC_SPIN_GUARD_DOUBLETS): the abelian
+    # sectors hold them in one sector as well and would keep the state, so a run it stops goes to the full grid
+    doublet: bool = False
 
 
 def _multiplets(values: np.ndarray, width: float) -> list[list[int]]:
@@ -304,14 +320,47 @@ def _sector_label(value) -> str:
     return f"{value // PARTNER_LABEL_STRIDE}.{value % PARTNER_LABEL_STRIDE + 1}"
 
 
-def partner_levels(values, filled, sectors, weights):
+def _repeated_offsets(values, sectors, repeated) -> np.ndarray:
+    """Per state, its position among the states of its sector degenerate with it (within :data:`MULTIPLET_WIDTH`).
+
+    ``repeated``: one flag per sector (labels from one), whether it holds a representation of ``G`` twice or more
+    (``PointGroupReduction.sector_repeated_irreps``); the states of the other sectors take 0.
+    """
+
+    values = np.asarray(values, dtype=np.float64)
+    sectors = np.asarray(sectors, dtype=np.int64)
+    flags = np.asarray(repeated, dtype=bool)
+    if sectors.size and (int(sectors.min()) < 1 or int(sectors.max()) > flags.size):
+        raise ValueError("a sector label lies outside the flags of the sectors")
+    offsets = np.zeros(values.size, dtype=np.int64)
+    for label in np.unique(sectors):
+        if not flags[int(label) - 1]:
+            continue
+        members = np.flatnonzero(sectors == label)
+        members = members[np.argsort(values[members], kind="stable")]
+        starts = np.concatenate(([0], np.flatnonzero(np.diff(values[members]) > MULTIPLET_WIDTH) + 1))
+        places = np.arange(members.size)
+        offsets[members] = places - starts[np.searchsorted(starts, places, side="right") - 1]
+    return offsets
+
+
+def _repeated_partner_steps(offsets, repeats) -> np.ndarray:
+    """What :func:`_repeated_offsets` adds to the partner index of a state of weight ``repeats``: distinct for
+    neighbours and below :data:`PARTNER_LABEL_STRIDE` with the partners of the state, however long a run of levels."""
+
+    return (np.asarray(offsets, dtype=np.int64) * np.asarray(repeats, dtype=np.int64)) % (PARTNER_LABEL_STRIDE // 2)
+
+
+def partner_levels(values, filled, sectors, weights, *, repeated=None):
     """The levels of one channel with every partner of a weighted state as a level of its own.
 
     ``values`` (Ry), ``filled`` (electrons per state: the occupation times the weight) and ``sectors`` (labels) of
     the states the weighted sectors solved, ``weights`` their weights (``None``: no weights, returned as given).  A
     state of weight ``w`` becomes ``w`` levels of its energy holding ``filled / w`` electrons each, labelled
     ``sector * PARTNER_LABEL_STRIDE + k`` for its ``k``-th partner: partners lie in distinct sectors, as they do in
-    the sectors of an abelian group, which is what the multiplet tests of the module ask.
+    the sectors of an abelian group, which is what the multiplet tests of the module ask.  ``repeated`` (one flag per
+    sector, ``None``: none): degenerate states of a sector that holds a representation twice or more take partner
+    labels of their own too (:func:`_repeated_offsets`, ``PARSEC_SPIN_GUARD_DOUBLETS``).
     """
 
     values = np.asarray(values, dtype=np.float64)
@@ -323,6 +372,8 @@ def partner_levels(values, filled, sectors, weights):
     if repeats.shape != values.shape or np.any(repeats < 1):
         raise ValueError("one positive integer weight per state is needed")
     partners = np.arange(int(repeats.sum()), dtype=np.int64) - np.repeat(np.cumsum(repeats) - repeats, repeats)
+    if repeated is not None:
+        partners = partners + np.repeat(_repeated_partner_steps(_repeated_offsets(values, sectors, repeated), repeats), repeats)
     return (
         np.repeat(values, repeats),
         np.repeat(filled / repeats, repeats),
@@ -460,6 +511,25 @@ def _periodic_atom_matrices(grid, atoms) -> list[np.ndarray] | None:
         if ok:
             found.append(matrix)
     return found
+
+
+_GUARD_DOUBLETS_SWITCH = "PARSEC_SPIN_GUARD_DOUBLETS"
+#: What the reports of a doublet within one sector name (:func:`spin_guard_doublets_setting`).
+DOUBLET_REASON = "a partly filled doublet within one sector"
+
+
+def spin_guard_doublets_setting() -> str:
+    """``PARSEC_SPIN_GUARD_DOUBLETS``: ``note`` (the default), ``stop`` or ``off`` (see the module).
+
+    ``note``: a run of weighted sectors that ends with a fractional doublet whose partners are states of one sector
+    keeps its result, the same bits as ``off``, and ``parsec.out`` says so.  ``stop``: tests 1 and 3 count such a
+    doublet and the run goes to the full grid.  ``off``: not looked for, as before.
+    """
+
+    value = os.environ.get(_GUARD_DOUBLETS_SWITCH, "note").strip().lower() or "note"
+    if value not in ("note", "stop", "off"):
+        raise ValueError(f"{_GUARD_DOUBLETS_SWITCH} must be note, stop or off, not {value!r}")
+    return value
 
 
 _GUARD_CELL_GROUP_SWITCH = "PARSEC_SPIN_GUARD_CELL_GROUP"
@@ -1043,6 +1113,43 @@ def fractional_occupations(
     return FractionalOccupations(largest=largest, tolerance=float(tolerance), lines=tuple(lines))
 
 
+def partly_filled_doublets(channels, tolerance: float = SPIN_SECTOR_OCCUPATION_TOLERANCE):
+    """:class:`FractionalOccupations` of the pairs of levels of a full-grid result that are degenerate within
+    :data:`MULTIPLET_WIDTH` and partly filled, ``None`` where there are none.
+
+    Exactly two levels: the full grid knows no group here, and a larger run of levels at the Fermi level is what a
+    metal has.  The note of ``PARSEC_PERIODIC_SPIN_SECTOR_FLOOR`` (``driver._say_floor_doublet``) reads it.
+    """
+
+    largest = 0.0
+    lines: list[str] = []
+    for index, channel in enumerate(channels):
+        values = np.asarray(channel.eigenvalues, dtype=np.float64)
+        filled = np.asarray(channel.occupations, dtype=np.float64)
+        for group in _multiplets(values, MULTIPLET_WIDTH):
+            if len(group) != 2:
+                continue
+            measure = float(np.max(np.minimum(filled[group], 1.0 - filled[group])))
+            if measure < tolerance:
+                continue
+            largest = max(largest, measure)
+            levels = " ".join(f"{values[member] * _RYDBERG_TO_EV:.4f}" for member in group)
+            shares = " ".join(f"{filled[member]:.4f}" for member in group)
+            lines.append(
+                f"{_CHANNEL_NAMES[index] if index < 2 else index} channel: 2 levels at {levels} eV "
+                f"hold {float(np.sum(filled[group])):.4f} electrons (occupations {shares})"
+            )
+    if not lines:
+        return None
+    return FractionalOccupations(
+        largest=largest,
+        tolerance=float(tolerance),
+        lines=tuple(lines),
+        reason="a partly filled pair of degenerate levels",
+        doublet=True,
+    )
+
+
 class _ChannelPair:
     """The two channels' orbit values as one vector, for a mixer of :mod:`.symmetry_fields`.
 
@@ -1306,6 +1413,7 @@ class SpinSectorReducer:
         if not self.guard:
             return None
         abelian_labels = None
+        solved = list(zip(eigenvalues, occupations, representations))
         if self.sector_weights is not None:
             # Weighted sectors: every partner of a weighted state as a level of its own (see the module).
             split = self.sector_abelian_split
@@ -1325,6 +1433,16 @@ class SpinSectorReducer:
             # (whether the sectors of the abelian group would find the same partly filled multiplet)
             abelian = partly_filled_multiplets(eigenvalues, occupations, abelian_labels, fixed=self.fixed_occupations)
             report = replace(report, abelian=abelian is not None)
+        repeated = self.sector_repeated
+        if report is None and repeated is not None and spin_guard_doublets_setting() == "stop":
+            # (PARSEC_SPIN_GUARD_DOUBLETS=stop: degenerate states of one sector count as partners)
+            labels = [
+                partner_levels(values, filled, sectors, self._weights_of(sectors), repeated=repeated)[2]
+                for values, filled, sectors in solved
+            ]
+            found = partly_filled_multiplets(eigenvalues, occupations, labels, fixed=self.fixed_occupations)
+            if found is not None:
+                report = replace(found, reason=DOUBLET_REASON, doublet=True)
         return report
 
     @property
@@ -1343,13 +1461,25 @@ class SpinSectorReducer:
         weights = getattr(self.reducer.reduction, "sector_weights", None)
         return None if weights is None else np.asarray(weights, dtype=np.int64)
 
+    @property
+    def sector_repeated(self):
+        """Per solved sector of weighted sectors, whether it holds a representation of the point group twice or more
+        (``PointGroupReduction.sector_repeated_irreps``); ``None`` where none does or that is not known."""
+
+        held = getattr(self.reducer.reduction, "sector_repeated_irreps", None)
+        if held is None or self.sector_weights is None:
+            return None
+        flags = np.fromiter((bool(item) for item in held), dtype=bool, count=len(held))
+        return flags if flags.any() else None
+
     def _weights_of(self, sectors) -> np.ndarray:
         """The weight of every state of the sector labels (from one) of a channel."""
 
         return self.sector_weights[np.asarray(sectors, dtype=np.int64) - 1]
 
-    def _partner_channel(self, channel):
-        """A result channel of weighted sectors with partner levels in distinct sectors (:func:`partner_levels`)."""
+    def _partner_channel(self, channel, *, repeated=None):
+        """A result channel of weighted sectors with partner levels in distinct sectors (:func:`partner_levels`);
+        ``repeated``: also the degenerate states of the sectors it flags (:func:`_repeated_offsets`)."""
 
         solved = getattr(channel, "sector_states", None)
         if solved is None:
@@ -1357,6 +1487,12 @@ class SpinSectorReducer:
         sectors, _, weights = solved
         repeats = np.asarray(weights, dtype=np.int64)
         partners = np.arange(int(repeats.sum()), dtype=np.int64) - np.repeat(np.cumsum(repeats) - repeats, repeats)
+        if repeated is not None:
+            # (the levels of the channel list every partner of a state: its first partner stands for the state)
+            first = np.cumsum(repeats) - repeats
+            levels = np.asarray(channel.eigenvalues, dtype=np.float64)[first]
+            offsets = _repeated_offsets(levels, np.asarray(sectors, dtype=np.int64), repeated)
+            partners = partners + np.repeat(_repeated_partner_steps(offsets, repeats), repeats)
         return SimpleNamespace(
             eigenvalues=np.asarray(channel.eigenvalues, dtype=np.float64),
             occupations=np.asarray(channel.occupations, dtype=np.float64),
@@ -1426,6 +1562,8 @@ class SpinSectorReducer:
 
         result = getattr(result, "result", result)
         channels = getattr(result, "spin", None)
+        # (what the last check found of PARSEC_SPIN_GUARD_DOUBLETS=note: the driver says it in parsec.out)
+        self.doublet_report = None
         if channels is None or not self.guard:
             return
         if self.structure is not None:
@@ -1464,6 +1602,21 @@ class SpinSectorReducer:
                 )
                 report = replace(report, abelian=abelian is not None)
             raise SpinSectorsAbandoned(self._stage(final), report)
+        repeated = self.sector_repeated if weighted else None
+        mode = spin_guard_doublets_setting()
+        if repeated is None or mode == "off":
+            return
+        found = fractional_occupations(
+            [self._partner_channel(channel, repeated=repeated) for channel in originals],
+            self.tolerance,
+            unequal_partners=True,
+        )
+        if found is None:
+            return
+        found = replace(found, reason=DOUBLET_REASON, doublet=True)
+        if mode == "stop":
+            raise SpinSectorsAbandoned(self._stage(final), found)
+        self.doublet_report = (self._stage(final), found)
 
 
 class HostSpinXCOnOrbits:
@@ -1500,6 +1653,8 @@ __all__ = [
     "guard_group_order",
     "spin_fallback_shared_setting",
     "spin_guard_cell_group_setting",
+    "spin_guard_doublets_setting",
+    "partly_filled_doublets",
     "partly_filled_multiplets",
     "abelian_partner_labels",
     "partner_levels",

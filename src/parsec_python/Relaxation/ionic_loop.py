@@ -28,7 +28,7 @@ from ..Forces import (
     symmetrize_positions,
 )
 from .backend import IonicBackend, moved_atoms, reference_backend, release_orbitals
-from .domove import MoveReport, MovementState, RelaxationSettings, domove
+from .domove import MoveReport, MovementState, RelaxationSettings, bfgs_first_step_setting, domove
 from .files import RYDBERG_TO_EV, RelaxRestart
 from ..SCF.filter_restart import FilterRestart
 
@@ -222,6 +222,7 @@ def _relaxation_loop(
     ``IonicOutcome.stopped_by_scf_failure``).
     """
 
+    bfgs_first_step_setting()  # an unknown value stops before the first SCF loop
     watch = IonicObserver() if observer is None else observer
     atom_count = len(system.atoms)
     mask = (

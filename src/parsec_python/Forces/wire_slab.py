@@ -87,6 +87,50 @@ class WireSlabForceResult(ForceResult):
     omit_torque = True
 
 
+#: The switch of the Gaussian compensation terms of the local forces of a wire or slab (:func:`wire_slab_gaussian_setting`).
+WIRE_SLAB_GAUSSIAN_ENV = "PARSEC_WIRE_SLAB_GAUSSIAN"
+
+
+def wire_slab_gaussian_setting() -> str:
+    """``PARSEC_WIRE_SLAB_GAUSSIAN``: the grid points within the first radial sample ``rs(2)`` of an atom in the Gaussian
+    terms of the local forces of a wire or slab.
+
+    ``forcloc.f90`` skips every term of such a point (``if (r1 < rmin) cycle``), also the two terms of the Gaussian
+    compensation charge, which are analytic: the Gaussian density ``Z exp(-r^2/sigma^2)/(pi^1.5 sigma^3)`` is largest
+    at ``r = 0`` and the slope of ``2 Z erf(r/sigma)/r`` is smooth there.  An atom on a grid point then misses the
+    term of that point: 2.1e-3 Ry/bohr in F_z of B (FHI table) in an hBN slab.
+
+    ``auto`` (default): the Gaussian terms at every point (a deliberate departure from ``forcloc.f90``); the terms of
+    the radial tables keep the skip.  ``off``: the skip of ``forcloc.f90`` for every term, bit for bit as before.
+    """
+
+    import os
+
+    value = os.environ.get(WIRE_SLAB_GAUSSIAN_ENV, "auto").strip().lower() or "auto"
+    if value not in ("auto", "off"):
+        raise ValueError(f"{WIRE_SLAB_GAUSSIAN_ENV} must be auto or off, not {value!r}")
+    return value
+
+
+def _erf_slope_over_radius(charge: float, radius: np.ndarray, sigma: float) -> np.ndarray:
+    """``(d/dr [2 Z erf(r/sigma)/r]) / r`` at every distance, ``r = 0`` included (its limit ``-8 Z/(3 sqrt(pi) sigma^3)``).
+
+    Below ``r/sigma = 1e-2`` the Taylor series ``2 Z (2/(sqrt(pi) sigma^3)) (-2/3 + 2 x^2/5)``: the closed form cancels
+    to round-off there.
+    """
+
+    ratio = radius / sigma
+    small = ratio < 1.0e-2
+    result = np.empty_like(radius)
+    series = ratio[small]
+    result[small] = 2.0 * charge * (2.0 / (np.sqrt(np.pi) * sigma**3)) * (-2.0 / 3.0 + 0.4 * series * series)
+    large = ~small
+    r = radius[large]
+    x = ratio[large]
+    result[large] = 2.0 * charge * (2.0 / (np.sqrt(np.pi) * sigma) * np.exp(-x * x) / (r * r) - erf(x) / (r * r * r))
+    return result
+
+
 def wire_slab_local_forces(
     grid,
     atoms: Sequence[Atom],
@@ -115,6 +159,8 @@ def wire_slab_local_forces(
     gaussian = np.zeros((count, 3))
     tables = {}
     half_width = grid.settings.stencil_half_width
+    # the Gaussian terms at every point (PARSEC_WIRE_SLAB_GAUSSIAN=auto) or with the skip of forcloc.f90 (off)
+    every_point = wire_slab_gaussian_setting() == "auto"
     for index, atom in enumerate(atoms):
         potential = potentials[atom.symbol]
         specification = specifications[atom.symbol]
@@ -139,14 +185,18 @@ def wire_slab_local_forces(
                 use_spline=specification.use_spline,
                 spline_padding_width=half_width,
             )
-            # d/dr [2 Z erf(r/sigma)/r] (forcloc_wire.f90:252-257).
-            ratio = radius[included] / sigma
-            gaussian_slope = np.zeros_like(radius)
-            gaussian_slope[included] = 2.0 * charge * (
-                2.0 / (np.sqrt(np.pi) * sigma) * np.exp(-ratio**2) * inverse[included]
-                - erf(ratio) * inverse[included] ** 2
-            )
-            ionic[index] += ((slope + gaussian_slope) * density * inverse) @ relative
+            if every_point:
+                # the slope of the tables with the skip within rs(2), that of 2 Z erf(r/sigma)/r at every point
+                ionic[index] += ((slope * inverse + _erf_slope_over_radius(charge, radius, sigma)) * density) @ relative
+            else:
+                # d/dr [2 Z erf(r/sigma)/r] (forcloc_wire.f90:252-257).
+                ratio = radius[included] / sigma
+                gaussian_slope = np.zeros_like(radius)
+                gaussian_slope[included] = 2.0 * charge * (
+                    2.0 / (np.sqrt(np.pi) * sigma) * np.exp(-ratio**2) * inverse[included]
+                    - erf(ratio) * inverse[included] ** 2
+                )
+                ionic[index] += ((slope + gaussian_slope) * density * inverse) @ relative
             atomic_slope = evaluate_density_derivative(
                 potential,
                 radius,
@@ -164,9 +214,9 @@ def wire_slab_local_forces(
                     spline_padding_width=half_width,
                 )
                 core[index] += (core_slope * xc * inverse) @ relative
-            charge_density = np.where(
-                included, density_factor * np.exp(-(radius / sigma) ** 2), 0.0
-            )
+            charge_density = density_factor * np.exp(-(radius / sigma) ** 2)
+            if not every_point:
+                charge_density = np.where(included, charge_density, 0.0)
             gaussian[index] += hartree_gradient @ charge_density
     volume = grid.volume_element
     return WireSlabLocalForceTerms(
@@ -190,10 +240,16 @@ def wire_slab_projector_gradients(
     along the periodic directions, as the projectors of
     :func:`parsec_python.V_ion.build_nonlocal_projectors` are; ``k_point``
     (Cartesian 1/bohr) gives each image the Bloch phase ``exp(-i k.(r - T))``
-    of those projectors.  As in ``nonloc.F90`` a distance below the first
-    radial sample is replaced by that sample.
+    of those projectors.  A distance below the first radial sample is
+    replaced by that sample, as in ``nonloc.F90``
+    (``PARSEC_PROJECTOR_CENTER=tip`` and ``off``); under ``auto`` a distance
+    below 3e-3 bohr by that distance
+    (:func:`parsec_python.V_ion.ionic_potential.projector_gradient_distance`).
     """
 
+    from ..V_ion.ionic_potential import projector_center_setting, projector_gradient_clamp
+
+    center_setting = projector_center_setting()
     rows: list[np.ndarray] = []
     columns: list[np.ndarray] = []
     values: tuple[list, list, list] = ([], [], [])
@@ -217,7 +273,7 @@ def wire_slab_projector_gradients(
             if not np.any(support):
                 continue
             rows_here = np.flatnonzero(support)
-            clamped = np.maximum(radius[support], potential.radii[0])
+            clamped = projector_gradient_clamp(radius[support], potential, center_setting)
             phase = (
                 1.0
                 if k_point is None

@@ -204,7 +204,13 @@ def read_bands_dat(path: str | Path) -> BandStructureResult:
 
 
 def save_band_structure_archive(path: str | Path, result: BandStructureResult) -> Path:
-    """Portable NumPy archive of a band structure (with segment names)."""
+    """Portable NumPy archive of a band structure (with segment names).
+
+    ``residual_norms`` is the largest ``|H v - e v|`` of each ``(channel, k-point)``.  The key ``residual_scope``
+    (``"reported levels"``) is present where the test of the k-points in sectors left out their margin states
+    (``PARSEC_BAND_REPORTED_RESIDUALS=auto``).  Without it, the residual of a k-point in sectors also covers those
+    states.
+    """
     path = Path(path)
     payload = {
         "mode": np.asarray(result.mode),
@@ -221,6 +227,8 @@ def save_band_structure_archive(path: str | Path, result: BandStructureResult) -
         payload["spin_expectation"] = result.spin_expectation
     if result.attempts is not None:
         payload["solver_attempts"] = result.attempts
+    if result.residual_scope is not None:
+        payload["residual_scope"] = np.asarray(result.residual_scope)
     np.savez_compressed(path, **payload)
     return path
 
@@ -238,6 +246,7 @@ def load_band_structure_archive(path: str | Path) -> BandStructureResult:
             fermi_level=float(archive["fermi_level_ry"]),
             spin_expectation=archive["spin_expectation"] if "spin_expectation" in archive.files else None,
             attempts=archive["solver_attempts"] if "solver_attempts" in archive.files else None,
+            residual_scope=str(archive["residual_scope"]) if "residual_scope" in archive.files else None,
         )
 
 

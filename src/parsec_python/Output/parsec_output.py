@@ -297,6 +297,41 @@ def spin_sector_fallback_lines(record) -> list[str]:
             *(f"       {line}" for line in record.multiplets),
             "",
         ]
+    if getattr(record, "route", "spin") == "floor_doublet":
+        # PARSEC_PERIODIC_SPIN_SECTOR_FLOOR: a small spin cell on the full grid; the result is kept.
+        return [
+            "",
+            f" NOTE: full grid of a small spin cell: {record.reason} after {record.stage}",
+            f"       ({record.measure} = {record.largest_fractional_occupation:.3E}).  The result is kept: the",
+            "       symmetric ensemble of this level, which the full grid keeps from a symmetric start. A state",
+            "       that breaks the point group can lie lower: to look for one, displace an atom by about 1e-3 bohr",
+            "       and run without symmetry.",
+            *(f"       {line}" for line in record.multiplets),
+            "",
+        ]
+    if getattr(record, "route", "spin") == "doublet":
+        # PARSEC_SPIN_GUARD_DOUBLETS=note: the result is kept.
+        return [
+            "",
+            f" NOTE: weighted symmetry sectors: {record.reason} after {record.stage}",
+            f"       ({record.measure} = {record.largest_fractional_occupation:.3E}).  The result is kept: the",
+            "       symmetric ensemble of this doublet, which the full grid also keeps from a symmetric start. A state",
+            "       that breaks the point group can lie lower: to look for one, displace an atom by about 1e-3 bohr",
+            "       and run without symmetry (PARSEC_SPIN_GUARD_DOUBLETS=stop sends this run to the full grid).",
+            *(f"       {line}" for line in record.multiplets),
+            "",
+        ]
+    if getattr(record, "route", "spin") == "weighted" and getattr(record, "doublet", False):
+        # PARSEC_SPIN_GUARD_DOUBLETS=stop
+        return [
+            "",
+            f" NOTE: weighted symmetry sectors: {record.reason} after {record.stage}",
+            f"       ({record.measure} = {record.largest_fractional_occupation:.3E}).",
+            "       The abelian sectors hold both partners in one sector too, so the calculation goes straight to the",
+            "       full grid (the NOTE below; PARSEC_SPIN_GUARD_DOUBLETS=note keeps the result of the sectors).",
+            *(f"       {line}" for line in record.multiplets),
+            "",
+        ]
     if getattr(record, "route", "spin") == "weighted":
         where = (
             [
@@ -3799,6 +3834,8 @@ class ParsecTextReporter:
         counts = [int(value) for value in result.segment_counts]
         states = result.eigenvalues.shape[2]
         worst = float(np.max(result.residual_norms)) if result.residual_norms.size else 0.0
+        # the levels the residual covers, where the sectors of the k-points left their margin states out of the test
+        scope = getattr(result, "residual_scope", None)
         lines = [
             " Band structure (non-self-consistent, Fortran calc_bands)",
             " -------------------------------------------------------",
@@ -3814,7 +3851,7 @@ class ParsecTextReporter:
         lines.extend(
             [
                 "",
-                f" Largest eigenpair residual |H v - e v| : {worst:12.4E} [Ry]",
+                f" Largest eigenpair residual |H v - e v| : {worst:12.4E} [Ry]" + (f" ({scope})" if scope else ""),
             ]
         )
         attempts = getattr(result, "attempts", None)

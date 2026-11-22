@@ -19,6 +19,9 @@ which is closed before the next, so the memory is that of a few k-points in thei
 stays below the floor of the k-point sectors (``2^24`` rows times states) or whose sectors would not halve the work
 is solved whole by the same solver.  ``PARSEC_BAND_KPOINT_SECTORS=off`` (or ``PARSEC_KPOINT_SECTORS=off``) keeps the
 solve of every k-point on the whole grid, as before.
+
+A converged first solve tests the levels its k-point reports, not the margin states of the sectors above them
+(``PARSEC_BAND_REPORTED_RESIDUALS``, :meth:`.kpoint_sectors.SectorKPointSolver.solve_reported`).
 """
 
 from __future__ import annotations
@@ -38,7 +41,8 @@ _LAST_RECORD: dict = {}
 
 def last_band_sector_record() -> dict:
     """What the last :func:`solve_band_sectors` did: ``kpoints``, ``split`` (those solved in sectors), ``largest``
-    (the most sectors of one) and ``group`` (the operations of the potential); empty where it kept the path whole."""
+    (the most sectors of one), ``group`` (the operations of the potential) and ``residuals_of_reported`` (whether every
+    residual is that of the levels its k-point reports); empty where it kept the path whole."""
 
     return dict(_LAST_RECORD)
 
@@ -152,13 +156,16 @@ def solve_band_sectors(
     workers=None,
     backend=None,
 ):
-    """Eigenvalues ``(n_k, number_of_states)`` and largest residuals ``(n_k,)`` of the band k-points in sectors.
+    """Eigenvalues ``(n_k, number_of_states)`` and largest residuals ``(n_k,)`` of the band k-points in sectors (of
+    the reported levels under ``PARSEC_BAND_REPORTED_RESIDUALS=auto``, else of every state of the sectors).
 
     ``make_hamiltonian(k_point, potential)`` is the scalar Bloch Hamiltonian of a k-point
     (:func:`parsec_python.SCF.bands.solve_kpoint_bands`), ``eigval_settings`` the settings of its first solve (with
     ``Bands_FF_MaxIter``).  ``None`` where no k-point of the path splits (the caller keeps its route).
     """
 
+    from parsec_python.Eigensolvers.eigval import first_solve_converges
+    from parsec_python.SCF.bands import band_reported_residuals_setting
     from parsec_python.SCF.kpoint_solver import KPointJob
 
     from .kpoint_parallel import _plain_solver, device_worker_count, resolve_backend
@@ -237,6 +244,10 @@ def solve_band_sectors(
     residuals = np.zeros(n_k)
     degree = int(system.input.eigensolver.filter_degree)
     options = {"problem_size": int(grid.size), "backend": backend, "workers": workers}
+    # PARSEC_BAND_REPORTED_RESIDUALS: the residual test of a converged first solve covers the levels the k-point
+    # reports, not the margin of its sectors above them
+    reported_test = band_reported_residuals_setting() == "auto" and first_solve_converges(eigval_settings)
+    of_reported = True  # no k-point of the path has a residual over the margin states of its sectors
     for start in range(0, n_k, chunk):
         stop = min(n_k, start + chunk)
         points = k_points[start:stop]
@@ -256,14 +267,21 @@ def solve_band_sectors(
         else:
             solver = _plain_solver(job, **options)
         with solver:
-            values = solver.solve({"V": potential}, degree)
-            norms = solver.residuals()
+            in_sectors = isinstance(solver, SectorKPointSolver)
+            if reported_test and in_sectors and solver.reported_test_available(degree):
+                values = solver.solve_reported({"V": potential}, degree)
+                norms = solver.reported_residuals()
+            else:
+                of_reported = of_reported and not in_sectors
+                values = solver.solve({"V": potential}, degree)
+                norms = solver.residuals()
         for offset, k_index in enumerate(range(start, stop)):
             levels = np.asarray(values[offset], dtype=np.float64)[: int(number_of_states)]
             eigenvalues[k_index, : levels.size] = levels
             residuals[k_index] = float(norms[offset]) if math.isfinite(float(norms[offset])) else float("nan")
             if callback is not None:
                 callback(k_index, n_k, eigenvalues[k_index][None, :], residuals[k_index], 1)
+    _LAST_RECORD["residuals_of_reported"] = of_reported
     return eigenvalues, residuals
 
 
