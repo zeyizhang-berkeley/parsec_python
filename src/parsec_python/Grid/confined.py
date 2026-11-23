@@ -102,17 +102,31 @@ class ConfinedPeriodicGrid(GeneralPeriodicGrid):
         return wrapped
 
     def rows_for_integer_coordinates(self, points: np.ndarray) -> np.ndarray:
-        """Active rows; periodic directions wrap, ``-1`` outside the domain."""
+        """Active rows; periodic directions wrap, ``-1`` outside the domain.
+
+        The index of a point in the box along each direction is ``(i - index_min) mod n`` along a periodic one
+        (:meth:`wrap_periodic`) and ``i - index_min`` along a confined one, where it must lie in ``[0, n)``; one
+        column at a time (the stencil builders call this for every neighbour of every point).
+        """
 
         points = np.asarray(points, dtype=np.int64)
         if points.ndim != 2 or points.shape[1] != 3:
             raise ValueError("integer grid points must have shape (n, 3)")
-        local = self.wrap_periodic(points) - self.index_min
-        valid = np.all((local >= 0) & (local < self.points_per_axis), axis=1)
+        columns = []
+        valid = None
+        for axis in range(3):
+            count = int(self.points_per_axis[axis])
+            column = points[:, axis] - int(self.index_min[axis])
+            if axis < self.periodicity:
+                np.remainder(column, count, out=column)
+            else:
+                inside = (column >= 0) & (column < count)
+                valid = inside if valid is None else valid & inside
+            columns.append(column)
+        if valid is None or bool(np.all(valid)):
+            return self.lookup[columns[0], columns[1], columns[2]]
         rows = np.full(points.shape[0], -1, dtype=np.int64)
-        if np.any(valid):
-            inside = local[valid]
-            rows[valid] = self.lookup[inside[:, 0], inside[:, 1], inside[:, 2]]
+        rows[valid] = self.lookup[columns[0][valid], columns[1][valid], columns[2][valid]]
         return rows
 
     def lattice_coordinates(self, integer_points: np.ndarray) -> np.ndarray:

@@ -9,6 +9,7 @@ their rows.
 
 from __future__ import annotations
 
+import dataclasses
 import itertools
 import os
 import unittest
@@ -122,8 +123,9 @@ class PartnerCosetTests(unittest.TestCase):
     def test_the_switch_is_validated(self):
         from parsec_python.acceleration.Symmetry.axis_reflection import orbital_irrep_rows_setting
 
-        # sector by default (partner is opt-in: slower over some whole first runs on A100)
-        for value, expected in (("", "sector"), ("partner", "partner"), ("SECTOR", "sector")):
+        # partner by default since 2026-11-22 (whole first runs on A100 faster than on sector rows in every case
+        # measured); sector restores the rows of before
+        for value, expected in (("", "partner"), ("partner", "partner"), ("SECTOR", "sector")):
             with patch.dict(os.environ, {"PARSEC_ORBITAL_IRREP_ROWS": value}):
                 self.assertEqual(orbital_irrep_rows_setting(), expected)
         with patch.dict(os.environ, {"PARSEC_ORBITAL_IRREP_ROWS": "on"}):
@@ -177,16 +179,113 @@ class TdPartnerRowTests(unittest.TestCase):
                     kept.keep_sector_rows("a test")
                     self.assertEqual(kept.partner_units, ())
                     self.assertEqual(kept.sector_rows_kept, "a test")
-                # the default keeps the rows of the sectors
+                # the default solves the units on partner rows
                 with patch.dict(os.environ, {"PARSEC_ORBITAL_IRREPS": mode, "PARSEC_ORBITAL_IRREP_ROWS": ""}):
                     default = ReflectionRepresentationDecomposition.build(grid, reduction)
-                    self.assertEqual(default.partner_units, ())
-                    self.assertEqual(default.solved_sizes, default.sector_sizes)
+                    self.assertEqual(default.partner_units, decomposition.partner_units)
+                    self.assertEqual(default.solved_sizes, decomposition.solved_sizes)
             with patch.dict(os.environ, {"PARSEC_ORBITAL_IRREPS": "off"}):
                 reduction = detect_point_group_reduction(grid, atoms, abelian)
                 decomposition = ReflectionRepresentationDecomposition.build(grid, reduction)
                 self.assertEqual(decomposition.partner_units, ())
                 self.assertEqual(decomposition.solved_sizes, decomposition.sector_sizes)
+
+
+def _check_partner_projectors(case, decomposition, label):
+    """The partner rows of every unit of ``decomposition`` against its projector's tables on random vectors:
+    ``E E^T X = P X``, ``E^T E Y = Y``, as many rows as the projector's trace (the tables' and the cheap one)."""
+
+    rng = np.random.default_rng(11)
+    for index in decomposition.partner_units:
+        rows = decomposition.partner_rows(index)
+        size = decomposition.sector_size(index)
+        case.assertEqual(rows.rows, decomposition.sector_rank(index), label)
+        case.assertEqual(rows.rows, decomposition.projector_trace(index), label)
+        vectors = rng.standard_normal((size, 3))
+        np.testing.assert_allclose(rows.expand(rows.restrict(vectors)), decomposition.project_vectors(vectors, index),
+                                   rtol=0.0, atol=1e-12, err_msg=label)
+        partner = rng.standard_normal((rows.rows, 3))
+        np.testing.assert_allclose(rows.restrict(rows.expand(partner)), partner, rtol=0.0, atol=1e-12, err_msg=label)
+        np.testing.assert_array_less(0.0, rows.values[rows.first], err_msg=label)
+        # the sector of K: the same full-grid functions as the sector of H of E x
+        vector = partner[:, 0]
+        np.testing.assert_allclose(
+            decomposition.partner_decomposition(index).expand_vector(vector, 0),
+            decomposition.expand_vector(rows.expand(vector), index), rtol=0.0, atol=1e-12, err_msg=label,
+        )
+
+
+class GroupPartnerRowTests(unittest.TestCase):
+    def test_clusters_of_the_cubic_and_tetragonal_groups(self):
+        """Clusters of Oh, Th, T and D4h (two orbits of generic points each) on half-shifted and zero-shift grids:
+        the partner rows of ``once`` and ``split`` (Oh: 4 units on the orbits of Oh; Th and T: units of ``split`` on
+        the orbits of the whole group; D4h: 8 units of ``split`` on subgroups of index 2) against the tables of their
+        projectors, with points on the mirror planes and axes."""
+
+        from parsec_python.Grid import build_cluster_grid
+        from parsec_python.acceleration.Symmetry import (
+            ReflectionRepresentationDecomposition,
+            SignedPermutationReduction,
+            detect_point_group_reduction,
+        )
+        from parsec_python.acceleration.tests.test_orbital_groups import GROUPS
+        from parsec_python.models import Atom, GridSettings
+
+        def orbit(group, point):
+            seen = []
+            for operation in GROUPS[group]:
+                image = np.asarray(operation, dtype=float) @ np.asarray(point, dtype=float)
+                if not any(np.allclose(image, other) for other in seen):
+                    seen.append(image)
+            return seen
+
+        cases = {
+            "Oh": ((1.7, 0.0, 0.0), (1.1, 0.9, 0.0)),
+            "Th": ((1.6, 0.7, 0.0), (1.2, 1.2, 1.2)),
+            "T": ((1.5, 0.6, 0.3), (1.1, 1.1, 1.1)),
+            "D4h": ((1.8, 0.0, 0.0), (1.2, 0.5, 0.0)),
+        }
+        found = {}
+        for group, points in cases.items():
+            atoms = [Atom("C", (0.0, 0.0, 0.0))] + [
+                Atom(symbol, tuple(position)) for symbol, point in zip(("H", "O"), points)
+                for position in orbit(group, point)
+            ]
+            for shift in (0.5, 0.0):
+                grid = build_cluster_grid(GridSettings(spacing=0.5, radius=4.0, expansion_order=4, shift=(shift,) * 3))
+                abelian = SignedPermutationReduction.detect(grid, atoms)
+                for mode in ("once", "split"):
+                    label = f"{group} shift {shift} {mode}"
+                    with self.subTest(label), patch.dict(os.environ, {"PARSEC_ORBITAL_IRREPS": mode,
+                                                                      "PARSEC_ORBITAL_IRREP_ROWS": "partner"}):
+                        reduction = detect_point_group_reduction(grid, atoms, abelian)
+                        self.assertEqual(len(reduction.full_operations), len(GROUPS[group]), label)
+                        decomposition = ReflectionRepresentationDecomposition.build(grid, reduction)
+                        found[label] = len(decomposition.partner_units)
+                        _check_partner_projectors(self, decomposition, label)
+                        # the rows of the coset images that the detection keeps give the tables and partner rows of
+                        # the row maps, bit for bit
+                        # (kept where units have projectors only: the groups of ``once`` without any keep the
+                        # reduction of before)
+                        self.assertEqual(reduction.coset_rows is not None, bool(decomposition.projected_sectors),
+                                         label)
+                        mapped = ReflectionRepresentationDecomposition.build(
+                            grid, dataclasses.replace(reduction, coset_rows=None))
+                        for index in decomposition.projected_sectors:
+                            for left, right in zip(decomposition.projection_tables(index),
+                                                   mapped.projection_tables(index)):
+                                np.testing.assert_array_equal(left, right, err_msg=label)
+                            self.assertEqual(decomposition.projector_trace(index), mapped.projector_trace(index))
+                        for index in decomposition.partner_units:
+                            left, right = decomposition.partner_rows(index), mapped.partner_rows(index)
+                            for name in ("first", "row_of_sector", "values"):
+                                np.testing.assert_array_equal(getattr(left, name), getattr(right, name), err_msg=label)
+        for shift in (0.5, 0.0):
+            self.assertEqual(found[f"Oh shift {shift} once"], 4)
+            self.assertEqual(found[f"D4h shift {shift} split"], 8)
+            self.assertEqual(found[f"D4h shift {shift} once"], 0)
+            self.assertGreater(found[f"Th shift {shift} split"], 0)
+            self.assertGreater(found[f"T shift {shift} split"], 0)
 
 
 class PeriodicPartnerRowTests(unittest.TestCase):

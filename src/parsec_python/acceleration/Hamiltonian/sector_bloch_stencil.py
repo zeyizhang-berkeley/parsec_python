@@ -218,7 +218,8 @@ class SectorStencilTable:
     def __init__(self, columns: np.ndarray, codes: np.ndarray, palette: np.ndarray, weights: np.ndarray, centre: float):
         self.columns = np.ascontiguousarray(columns, dtype=np.int32)
         self.codes = np.ascontiguousarray(codes, dtype=np.uint8)
-        self.palette = np.ascontiguousarray(palette, dtype=np.float64)
+        # complex for a sector of complex characters (..Symmetry.complex_sectors), real otherwise
+        self.palette = np.ascontiguousarray(palette, dtype=np.complex128 if np.iscomplexobj(palette) else np.float64)
         self.weights = np.ascontiguousarray(weights, dtype=np.complex128)
         self.centre = float(centre)
         size = int(self.columns.shape[1])
@@ -280,16 +281,19 @@ def build_sector_table(decomposition, sector: int, shape, half_width: int, centr
     to_wedge = np.asarray(reduction.full_to_wedge, dtype=np.int64)
     to_sector = np.asarray(decomposition.orbit_to_sector[int(sector)], dtype=np.int64)
     phases = decomposition.phases[int(sector)]
+    # the complex phases of a sector of complex characters (..Symmetry.complex_sectors): a complex palette
+    complex_phases = np.iscomplexobj(phases)
     slots = _slots(shape, half_width)
     rows = np.arange(orbits.size, dtype=np.int64)
     columns = np.empty((len(slots), orbits.size), dtype=np.int32)
-    factors = np.empty((len(slots), orbits.size), dtype=np.float64)
+    factors = np.empty((len(slots), orbits.size), dtype=np.complex128 if complex_phases else np.float64)
     own = multiplicities[orbits]
     for slot, (axis, shift) in enumerate(slots):
         neighbours = _moved(points, shape, axis, shift)
         orbit = to_wedge[neighbours]
         column = to_sector[orbit]
-        factor = phases[neighbours].astype(np.float64) * np.sqrt(own / multiplicities[orbit])
+        values = phases[neighbours]
+        factor = (values if complex_phases else values.astype(np.float64)) * np.sqrt(own / multiplicities[orbit])
         missing = column < 0
         factor[missing] = 0.0
         column[missing] = rows[missing]
@@ -426,18 +430,37 @@ extern "C" __global__ void sector_bloch_stencil_real(
 }
 """
 
-_KERNELS: dict[tuple[int, int, bool], Any] = {}
+# The complex kernel with a complex palette (the sectors of complex characters, ..Symmetry.complex_sectors): the
+# factor of an entry is complex, the palette holds its real and imaginary parts.
+_COMPLEX_PALETTE_SOURCE = _SOURCE.replace(
+    "__shared__ double shared_palette[PALETTE];", "__shared__ double shared_palette[2 * PALETTE];"
+).replace(
+    "for (int i = threadIdx.x; i < palette_size; i += blockDim.x) shared_palette[i] = palette[i];",
+    "for (int i = threadIdx.x; i < 2 * palette_size; i += blockDim.x) shared_palette[i] = palette[i];",
+).replace(
+    """        const double f = shared_palette[codes[e]];
+        const double2 x = u[(long long)j * count + c];
+        const double wr = shared_weights[2 * s] * f;
+        const double wi = shared_weights[2 * s + 1] * f;""",
+    """        const int code = codes[e];
+        const double fr = shared_palette[2 * code];
+        const double fi = shared_palette[2 * code + 1];
+        const double2 x = u[(long long)j * count + c];
+        const double wr = shared_weights[2 * s] * fr - shared_weights[2 * s + 1] * fi;
+        const double wi = shared_weights[2 * s] * fi + shared_weights[2 * s + 1] * fr;""",
+)
+
+_KERNELS: dict[tuple, Any] = {}
 _LOCK = Lock()
 
 
-def _kernel(cp, slots: int, real: bool = False):
-    key = (int(cp.cuda.Device().id), int(slots), bool(real))
+def _kernel(cp, slots: int, real: bool = False, complex_palette: bool = False):
+    key = (int(cp.cuda.Device().id), int(slots), bool(real)) + ((True,) if complex_palette else ())
     with _LOCK:
         kernel = _KERNELS.get(key)
         if kernel is None:
-            source = (_REAL_SOURCE if real else _SOURCE).replace("SLOTS", str(int(slots))).replace(
-                "PALETTE", str(_PALETTE)
-            )
+            base = _COMPLEX_PALETTE_SOURCE if complex_palette else (_REAL_SOURCE if real else _SOURCE)
+            source = base.replace("SLOTS", str(int(slots))).replace("PALETTE", str(_PALETTE))
             module = cp.RawModule(code=source, options=("--std=c++11", "--fmad=false"))
             kernel = module.get_function("sector_bloch_stencil_real" if real else "sector_bloch_stencil")
             _KERNELS[key] = kernel
@@ -454,8 +477,8 @@ class _SectorStencil:
     def __init__(self, table: SectorStencilTable) -> None:
         self.table = table
         self.centre = float(table.centre)
-        # real weights (a sector of k = 0): the kernel also takes real blocks (PARSEC_KPOINT_REAL_GAMMA)
-        self.real_capable = bool(np.all(np.asarray(table.weights).imag == 0.0))
+        # real weights (a sector of k = 0) and factors: the kernel also takes real blocks (PARSEC_KPOINT_REAL_GAMMA)
+        self.real_capable = bool(np.all(np.asarray(table.weights).imag == 0.0)) and not np.iscomplexobj(table.palette)
 
     def diagonal(self, diagonal):
         """``c_0 + v``: the diagonal the kernel adds (``v`` the potential of the sector's rows)."""
@@ -497,9 +520,14 @@ class DeviceSectorStencil(_SectorStencil):
         self.rows = int(table.shape[0])
         self.columns = cp.asarray(table.columns)
         self.codes = cp.asarray(table.codes)
-        self.palette = cp.asarray(table.palette)
+        # a complex palette as its real and imaginary parts (the sectors of complex characters)
+        self.complex_palette = bool(np.iscomplexobj(table.palette))
+        self.palette = cp.asarray(
+            np.ascontiguousarray(table.palette.view(np.float64)) if self.complex_palette else table.palette
+        )
+        self.palette_size = int(table.palette.size)
         self.weights = cp.asarray(np.ascontiguousarray(table.weights.view(np.float64)))
-        self.kernel = _kernel(cp, table.slots)
+        self.kernel = _kernel(cp, table.slots, complex_palette=self.complex_palette)
         # the real weights and kernel of a sector of k = 0 (made at the first real block)
         self._real_weights = None
         self._real_kernel = None
@@ -559,7 +587,7 @@ class DeviceSectorStencil(_SectorStencil):
                 np.int64(self.rows), np.int64(count),
                 nonlocal_part, has_nonlocal, previous_part, has_previous,
                 np.float64(center), np.float64(scale), before_part, after_part, has_after,
-                np.int32(self.palette.size),
+                np.int32(self.palette_size),
             ),
         )
         return out
@@ -611,7 +639,7 @@ class DeviceSectorStencil(_SectorStencil):
                 np.int64(self.rows), np.int64(count),
                 nonlocal_part, has_nonlocal, previous_part, has_previous,
                 np.float64(center), np.float64(scale), before_part, after_part, has_after,
-                np.int32(self.palette.size),
+                np.int32(self.palette_size),
             ),
         )
         return out

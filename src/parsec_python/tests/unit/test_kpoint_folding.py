@@ -11,10 +11,12 @@ points; explicit k-point lists stay as written.
 # With both sets of routines: the energy test runs the Fortran-derived routines and Andrew Grieder's.
 from __future__ import annotations
 
+import os
 import shutil
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import numpy as np
 
@@ -117,8 +119,13 @@ class ParsedKPointTests(_Case):
             "begin Kpoint_List\n 0.25 0.25 0.75 1.0\nend Kpoint_List"
         )
         listed = listed.split("begin Monkhorst_Pack_Grid")[0] + listed.split("end Monkhorst_Pack_Shift")[1]
+        # a written point outside the first zone of this orthogonal cell runs at its shortest image
+        # (PARSEC_KPOINT_ORTHOGONAL_LIST_FOLD=auto); off keeps the written vector, as before
         explicit = parse_parsec_input(self.write("listed", listed)).problem
-        np.testing.assert_allclose(np.asarray(explicit.kpoints) / reciprocal, [[0.25, 0.25, 0.75]], atol=1e-15)
+        np.testing.assert_allclose(np.asarray(explicit.kpoints) / reciprocal, [[0.25, 0.25, -0.25]], atol=1e-15)
+        with mock.patch.dict(os.environ, {"PARSEC_KPOINT_ORTHOGONAL_LIST_FOLD": "off"}):
+            written = parse_parsec_input(self.write("written", listed)).problem
+        np.testing.assert_allclose(np.asarray(written.kpoints) / reciprocal, [[0.25, 0.25, 0.75]], atol=1e-15)
 
 
 class SymmetricAndPlainRunsAgreeTests(_Case):

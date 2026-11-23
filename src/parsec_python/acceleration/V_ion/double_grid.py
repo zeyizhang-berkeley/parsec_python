@@ -293,10 +293,16 @@ def build_double_grid_projector_gradients(
         _selected_atoms,
         real_harmonics_with_gradients,
     )
-    from parsec_python.Pseudopotential.radial_derivatives import spline_derivative
+    from parsec_python.Pseudopotential.radial_derivatives import (
+        linear_projector_slope,
+        linear_slope_setting,
+        spline_derivative,
+    )
     from parsec_python.V_ion.ionic_potential import projector_center_setting, projector_gradient_clamp
 
     center_setting = projector_center_setting()
+    # PARSEC_LINEAR_TABLE_SLOPES: the radial slope of a linearly interpolated projector
+    slopes = linear_slope_setting()
     order = double_grid_order(grid) if order is None else int(order)
     displacements, fine_weights = double_grid_points(order, float(grid.spacing))
     sqrt_dv = np.sqrt(grid.volume_element)
@@ -331,7 +337,7 @@ def build_double_grid_projector_gradients(
                 slope = spline_derivative(spline, clamped)
             else:
                 radial = np.interp(clamped, potential.radii, table, right=0.0)
-                slope = np.interp(clamped, potential.radii, slope_table, right=0.0)
+                slope = linear_projector_slope(clamped, potential.radii, table, slope_table, slopes)
             harmonics, harmonic_gradients = real_harmonics_with_gradients(
                 angular_momentum, unit, inverse
             )

@@ -81,6 +81,13 @@
 #define CA_PI_A0 @CA_PI_A0@
 // V_xc/ca_lda_spin.py
 #define CA_GAMMA @CA_GAMMA@
+// V_xc/ca_lda.py ca_high_density_coefficients (PARSEC_CA_CONTINUITY; PARSEC's 0.004, 0.0232, 0.0192, 0.0014, -0.0096
+// by default): the coefficients of r_s ln r_s and r_s of the high-density Perdew-Zunger forms
+#define CA_C3 @CA_C3@
+#define CA_C4 @CA_C4@
+#define CA_C5 @CA_C5@
+#define CA_CS @CA_CS@
+#define CA_DS @CA_DS@
 // V_xc/asymptotic_correction.py
 #define LB_TWO_BETA @LB_TWO_BETA@
 #define LB_THREE_BETA @LB_THREE_BETA@
@@ -739,7 +746,7 @@ static __device__ void ca_lda_point(double rho, double* potential, double* epsil
         vc = (ec * ec / g) * (1.0 + (7.0 / 6.0) * b1 * sqrt_r + (4.0 / 3.0) * b2 * rs);
     } else {
         double log_r = log(rs);
-        const double c1 = 0.0622, c2 = 0.096, c3 = 0.004, c4 = 0.0232, c5 = 0.0192;
+        const double c1 = 0.0622, c2 = 0.096, c3 = CA_C3, c4 = CA_C4, c5 = CA_C5;
         ec = c1 * log_r - c2 + (c3 * log_r - c4) * rs;
         vc = ec - (c1 + (c3 * log_r - c5) * rs) / 3.0;
     }
@@ -750,9 +757,9 @@ static __device__ void ca_lda_point(double rho, double* potential, double* epsil
 // ca_lda_spin.py for one point with a positive total density.
 static __device__ void ca_lsda_point(double rho_up, double rho_down, double* potential_up,
                               double* potential_down, double* energy) {
-    const double c1 = 0.0622, c2 = 0.0960, c3 = 0.0040, c4 = 0.0232;
+    const double c1 = 0.0622, c2 = 0.0960, c3 = CA_C3, c4 = CA_C4;
     const double g = -0.2846, b1 = 1.0529, b2 = 0.3334;
-    const double as_ = 0.0311, bs = -0.0538, cs = 0.0014, ds = -0.0096;
+    const double as_ = 0.0311, bs = -0.0538, cs = CA_CS, ds = CA_DS;
     const double gs = -0.1686, b1s = 1.3981, b2s = 0.2611;
     double rho = rho_up + rho_down;
     double exchange_up = PW_AX * cbrt(2.0 * rho_up);
@@ -794,9 +801,9 @@ static __device__ void ca_lsda_point(double rho_up, double rho_down, double* pot
 // no clamp of 1 +- zeta, the coefficients of the potential grouped as there).
 static __device__ void ca_lsda_polarized_point(double rh1, double rh2, double* potential_up,
                                                double* potential_down, double* energy) {
-    const double c1 = 0.0622, c2 = 0.0960, c3 = 0.0040, c4 = 0.0232;
+    const double c1 = 0.0622, c2 = 0.0960, c3 = CA_C3, c4 = CA_C4;
     const double g = -0.2846, b1 = 1.0529, b2 = 0.3334;
-    const double as_ = 0.0311, bs = -0.0538, cs = 0.0014, ds = -0.0096;
+    const double as_ = 0.0311, bs = -0.0538, cs = CA_CS, ds = CA_DS;
     const double gs = -0.1686, b1s = 1.3981, b2s = 0.2611;
     double total = rh1 + rh2;
     double ex1 = PW_AX * pow(2.0 * rh1, 1.0 / 3.0);

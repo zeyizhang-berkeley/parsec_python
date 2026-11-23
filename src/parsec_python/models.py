@@ -2411,6 +2411,13 @@ class SinglePointInput:
     embedding: EmbeddingSettings | None = None
     """PARSEC 1.5's frozen-density embedding (``Potential_Field``) of an
     isolated, spin-unpolarized tip run; ``None`` without it."""
+    forces_wanted: bool = False
+    """Whether the forces of the structures are wanted (a relaxation,
+    molecular dynamics, manual movements without ``Skip_Force: true``,
+    ``Calculate_Force``), which the input reader records.
+    ``PARSEC_HARTREE_VARIATIONAL=auto`` can give such a cluster the Hartree
+    potential that is the derivative of its Hartree energy
+    (:mod:`parsec_python.Hartree.variational`)."""
 
     def __repr__(self) -> str:
         # Point charges and charged sheets that are not there, and the
@@ -2427,6 +2434,7 @@ class SinglePointInput:
             "kpoint_tie_images": not self.kpoint_tie_images,
             "kpoint_written_ties": not self.kpoint_written_ties,
             "force_space_group": self.force_space_group is None,
+            "forces_wanted": not self.forces_wanted,
         }
         shown = [
             f"{item.name}={getattr(self, item.name)!r}"
@@ -2556,6 +2564,14 @@ class BandStructureResult:
     """Diagonalization attempts per ``(channel, k-point)``: 1 unless the CHEBDAV
     re-solve with a larger block was needed (see :mod:`parsec_python.SCF.bands`)."""
     residual_scope: str | None = None
+    residual_tested: np.ndarray | None = None
+    """``(channel, k)`` mask of the k-points whose solve applied ``residual_test`` (``None``: all of them); the host
+    CHEBDAV locks its pairs against its running Ritz values instead."""
+    residual_test: float | None = None
+    """The relative residual test of the converged first solve of the k-points (``Diag_Tolerance``), ``None`` where
+    the first solve made fixed cycles (``PARSEC_BAND_CONVERGENCE=off``); a k-point whose largest residual exceeds it
+    times the largest ``|e|`` of its levels did not converge
+    (:func:`parsec_python.SCF.bands.unconverged_band_points`)."""
 
     @property
     def segment_index(self) -> np.ndarray:
@@ -2696,7 +2712,10 @@ class SpinSectorFallbackRecord:
     # occup.in with unequal occupations of partners), the run starts again in the sectors of the abelian group;
     # ``spin_flip``: a loop of a system prepared with PARSEC_SPIN_FLIP_SYMMETRY=auto solves both channels
     # (SCF.spin_polarized: ``reason`` why, ``largest_fractional_occupation`` the deviation that ``measure`` names,
-    # against ``tolerance``; ``measure`` empty where the reason has none), said before the loop starts.
+    # against ``tolerance``; ``measure`` empty where the reason has none), said before the loop starts;
+    # ``spin_flip_stable``: the state of such a loop passed the test of PARSEC_SPIN_FLIP_STABILITY=auto and is kept
+    # (``largest_fractional_occupation`` the largest eigenvalue of the response, ``multiplets`` the summary);
+    # ``doublet`` and ``sector_doublet``: the note of a kept result (PARSEC_SPIN_GUARD_DOUBLETS).
     route: str = "spin"
     # Where the full grid of the ``spin`` route goes (the accelerated driver's plan, PARSEC_SPIN_FALLBACK_SHARED):
     # ``on the full grid of one device (...)``, ``as one sector of the identity whose basis ... share (...)``, or
@@ -2902,6 +2921,9 @@ class SCFIteration:
     # on the same V_in, whose eigensolver passes converge the levels; the loop
     # converged at the iteration before (its residual is the loop's).
     level_refinement: bool = field(default=False, repr=False)
+    # PARSEC_STATES_CLOSE_MULTIPLET (SCF/state_extension.py): the NOTE of an iteration after which the loop takes
+    # more states, empty otherwise.
+    state_count_note: tuple[str, ...] = field(default=(), repr=False)
 
     @property
     def spin_polarized(self) -> bool:

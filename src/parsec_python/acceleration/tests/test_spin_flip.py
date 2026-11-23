@@ -955,6 +955,99 @@ class OutputLineTests(unittest.TestCase):
         self.assertNotIn("allowed", text)
 
 
+class StabilityTests(unittest.TestCase):
+    """``PARSEC_SPIN_FLIP_STABILITY``: the converged state of a flip loop against perturbations that break the
+    operation, from the linear response of the down channel (a stretched H2 on the scipy backend)."""
+
+    def test_values(self) -> None:
+        from parsec_python.acceleration import driver
+        from parsec_python.acceleration.SCF.spin_flip import spin_flip_stability_setting
+
+        for value, expected in (("", "off"), ("OFF", "off"), ("0", "off"), ("auto", "auto"), (" on ", "auto")):
+            with mock.patch.dict(os.environ, {"PARSEC_SPIN_FLIP_STABILITY": value}):
+                self.assertEqual(spin_flip_stability_setting(), expected)
+        # off by default: no unstable state among six antiferromagnetic inputs on A100, at about the cost the route
+        # saves; the Ni2 miss is a stable state of the route
+        with mock.patch.dict(os.environ):
+            os.environ.pop("PARSEC_SPIN_FLIP_STABILITY", None)
+            self.assertEqual(spin_flip_stability_setting(), "off")
+        with mock.patch.dict(os.environ, {"PARSEC_SPIN_FLIP_STABILITY": "maybe"}):
+            with self.assertRaises(ValueError):
+                spin_flip_stability_setting()
+            with self.assertRaises(ValueError):
+                driver.prepare_single_point(object(), backend="scipy")
+
+    def test_mirrored_levels(self) -> None:
+        from parsec_python.SCF.spin_polarized import _mirrored_levels
+
+        base = np.array([-1.0, -0.5, -0.49, 0.2])
+        labels = np.array([1, 2, 1, 2])
+        # the perturbed levels in another global order: matched sector by sector
+        levels = np.array([-0.98, -0.50, -0.52, 0.21])
+        moved = np.array([1, 1, 2, 2])
+        np.testing.assert_allclose(_mirrored_levels(base, labels, levels, moved), [-1.02, -0.48, -0.48, 0.19])
+        self.assertIsNone(_mirrored_levels(base, labels, levels, np.array([1, 1, 1, 2])))
+        self.assertIsNone(_mirrored_levels(base, labels, levels[:3], moved[:3]))
+
+    def _flip(self, path, stability, **patches):
+        from parsec_python.Input import parse_parsec_input
+        from parsec_python.SCF import spin_polarized
+        from parsec_python.acceleration import driver
+        from parsec_python.models import SpinSectorFallbackRecord
+
+        records = []
+        environment = {"PARSEC_SPIN_FLIP_SYMMETRY": "auto", "PARSEC_SPIN_FLIP_STABILITY": stability}
+        patches = patches or {"FLIP_STABILITY_STEPS": spin_polarized.FLIP_STABILITY_STEPS}
+        with mock.patch.dict(os.environ, environment), mock.patch.multiple(spin_polarized, **patches):
+            translation = parse_parsec_input(path)
+            system = driver.prepare_single_point(translation.problem, backend="scipy")
+            self.assertIsNotNone(system.spin_flip)
+            self.assertEqual(system.spin_flip.stability, stability)
+            result = driver.run_scf(system, callback=records.append)
+        return result, [record for record in records if isinstance(record, SpinSectorFallbackRecord)]
+
+    def test_a_stable_state_is_kept_bit_for_bit(self) -> None:
+        from parsec_python.Output.parsec_output import spin_sector_fallback_lines
+
+        directory = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, directory, ignore_errors=True)
+        path = _write_h2(directory, radius=6.0, spacing=0.55)
+        untested, notes = self._flip(path, "off")
+        self.assertEqual(notes, [])
+        tested, notes = self._flip(path, "auto")
+        self.assertEqual(tested.energies.total, untested.energies.total)
+        self.assertEqual(tested.iterations, untested.iterations)
+        np.testing.assert_array_equal(tested.spin[0].density, untested.spin[0].density)
+        self.assertIsInstance(tested.spin[1].eigensolver_state, SpinFlipChannelState)
+        self.assertEqual(len(notes), 1)
+        self.assertEqual(notes[0].route, "spin_flip_stable")
+        # the broken-symmetry singlet of the stretched molecule is a minimum: the largest eigenvalue is well below 1
+        largest = notes[0].largest_fractional_occupation
+        self.assertLess(largest, 0.5)
+        self.assertGreater(largest, 0.0)
+        text = "\n".join(spin_sector_fallback_lines(notes[0]))
+        self.assertIn("NOTE: PARSEC_SPIN_FLIP_STABILITY: the state of the converged loop is stable", text)
+        self.assertIn("largest eigenvalue", text)
+        # the linear regime: a probe five times smaller gives the same eigenvalue
+        _, smaller = self._flip(path, "auto", FLIP_STABILITY_KICK=1.0e-3)
+        self.assertAlmostEqual(smaller[0].largest_fractional_occupation, largest, delta=5e-3)
+
+    def test_an_unstable_state_solves_both_channels(self) -> None:
+        # (the bound lowered below the eigenvalue of the stable state: the route of an unstable one)
+        directory = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, directory, ignore_errors=True)
+        path = _write_h2(directory, radius=6.0, spacing=0.55)
+        _, both, _ = _run(path, "off", backend="scipy")
+        flip, notes = self._flip(path, "auto", FLIP_STABILITY_BOUND=0.01)
+        self.assertEqual(len(notes), 1)
+        self.assertEqual(notes[0].route, "spin_flip")
+        self.assertEqual(notes[0].stage, "the stability test after the SCF loop")
+        self.assertIn("unstable", notes[0].reason)
+        self.assertNotIsInstance(flip.spin[1].eigensolver_state, SpinFlipChannelState)
+        self.assertTrue(both.converged and flip.converged)
+        self.assertEqual(flip.energies.total, both.energies.total)
+
+
 class WeightedChannelTests(unittest.TestCase):
     def test_the_flipped_channel_takes_the_weights_and_partners_of_the_up_channel(self) -> None:
         # (with PARSEC_ORBITAL_GROUP_SPIN) In weighted sectors (H2 along z: C4v) the loop reads the state
@@ -1149,6 +1242,42 @@ class SectorRunTests(unittest.TestCase):
             full_system = driver.prepare_single_point(translation.problem, backend="auto", symmetry="auto")
             full = driver.run_scf(full_system)
         self.assert_same(full, flip, energy=1e-7, levels=1e-6, density=1e-5)
+
+    def test_the_stability_test_in_the_sectors(self) -> None:
+        # PARSEC_SPIN_FLIP_STABILITY=auto in the sectors of the device: the stable broken-symmetry singlet keeps the
+        # result of the untested route bit for bit, with the note of its largest eigenvalue; forced unstable (the
+        # bound below it), the run is that of off
+        from parsec_python.SCF import spin_polarized
+        from parsec_python.models import SpinSectorFallbackRecord
+
+        path = _write_h2(self.directory)
+        _, untested, _ = _run(path, "auto", backend="auto")
+        records = []
+
+        def run(extra_patch=None):
+            from parsec_python.Input import parse_parsec_input
+            from parsec_python.acceleration import driver
+
+            environment = {"PARSEC_SPIN_FLIP_SYMMETRY": "auto", "PARSEC_SPIN_FLIP_STABILITY": "auto"}
+            patches = extra_patch or {"FLIP_STABILITY_STEPS": spin_polarized.FLIP_STABILITY_STEPS}
+            with mock.patch.dict(os.environ, environment), mock.patch.multiple(spin_polarized, **patches):
+                translation = parse_parsec_input(path)
+                system = driver.prepare_single_point(translation.problem, backend="auto", symmetry="auto")
+                del records[:]
+                return driver.run_scf(system, callback=records.append)
+
+        tested = run()
+        notes = [record for record in records if isinstance(record, SpinSectorFallbackRecord)]
+        self.assertEqual([note.route for note in notes], ["spin_flip_stable"])
+        self.assertLess(notes[0].largest_fractional_occupation, 0.5)
+        self.assertEqual(tested.energies.total, untested.energies.total)
+        np.testing.assert_array_equal(tested.spin[0].eigenvalues, untested.spin[0].eigenvalues)
+        _, both, _ = _run(path, "off", backend="auto")
+        forced = run({"FLIP_STABILITY_BOUND": 0.01})
+        notes = [record for record in records if isinstance(record, SpinSectorFallbackRecord)]
+        self.assertEqual([note.route for note in notes], ["spin_flip"])
+        self.assertEqual(notes[0].stage, "the stability test after the SCF loop")
+        self.assert_same(both, forced, energy=1e-9, levels=1e-8, density=1e-7)
 
     def test_square_permutes_the_sectors_of_the_down_channel(self) -> None:
         for label in ("H_a", "H_b"):

@@ -23,8 +23,13 @@ eigensolver with only the Chebyshev filter on the device.
 With one worker the inline backend runs this in the calling process.  Parallel
 results equal the serial ones to round-off (the eigenvalues exactly: each task
 is the same computation; the densities differ only by the order of the sum over
-tasks).  Importing :mod:`parsec_python.acceleration` installs this solver and
-:func:`map_tasks` as the parallel backend of the reference drivers
+tasks).  Under ``PARSEC_ORDERED_SUMS=auto`` the density parts of the workers are
+added in the order of the workers, not in the order they finish, and the sparse
+products of the device operators sum in a fixed order
+(:class:`..Hamiltonian.complex_csr_device.OrderedCSR`): an input on the same
+devices gives the same bits in every run.  Importing
+:mod:`parsec_python.acceleration` installs this solver and :func:`map_tasks` as
+the parallel backend of the reference drivers
 (:func:`parsec_python.SCF.kpoint_solver.set_parallel_backend`).
 """
 
@@ -52,7 +57,7 @@ from parsec_python.SCF.kpoint_solver import (
 
 from ..Eigensolvers.chebff_spinor import ReportedFirstSolve, SpinorEigvalState, solve_spinor_eigval
 from .kpoint_real import as_complex, matched_state, psi_gauge_for, real_gamma_applies
-from .kpoint_sectors import carried_state
+from .kpoint_sectors import carried_state, refined_state, warm_growth_takes
 from ..Parallel import WORKERS_ENV, make_pool, mpi
 
 SOLVER_ENV = "PARSEC_KPOINT_SOLVER"  # device (default) | host
@@ -60,6 +65,13 @@ STORAGE_ENV = "PARSEC_KPOINT_STATE_STORAGE"  # auto (default) | device | host
 FIRST_SOLVE_ENV = "PARSEC_KPOINT_FIRST_SOLVE"  # refine (default) | chebdav
 _AUTO_FRACTION = 0.75  # of the device memory the subspaces (and one transient copy set) may take
 _REPORTED_HOST_FRACTION = 0.75  # of the available host memory the subspaces of a first solve in parts may take
+
+
+def _ordered_sums() -> bool:
+    """``PARSEC_ORDERED_SUMS`` (:func:`..Hamiltonian.complex_csr_device.ordered_sums_setting`) is ``auto``."""
+    from ..Hamiltonian.complex_csr_device import ordered_sums_setting
+
+    return ordered_sums_setting() == "auto"
 
 
 def _device_solver_requested() -> bool:
@@ -118,6 +130,62 @@ def resolve_backend(requested: str | None = None):
     return plan if plan.uses_device else None
 
 
+def band_stage_route(backend: str | None = None, workers=None, n_tasks: int = 1, problem_size: int | None = None):
+    """How the band k-points of this run are solved and what memory one solve may take: ``(device, host chebdav in
+    sectors, bytes)``.
+
+    ``device``: the device-resident first solve (a device plan with ``PARSEC_KPOINT_SOLVER=device``), whose
+    converged first solve is CHEBFF with more cycles to the relative residual test; else the host eigensolvers.
+    ``host chebdav in sectors``: the workers of the band sectors make the first solve of ``Eigensolver: chebdav`` as
+    the host CHEBDAV (``PARSEC_KPOINT_FIRST_SOLVE=chebdav``).  ``bytes``: the memory of a device (the total of each
+    device that solves band k-points, divided by the processes that share it) or the available host memory divided
+    by the worker threads and the processes of a host; the least of them, the same on every MPI rank (``None`` where
+    the host does not say).  Read once per band stage, so that every k-point takes the same decision.
+    """
+    import socket
+    from collections import Counter
+
+    from ..Parallel.pool import resolve_workers
+
+    plan = resolve_backend(backend)
+    device = plan is not None and _device_solver_requested()
+    context = mpi.context()
+    host = socket.gethostname()
+    entries: list[tuple[str, str, float]] = []
+    if device and plan.name == "cupy":
+        from ..backends.cupy import require_cupy
+
+        cp, _ = require_cupy()
+        ids = list(plan.device_ids)
+        if context is not None and context.size > 1:
+            ids = [ids[context.local_rank % len(ids)]]
+        else:
+            ids = ids[: device_worker_count(plan, n_tasks)]
+        for device_id in ids:
+            with cp.cuda.Device(device_id):
+                total = float(cp.cuda.runtime.memGetInfo()[1])
+                bus = str(cp.cuda.Device(device_id).pci_bus_id)
+            entries.append((host, bus, total))
+    else:
+        from ..Eigensolvers.spill_buffers import host_available_bytes
+
+        available = host_available_bytes()
+        if available is not None:
+            threads = device_worker_count(plan, n_tasks) if plan is not None else resolve_workers(
+                workers, n_tasks, problem_size=problem_size
+            )
+            entries.append((host, "host", float(available) / max(1, int(threads))))
+    if context is not None and context.size > 1:
+        entries = [entry for part in context.comm.allgather(entries) for entry in part]
+        if not all(context.comm.allgather(bool(entries))):
+            entries = []
+    if not entries:
+        return device, device and _first_solve_on_host(), None
+    users = Counter((name, bus) for name, bus, _ in entries)
+    budget = min(total / users[(name, bus)] for name, bus, total in entries)
+    return device, device and _first_solve_on_host(), int(budget)
+
+
 def device_worker_count(plan, n_tasks: int) -> int:
     """Worker threads of a device plan: one per device (host double: ``PARSEC_KPOINT_WORKERS``)."""
     if plan.name == "numpy-device":
@@ -165,6 +233,9 @@ class _SolveWorker:
         self.reported_progress: dict[int, tuple[np.ndarray, int]] = {}
         # the tasks of whole k-points among them: one first solve with the test of all their pairs, as before
         self.reported_whole: frozenset[int] = frozenset()
+        # PARSEC_KPOINT_SECTOR_WARM_GROWTH: by task that grew (resize_tasks), the saved Ritz vectors of its former basis
+        # on the host and their gauge, for the first solve of its new count
+        self.growth_starts: dict[int, tuple[Any, str | None]] = {}
 
     def _tick(self, name: str, start: float) -> None:
         """Add the seconds since ``start`` to the worker's ``worker_<name>_seconds`` counter."""
@@ -221,6 +292,8 @@ class _SolveWorker:
             self.states.pop(task, None), bool(getattr(operator, "real_arithmetic", False)),
             None if gauge is None else "psi",
         )
+        # a task that grew starts its first solve from the vectors of its former basis (PARSEC_KPOINT_SECTOR_WARM_GROWTH)
+        start = self._growth_start(task, state, settings, operator, None if gauge is None else "psi")
         self.vectors.pop(task, None)  # release the previous basis before the next one is made
         # a task whose states the refit of the k-point sectors cut keeps its lowest Ritz pairs (kpoint_sectors)
         state = carried_state(state, requested, settings, int(operator.shape[0]))
@@ -274,7 +347,9 @@ class _SolveWorker:
                 converge_first=first_solve_converges(settings),
                 tolerance=None if reported is None else self.reported_tolerance,
                 reported=reported,
+                start=start,
             )
+            del start
             new_state = result.state
             eigenvalues = result.eigenvalues
             self.residual[task] = residual_max(result.residual_norms)
@@ -360,17 +435,67 @@ class _SolveWorker:
                     total[name] += value
                 else:
                     total[name] = np.array(value, copy=True)
-        yield None, total
+        # keyed by the worker's first task: the driver adds the parts of the workers in that order (PARSEC_ORDERED_SUMS)
+        yield (min(self.tasks) if self.tasks else -1), total
 
     def resize_tasks(self, counts: dict):
         """New numbers of states of some tasks (:meth:`PooledKPointSolver.resize_tasks`): their Ritz states and
-        orbitals are dropped here."""
+        orbitals are dropped here.  Under ``PARSEC_KPOINT_SECTOR_WARM_GROWTH`` the Ritz vectors of a device state that a
+        SUBSPACE step has refined wait on the host for the first solve of the new count (:meth:`_growth_start`), where
+        the host has room for them (:func:`..Eigensolvers.sector_growth.host_room`)."""
+        from .kpoint_sectors import kpoint_sector_warm_growth_setting
+
         self.job = resized_job(self.job, counts)
+        warm = self.device_solver and kpoint_sector_warm_growth_setting() != "off"
         for task in counts:
             if task in self.tasks:
-                self.states.pop(task, None)
+                state = self.states.pop(task, None)
                 self.vectors.pop(task, None)
+                self.growth_starts.pop(task, None)
+                if warm and refined_state(state):
+                    saved = self._stage_growth(state)
+                    if saved is not None:
+                        self.growth_starts[task] = (saved, getattr(state, "gauge", None))
+                del state
         yield None, None
+
+    def _stage_growth(self, state):
+        """The Ritz vectors of ``state`` on the host (a spilled subspace as it is), or ``None`` where the host has no
+        room for them or the copy fails."""
+        from ..Eigensolvers.sector_growth import host_room
+
+        vectors = state.vectors
+        if isinstance(vectors, np.ndarray):
+            return vectors
+        record = self.stats
+        with host_room(int(vectors.nbytes)) as fits:
+            if not fits:
+                record["kpoint_warm_growth_no_room"] = record.get("kpoint_warm_growth_no_room", 0.0) + 1.0
+                return None
+            try:
+                self.converter.backend.use()
+                return np.asarray(self.converter.backend.asnumpy(vectors))
+            except Exception:  # noqa: BLE001 - any failure of the copy falls back to random vectors
+                record["kpoint_warm_growth_failed"] = record.get("kpoint_warm_growth_failed", 0.0) + 1.0
+                return None
+
+    def _growth_start(self, task: int, state, settings, operator, gauge):
+        """The saved columns that the first solve of ``task`` starts from (:meth:`resize_tasks`), or ``None``: none
+        saved, a state the solve continues, a first solve that does not take them (:func:`.kpoint_sectors
+        .warm_growth_takes`; the host CHEBDAV of ``PARSEC_KPOINT_FIRST_SOLVE=chebdav``), or columns of another gauge,
+        arithmetic or number of rows."""
+        saved = self.growth_starts.pop(task, None)
+        if saved is None:
+            return None
+        columns, saved_gauge = saved
+        if state is not None or not warm_growth_takes(settings) or _first_solve_on_host():
+            return None
+        rows = int(operator.shape[0])
+        real = bool(getattr(operator, "real_arithmetic", False))
+        if saved_gauge != gauge or int(columns.shape[0]) != rows or (real and np.iscomplexobj(columns)):
+            return None
+        self.stats["kpoint_warm_growths"] = self.stats.get("kpoint_warm_growths", 0.0) + 1.0
+        return columns
 
     def trim_tasks(self, counts: dict):
         """Fewer states for some tasks (:meth:`PooledKPointSolver.trim_tasks`): their Ritz states are kept, and
@@ -462,9 +587,15 @@ class _SolveWorker:
             else:
                 yield task, self.job.extras(task, self._u_gauge(task, self._host_vectors(task)))
 
-    def vectors_of(self, task: int):
+    def vectors_of(self, task: int, columns: int | None = None):
         if task in self.vectors:
-            yield task, as_complex(self._u_gauge(task, self._host_vectors(task)))
+            if columns is None:
+                yield task, as_complex(self._u_gauge(task, self._host_vectors(task)))
+            else:
+                # the first ``columns`` eigenvectors only: copied to the host and gauged without the rest
+                yield task, as_complex(
+                    self._u_gauge(task, np.asarray(self._to_host(self.vectors[task][:, : int(columns)])))
+                )
 
     def stats_of(self):
         yield None, dict(self.stats)
@@ -571,7 +702,11 @@ class PooledKPointSolver:
         """Sum of every task's density contribution for the given occupations."""
         payload = {task: occupations[task] for task in range(self.job.n_tasks)}
         total: dict[str, np.ndarray] = {}
-        for _, part in self.pool.results("accumulate", payload):
+        parts = self.pool.results("accumulate", payload)
+        if _ordered_sums():
+            # the parts in the order of the workers, not in the order they finish: the same sum in every run
+            parts = sorted(parts, key=lambda item: item[0])
+        for _, part in parts:
             for name, value in part.items():
                 if name in total:
                     total[name] = total[name] + value
@@ -591,9 +726,10 @@ class PooledKPointSolver:
         """Start the tasks from the Ritz states ``states`` (by task) of an earlier loop."""
         self.pool.results("import_states", states)
 
-    def vectors(self, task: int) -> np.ndarray:
-        """The final eigenvectors of one task (fetched from its worker)."""
-        for _, vectors in self.pool.results("vectors_of", task):
+    def vectors(self, task: int, columns: int | None = None) -> np.ndarray:
+        """The final eigenvectors of one task (fetched from its worker; its first ``columns`` ones where given)."""
+        arguments = {} if columns is None else {"columns": int(columns)}
+        for _, vectors in self.pool.results("vectors_of", task, **arguments):
             return vectors
         raise KeyError(task)
 

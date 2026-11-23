@@ -31,6 +31,11 @@ class AcceleratedPreparedSinglePointSystem:
     backend_info: BackendInfo
     eigenproblem_solver: Callable[..., object] | None = None
     hartree_solver: Callable[..., object] | None = None
+    # PARSEC_HARTREE_VARIATIONAL: the parsec_python.Hartree.variational.VariationalHartree
+    # of ``hartree_solver``, whose atomic tail the forces then differentiate;
+    # ``None`` where the potential is that of the Poisson solve (the field of
+    # ``reference`` is not read).
+    hartree_variational: object | None = None
     orbital_density_builder: Callable[..., object] | None = None
     xc_evaluator: Callable[..., object] | None = None
     # ``evaluate_spin_xc`` of the loop of two spin channels; ``None`` keeps
@@ -346,6 +351,16 @@ def materialize_wavefunctions(system, result) -> None:
             )
             if callable(ensure) and getattr(wavefunctions, "sector_handovers", None):
                 ensure()
+            # A level shared at the end of the window (PARSEC_WEIGHTED_STATE_COUNT=auto) lists States_Num whole states;
+            # parsec.dat takes every partner of its solved states instead, whose orbitals give the density of the run
+            # (whole_partner_states; the listing of the result is kept).
+            whole = whole_partner_states(wavefunctions)
+            channels_before = getattr(result, "spin", None)
+            channel_whole = (
+                None
+                if channels_before is None
+                else tuple(whole_partner_states(channel.wavefunctions) for channel in channels_before)
+            )
             if callable(materialize_host):
                 result.wavefunctions = materialize_host()
             elif callable(materialize):
@@ -364,11 +379,43 @@ def materialize_wavefunctions(system, result) -> None:
                     replace(channels[0], wavefunctions=host[:, :count]),
                     replace(channels[1], wavefunctions=host[:, count:]),
                 )
+            if whole is not None:
+                result.parsec_dat_states = whole
+            if channel_whole is not None and any(item is not None for item in channel_whole):
+                result.parsec_dat_channel_states = channel_whole
             timing_stats = getattr(system.backend, "timing_stats", None)
             if timing_stats is not None:
                 timing_stats.final_wavefunction_download_seconds += (
                     perf_counter() - started
                 )
+
+
+def whole_partner_states(wavefunctions):
+    """``(levels, occupations, host orbitals)`` of every partner of each solved state of orbitals whose last level
+    shares the states left of ``States_Num`` (``CuPySymmetryOrbitals.whole_levels``, PARSEC_WEIGHTED_STATE_COUNT=auto),
+    ``None`` otherwise.
+
+    The listing of such a result holds exactly ``States_Num`` whole states, while the density of the run holds the
+    shares of every partner of the shared level; these partners are the states whose orbitals give that density
+    (``parsec.dat``: ``Output.parsec_dat.result_channels``), each with its part of the occupation of its solved state
+    (a share s of a state of weight w at the Fermi occupation f gives each of its w partners s f / w,
+    ``SCF.single_point._whole_levels``), so that they add up to the electrons.
+    """
+
+    from dataclasses import is_dataclass
+
+    whole = getattr(wavefunctions, "whole_levels", None)
+    if whole is None or not is_dataclass(wavefunctions) or not callable(getattr(wavefunctions, "to_full_host", None)):
+        return None
+    levels, occupations, weights = whole
+    partners = replace(
+        wavefunctions, state_weights=np.asarray(weights, dtype=np.int64), state_occupations=None, whole_levels=None
+    )
+    return (
+        np.asarray(levels, dtype=np.float64),
+        np.asarray(occupations, dtype=np.float64),
+        np.asarray(partners.to_full_host(), dtype=np.float64),
+    )
 
 
 def _final_state_counts(symmetry_eigensolver, symmetry_state) -> str:

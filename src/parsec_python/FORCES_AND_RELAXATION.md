@@ -237,7 +237,137 @@ The radial derivatives are the tables of `pseudo.f90`
 on the logarithmic grid, the local potential tabulated as `r^2 dV/dr` with
 the tail `2Z/r^2`, and the projector derivative held constant near the
 origin. Grid points closer to an atom than its first radial sample are left
-out, as in PARSEC.
+out, as in PARSEC, under `PARSEC_SPLINE_FORCE_CENTER=tip`. The default `auto`
+(since 2026-11-22) gives every grid point closer than `c = 2 rs(2)` (twice the
+first radial sample) to its atom the slope of the smooth behaviour of the
+local potential and of the core density, `s(c) d/c` with `s` the slope the
+routine takes at `c` (a deliberate departure; the energy is unchanged): below
+its first sample a table has no data, the padded spline has a slope of its own
+at `r = 0+` (0.42 Ry/bohr for carbon FHI, first sample 1.04e-3 bohr), and a
+step of 1e-3 bohr or more averages that interval out and follows
+`V(0) + a r^2`, whose slope `forcloc.f90`'s skip misses. Tables sampled down
+to the origin (POTRE, first samples 4e-7 to 8e-5 bohr) keep their own slope
+beyond `2 rs(2)`, and tables whose first sample lies at or beyond 3e-3 bohr
+(H and He FHI, whose padded interval the steps resolve) keep `tip`. A CH4
+cluster with the carbon FHI table, carbon 1e-4, 5e-4 and 1e-3 bohr from a grid
+point, off the slope of the SCF energy at steps of 1e-3 / 2e-3 bohr: `tip`
+1.2e-4/4.3e-5, 1.7e-4/2.1e-4 and 3.5e-4/4.3e-4 Ry/bohr, `auto` 8.3e-5/6.3e-6,
+7.5e-5/3.3e-5 and 1.4e-4/6.6e-5 (A100). What remains is nonlocal; the section
+on cells below gives the measurements.
+
+Two properties of PARSEC's tables limit how closely a force follows the
+slope of the energy over finite steps. Without `Cubic_Spline` (PARSEC 1.5's
+default) the energy interpolates `r V_local` and the projectors linearly
+between the radial samples (`ionpot.f90`, `nonloc.F90`), while the forces
+take the smooth derivative tables above: the energy has a kink wherever a
+grid point crosses a radial sample. At h 0.3 bohr its slope over intervals
+of 1e-4 bohr jumps at such positions by up to 1e-3 Ry/bohr (H) and 4e-2
+(O), more for an atom on a symmetry line, which moves several equivalent
+points at once. A100, one atom of a dimer moved by 1e-3 bohr, tight SCF:
+the slope differs from the force by 5.6e-4 Ry/bohr (H2 at h 0.3), 3.3e-2
+(O2) and 9.7e-2 (Cr2), and on a Si8 cell at h 0.49 by 6.5e-4; the exact
+derivative of the interpolated energy misses those slopes by as much (H2
+4.6e-4, O2 2.8e-2, local term at fixed density), because the kinks are
+closer together than the steps, and tighter SCF and eigensolver tolerances
+change nothing. With `Cubic_Spline: .true.` the same cases agree within
+2.2e-5 (H2; 5.6e-6 extrapolated from the two steps), 2.2e-5 (O2: the O
+projector is zero at the edge of its support but its spline is not flat
+there, a kink of that size) and 3.6e-6 (Si8). The second property is that
+edge: the support of the projectors ends at `rcore`, the first radial sample
+beyond the largest channel cutoff, where most tables converted from UPF
+files still hold a value, so that the energy jumps when a grid point
+crosses it (Cr2 with `Cubic_Spline` 6.7e-4 Ry/bohr, the diamond cell of
+eight atoms at h 0.37 with the carbon table of the diamond examples
+7.4e-5). `PARSEC_PROJECTOR_TAIL=auto` (opt-in) sets those tails to zero, as
+the UPF files have them: Cr2 3.2e-6, the diamond cell 8.9e-6 (5e-7
+extrapolated). A check of forces against differences of the energy
+therefore needs `Cubic_Spline` species and, with converted tables, that
+switch or steps over which no grid point crosses a support edge. On the
+Fortran-derived routines it also needs one grid for all its inputs: their
+grid rule depends on the structure, and an Si8 cell with one atom moved by
+1e-3 bohr along x or z ran on Fortran's general grid (3.3e-4 Ry above the
+unmoved cell), along y on the grid of the unmoved cell, so that a
+difference between separate inputs mixed two grids; an ionic loop keeps
+the grid of its first structure. A
+spin-polarized run adds no force term of its own here (the core-correction
+term takes the mean of the two exchange-correlation potentials, as
+`forcloc.f90`), but a structure moved off a symmetric start may leave the
+state of that start: Fe2 (FM, 3.82 bohr) moved by 1e-3 bohr breaks its
+inversion symmetry and lands 0.038 Ry lower, so differences against the
+symmetric run are not its force; started in that broken-symmetry state
+(unequal starting moments) it agrees within the step truncation, as do
+Fe2 AFM and non-magnetic Fe2 (Richardson values 2.7e-6, 3.2e-6 and 3.0e-6
+Ry/bohr, `Cubic_Spline`).
+
+**Linear tables.** A species without `Cubic_Spline` (PARSEC's default)
+samples its local potential (`r V`), its core density and its projectors by
+linear interpolation between the radial samples, 1 to 2.5 % of the radius
+apart. Its energy therefore changes slope wherever a grid point crosses a
+sample, and is rough on the scale of a relaxation step, while the slope
+tables are the derivative of the smooth table. So the forces are close to
+those of the same tables with `Cubic_Spline` but are not the slope of the
+energy the run evaluates. Full SCF on A100 (criterion 1e-8 Ry, `E - TS`,
+central differences along unit vectors over all coordinates, steps of 1e-3
+and 2e-3 bohr): the forces miss the slope by 2e-3 to 1e-2 Ry/bohr on
+Si28H36 (`examples/0d_Si28H36`), CH4 with FHI tables, GeH4, NH4 at h = 0.4
+bohr and a silicon cell of 216 atoms, by 4e-2 to 9e-2 on H2O and Au2, by 1e-3
+on MgO and Si cells of 64 atoms with a 3x3x3 mesh (1e-2 on MgO8 with an atom
+elsewhere), by 3e-2 to 6e-2 on Ge slabs and 0.11 on a Ge64 cell (the core
+correction, default routines), and by up to 0.45 Ry/bohr on
+an Ag4 cluster at h = 0.45 bohr, whose slopes at the two steps differ by a
+factor of five. With `Cubic_Spline: .true.` the same inputs give the slope
+within 1e-6 to 3e-4 Ry/bohr (2e-5 on the Ge slabs), and the forces of the two settings differ by
+9e-6 to 3e-3 Ry/bohr: it is the energy of the linear tables that is rough.
+It is offset as well, by an amount that depends on the species, the table
+format and the positions: the spline energy differs from it by -5e-4 to
++2.5e-4 Ry per atom for the C, Si, N, O and H POTRE tables of the clusters and
+the cells measured, by -1e-5 to +1.4e-4 for MgO (the Mg table carries a core
+correction; the value depends on the positions), by +9.4e-4 to +1.3e-3 for Ge
+with its core correction (cells of 8 and 64 atoms, slabs), by -1.7e-4 to
+-5.3e-4 for carbon FHI tables and -2.1e-3 for silicon FHI tables (the FHI
+grids are twice as coarse), and by +9e-3 to +1.2e-2 for Au and Ag. The spline
+is not free everywhere. First runs with forces on one A100 each, the linear
+and the spline run started together (spline / linear wall time): a core
+correction superposed with the spline costs its preparation (the core density
+of a Ge8 slab 0.011 -> 0.92 s, of Ge64 cells 0.002 -> 0.7-0.9 s, of MgO64 0.002 ->
+0.59 s, with the block superposition of `PARSEC_SPLINE_SETUP`) and, on slabs
+and the Fortran-derived routines, a slower force stage (Ge8 slab 0.21 -> 1.52 s,
+Ge64 0.32 -> 2.10 s): Ge8 slab 1.89 (6.3 -> 12.0 s), Ge64 on the Fortran-derived
+routines 1.45 (7.1 -> 10.3 s), Ge64 on the default routines 1.06, Ge2 slab
+1.03, MgO64 1.04; a silicon cell of 216 atoms 1.30 (8.1 -> 10.6 s: three more SCF
+iterations, and its forces take the Fortran-derived routines, the parser's
+choice for `Cubic_Spline`); the other 14 cases 0.89 to 1.10. PARSEC 1.5 shows the same mismatch
+(its own grid, 8 MPI ranks, energies printed to 1e-8 Ry: the breathing mode of
+GeH4 1.3e-2 and 1.2e-2 Ry/bohr, of NH4 2.6e-3 and 3.0e-3; with `Cubic_Spline`
+4e-6 and 2e-6, 4e-5 and 1.6e-4). `PARSEC_LINEAR_TABLE_SLOPES=interpolant` differentiates
+the linear interpolants instead, the exact derivative of the computed energy
+(within 2e-6 Ry/bohr of central differences at 1e-7 bohr,
+`tests/unit/test_linear_table_slopes.py`), except within 3e-3 bohr of a grid
+point, where `PARSEC_PROJECTOR_CENTER=auto` takes the projector gradient at
+that distance (up to 2.6e-2 Ry/bohr off on an Ag table there; exact under
+`tip`); it sums the local forces of a cluster on the host (molecular dynamics
+about twice as long). It is no better defined over
+realistic steps (2e-4 to 4e-2 Ry/bohr off the slopes above, 0.35 on Ag4),
+strays from the spline forces by up to 0.75 Ry/bohr, and leaves the optimizer
+a noisy gradient: `examples/0d_water_geoopt` needs 23 structures instead of 7
+and the hand-built benzene of `examples/0d_mlff_initial_structure` does not
+converge in its 60 moves (14 with the tables, 13 with `Cubic_Spline`). It
+stays opt-in. In microcanonical molecular dynamics the spline halves to
+quarters the scatter of the conserved energy (C60, 21 steps of 20 a.u.: 2.2e-3
+-> 9.5e-4 Ry; Si28H36, 16 steps: 7.3e-4 -> 3.5e-4 Ry). For forces,
+relaxations and molecular dynamics, give every species `Cubic_Spline: .true.`.
+
+**CA correlation.** The Perdew-Zunger fit of `Correlation_Type: ca` (the
+constants of PARSEC 1.5's `exc.f90`) has two branches that differ by 6.413e-5
+Ry per electron at r_s = 1, so the energy steps by 6.413e-5 x 3/(4 pi) x h^3
+Ry whenever the density of a grid point crosses 3/(4 pi) e/bohr^3, and a
+symmetric structure moves symmetric points across together. C60 at h = 0.4
+bohr (carbon POTRE, `Cubic_Spline`), moved along its forces: 24 points cross
+within 2.5e-4 bohr on one side, a predicted step of 2.352e-5 Ry against 2.347e-5
+observed, which a central difference at 1e-3 bohr turns into 1.2e-2 Ry/bohr;
+the forces are the slope on either side. PBE has no branch change: the same
+C60 gives the slope within 1e-6 Ry/bohr at steps of 2.5e-4 to 2e-3 bohr. Not
+changed, so that CA energies stay those of PARSEC 1.5.
 
 `parsec.out` prints the tables PARSEC prints: the ion-ion, local, SCF
 correction, core correction and nonlocal forces, the total before and after
@@ -385,7 +515,8 @@ the forces of a spin-polarized PBE cell) keep the readable solver. There the ion
 the Gamma point is the 1x1x1 k-point run of the device k-point solver on the Fortran-derived routines (since
 2026-11-21, `PARSEC_SPIN_IONIC_KPOINT`: V- in 2^3 diamond with PBE, forces 174.8 -> 12.3 s, a `bfgs` relaxation of
 three moves 469.9 -> 29.3 s, three molecular dynamics steps 526.3 -> 31.6 s on an A100 node, the same results within
-1.7e-6 Ry/bohr; its `parsec.dat` holds the Bloch orbitals of k = 0 as the complex wavefunctions of one k-point) and the
+1.7e-6 Ry/bohr; its `parsec.dat` holds the Bloch orbitals of k = 0, made real since 2026-11-22 as the file of a run
+without k-points, `PARSEC_GAMMA_PARSEC_DAT`) and the
 Gamma-point loop with the eigensolvers of the host on the default routines.
 
 Forces (`Forces.compute_periodic_forces`; the Fortran routines are `forpbc.f90`, `force_loc_pb.f90`, `ewald_sum.f90` and
@@ -456,9 +587,18 @@ Forces (`Forces.compute_periodic_forces`; the Fortran routines are `forpbc.f90`,
    49.9 -> 42.3 s, its forces 13.6 -> 0.49 s.
 
 The terms are exact derivatives of the energies the SCF evaluates (`Forces` tests: finite differences of each energy and of the
-SCF total energy, 1e-5 Ry/bohr or better), with one exception: the local potential and the nonlocal projectors use PARSEC's
-derivative tables, which differ from the exact derivative of their linear interpolation by about 1e-4 Ry/bohr in the
-test systems.
+SCF total energy, 1e-5 Ry/bohr or better), with the exceptions of the tables described under Forces: for a species without `Cubic_Spline` the projectors and the core density of the default routines (at the Gamma point
+and on k-point meshes) use PARSEC's derivative tables (`PARSEC_LINEAR_TABLE_SLOPES=tabulated`, the local potential of those routines is always the spline), while the
+energy interpolates the tables linearly and is rough on the scale of a relaxation step (see the paragraph on linear
+tables in the forces of an isolated system): a silicon cell of 216 atoms at the Gamma point misses the slope of its
+energy by 6e-3 Ry/bohr along all atoms, with forces within 9e-6 Ry/bohr of those of `Cubic_Spline`, which gives the
+slope within 2e-7. The Fortran-derived routines take the slopes of the interpolants (`PARSEC_PERIODIC_FORCE_SLOPES=interpolant`), the
+exact derivative of that rough energy: on an 8-atom silicon cell with a 2x2x2 mesh they miss the slope by 2e-4 to 6e-4
+Ry/bohr (it differs by 5e-4 between the two steps) and the forces of `Cubic_Spline` by 1.3e-3, and a BFGS relaxation
+of that cell stops at the noise of those forces (17 structures to 1e-3 Ry/bohr against 3 with `Cubic_Spline`).
+`PARSEC_PERIODIC_FORCE_SLOPES=tables` (opt-in) takes the tables of `pseudo.f90` there as well; it relaxes POTRE cells
+as `Cubic_Spline` does, but does not follow the energy of linear FHI tables and is slower (acceleration/README.md). The support of the projectors of a table converted from a UPF file ends with a jump of
+the energy (`PARSEC_PROJECTOR_TAIL`).
 
 Atoms leave the cell as they move. The coordinates of the optimizer and the integrator are kept continuous (they are never
 wrapped), and every image sum is built for the atoms folded into the cell (`PeriodicPreparedSinglePointSystem.cell_atoms`).
@@ -543,9 +683,15 @@ case:
   projector functions of an atom (`V_ion` and `V_so` for the harmonics of `l = 1, 2`, complex spherical harmonics, KB sign
   per `l`); `apply_spin_orbit` multiplies the projectors with coefficients linear in these overlaps (`lzsz` on the same
   spin, the `lsxy` ladders on the other). A projector depends on the atom only through `r - R_a`, so
-  `F_a = 2 sum_n f_n Re sum_(sigma,j) conj(<grad P_j|u_n,sigma>) c_(sigma,j)`. The radial functions are interpolated
-  linearly in the Hamiltonian, so the gradient takes the slope of that interpolant: the force is the derivative of the
-  energy that is minimized, not of a smoother table (Fortran's `dv_ion`/`dv_so` tables). Within 3e-3 bohr of an atom the
+  `F_a = 2 sum_n f_n Re sum_(sigma,j) conj(<grad P_j|u_n,sigma>) c_(sigma,j)`. The gradient takes the derivative of the
+  radial functions the Hamiltonian samples, so the force is the derivative of the energy that is minimized, not of
+  another table (Fortran's `dv_ion`/`dv_so` tables): for a species with `Cubic_Spline` PARSEC's cubic spline of `vionr`
+  and `vsor` and its derivative, as `nonloc.F90` evaluates them under `uspline` (`PARSEC_SOC_PROJECTOR_SPLINE=auto`, since
+  2026-11-22), otherwise the linear interpolation of the tables and its slope. The energy of linear tables has a kink
+  wherever a grid point crosses a radial knot: their forces are exact derivatives over steps of 1e-6 bohr but miss the
+  slope of the energy over the steps of a relaxation, 1.6e-5 and 2.5e-5 Ry/bohr at 1e-3 and 2e-3 bohr in the spin-orbit
+  Ge8 cell, where the spline is within 1.5e-6 and 6.1e-6 (the h^2 truncation of the difference; Richardson 1.4e-8).
+  `PARSEC_SOC_PROJECTOR_SPLINE=off` keeps the linear tables for every species, as before. Within 3e-3 bohr of an atom the
   gradient is taken at that distance on both sets of routines (`PARSEC_PROJECTOR_CENTER=auto`, the rule of the scalar
   projectors below).
 
@@ -561,7 +707,10 @@ time-reversal pairs (the Kramers partner of a spinor at `-k` has the same densit
 moved along (1, 1, 1), 4x4x4 on one A100 node: the forces of the 13-point wedge within 6e-6 Ry/bohr of the 64 points
 (22.5 against 77.6 s), two relaxation steps 62.2 against 251.6 s with every energy within 1.2e-6 Ry (the SCF criterion
 is 1e-6 Ry). hcp Au2 with an atom moved along c (4x4x2): 2 operations kept, the forces of the 14-point wedge within
-1e-7 Ry/bohr of the 20 time-reversal pairs. Collinear spin and non-collinear magnetism keep the whole mesh. Moved
+1e-7 Ry/bohr of the 20 time-reversal pairs. A relaxation whose `Move_Flag` fixes atoms that an operation exchanges
+with movable ones takes the wedge of the subgroup that maps the fixed atoms onto fixed atoms since 2026-11-22
+(`PARSEC_SPINOR_MOVE_FLAG_SUBGROUP=auto`, as for scalar orbitals; `off`: the time-reversal pairs). Collinear spin and
+non-collinear magnetism keep the whole mesh. Moved
 atoms keep the direction of their initial moment (`Initial_NCL_Moment`). The SCF loop of a moved structure continues from the
 previous one, for plain spin-orbit coupling, collinear spin and non-collinear magnetism alike (isolated or periodic, Gamma
 point or k-points): the last mixed potential with the new ionic potential (for spin the pair `V_up`, `V_down`; for
@@ -586,7 +735,7 @@ package instead (`tests/unit/test_spinor_forces.py`, Au dimer with a relativisti
 | Check | Result |
 |---|---|
 | Each term against a finite difference of its energy at the converged spinors (non-collinear, spin-orbit, one unpaired electron) | ion-ion 1e-8, local ionic 1e-6, nonlocal plus spin-orbit 7e-5 Ry/bohr |
-| Spin-orbit term alone, smooth orbitals, step 1e-4 | 1e-5 Ry/bohr; the residue is the kinks of the piecewise-linear radial tables |
+| Spin-orbit term alone, smooth orbitals, step 1e-4 | 1e-5 Ry/bohr with the piecewise-linear radial tables, whose kinks are the residue (measured before the spline of `PARSEC_SOC_PROJECTOR_SPLINE=auto`) |
 | Total force against the derivative of the converged SCF energy (Richardson, steps 0.01 / 0.005 bohr), isolated, non-collinear with spin-orbit | -9.5720 against -9.5725, 4.9827 against 4.9817 Ry/bohr |
 | The same, collinear spin with spin-orbit (isolated and 2x1x1 k-points), unpolarized spin-orbit (Gamma), non-collinear (2x1x1 k-points, periodic) | 5e-5 to 3e-3 Ry/bohr on forces of 0.7 to 10 Ry/bohr |
 | Without spin-orbit, non-collinear against the collinear spin-polarized driver (whose forces were compared with Fortran) | energy 1e-6 Ry, forces 2e-4 Ry/bohr |
@@ -777,7 +926,15 @@ positions, the orbits of their atoms and the state are checked against it to
 state is averaged over it. A structure that leaves the group is prepared again,
 in the sectors of the group it keeps (a cluster) or on the full grid, from the
 potential of the structure before, with a NOTE in `parsec.out`. Two spin
-channels, spinors, `Ignore_Symmetry`, the other reasons PARSEC switches the
+channels take the sectors too since 2026-11-22 (`PARSEC_MOVING_SPIN_SECTORS=auto`,
+both channels with the spin guard of every loop, which leaves the sectors where
+it fires as in a single point: weighted sectors for the abelian ones or the full
+grid, abelian ones for the full grid, kept for the later structures), but for a
+start whose labels carry `Initial_Spin_Polarization` of both signs, which keeps
+the full grid with a NOTE: the sectors of its labels can hold a symmetric state
+that the full grid leaves (Fe2, Co2: 10-28 mRy higher); `on` takes those too,
+`off` keeps every spin run on the full grid.
+Spinors, `Ignore_Symmetry`, the other reasons PARSEC switches the
 symmetry off for, `Restart_From_Wfndat`, MPI, wires, slabs and k-points keep
 the full grid; so does the MPI full-SCF runner. `off` restores the full grid of
 before. Results: acceleration/README.md, switch table.
@@ -872,16 +1029,55 @@ real-space Ewald split instead of the G-space `v_first`/`pot_local`):
   a grid point within round-off of an atom got `w(rs(2))/1e-6`. The LDA+U
   d tables follow `c r^2` from their first sample on within 1e-5, so for them
   the rule changes nothing measurable (it keeps every route on one rule). The
-  local term keeps its own rules (`PARSEC_SPLINE_FORCE_CENTER`), which leave
-  an error of the same family within the first radial sample: the padded
-  spline of the local potential has a slope of its own at the atom (0.42
-  Ry/bohr for carbon FHI, 3.6e-3 carbon POTRE, 0.035 silicon FHI, below 1e-4
-  for Ge and Ag POTRE) where the potential has none, and the Fortran-derived
-  routines take that slope within `rs(2)`, while the default routines take
-  none there (`forcloc.f90`'s skip), where the potential has `2 a r`. An atom
-  1e-5 to 1e-3 bohr from a grid point therefore has a local force up to
-  1e-3 Ry/bohr (carbon FHI; 8e-5 on POTRE) from the slope of the energy over
-  steps beyond `rs(2)`; this is not changed;
+  local term had an error of the same family within the first radial sample:
+  the padded spline of the local potential has a slope of its own at the atom
+  (0.42 Ry/bohr for carbon FHI, 3.6e-3 carbon POTRE, 0.035 silicon FHI, below
+  1e-4 for Ge and Ag POTRE) where the potential has none, and the
+  Fortran-derived routines took that slope within `rs(2)`, while the default
+  routines took none there (`forcloc.f90`'s skip), where the potential has
+  `2 a r`: an atom 1e-6 to 5e-4 bohr from a grid point had a local force up to
+  9e-4 Ry/bohr (carbon FHI) off the slope of the energy over steps beyond
+  `rs(2)`. Since 2026-11-22 (`PARSEC_SPLINE_FORCE_CENTER=auto`) every route
+  takes the slope of the smooth behaviour within `c = 2 rs(2)` of an atom,
+  `s(c) d/c` with `s` the route's own slope at `c` (both routine sets of a
+  cell, clusters, wires, slabs, readable, fast and device sums; `tip` keeps the
+  former forces), so tables sampled down to the origin keep their own slope
+  beyond `2 rs(2)` (2.6e-5 bohr for carbon POTRE). At fixed density (CPU; C, O,
+  N, B, Si, Mg FHI and C, Ge, Au POTRE tables, clusters and the Fortran-derived
+  routines, an atom 1e-11 to 3e-3 bohr from a grid point) the local term then
+  follows the central differences of the local energy at steps of 1e-3 and
+  2e-3 bohr: summed worst error 5.69e-3 Ry/bohr against 9.59e-2 under `tip`.
+  The radius `max(2 rs(2), 1.5e-3 bohr)` of the first form of the rule
+  (5.50e-3) departs from the own slope of the tables sampled to the origin and
+  made the carbon POTRE cube worse in the SCF (5e-4 bohr from a grid point
+  1.57e-5 / 2.65e-6 Ry/bohr off the slope of the energy at steps of 1e-3 / 2e-3
+  bohr, 5.25e-6 / 1.31e-5 with its own slope). On A100, at steps of 1e-3 / 2e-3
+  bohr: carbon FHI cube 1.1e-3/8.9e-4 -> 2.0e-4/2.3e-5 Ry/bohr 1e-4 bohr from
+  the point, 7.8e-4/8.6e-4 -> 2.1e-4/1.2e-4 at 5e-4, 2.5e-4/1.4e-4 ->
+  3.5e-4/2.4e-4 at 1e-3 (worse, just inside `rs(2)`); silicon FHI
+  3.2e-5/3.1e-5 -> 3.6e-6/3.1e-6 at 1e-4 but 4.9e-6/2.6e-6 -> 1.2e-5/1.0e-5 at
+  5e-4; oxygen FHI (MgO) 2.1e-3/2.0e-3 -> 5.2e-5/4.6e-5 at 1e-4, 1.5e-3/1.6e-3
+  -> 2.9e-4/2.4e-4 at 5e-4 (the row of `PARSEC_SPLINE_FORCE_CENTER` in
+  `acceleration/README.md` lists every case). What remains next to a grid point
+  is not the local slope, and is open. The gap that both steps show lies in the
+  projector values near the origin (nonlocal): with the local potential
+  replaced by its smooth form within `c` in the energy itself, the carbon FHI
+  cube 5e-4 bohr from a grid point keeps 1.16e-4 / 1.20e-4 Ry/bohr (constant in
+  the step, linear in the distance), and the step-1e-3 feature of a carbon wire
+  with an atom on a grid point is unchanged by that smoothing but moves with the
+  projector values of `PARSEC_PROJECTOR_CENTER=off`; for the carbon POTRE table
+  the projector values replaced by their smooth form within 3e-3 bohr took the
+  gap 1e-4 bohr from the point from 7.6e-5 to 2.3e-6 Ry/bohr. The orbitals
+  respond to such features at first order, so no force of the structure has the
+  slope of the energy over steps that leave the point. The difference between
+  the two steps next to the point is the padded interval of the local table,
+  which a step of 1e-3 bohr resolves (8.6e-5 Ry/bohr at 5e-4 bohr on the carbon
+  FHI cube, 3.8e-6 with that smoothing). The silicon FHI cube is worse than
+  under `tip` because `tip`'s local error (1.1e-5 at fixed density) had
+  cancelled a residual of about -1.1e-5 outside the local term; the oxygen FHI
+  residual is not analysed. For carbon, steps of 1e-3 and 2e-3 bohr also differ
+  by up to 2.5e-5 Ry/bohr, since `V'(r)/r` of the tables changes from -813 to
+  -796 Ry/bohr^2 between 1e-3 and 2e-3 bohr;
 - the self-consistency correction of `forcloc.f90` is added (Fortran's periodic
   routine has none; it vanishes at convergence); LDA+U (J = 0) and TS-vdW forces
   at Gamma as for clusters (since 2026-11-21 the LDA+U forces and relaxations of a
@@ -918,7 +1114,14 @@ the lattice, the grid, the atoms (modulo lattice vectors) and the k-points onto
 themselves are used, as before. Molecular dynamics and manual movements use
 none, as in PARSEC (`parsec.F90` sets no symmetry for them: on a
 Monkhorst-Pack mesh their wedge is that of time reversal alone); no torque
-is reported.
+is reported. On the default routines a `Kpoint_List` of scalar or
+collinear-spin orbitals with forces takes, since 2026-11-22
+(`PARSEC_KPOINT_LIST_FORCE_GROUP=auto`), the operations of the space group
+that map the grid and the weighted list (its classes `{k, -k}` modulo the
+reciprocal lattice) onto themselves, as the same points given as a mesh do:
+the forces of a moved hcp Au2 cell given as the list of its 4x4x2 mesh equal
+those of the mesh within 1.6e-10 Ry/bohr (4.2e-5 in plane without the
+average, `off`).
 
 An irreducible k-point wedge gives the nonlocal forces of its own points
 only; summed over the zone they are `(1/N) sum_g U_g F(g^-1 a)` of the wedge
@@ -934,7 +1137,11 @@ keep a fixed atom) and kept to the operations that also map the
 finite-difference operators of the grid onto themselves (on an oblique grid
 the others change the energy at the order of the discretization), and the
 mesh, the density average and the forces take it; the grid stays that of the whole group, and a
-subgroup whose translations it does not take is refused as before. A weighted
+subgroup whose translations it does not take is refused as before. Since
+2026-11-22 the spinors of non-magnetic spin-orbit coupling on a mesh take the
+subgroup too (`PARSEC_SPINOR_MOVE_FLAG_SUBGROUP=auto`; `off`: refused as
+before); non-collinear magnetism and spin-polarized spin-orbit coupling stay
+refused. A weighted
 `Kpoint_List` (a wedge of the input's group) is still refused with such flags,
 and so is molecular dynamics with one; `off` refuses every such relaxation, as
 before. A Gamma-point relaxation with `Symmetrize_Charge_Density` and such
@@ -998,17 +1205,20 @@ The G-space local potential keeps the readable fields and forces.
 (`acceleration/Forces/periodic_spline.py`, since 2026-11-07: the short-ranged
 terms on the host over the balls of the potential, the reciprocal part from
 one FFT, the self-consistency and core terms in the CUDA kernel above). Grid
+points within `2 rs(2)` of an atom take the slopes of the
+smooth behaviour of the potential and of the core density
+(`PARSEC_SPLINE_FORCE_CENTER=auto`, since 2026-11-22, above); under `tip` the
 points within round-off of an atom (`min(rs(2), 1e-6 bohr)`) are left out of
-the spline slopes of the potential and of the core density
-(`PARSEC_SPLINE_FORCE_CENTER=auto`, since 2026-11-21): the padded spline has a
+the spline slopes (the default of 2026-11-21): the padded spline has a
 slope of its own at `r = 0+` (3.6e-3 Ry/bohr for the carbon POTRE table, 0.42
 and 0.73 for the carbon and oxygen FHI tables), so the energy has a cone at
 the atom, and an atom within round-off of a grid point (half the atoms of the
 `make_diamond.py` cubes, 4e-12 to 2e-11 bohr from one) took the slope of the
 cone along the direction of the round-off, up to 1.5e-5 Ry/bohr (POTRE) and
-2e-3 Ry/bohr (FHI) that changed when the atom moved by 1e-11 bohr; now such a
-point gives the symmetric value, zero, as a central difference of the energy
-does, and every other point keeps the derivative of the energy.
+2e-3 Ry/bohr (FHI) that changed when the atom moved by 1e-11 bohr; under `tip`
+such a point gives the symmetric value, zero, as a central difference of the
+energy does, and every other point keeps the derivative of the energy at the
+point, cone included.
 `PARSEC_SPLINE_FORCE_CENTER=fortran` leaves out every point within the first
 radial sample, the rule of `forcloc.f90` and of the other local forces here,
 which is not the derivative of the energy between 1e-6 bohr and `rs(2)`
@@ -1016,8 +1226,9 @@ which is not the derivative of the energy between 1e-6 bohr and `rs(2)`
 The readable routine they replace summed every grid point of every image within
 `erfcinv(1e-26)/eta`: 34 s against 3.5 s for the local forces of the 8-atom cube
 at h 0.25 on an A100 node, 892 s against 5.2 s for the 64-atom cube at h 0.30.
-On Fortran's general (oblique) grid, whose `Cubic_Spline` potential takes the
-same split by default (`PARSEC_PERIODIC_OBLIQUE_SPLIT`), the same routine
+On Fortran's general (oblique) grid, whose potential takes the same split by
+default (`PARSEC_PERIODIC_OBLIQUE_SPLIT`: `Cubic_Spline` species since
+2026-11-07, linear POTRE and FHIPP tables since 2026-11-22), the same routine
 differentiates it over the lattice balls (the density terms in a lattice
 kernel on the device; within 2.2e-8 Ry/bohr of fourth-order differences of
 the energy of the potential for a distorted fcc Si16 cell at h 0.30, 4.5e-7 of
@@ -1117,12 +1328,23 @@ Gaussian compensation charge (its density in the Hartree field and the slope of
 `2 Z erf(r/sigma)/r`) are evaluated at every grid point
 (`PARSEC_WIRE_SLAB_GAUSSIAN=auto`), a departure from `forcloc.f90`, which skips
 every term of a point within the first radial sample `rs(2)` although the
-Gaussian density is largest at the atom; the terms of the radial tables keep
-the skip (`off`: the former forces). An atom on a grid point then meets the
-slope of the energy within 7.2e-5 Ry/bohr on an hBN slab (2.1e-3 with the
-skip) and within 7.7e-6 on a carbon wire (7.2e-3); the radial terms skipped
-within `rs(2)` still leave 2.6e-4 on the wire 1e-3 bohr off a point, just
-inside `rs(2)` of the C table.
+Gaussian density is largest at the atom (`off`: the former forces). The terms
+of the radial tables take the slopes of `PARSEC_SPLINE_FORCE_CENTER` (since
+2026-11-22 the smooth slopes within `2 rs(2)`, which reach the points within
+`rs(2)`; the skip left 4.2e-4 / 2.6e-4 Ry/bohr at steps of 1e-3 / 2e-3 bohr
+on a carbon FHI wire 1e-3 bohr off a point, 2.8e-4 / 1.0e-4 now). Two further departures from PARSEC 1.5 make the
+forces the derivative of the energy (since 2026-11-22): the potential `V_G`
+of the Gaussian charges is solved to a relative residual of 1e-12
+(`PARSEC_WIRE_SLAB_GAUSSIAN_SOLVE=auto`) instead of the Hartree tolerance of
+the run, whose error enters the energy at first order and moves with the atoms
+(`-dV rho . V_G` 6.8e-6 Ry from the converged value on an hBN slab: the 7.5e-5
+Ry/bohr left in F_z of B, 4.7e-7 to 1.0e-5 now at 0 to 2e-3 bohr from a grid
+point; energies move by that error, +8.5e-6 Ry there); and the force of the
+Gaussian charges takes the analytic slope of the Gaussian,
+`dV sum V_H dn_g/dR` (`PARSEC_WIRE_SLAB_GAUSSIAN_FORCE=auto`), instead of the
+finite-difference gradient of `V_H`, which does not resolve the Gaussian on
+coarse grids (2.5e-4 Ry/bohr at h 0.4 for hydrogen; an hBN slab at h 0.4 meets
+the slope of the energy within 6e-8 instead of 7.9e-5).
 
 Symmetrization (`symm_forces.f90`): over the space group the input reader
 finds for the wire or slab (`symmetries.f90` with `alatt` = `latt_vec` and
@@ -1448,6 +1670,9 @@ those exchanges was measured slower and left out (see the module).
 | Molecular dynamics and manual movements | No symmetry | The accelerated command line solves a trajectory that keeps a group in its sectors, checked at every structure (`PARSEC_MOVING_SECTORS=auto`, from 2^24 grid points x states for a cluster, the floor of the sectors and 4 operations for a cell; `off`: no symmetry) | The same energies and forces in less time; the full grid where the velocities are random, a structure keeps no group or the run is small. |
 | Positions after a movement | As the optimizer returns them | Averaged over the symmetry operations | Removes round-off drift; no change at print precision. |
 | Energy that is not finite | L-BFGS-B reports a converged minimum | The run stops with an error | The Fortran outcome is wrong. |
+| Local and core slopes within `2 rs(2)` of an atom | `forcloc.f90` skips the points within `rs(2)` | The slope of the smooth behaviour of the table, `s(c) d/c` (`PARSEC_SPLINE_FORCE_CENTER=auto`; `tip`: the former forces) | The energy over realistic steps averages the padded first interval of the table out; carbon FHI atom 5e-4 bohr from a grid point 7.8e-4 / 8.6e-4 -> 2.1e-4 / 1.2e-4 Ry/bohr off the slope of the SCF energy at steps of 1e-3 / 2e-3 bohr (the rest is nonlocal). |
+| Potential of the Gaussian charges of a wire or slab | Solved to the Hartree tolerance of the run | Solved to a relative residual of 1e-12 (`PARSEC_WIRE_SLAB_GAUSSIAN_SOLVE=auto`; `off`: as Fortran) | Its error enters the energy at first order and moves with the atoms: 7.5e-5 Ry/bohr in F_z of B in an hBN slab. |
+| Force of the Gaussian charges of a wire or slab | Finite-difference gradient of `V_H` (`gradmvs`) | Analytic slope of the Gaussian (`PARSEC_WIRE_SLAB_GAUSSIAN_FORCE=auto`; `gradient`: as Fortran) | The derivative of the energy; the gradient misses it by 2.5e-4 Ry/bohr at h 0.4 for hydrogen. |
 | Gaussian terms of the local forces of a wire or slab within `rs(2)` of an atom | Skipped with every other term of the point (`forcloc.f90`) | Evaluated at every point (`PARSEC_WIRE_SLAB_GAUSSIAN=auto`; `off`: the skip) | They are analytic and largest at the atom: 2.1e-3 Ry/bohr on an hBN slab with an atom on a grid point. |
 | Hartree boundary of larger clusters | Multipoles at `Solver_Lpole` | Higher order and atomic tail by default | See "Physical scope" in the package README; `Hartree_Boundary_Tolerance: off` restores PARSEC's boundary for a comparison. |
 | `Solver_Lpole` | Read and printed, then order 9 is used whatever it says (runs with 2, 4 and 9 give identical results) | The given order is the lowest one used | Not specific to moving atoms; give 9 for a comparison. |
@@ -1487,16 +1712,149 @@ printed decimals, and the total energies within 3e-8 Ry.
 are compared with finite differences of the energy instead.
 
 The domain of a cluster bounds how closely its forces follow the slope of its
-SCF energy. An Au2 cluster in a sphere of radius 8 bohr (h = 0.7 bohr, forces
-near 10 Ry/bohr) stays 3 to 5e-5 Ry/bohr from that slope at every step with an
-atom on a grid point (9.7e-5 with the atom off the grid), while each force term
-is the derivative of its energy at fixed density and orbitals within 1.2e-7.
-The residual comes from the Hartree multipole boundary of the small domain: a
-radius of 11 bohr brings it to about 6e-7 (1.6e-6 at a step of 1e-3 bohr). Two
-mechanisms contribute: the Poisson operator with multipole boundary values is
-not symmetric, so the potential it gives is not the derivative of the Hartree
-energy it gives, which the forces assume; and the atomic tail of the boundary is
-rebuilt from the positions with no force term of its own.
+SCF energy. An Au2 cluster in a sphere of radius 8 bohr (h = 0.7 bohr,
+`Solver_Lpole: 4`, raised to 6 with the atomic tail, forces near 10 Ry/bohr)
+stays 1.3 to 4.6e-5 Ry/bohr from that slope with an atom on a grid point
+(1.6e-4 after Richardson extrapolation with the atom off the grid), while each
+force term is the derivative of its energy at fixed density and orbitals
+within 1.2e-7. The residual comes from the Hartree multipole boundary of the
+small domain: a radius of 11 bohr brings it to about 6e-7. Two mechanisms
+contribute: the Poisson operator with multipole boundary values is not
+symmetric (the density of the outer layer enters moments that the boundary
+does not give back to it), so the potential it gives is not the derivative of
+the Hartree energy it gives, which the forces assume; and the atomic tail of
+the boundary moves with the atoms with no force term of its own.
+
+`PARSEC_HARTREE_VARIATIONAL` (off by default; `Hartree/variational.py`)
+removes both. With `on` a cluster with a multipole boundary takes the
+derivative of its Hartree energy as its Hartree potential and adds the force
+of the tail: with `u = A^-1 rho` (zero boundary values, one more CG per
+solve),
+
+`V' = (V_H + 8 pi u - M^T A_IB^T u)/2 + (u.t)/(2 sum rho)`,
+
+where `M` maps the density to its multipole boundary values, `A_IB` is the
+block of the Laplacian that couples to the exterior points and `t` the tail
+rows of the right-hand side. The energy functional is the same, `(h^3/2)
+rho.V' = (h^3/2) rho.V_H` at every density, so the usual bookkeeping of the
+total energy stands and the self-consistent density makes it stationary; the
+forces then add `(h^3/2) d/dR_a [y.C_L(R)]` with `y = A_IB^T u` and the tail
+values `C_L` (table "Hartree boundary force components" of `parsec.out`,
+`forces_hartree_boundary` of the archive). The results keep `V_H` of the
+Poisson solve as their Hartree potential (`hartree_potential_ry` of the
+archive, the `v_hartree` cube of `Output_Grid_Data`, the `pot.dat` of a
+frozen-density embedding): `V'` is not the electrostatic potential of the
+density and differs from it by up to 5e-2 Ry near the sphere. The effective
+potentials of a result are those the SCF ran with.
+
+What this buys is consistency, not accuracy. The forces become the exact
+slope of the energy of the multipole boundary. On A100 (the accelerated
+command line, `Cubic_Spline`, SCF to 1e-10 Ry, central differences at steps of
+1e-3 and 2e-3 bohr) force and slope then differ by the truncation error of the
+central difference: Au2 in the sphere of 8 bohr with the atom on a grid point
+by 1.1e-7 to 9.9e-7 Ry/bohr at 1e-3 bohr (4e-8 after Richardson
+extrapolation), with the atom off the grid by 1.3e-6 after extrapolation
+(1.6e-4 with the Poisson potential); Ge2H2 in a sphere of 6.5 bohr by 7e-7
+(8.4e-6), Si2H6 in 7 bohr by 1.7e-7 (5.1e-6), Ag2H2 in 6.5 bohr by 5.1e-7 for
+the component whose error came from the boundary (1.4e-5), the breathing mode
+of a Ge5 tetrahedron in 9 bohr (h = 0.5 bohr) by 1.6e-8 after extrapolation
+(6.6e-5 at 1e-3 bohr). A finite-difference check of the forces, and the
+stopping test of a relaxation (`Force_Min`) against the energy it lowers, then
+see the same function. That function is itself an approximation of the one of
+the boundary values summed directly (`Full_Hartree: true`): in the same
+spheres the slopes of the two energies differ by 1.8e-4 (Au2, 8 bohr) and
+2.2e-4 Ry/bohr (Au2, 8.3 bohr), and the forces of the Poisson potential lie
+closer to the forces of the direct boundary than those of `V'` on every
+cluster compared: 3.1e-5 against 1.6e-4 Ry/bohr (Au2, 8 bohr), 1.7e-5 against
+1.9e-4 (Au2, 8.3 bohr), 3.2e-5 against 5.2e-5 (Ag2H2), 4.9e-6 against 2.0e-5
+(Ge2H2), 3.3e-6 against 8.6e-6 (Si2H6), 1.3e-7 against 3.8e-7 (Na4, 9 bohr).
+Accurate forces of a small cluster come from a larger sphere, or from
+`Full_Hartree` where it is affordable (Au2 in 8 bohr: 7.8 s against 3.1 s;
+C185H124 in the sphere of the default rule did not reach its first SCF step in
+29 minutes on four A100); the switch gives forces consistent with the energy
+of the sphere as it is. The potential that would make the forces the slope of
+the direct energy is the transpose of the direct Coulomb sums of the boundary
+values in place of that of the multipole series; it is not built.
+
+`auto` takes `V'` where the forces are computed (a relaxation, molecular
+dynamics, manual movements without `Skip_Force: true`, `Calculate_Force`) and
+the first Poisson solve of a structure estimates a force change of 3e-7
+Ry/bohr or more (the self-consistency force term of `forcloc.f90` with `V' -
+V_H` as the residual, plus the force of the tail; on the clusters measured
+0.07 to 50 times the change); below it, and with `Hartree_Boundary_Tolerance:
+off` (PARSEC's boundary values), the run keeps the Poisson solution bit for
+bit. A run that keeps it decides again at the first solve of a structure in
+which an atom has moved outward by more than one grid spacing since its last
+decision; a run that takes `V'` keeps it. `hartree_variational_solves` of the
+backend report gives the estimates, the decisions and the solves of `u`. A
+restart (`Restart_Run`) from a run that kept the Poisson solution starts from
+the fixed point of the other potential and takes a few more SCF iterations
+under `auto` or `on` (an AuH spin-orbit restart with forces 8 instead of at
+most 6).
+
+What the opt-in costs on A100 (the accelerated command line, first runs, wall
+times `off` -> `auto` -> `on`): one more CG per Hartree solve and the
+solid-harmonic sums, with the sums of the tail over atoms and exterior points
+on the device of a GPU route. C795H300 (forces at one structure, four GPUs)
+14.2 -> 15.2 -> 14.8 s; C185H124 in the sphere of its example with the default
+boundary 9.7 -> 11.0 -> 11.0 s, three structures of its relaxation 14.0 ->
+17.6 -> 17.1 s; Au2 in the sphere of 8 bohr (one GPU) 3.4 -> 3.7 -> 3.6 s. A
+run that `auto` leaves with the Poisson solution pays its decisions, 0.4 to
+1.0 s each: H2O relaxed through seven structures (two decisions) 7.8 -> 8.1 s,
+benzene 3.7 -> 4.2 s.
+
+Two properties of a cluster calculation decide what a finite-difference check
+of its forces compares, both as in PARSEC 1.5.
+
+The first is the re-centring of the input (`initial.f90`, `Recenter_Atoms_In_Aperiodic_Directions`):
+a cluster whose bounding box has its midpoint more than 0.1 bohr from the
+origin is translated so that the midpoint is the origin, and `parsec.out`
+says so (`WARNING: atom coordinates were shifted so that the cluster is
+centered at the origin`, the shift vector and the new coordinates). Moving one
+input coordinate of an atom that bounds the box moves the midpoint by half the
+step and with it every atom, so the slope of the energy against that input
+coordinate is `sum_b F_b . dR_b/dx`: for an atom that alone bounds its axis,
+`F_a - F_net/2` with the forces before the net force is removed. The printed
+forces have the net force removed (`F_a - F_net/N`; the archive holds
+`forces_total` so and `forces_net`). An Au3 cluster (h = 0.42 bohr, a sphere of
+9.5 bohr, `Cubic_Spline`, SCF to 1e-10 Ry, the atom of the largest y moved
+along y): the slope of `E - TS` at 1e-3 and 2e-3 bohr is `F_a - F_net/2` to
+8e-8 and 2.8e-7 Ry/bohr (1.6e-8 after Richardson extrapolation), while the
+force before the net force is removed misses it by 7.9e-3 and the printed one
+by 2.6e-3. A check compares like with like on a centred input, with
+`Recenter_Atoms_In_Aperiodic_Directions: false`, or with the sum above; a
+relaxation re-centres only its first structure, so its steps follow the
+forces.
+
+The second is the correlation of `Correlation_Type: CA`, PARSEC's default.
+Its two Perdew-Zunger forms meet at `r_s = 1`, the density `3/(4 pi)`
+e/bohr^3, where PARSEC's coefficients leave a step of 6.41e-5 Ry in the
+correlation energy per electron. Whenever the density of a grid point crosses
+that value the total energy steps by `(3/(4 pi)) 6.41e-5 h^3` Ry: 6.6e-7,
+1.13e-6, 1.40e-6 and 1.91e-6 Ry at h = 0.35, 0.42, 0.45 and 0.5 bohr, and a
+multiple of it where points of one symmetry orbit cross together (24 points of
+C60 at h = 0.4 bohr: 2.35e-5 Ry). The forces are the slope of the energy
+between the steps: on A100 the energy of Au2, Au3, Au4, Ag4, a spin-polarized
+Au3 and a cell of fcc Au over displacements of +-2e-3 bohr equals the integral
+of the forces within 2e-9 Ry apart from these steps, which do not change with
+the SCF criterion, the eigensolver, the Hartree tolerance or the sphere. A
+central difference whose two points straddle a step misses the force by the
+step over twice the displacement: Au2 at h = 0.35 by 3.3e-4 and 1.7e-4
+Ry/bohr at 1e-3 and 2e-3 bohr, Au3 by 5.7e-4 and 2.8e-4 (h = 0.42) or 4.8e-4
+at 2e-3 (h = 0.5), Ag4 at h = 0.45 by 6.9e-4 and 3.1e-4, the fcc Au cell (two
+points at once) by 6.0e-4 at 2e-3. `PARSEC_CA_CONTINUITY=on` (opt-in;
+`V_xc/ca_lda.py`) joins the two forms with continuous energy and slope at
+`r_s = 1` (the coefficients of libxc's `LDA_C_PZ_MOD`); the same checks then
+agree to the truncation of the central difference, 1e-7 to 9e-6 Ry/bohr at
+1e-3 bohr and 5e-9 to 8e-7 after Richardson extrapolation, with an atom off
+and on a grid point, spin-polarized, and on the default and the
+Fortran-derived routines of the cell. Two cases keep a few 1e-6 after
+extrapolation for reasons of their own: Ag4 in a sphere of 10 bohr 3.7e-6
+(its multipole boundary: 3.1e-7 under `PARSEC_HARTREE_VARIATIONAL=on`), and
+displacements that carry the atom across a grid point (starting 5e-4 bohr from
+it: Au4 1.2e-6, Ag4 6.1e-6). It lowers the energies of these Au and Ag systems
+by 2.9e-4 to 3.5e-4 Ry per atom against PARSEC 1.5 and moves their forces by
+up to 1.8e-5 Ry/bohr, which is why it is not the default.
 
 ### Trajectories
 

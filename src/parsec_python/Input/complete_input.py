@@ -683,7 +683,8 @@ def complete_input_text(
 
 
 def _kpoint_list_lines(translation, scalar, blocks, kpoint_cell) -> tuple[list[str], frozenset[str]]:
-    """``Kpoint_List`` and ``nscf_kpoints`` of an input whose ``Super_Cell`` the bak file expands, in 1/bohr.
+    """``Kpoint_List`` and ``nscf_kpoints`` of an input whose ``Super_Cell`` the bak file expands, in 1/bohr, and the
+    ``Kpoint_List`` of any input whose points the reader moved to other images.
 
     The reader converts ``reciprocal_lattice_vectors`` with the input cell where a ``Super_Cell`` or
     ``Super_Cell_Vac`` is given (``Input.parsec_input``, as usrinputfile.F90 does with ``lattvec``); the bak file has
@@ -691,7 +692,11 @@ def _kpoint_list_lines(translation, scalar, blocks, kpoint_cell) -> tuple[list[s
     input's rows (with ``kpoint_cell``), bit for bit, beside the weights of the input (normalised again by the
     reader, to the same numbers).  A ``Kpoint_File`` becomes a ``Kpoint_List``.  Monkhorst-Pack grids and their
     shifts, the bandstruc path and the DOS grid are fractions of the cell the run uses, the expanded one, and are
-    copied.  Returns the lines and the labels they replace (none without an expanded ``Super_Cell``).
+    copied.  Where the reader moved points of a ``Kpoint_List`` to their shortest images (PARSEC_KPOINT_LIST_FOLD,
+    PARSEC_KPOINT_ORTHOGONAL_LIST_FOLD: on the default routines and on Fortran-derived routines the run chose), the
+    list is written as the run uses it, with or without a ``Super_Cell``: the bak file names those routines with
+    ``Use_Fortran_Routines``, under which the reader keeps written vectors.  Returns the lines and the labels they
+    replace (none for an input without an expanded ``Super_Cell`` whose list the reader kept).
     """
 
     from pathlib import Path
@@ -700,12 +705,16 @@ def _kpoint_list_lines(translation, scalar, blocks, kpoint_cell) -> tuple[list[s
     from .parsec_input import _block_numbers, _normalize_label, _unquoted
 
     problem = translation.problem
-    expanded = problem.periodic_cell is not None and (
+    if problem.periodic_cell is None:
+        return [], frozenset()
+    expanded = (
         getattr(translation, "super_cell", None) is not None
         or getattr(translation, "super_cell_vacuum", None) is not None
     )
-    if not expanded or kpoint_cell is None:
+    if expanded and kpoint_cell is None:
         return [], frozenset()
+    # the cell with which the reader converted the rows of the input
+    list_cell = kpoint_cell if expanded else problem.periodic_cell
 
     def first(key: str, default: str) -> str:
         items = scalar.get(key, ())
@@ -718,15 +727,18 @@ def _kpoint_list_lines(translation, scalar, blocks, kpoint_cell) -> tuple[list[s
             rows.append(list(values))
         return np.asarray(rows, dtype=float)
 
-    def written(raw: np.ndarray, unit: str) -> list[str]:
-        points, _weights = explicit_kpoints(raw, unit=unit, cell=kpoint_cell)
+    def written(raw: np.ndarray, unit: str, points=None) -> list[str]:
+        if points is None:
+            points, _weights = explicit_kpoints(raw, unit=unit, cell=list_cell)
         if raw.shape[1] == 3:
             return [_row(point) for point in points]
         return [_row(point) + f"  {_number(weight)}" for point, weight in zip(points, raw[:, 3])]
 
     lines: list[str] = []
     converted: set[str] = set()
-    if _normalize_label(first("kpoint_method", "none")) == "manual":
+    if _normalize_label(first("kpoint_method", "none")) == "manual" and (
+        blocks.get("kpoint_list") or scalar.get("kpoint_file")
+    ):
         if blocks.get("kpoint_list"):
             raw = rows_of(blocks["kpoint_list"][0])
         else:
@@ -735,17 +747,32 @@ def _kpoint_list_lines(translation, scalar, blocks, kpoint_cell) -> tuple[list[s
                 candidate = Path(translation.source).parent / candidate
             raw = read_kpoint_file(candidate.resolve())
         unit = _normalize_label(first("kpoint_unit", "cartesian_inverse_bohr"))
-        lines += [
-            "",
-            "# k-points of the input in 1/bohr (its Super_Cell is expanded above)",
-            "Kpoint_Method  manual",
-            "Kpoint_Unit  cartesian_inverse_bohr",
-            "begin Kpoint_List",
-            *written(raw, unit),
-            "end Kpoint_List",
-        ]
-        converted |= {"kpoint_method", "kpoint_unit", "kpoint_list", "kpoint_file"}
-    if blocks.get("nscf_kpoints"):
+        points, _weights = explicit_kpoints(raw, unit=unit, cell=list_cell)
+        used = getattr(problem, "kpoints", None)
+        # (points the reader moved to other images: by a reciprocal lattice vector, far more than round-off)
+        moved = (
+            used is not None
+            and np.shape(used) == np.shape(points)
+            and bool(np.any(np.abs(np.asarray(used, dtype=float) - points) > 1.0e-9))
+        )
+        if expanded or moved:
+            heading = (
+                "# k-points of the input in 1/bohr as the run uses them (points outside the first Brillouin zone at "
+                "their shortest images)"
+                if moved
+                else "# k-points of the input in 1/bohr (its Super_Cell is expanded above)"
+            )
+            lines += [
+                "",
+                heading,
+                "Kpoint_Method  manual",
+                "Kpoint_Unit  cartesian_inverse_bohr",
+                "begin Kpoint_List",
+                *written(raw, unit, np.asarray(used, dtype=float) if moved else points),
+                "end Kpoint_List",
+            ]
+            converted |= {"kpoint_method", "kpoint_unit", "kpoint_list", "kpoint_file"}
+    if expanded and blocks.get("nscf_kpoints"):
         raw = rows_of(blocks["nscf_kpoints"][0])
         unit = _normalize_label(first("nscf_kpoint_unit", "cartesian_inverse_bohr"))
         lines += [

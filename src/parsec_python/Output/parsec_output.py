@@ -169,6 +169,56 @@ def slab_recentring_lines(translation) -> list[str]:
     ]
 
 
+def cluster_recentring_lines(translation, system=None) -> list[str]:
+    """What ``initial.f90:163-182`` prints when it re-centred a cluster.
+
+    PARSEC translates a cluster whose bounding box has its midpoint more than
+    0.1 bohr from the origin (:func:`parsec_python.V_ion.center_cluster_geometry`),
+    warns, prints the new coordinates (format ``3(f15.9,3x)``) and, for a domain
+    other than a sphere, warns that atoms may then lie outside it, as the
+    ``fortran_reference.out`` files of ``examples/0d_AuH`` show it (no line of the
+    shift itself).  The forces are those of the moved atoms: a
+    finite difference of the energy against a displacement of an input
+    coordinate also moves every atom where that coordinate bounds the box.
+    Nothing for a cluster that was not moved (``Recenter_Atoms_In_Aperiodic_Directions:
+    false``, a restart, manual movements, a centred input) and for every other
+    system.
+    """
+
+    problem = getattr(translation, "problem", None)
+    if (
+        problem is None
+        or not getattr(problem, "recenter_geometry", False)
+        or getattr(problem, "periodic_cell", None) is not None
+        or not getattr(problem, "atoms", ())
+    ):
+        return []
+    from ..V_ion import center_cluster_geometry
+
+    atoms = tuple(problem.atoms)
+    placed = center_cluster_geometry(atoms)
+    original = np.asarray([atom.position for atom in atoms], dtype=float)
+    moved = np.asarray([atom.position for atom in placed], dtype=float)
+    if np.array_equal(original, moved):
+        return []
+    # the two list-directed records of the warning, as in the outputs of PARSEC 1.5
+    lines = [
+        "",
+        " WARNING: atom coordinates were shifted so",
+        " that the cluster is centered at the origin",
+    ]
+    grid = getattr(system, "grid", None)
+    shape = getattr(getattr(grid, "settings", None), "domain_shape", "sphere")
+    if shape != "sphere":
+        lines += [
+            "",
+            " WARNING: This may cause atoms to be outside the domain.",
+            " Coordinates in the input file may need to be adjusted.",
+        ]
+    lines += ["", " The new atom coordinates are:", *(_fortran_columns(position) for position in moved)]
+    return lines
+
+
 def standard_orientation_lines(translation) -> list[str]:
     """The map between the frame of the input and the calculation frame (``PARSEC_STANDARD_ORIENTATION=on``).
 
@@ -286,6 +336,14 @@ def spin_sector_fallback_lines(record) -> list[str]:
             *measured,
             "",
         ]
+    if getattr(record, "route", "spin") == "spin_flip_stable":
+        # PARSEC_SPIN_FLIP_STABILITY=auto: the state of a loop of the flip route passed its test (SCF/spin_polarized.py).
+        return [
+            "",
+            f" NOTE: PARSEC_SPIN_FLIP_STABILITY: {record.reason}:",
+            *(f"       {line}" for line in getattr(record, "multiplets", ())),
+            "",
+        ]
     if getattr(record, "route", "spin") == "kpoint":
         return [
             "",
@@ -306,6 +364,19 @@ def spin_sector_fallback_lines(record) -> list[str]:
             "       symmetric ensemble of this level, which the full grid keeps from a symmetric start. A state",
             "       that breaks the point group can lie lower: to look for one, displace an atom by about 1e-3 bohr",
             "       and run without symmetry.",
+            *(f"       {line}" for line in record.multiplets),
+            "",
+        ]
+    if getattr(record, "route", "spin") == "sector_doublet":
+        # PARSEC_SPIN_GUARD_DOUBLETS=note, the abelian sectors: the result is kept.
+        return [
+            "",
+            f" NOTE: symmetry sectors: {record.reason} after {record.stage}",
+            f"       ({record.measure} = {record.largest_fractional_occupation:.3E}).  The result is kept: the",
+            "       symmetric ensemble of degenerate partners that the sectors hold in one sector. The full grid can",
+            "       split such levels and end lower (bcc Mn2 with antiparallel start polarizations, 300 K, h 0.11",
+            "       bohr: 82 mRy); PARSEC_SPIN_GUARD_DOUBLETS=stop sends this run to the full grid. The k-point",
+            "       sector routes do not look for such levels.",
             *(f"       {line}" for line in record.multiplets),
             "",
         ]
@@ -2335,6 +2406,8 @@ class ParsecTextReporter:
                 *hubbard_setup_lines(system),
                 # initial.f90:201-228, only for a slab it re-centred along z.
                 *slab_recentring_lines(self.translation),
+                # initial.f90:163-182, only for a cluster it re-centred.
+                *cluster_recentring_lines(self.translation, system),
                 # PARSEC_STANDARD_ORIENTATION=on, only where it moved the atoms.
                 *standard_orientation_lines(self.translation),
                 "",
@@ -2861,6 +2934,10 @@ class ParsecTextReporter:
             )
         # parsec.F90:1307-1310, after getsre (Dynamic_Diag_Tol only).
         lines.extend(dynamic_tolerance_lines(step))
+        # PARSEC_STATES_CLOSE_MULTIPLET: more states from the next iteration on.
+        note = getattr(step, "state_count_note", ())
+        if note:
+            lines.extend([*note, ""])
         self._previous_total = energies.total
         self.write("\n".join(lines))
 
@@ -3444,6 +3521,18 @@ class ParsecTextReporter:
                     f" {'Sectors of conjugate pairs':30s} : {int(detail['kpoint_sector_pairs']):12d}"
                     "   (not solved: the orbitals e^{-iG.r} conj(u) of their partners)"
                 )
+            if detail.get("kpoint_sector_images", 0.0):
+                # the sectors of classes under the little group beyond H_k (PARSEC_KPOINT_SECTOR_CLASSES)
+                lines.append(
+                    f" {'Sectors of classes':30s} : {int(detail['kpoint_sector_images']):12d}"
+                    "   (not solved: the images P_g u of sectors solved)"
+                )
+            if detail.get("kpoint_sector_real_forms", 0.0):
+                # the sectors solved on real blocks through an antiunitary P_g K (PARSEC_KPOINT_SECTOR_REAL)
+                lines.append(
+                    f" {'Sectors in real forms':30s} : {int(detail['kpoint_sector_real_forms']):12d}"
+                    "   (solved on real blocks: an antiunitary P_g K keeps them)"
+                )
         lines.extend(ParsecTextReporter._kpoint_guard_lines(detail))
         lines.append(" --------------------------------------------------")
         return lines
@@ -3861,7 +3950,28 @@ class ParsecTextReporter:
                 f" CHEBDAV re-solved {retried} k-point(s) with a larger block "
                 f"(up to {int(attempts.max())} attempts) to converge degenerate levels."
             )
-        if worst > 1.0e-2:
+        from ..SCF.bands import unconverged_band_points
+
+        test = getattr(result, "residual_test", None)
+        failed = unconverged_band_points(
+            result.residual_norms, result.eigenvalues, test, getattr(result, "residual_tested", None)
+        )
+        if np.any(failed):
+            # a converged first solve stopped at its cap before its residual test: name the residual
+            from ..Eigensolvers.eigval import first_solve_extra_cycles
+
+            bad = float(np.nanmax(np.where(failed, np.asarray(result.residual_norms, dtype=float), np.nan)))
+            points = int(np.count_nonzero(np.any(failed, axis=0)))
+            lines.append(
+                f" WARNING: the band levels of {points} of {failed.shape[1]} k-point(s) did not converge: largest "
+                f"residual {bad:.3E} Ry, above Diag_Tolerance ({test:.1E}) times the largest |e| of a k-point;"
+            )
+            lines.append(
+                "          their first solve stopped before its test (on the device after Bands_FF_MaxIter + "
+                f"PARSEC_KPOINT_EXTRA_CYCLES ({first_solve_extra_cycles()}) CHEBFF cycles): raise "
+                "PARSEC_KPOINT_EXTRA_CYCLES or PARSEC_BAND_BUFFER, or loosen Diag_Tolerance."
+            )
+        elif worst > 1.0e-2:
             from ..SCF.bands import band_convergence_setting
 
             if self.problem.eigensolver.method == "chebff" and band_convergence_setting() == "off":

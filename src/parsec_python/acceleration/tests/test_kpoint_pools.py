@@ -124,6 +124,14 @@ class ColumnEigensolverTests(unittest.TestCase):
     def test_block_route_converged_first_solve(self) -> None:
         self._assert(_check("eigensolver", "chebdav", "2", "2", "route=block"), (2,))
 
+    def test_start_from_the_vectors_of_a_smaller_basis(self) -> None:
+        # PARSEC_KPOINT_SECTOR_WARM_GROWTH on the pools: the former basis laid out over the ranks as the leading
+        # columns of the new one gives the one-device solver's start (which moves the levels from a random one)
+        for route in ("rows", "block"):
+            report = _check("start", "1,2,3", f"route={route}")
+            self._assert(report, (1, 2, 3))
+            self.assertGreater(report["moved"], 1.0e-10)
+
 
 def _diamond(dimension: int, working: int):
     """The memory of a diamond cell of ``dimension`` points and ``working`` states (18 points per edge)."""
@@ -539,6 +547,21 @@ class PooledSCFTests(unittest.TestCase):
                 self.assertGreaterEqual(result["regrowths"], 1.0)
                 self.assertGreaterEqual(result["regrown_tasks"], result["regrowths"])
                 self.assertEqual(result["rebuilds"], 0.0)
+                self.assertAlmostEqual(result["energy"], serial["energy"], delta=1.0e-8)
+            for result in report["pooled"][1:]:
+                self.assertEqual(result["energy"], report["pooled"][0]["energy"])
+
+    def test_grown_sectors_start_from_their_vectors_on_pools(self) -> None:
+        # PARSEC_KPOINT_SECTOR_WARM_GROWTH=all (the device CHEBDAV of this input takes it): a grown sector whose states a
+        # SUBSPACE step refined starts from them, its columns laid out again over the ranks of its pool; the pools give
+        # the energy of one process, and the ranks of a pool agree
+        for ranks, pools in ((3, 3), (2, 1)):
+            report = _check("sectors", str(ranks), str(pools), "grow", "warm=all")
+            serial = report["serial"]
+            self.assertGreaterEqual(serial["warm_growths"], 1.0)
+            self.assertGreaterEqual(sum(result["warm_growths"] for result in report["pooled"]), 1.0)
+            for result in report["pooled"]:
+                self.assertTrue(result["converged"])
                 self.assertAlmostEqual(result["energy"], serial["energy"], delta=1.0e-8)
             for result in report["pooled"][1:]:
                 self.assertEqual(result["energy"], report["pooled"][0]["energy"])

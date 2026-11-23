@@ -336,10 +336,15 @@ class MPIExchangeService:
 
     ``exchange`` is the rank's :class:`~.hybrid.DeviceExchange` (its devices,
     sector expansions, pair solvers), ``sectors`` its symmetry eigensolver,
-    ``grid`` and ``definition`` those of the hybrid.
+    ``grid`` and ``definition`` those of the hybrid.  ``reference`` (the
+    rank's prepared reference system) names a periodic cell, whose pair
+    densities the cuFFT pair solver of the cell solves
+    (``hybrid.DeviceExchange.pair_solvers``; since 2026-11-22, the bulk cells
+    at the Gamma point of the MPI runner); ``None`` or a cluster takes the
+    Kronecker solver of the grid.
     """
 
-    def __init__(self, context, exchange: DeviceExchange, sectors, grid, definition) -> None:
+    def __init__(self, context, exchange: DeviceExchange, sectors, grid, definition, reference=None) -> None:
         self.context = context
         self.comm = context.comm
         self.rank, self.size = int(self.comm.rank), int(self.comm.size)
@@ -369,8 +374,12 @@ class MPIExchangeService:
         self.counts: dict[str, int] = {}
         self.pair_solves = 0
         self.tile_seconds = 0.0
-        # The pair solvers of the hybrid (their host plans on a thread beside the start).
-        self.solvers = exchange.pair_solvers(SimpleNamespace(grid=grid), definition)
+        # The pair solvers of the hybrid (their host plans on a thread beside the start): the Kronecker solver of a
+        # cluster's grid, or the cuFFT pair solver of a periodic cell (its reference names the cell).
+        from .hybrid import _periodic_reference
+
+        periodic = reference is not None and _periodic_reference(reference) is not None
+        self.solvers = exchange.pair_solvers(reference if periodic else SimpleNamespace(grid=grid), definition)
 
     # ----- bookkeeping -------------------------------------------------------
 
@@ -527,7 +536,10 @@ class MPIExchangeService:
             self._release(self.objects.pop(key))
         if final:
             self.solvers.release_blocks()
-            self.solvers._devices.clear()
+            devices = getattr(self.solvers, "_devices", None)
+            if devices is not None:
+                # (the device plans of the Kronecker solver; the cuFFT solver of a cell keeps its threads)
+                devices.clear()
             self.exchange._solvers.clear()
             self.exchange.expansions.clear()
         for device in self.devices:
@@ -723,7 +735,8 @@ class MPIExchangeService:
         """
 
         started = perf_counter()
-        self.solvers.parts
+        # (the Kronecker solver builds its host plans on a thread; the cuFFT solver of a cell has none to wait for)
+        getattr(self.solvers, "parts", None)
         self._timed("apply_solver_wait", started)
         entry = self.objects[int(payload["channel"])]
         orbitals = entry.orbitals
@@ -1497,7 +1510,10 @@ class MPIDeviceExchange(DeviceExchange):
             self.bound = None
 
     def fock_engine(self, system, definition) -> "MPIFockEngine":
-        if definition.pair_solver != "kronecker":
+        from .hybrid import _periodic_reference
+
+        # A periodic cell solves its pair densities by FFT whatever Exx_Pair_Solver says, as in one process.
+        if _periodic_reference(system) is None and definition.pair_solver != "kronecker":
             raise NotImplementedError(
                 "the device exchange operator solves the pair densities with the Kronecker "
                 "solver only (Exx_Pair_Solver: kronecker)"
@@ -1757,7 +1773,7 @@ def mpi_device_exchange_for(exchange: DeviceExchange, context, sectors, referenc
         volume_element=exchange.volume_element,
     )
     service = MPIExchangeService(
-        context, mpi_exchange, sectors, reference.grid, hybrid_definition(reference.input.scf)
+        context, mpi_exchange, sectors, reference.grid, hybrid_definition(reference.input.scf), reference=reference
     )
     mpi_exchange.service = service
     context.exchange_service = service

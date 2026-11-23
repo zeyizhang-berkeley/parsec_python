@@ -49,9 +49,18 @@ def prepare_device_nonlocal(xp, operator, gradients: NonlocalProjectorGradients,
 
     sparse = _sparse_module(xp) if sparse is None else sparse
     columns = gradient_columns_for(operator.labels, gradients.labels)
+    if xp is np:
+        def ordered(matrix):
+            return matrix
+    else:
+        # PARSEC_ORDERED_SUMS=auto: the overlaps in a fixed order of summation (the same forces in every run)
+        from ..Hamiltonian.complex_csr_device import ordered_device_matrix as ordered
     return (
-        sparse.csr_matrix(_conjugate_transpose(operator.projectors)),
-        [sparse.csr_matrix(_conjugate_transpose(sp.csc_matrix(component)[:, columns])) for component in gradients.components],
+        ordered(sparse.csr_matrix(_conjugate_transpose(operator.projectors))),
+        [
+            ordered(sparse.csr_matrix(_conjugate_transpose(sp.csc_matrix(component)[:, columns])))
+            for component in gradients.components
+        ],
     )
 
 

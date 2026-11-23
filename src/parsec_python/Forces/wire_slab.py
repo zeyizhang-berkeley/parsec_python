@@ -46,8 +46,12 @@ from ..Pseudopotential import ParsecPseudopotential, ParsecRadialSpline
 from ..Pseudopotential.radial_derivatives import (
     evaluate_density_derivative,
     evaluate_local_potential_derivative,
+    linear_projector_slope,
+    linear_slope_setting,
     radial_projector_with_derivative,
+    smooth_center_radius,
     spline_derivative,
+    spline_force_center_setting,
 )
 from ..V_ion.ionic_potential import _projector_support_radius
 from ..V_ion.wire_slab import gaussian_width
@@ -112,6 +116,38 @@ def wire_slab_gaussian_setting() -> str:
     return value
 
 
+#: The switch of the form of the force of the Gaussian charges of a wire or slab (:func:`wire_slab_gaussian_force_setting`).
+WIRE_SLAB_GAUSSIAN_FORCE_ENV = "PARSEC_WIRE_SLAB_GAUSSIAN_FORCE"
+
+
+def wire_slab_gaussian_force_setting() -> str:
+    """``PARSEC_WIRE_SLAB_GAUSSIAN_FORCE``: the form of ``F_g``, the force on the Gaussian charge of an atom of a wire or
+    slab in the Hartree field of the electrons.
+
+    The energy holds ``-dV sum_r rho(r) V_G(r)``, ``V_G = G n_g`` the potential of the Gaussian charges; with the
+    Hartree operator ``G`` of the wire or slab symmetric (to 1e-10 relative on an hBN slab) its derivative is
+    ``F_g = dV sum_r V_H(r) dn_g(r - R)/dR``, ``V_H = G rho``.
+
+    * ``auto`` (default since 2026-11-22): that sum with the analytic derivative of the Gaussian,
+      ``dn_g/dR = n_g 2 (r - R)/sigma^2``: the central difference of ``-dV rho . V_G`` within 1.5e-7 to 7.7e-7 Ry/bohr
+      on hydrogen slabs and wires at h 0.2 to 0.6 bohr (fixed density, tight solves).  A deliberate departure from
+      PARSEC 1.5.
+    * ``gradient``: ``dV sum_r grad V_H(r) n_g(r - R)`` with the finite-difference gradient of the grid
+      (``forcloc_slab.f90``'s ``gradmvs``), as before: it is that derivative only where the stencil resolves the
+      Gaussian (sigma = rcore/2): off by 2.2e-3, 2.5e-4, 8.9e-6 and 6e-7 Ry/bohr at h 0.6, 0.4, 0.3 and 0.2 for
+      hydrogen (sigma 0.66 bohr).
+
+    ``PARSEC_WIRE_SLAB_GAUSSIAN=off`` (the skip of ``forcloc.f90``) keeps the gradient form.
+    """
+
+    import os
+
+    value = os.environ.get(WIRE_SLAB_GAUSSIAN_FORCE_ENV, "auto").strip().lower() or "auto"
+    if value not in ("auto", "gradient"):
+        raise ValueError(f"{WIRE_SLAB_GAUSSIAN_FORCE_ENV} must be auto or gradient, not {value!r}")
+    return value
+
+
 def _erf_slope_over_radius(charge: float, radius: np.ndarray, sigma: float) -> np.ndarray:
     """``(d/dr [2 Z erf(r/sigma)/r]) / r`` at every distance, ``r = 0`` included (its limit ``-8 Z/(3 sqrt(pi) sigma^3)``).
 
@@ -139,19 +175,34 @@ def wire_slab_local_forces(
     density: np.ndarray,
     potential_residual: np.ndarray,
     xc_potential: np.ndarray,
-    hartree_gradient: np.ndarray,
+    hartree_gradient: np.ndarray | None,
+    *,
+    hartree_potential: np.ndarray | None = None,
 ) -> WireSlabLocalForceTerms:
     """The local force terms of a wire or slab (Ry/bohr, ``(atoms, 3)`` each).
 
     ``hartree_gradient`` is the Cartesian gradient of the Hartree potential,
-    ``(3, n)``; the other fields are those of
-    :func:`parsec_python.Forces.local.local_forces`.
+    ``(3, n)``, and ``hartree_potential`` that potential; the force of the Gaussian charges takes the potential under
+    ``PARSEC_WIRE_SLAB_GAUSSIAN_FORCE=auto`` (:func:`wire_slab_gaussian_force_setting`, where it is given) and the
+    gradient otherwise.  The other fields are those of :func:`parsec_python.Forces.local.local_forces`.
     """
 
     density = np.asarray(density, dtype=np.float64)
     residual = np.asarray(potential_residual, dtype=np.float64)
     xc = np.asarray(xc_potential, dtype=np.float64)
-    hartree_gradient = np.asarray(hartree_gradient, dtype=np.float64)
+    # F_g from the potential and the analytic slope of the Gaussian (PARSEC_WIRE_SLAB_GAUSSIAN_FORCE=auto), or from
+    # the finite-difference gradient of the potential (gradient, and the skip of PARSEC_WIRE_SLAB_GAUSSIAN=off)
+    analytic = (
+        hartree_potential is not None
+        and wire_slab_gaussian_setting() == "auto"
+        and wire_slab_gaussian_force_setting() == "auto"
+    )
+    if analytic:
+        hartree_potential = np.asarray(hartree_potential, dtype=np.float64)
+    else:
+        if hartree_gradient is None:
+            raise ValueError("the force of the Gaussian charges needs the gradient of the Hartree potential")
+        hartree_gradient = np.asarray(hartree_gradient, dtype=np.float64)
     count = len(atoms)
     ionic = np.zeros((count, 3))
     correction = np.zeros((count, 3))
@@ -161,6 +212,8 @@ def wire_slab_local_forces(
     half_width = grid.settings.stencil_half_width
     # the Gaussian terms at every point (PARSEC_WIRE_SLAB_GAUSSIAN=auto) or with the skip of forcloc.f90 (off)
     every_point = wire_slab_gaussian_setting() == "auto"
+    center_setting = spline_force_center_setting()
+    slopes = linear_slope_setting()  # PARSEC_LINEAR_TABLE_SLOPES (species without Cubic_Spline)
     for index, atom in enumerate(atoms):
         potential = potentials[atom.symbol]
         specification = specifications[atom.symbol]
@@ -171,12 +224,16 @@ def wire_slab_local_forces(
         sigma = gaussian_width(potential)
         density_factor = charge / sigma**3 / np.sqrt(np.pi) / np.pi
         position = np.asarray(atom.position, dtype=np.float64)
+        # within 2 rs(2) the slopes of the smooth behaviour of the tables (PARSEC_SPLINE_FORCE_CENTER=
+        # auto), which also reach the points closer than rs(2); without it the tables leave those out (forcloc.f90)
+        center = smooth_center_radius(potential, center_setting)
         for translation in grid.compensation_image_translations(position, sigma):
             relative = grid.coordinates - (position + translation)
             radius = np.sqrt(np.einsum("ij,ij->i", relative, relative))
             included = radius >= potential.radii[0]
             inverse = np.zeros_like(radius)
-            inverse[included] = 1.0 / radius[included]
+            reached = included if center == 0.0 else radius > 0.0
+            inverse[reached] = 1.0 / radius[reached]
             slope = evaluate_local_potential_derivative(
                 potential,
                 radius,
@@ -184,6 +241,8 @@ def wire_slab_local_forces(
                 table=species.local_potential_derivative,
                 use_spline=specification.use_spline,
                 spline_padding_width=half_width,
+                center=center,
+                slopes=slopes,
             )
             if every_point:
                 # the slope of the tables with the skip within rs(2), that of 2 Z erf(r/sigma)/r at every point
@@ -202,6 +261,7 @@ def wire_slab_local_forces(
                 radius,
                 species.valence_density,
                 table=species.valence_density_derivative,
+                slopes=slopes,
             )
             correction[index] += (atomic_slope * residual * inverse) @ relative
             if species.core_density_derivative is not None:
@@ -212,9 +272,15 @@ def wire_slab_local_forces(
                     table=species.core_density_derivative,
                     use_spline=specification.use_spline,
                     spline_padding_width=half_width,
+                    center=center,
+                    slopes=slopes,
                 )
                 core[index] += (core_slope * xc * inverse) @ relative
             charge_density = density_factor * np.exp(-(radius / sigma) ** 2)
+            if analytic:
+                # dV sum_r V_H(r) dn_g/dR, dn_g/dR = n_g 2 (r - R)/sigma^2: the derivative of -dV rho . V_G
+                gaussian[index] += (hartree_potential * charge_density * (2.0 / sigma**2)) @ relative
+                continue
             if not every_point:
                 charge_density = np.where(included, charge_density, 0.0)
             gaussian[index] += hartree_gradient @ charge_density
@@ -250,6 +316,7 @@ def wire_slab_projector_gradients(
     from ..V_ion.ionic_potential import projector_center_setting, projector_gradient_clamp
 
     center_setting = projector_center_setting()
+    slopes = linear_slope_setting()
     rows: list[np.ndarray] = []
     columns: list[np.ndarray] = []
     values: tuple[list, list, list] = ([], [], [])
@@ -308,7 +375,7 @@ def wire_slab_projector_gradients(
                     slope = spline_derivative(spline, clamped)
                 else:
                     radial = np.interp(clamped, potential.radii, radial_grid, right=0.0)
-                    slope = np.interp(clamped, potential.radii, radial_slope, right=0.0)
+                    slope = linear_projector_slope(clamped, potential.radii, radial_grid, radial_slope, slopes)
                 harmonics, harmonic_gradients = real_harmonics_with_gradients(
                     angular_momentum, unit, inverse
                 )
@@ -659,7 +726,12 @@ def compute_wire_slab_forces(system, result, *, symmetrize: bool = True, operati
             result.input_effective_potential
         )
         hartree_potential = np.asarray(result.hartree_potential)
-    hartree_gradient = np.vstack([matrix @ hartree_potential for matrix in system.gradient])
+    # the analytic form of the force of the Gaussian charges needs the potential, the former one its gradient
+    # (PARSEC_WIRE_SLAB_GAUSSIAN_FORCE)
+    analytic = wire_slab_gaussian_setting() == "auto" and wire_slab_gaussian_force_setting() == "auto"
+    hartree_gradient = (
+        None if analytic else np.vstack([matrix @ hartree_potential for matrix in system.gradient])
+    )
     local = wire_slab_local_forces(
         system.grid,
         atoms,
@@ -669,6 +741,7 @@ def compute_wire_slab_forces(system, result, *, symmetrize: bool = True, operati
         residual,
         xc,
         hartree_gradient,
+        hartree_potential=hartree_potential,
     )
     if spin_kpoints:
         separable = wire_slab_spin_kpoint_nonlocal_forces(system, result)

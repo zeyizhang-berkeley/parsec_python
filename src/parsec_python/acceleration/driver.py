@@ -24,6 +24,7 @@ from parsec_python.SCF.pbc import (
     prepare_periodic_single_point as prepare_reference_periodic_single_point,
 )
 from parsec_python.Grid.pbc import uses_fortran_routines
+from parsec_python.Hartree.variational import VariationalHartreeSolve, tail_charges
 from parsec_python.V_ion import ion_ion_energy
 from parsec_python.models import (
     PreparationTimings,
@@ -129,8 +130,8 @@ def _reference_cache_key(
     # before 2026-10-30, when the table reach was the default).
     if getattr(problem, "periodic_cell", None) is not None and periodic_reach_rule() != "table":
         digest.update(f"periodic-reach-{periodic_reach_rule()}".encode("ascii"))
-    # PARSEC_PERIODIC_OBLIQUE_SPLIT other than its default (auto: the split of the orthorhombic grid on the
-    # oblique grid where a species uses Cubic_Spline).
+    # PARSEC_PERIODIC_OBLIQUE_SPLIT other than auto (the split of the orthorhombic grid on the oblique grid where a
+    # species uses Cubic_Spline; the default up to 2026-11-22, which adds nothing: the default validated adds its name).
     if getattr(problem, "periodic_cell", None) is not None and periodic_oblique_split() != "auto":
         digest.update(f"periodic-oblique-{periodic_oblique_split()}".encode("ascii"))
     digest.update(bytes((int(bool(defer_native_laplacian)),)))
@@ -488,7 +489,7 @@ def spin_cell_group_refusal(reason: str) -> str:
         "a spin-polarized periodic cell runs as an MPI SCF only in the abelian sectors of its group, both channels "
         f"divided among the ranks, and this cell has none: {reason}. Its forces, relaxations and molecular dynamics "
         "with Use_Fortran_Routines: .false. run on the ranks with --symmetry off, both channels as one shared "
-        "sector of the identity (PARSEC_SPIN_SECTOR_FORCES=auto, with PARSEC_CUPY_DISTRIBUTED_FILTER=0); "
+        "sector of the identity (PARSEC_SPIN_SECTOR_FORCES=auto); "
         "a single point runs with parsec_python/main.py, whose one process solves both channels on the full grid of "
         "one device, or with --serial-control"
     )
@@ -503,7 +504,9 @@ def periodic_sector_refusal(problem, *, hybrid_sectors: bool = False, features: 
     sectors, :mod:`.SCF.gamma_spin`), with a native LDA or GGA, or in one
     process a meta-GGA, a libxc functional, LDA+U (unpolarized, and with
     spin under ``PARSEC_LDAU_SPIN_SECTORS=auto``) or the TS correction under
-    their switches (``features`` below).
+    their switches (``features`` below); in one process also a wire or slab under ``PARSEC_SLAB_WIRE_SECTORS=auto``
+    (:func:`_wire_slab_sector_refusal`) and a cell whose lattice vectors are not along the axes under
+    ``PARSEC_OBLIQUE_SECTORS=auto`` (:func:`_oblique_sector_refusal`), both off by default.
     Its orbitals are solved in the sectors of the point group of the cell
     about its origin (``PARSEC_PERIODIC_SYMMETRY=auto``, the default), whose
     density, potentials and mixer keep one value per orbit, the Hartree
@@ -519,13 +522,14 @@ def periodic_sector_refusal(problem, *, hybrid_sectors: bool = False, features: 
     still split the Gamma point: ``SCF/kpoint_sectors.py``; so does, under
     ``PARSEC_GAMMA_HYBRID_SECTORS=kpoint``, an unpolarized hybrid of a cell
     large enough for those sectors, ``SCF/gamma_hybrid_route.py``), and the
-    MPI runner refuses it.
+    MPI runner refuses it (but the SCF of an unpolarized hybrid, below).
 
     ``hybrid_sectors``: the caller solves an unpolarized hybrid in the real
     sectors of this route (the driver in one process under
     ``PARSEC_GAMMA_HYBRID_SECTORS=auto``, :func:`_gamma_hybrid_in_sectors`):
-    a hybrid is then no reason.  The other callers (the k-point mesh folded
-    into a supercell, the MPI runner) keep refusing it.
+    a hybrid is then no reason; the ranks of the MPI runner pass it where they
+    take the SCF of an unpolarized hybrid (:func:`_mpi_periodic_hybrid`, since
+    2026-11-22).  The k-point mesh folded into a supercell keeps refusing it.
 
     ``features``: the caller runs the cell of the input in one process (the
     driver without an MPI context, the spin route of the command line), where
@@ -543,7 +547,7 @@ def periodic_sector_refusal(problem, *, hybrid_sectors: bool = False, features: 
     scf = problem.scf
     lattice = np.asarray(problem.periodic_cell.lattice_vectors, dtype=np.float64)
     if int(getattr(problem.grid, "periodicity", 3)) != 3:
-        return "a wire or slab (Boundary_Conditions: wire or slab)"
+        return _wire_slab_sector_refusal(problem, features=features)
     if problem.has_kpoint_sampling:
         sampling = kpoint_sampling(problem)
         if sampling is None or len(sampling[0]) != 1 or np.any(sampling[0]):
@@ -566,8 +570,114 @@ def periodic_sector_refusal(problem, *, hybrid_sectors: bool = False, features: 
     if functional_refusal is not None:
         return functional_refusal
     if not np.allclose(lattice, np.diag(np.diag(lattice)), atol=1.0e-10):
-        return "an oblique cell (lattice vectors not along the Cartesian axes)"
+        oblique_refusal = _oblique_sector_refusal(problem, features=features)
+        if oblique_refusal is not None:
+            return oblique_refusal
     return correction_refusal(problem, features=features)
+
+
+_OBLIQUE_REASON = "an oblique cell (lattice vectors not along the Cartesian axes)"
+
+
+def _oblique_sector_refusal(problem, *, features: bool = False) -> str | None:
+    """Why a bulk cell whose lattice vectors are not along the Cartesian axes cannot be solved in the sectors, or
+    ``None``.
+
+    ``PARSEC_OBLIQUE_SECTORS=auto`` takes such a cell at the Gamma point in one process (``features``), unpolarized,
+    with a native LDA or GGA and none of TS, LDA+U, a hybrid, a meta-GGA or libxc: its orbitals in the sectors of the
+    operations that map its grid and finite-difference operators onto themselves, detected in the frame of the grid
+    indices (``Symmetry/oblique_frame.py``).  Everything else, and every such cell under ``off`` (the default), keeps
+    the full grid as before.  Its forces and the moves of a relaxation are averaged over the Cartesian operations
+    ``S W S^-1`` of the sectors (:mod:`.Forces.sector_symmetry`).
+    """
+
+    from .Symmetry.oblique_frame import oblique_sectors_setting
+
+    if oblique_sectors_setting() != "auto" or not features:
+        return _OBLIQUE_REASON
+    if int(getattr(problem.periodic_cell, "dimensions", 3)) != 3:
+        # the slab of the default routines (Use_Fortran_Routines: .false.): its grid keeps the full grid
+        return _OBLIQUE_REASON
+    scf = problem.scf
+    if scf.spin_polarized or scf.noncollinear or scf.self_consistent_spin_orbit:
+        return f"{_OBLIQUE_REASON} with spin polarization or spin-orbit coupling"
+    if scf.is_hybrid:
+        return "a hybrid functional"
+    from .SCF.gamma_features import correction_refusal, meta_gga_or_libxc_refusal
+
+    functional_refusal = meta_gga_or_libxc_refusal(problem, features=False)
+    if functional_refusal is not None:
+        return functional_refusal
+    return correction_refusal(problem, features=False)
+
+
+def _symmetry_index_frame(grid, problem, mpi_context=None):
+    """The :class:`.Symmetry.oblique_frame.IndexFrame` the detection of the sectors of ``grid`` takes, or ``None``
+    (a grid of the Cartesian axes, ``PARSEC_OBLIQUE_SECTORS=off``, or a calculation that :func:`_oblique_sector_refusal`
+    refuses: an MPI run, spin, a hybrid, TS, LDA+U, a meta-GGA or libxc, also where the lattice is diagonal and only
+    the general grid of the Fortran-derived routines asks for the frame).  Forces and moves averaged over the group of
+    the sectors (``sector_forces``) take the frame too: the operations turn the forces as ``S W S^-1``
+    (:mod:`.Forces.sector_symmetry`)."""
+
+    from .Symmetry.oblique_frame import index_frame, needs_index_frame, oblique_sectors_setting
+
+    if not needs_index_frame(grid) or oblique_sectors_setting() != "auto":
+        return None
+    if _oblique_sector_refusal(problem, features=mpi_context is None) is not None:
+        return None
+    return index_frame(grid)
+
+
+_WIRE_SLAB_REASON = "a wire or slab (Boundary_Conditions: wire or slab)"
+
+
+def _wire_slab_sector_refusal(problem, *, features: bool = False) -> str | None:
+    """Why a wire or slab cannot be solved in the sectors of the Gamma route, or ``None``.
+
+    ``PARSEC_SLAB_WIRE_SECTORS=auto`` takes a wire or slab of the Fortran-derived routines (the grid of
+    :mod:`parsec_python.Grid.confined`) at the Gamma point whose periodic vectors lie along the Cartesian axes,
+    unpolarized, with a native LDA or GGA and none of TS, LDA+U, a hybrid, a meta-GGA, libxc or
+    ``Symmetrize_Charge_Density``, in one process (``features``: the driver without an MPI context): its orbitals in
+    the sectors of its point group about the origin (``Symmetry/axis_reflection.py``), every field on the full grid of the
+    wire or slab reduced to the orbits, its Hartree potential solved there by its own solver (the boundary values of
+    ``hartset_wire``/``hartset_slab``).  Everything else, and every wire or slab under ``off`` (the default), keeps
+    the full grid as before.  The forces of a wire or slab stay with the reference solver
+    (:func:`.SCF.periodic_routes.moving_cell_options_reference_only`), its MPI runs and restarts too
+    (:func:`.SCF.periodic_routes.wire_slab_reference_only`).
+    """
+
+    from .Symmetry.axis_reflection import slab_wire_sectors_setting
+
+    if slab_wire_sectors_setting() != "auto" or not features:
+        return _WIRE_SLAB_REASON
+    from parsec_python.Grid import kpoint_sampling
+
+    scf = problem.scf
+    lattice = np.asarray(problem.periodic_cell.lattice_vectors, dtype=np.float64)
+    if not bool(getattr(problem.grid, "fortran_routines", True)):
+        return _WIRE_SLAB_REASON
+    if not np.allclose(lattice, np.diag(np.diag(lattice)), atol=1.0e-10):
+        # (a hexagonal slab: its sectors in the frame of its grid indices under PARSEC_OBLIQUE_SECTORS=auto)
+        from .Symmetry.oblique_frame import oblique_sectors_setting
+
+        if oblique_sectors_setting() != "auto":
+            return "a wire or slab whose periodic vectors are not along the Cartesian axes (PARSEC_OBLIQUE_SECTORS=off)"
+    if problem.has_kpoint_sampling:
+        sampling = kpoint_sampling(problem)
+        if sampling is None or len(sampling[0]) != 1 or np.any(sampling[0]):
+            return "k-point sampling beyond the Gamma point"
+    if scf.spin_polarized or scf.noncollinear or scf.self_consistent_spin_orbit:
+        return "a wire or slab with spin polarization or spin-orbit coupling"
+    if scf.is_hybrid:
+        return "a hybrid functional"
+    if bool(getattr(scf, "symmetrize_density", False)):
+        return "a wire or slab with Symmetrize_Charge_Density"
+    from .SCF.gamma_features import correction_refusal, meta_gga_or_libxc_refusal
+
+    functional_refusal = meta_gga_or_libxc_refusal(problem, features=False)
+    if functional_refusal is not None:
+        return functional_refusal
+    return correction_refusal(problem, features=False)
 
 
 def _gamma_hybrid_in_sectors(problem, mpi_context, *, sector_forces: bool = False) -> bool:
@@ -585,9 +695,9 @@ def _gamma_hybrid_in_sectors(problem, mpi_context, *, sector_forces: bool = Fals
     under ``PARSEC_GAMMA_HYBRID_SECTOR_FORCES=sectors`` (an opt-in, slower on small cells); under ``auto`` (the
     default) it keeps the full grid, whose forces and moves are averaged over the operations of the cell
     (:func:`_gamma_hybrid_full_grid_forces`), and under ``off`` it keeps the full grid as before.  ``off`` and
-    ``kpoint`` of ``PARSEC_GAMMA_HYBRID_SECTORS`` keep the former routes; with an MPI context it is ``False``, and
-    :func:`periodic_sector_refusal` then names the hybrid, which the MPI runner refuses (run it with main.py), as
-    before.
+    ``kpoint`` of ``PARSEC_GAMMA_HYBRID_SECTORS`` keep the former routes; with an MPI context it is ``False``: the
+    ranks of the MPI runner decide with :func:`_mpi_periodic_hybrid` (since 2026-11-22; before, they refused every
+    periodic hybrid).
     """
 
     from .SCF.gamma_hybrid_route import (
@@ -605,6 +715,38 @@ def _gamma_hybrid_in_sectors(problem, mpi_context, *, sector_forces: bool = Fals
     if sector_basis_reached(problem):
         return True
     return bool(sector_forces) and gamma_hybrid_sector_forces_setting() == "sectors"
+
+
+def _mpi_periodic_hybrid(problem, mpi_context) -> bool | None:
+    """How the ranks of the MPI full-SCF runner solve an unpolarized hybrid of a bulk cell at the Gamma point, or
+    ``None`` where the run is not one (since 2026-11-22; before, the runner refused every periodic hybrid).
+
+    ``True``: in the real sectors of the abelian group of the cell, as one process takes them under
+    ``PARSEC_GAMMA_HYBRID_SECTORS=auto`` (:func:`_gamma_hybrid_in_sectors`, the same floor of
+    :func:`.SCF.gamma_hybrid_route.sector_basis_reached`), every sector basis on one GPU of its rank and the pair
+    tiles of the exchange on every GPU of every rank, solved by the cuFFT pair solver of the cell
+    (:mod:`.SCF.hybrid_mpi`).  ``False``: as the one sector of the identity, on the first GPU of the root, whose
+    exchange tiles every GPU of every rank solves: a cell below that floor, and every cell under ``off``, the full grid
+    that one process takes there.  ``kpoint`` (a route of one process) gives ``None``, and the hybrid is refused as
+    before.  A spin-polarized hybrid of a cell gives ``None`` as well.  The input alone decides, alike on every rank.
+    """
+
+    scf = getattr(problem, "scf", None)
+    if (
+        mpi_context is None
+        or getattr(problem, "periodic_cell", None) is None
+        or not bool(getattr(scf, "is_hybrid", False))
+        or bool(getattr(scf, "spin_polarized", False))
+        or bool(getattr(scf, "noncollinear", False))
+        or bool(getattr(scf, "self_consistent_spin_orbit", False))
+    ):
+        return None
+    from .SCF.gamma_hybrid_route import gamma_hybrid_sectors_setting, sector_basis_reached
+
+    setting = gamma_hybrid_sectors_setting()
+    if setting == "kpoint":
+        return None
+    return setting == "auto" and bool(sector_basis_reached(problem))
 
 
 def _gamma_hybrid_full_grid_forces(
@@ -897,7 +1039,7 @@ def _weighted_spin_refusal(problem, mpi_context, *, basis: int | None = None) ->
 
     if mpi_context is not None and mpi_weighted_setting() == "off":
         return f"spin polarization on several MPI ranks ({_MPI_WEIGHTED_OFF})"
-    if _spin_sector_refusal(problem) is not None:
+    if _spin_sector_refusal(problem, mpi_context=mpi_context) is not None:
         return "spin polarization on the full grid"
     floor = spin_floor_setting()
     if basis is not None and int(basis) < floor:
@@ -936,22 +1078,25 @@ def _kept_abelian_note(refusal) -> str | None:
     )
 
 
-def _sectors_keep_orbits(reference, setting: str, reduction, atoms) -> bool:
+def _sectors_keep_orbits(reference, setting: str, reduction, atoms, *, grid=None) -> bool:
     """Whether the sectors of ``reduction`` take the projectors of one atom per orbit.  Without LDA+U: where the atoms
     keep the group of the sectors within 1e-6 bohr (:func:`.Symmetry.axis_reflection.sector_orbits_exact`,
     ``PARSEC_SECTOR_ORBITS_EXACT``).  With LDA+U: under ``PARSEC_LDAU_PROJECTOR_ORBITS=auto``, by the same distance
     (``hubbard_device.ldau_orbits_exact``).  A structure accepted within a looser ``PARSEC_SYMMETRY_ATOM_TOLERANCE``
-    keeps the projectors of every atom."""
+    keeps the projectors of every atom.  ``grid``: the grid of the detection where it is not that of ``reference`` (the
+    frame of the grid indices of an oblique cell, ``Symmetry/oblique_frame.py``, with ``atoms`` in that frame)."""
 
+    if grid is None:
+        grid = reference.grid
     if getattr(reference, "hubbard", None) is None:
         from .Symmetry.axis_reflection import sector_orbits_exact
 
-        return sector_orbits_exact(reduction, atoms, reference.grid)
+        return sector_orbits_exact(reduction, atoms, grid)
     if setting != "auto":
         return False
     from .Hamiltonian.hubbard_device import ldau_orbits_exact
 
-    return ldau_orbits_exact(reduction, atoms, reference.grid)
+    return ldau_orbits_exact(reduction, atoms, grid)
 
 
 #: The report of an LDA+U run whose atoms keep the group of its sectors only within a loose atom tolerance.
@@ -1284,7 +1429,7 @@ def _readable_spin_xc_label(xc_functional: str) -> str:
     return _readable_xc_label(xc_functional, spin_polarized=True)
 
 
-def _spin_sector_refusal(problem) -> str | None:
+def _spin_sector_refusal(problem, *, mpi_context=None) -> str | None:
     """Why a spin-polarized ``problem`` keeps both channels on the full grid, or ``None``.
 
     ``Spin_Symmetry_Sectors`` (``SCFSettings.spin_symmetry_sector_mode``):
@@ -1295,7 +1440,12 @@ def _spin_sector_refusal(problem) -> str | None:
     ``auto`` and of every input under ``off`` (the default)
     (``SCF/gamma_features.py``; where it takes them, each channel writes its own
     potential matrices into the shared sector operators before its solve), the
-    triangular Ritz hand-over and a filter spread over several devices.
+    triangular Ritz hand-over and, in one process, a filter spread over several devices
+    (``PARSEC_CUPY_DISTRIBUTED_FILTER=1``).  On the ranks of the MPI runner (``mpi_context``) that filter keeps the
+    sectors since 2026-11-22: it spreads the filter of a sector over the GPUs of its group and reads the potential of
+    the sector operator at every application, which each channel writes before its solve; the runner had no full
+    grid to fall back to and refused every spin-polarized run under that value (the launch settings of
+    ``scripts/run_multi_gpu_scf.sh``).
     ``Symmetrize_Charge_Density`` averages each
     channel on the orbits of the sectors under
     ``PARSEC_SYMMETRIZED_DENSITY_SECTORS=auto`` (since 2026-11-19,
@@ -1329,7 +1479,7 @@ def _spin_sector_refusal(problem) -> str | None:
             "PARSEC_CUPY_RITZ_HANDOVER=triangular",
         ),
         (
-            os.environ.get("PARSEC_CUPY_DISTRIBUTED_FILTER", "").strip().lower() == "1",
+            mpi_context is None and os.environ.get("PARSEC_CUPY_DISTRIBUTED_FILTER", "").strip().lower() == "1",
             "PARSEC_CUPY_DISTRIBUTED_FILTER=1",
         ),
     ):
@@ -3599,6 +3749,76 @@ def hartree_boundary_check_seconds(result) -> float:
     return float(details.get("hartree_boundary_check_seconds", 0.0))
 
 
+def _variational_hartree(reference, solver, *, sector_worker: bool, is_periodic: bool, charges, atoms):
+    """``(VariationalHartree or None, reason)`` of ``PARSEC_HARTREE_VARIATIONAL`` for the Hartree solver of a route.
+
+    ``solver`` solves ``A u = rho`` with the CG of the route (``None`` where
+    the route has none: a periodic cell, a rank without a Hartree solver);
+    ``charges()`` returns the point charges of the atomic tail of the present
+    structure, ``atoms()`` its atoms.  The switch was validated by the preparation of ``reference``.
+    """
+
+    from parsec_python.Hartree.variational import (
+        VariationalHartree,
+        ZeroBoundaryDeviceSolver,
+        hartree_variational_setting,
+        variational_hartree_applies,
+    )
+
+    setting = hartree_variational_setting()
+    problem = reference.input
+    if sector_worker:
+        return None, "not used (no Hartree solver on this rank)"
+    if is_periodic:
+        return None, "not used (periodic cell)"
+    if setting == "off":
+        return None, "off (PARSEC_HARTREE_VARIATIONAL=off: the potential of the Poisson solve)"
+    if not variational_hartree_applies(
+        getattr(problem, "hartree", None),
+        getattr(problem, "grid", None),
+        forces_wanted=bool(getattr(problem, "forces_wanted", False)),
+        setting=setting,
+    ):
+        if (
+            getattr(getattr(problem, "grid", None), "domain_shape", None) != "sphere"
+            or getattr(getattr(problem, "hartree", None), "boundary_method", None) == "direct"
+        ):
+            return None, "not used (boundary values summed directly)"
+        if not getattr(problem, "forces_wanted", False):
+            return None, "off (auto: no forces are computed)"
+        return None, "off (auto: PARSEC's Hartree boundary, Hartree_Boundary_Tolerance: off, keeps PARSEC's potential)"
+    if solver is None:
+        return None, "not used (no CG of this route for A u = rho)"
+    # The solid-harmonic sums run on the device of a GPU CG, on the host beside a host CG.
+    device = getattr(getattr(solver, "backend", None), "device_id", None)
+    if isinstance(solver, ZeroBoundaryDeviceSolver):
+        device = int(solver.operator.data.device.id)
+    where = "host" if device is None else f"device {device}"
+    estimator = None
+    if setting == "auto":
+        # The first solve estimates the force change of V' (Hartree.variational.VariationalHartree._decide).
+        from functools import partial
+
+        from parsec_python.Hartree.variational import self_consistency_estimator
+
+        sums = None
+        if device is not None:
+            from .Forces.local_device import cupy_local_forces
+
+            sums = partial(cupy_local_forces, device_id=device)
+        estimator = self_consistency_estimator(
+            reference.grid, reference.pseudopotentials, problem.pseudopotentials, sums
+        )
+    return (
+        VariationalHartree(
+            reference.grid, problem.hartree, solver, charges=charges, atoms=atoms, device=device, estimator=estimator
+        ),
+        f"{setting}: the derivative of the Hartree energy"
+        + (" where the first solve of a structure estimates a force change from the threshold" if estimator is not None else "")
+        + f" (one more CG per solve; solid-harmonic sums and sums of the tail on the {where})",
+    )
+
+
 def _hartree_boundary_details(
     reference, tail, builder=None
 ) -> tuple[tuple[str, str], ...]:
@@ -4565,10 +4785,13 @@ def _prepare_single_point(
         getattr(getattr(problem, "scf", None), "spin_polarized", False)
     )
     # PARSEC_SPIN_FLIP_SYMMETRY: read (and refused if unknown) before anything is built.
-    from .SCF.spin_flip import spin_flip_setting
+    from .SCF.spin_flip import spin_flip_setting, spin_flip_stability_setting
 
     spin_flip_mode = spin_flip_setting()
-    spin_sector_refusal = _spin_sector_refusal(problem) if spin_polarized else None
+    # (and PARSEC_SPIN_FLIP_STABILITY, the test of the states of that route, read so that a value it does not know is
+    # refused)
+    spin_flip_stability = spin_flip_stability_setting()
+    spin_sector_refusal = _spin_sector_refusal(problem, mpi_context=mpi_context) if spin_polarized else None
     if spin_polarized and mpi_context is not None and spin_sector_refusal is not None:
         # The ranks divide the symmetry sectors; two channels on the full grid
         # run in one process.
@@ -4592,6 +4815,15 @@ def _prepare_single_point(
 
     # (read in every run, so that a value it does not know is refused)
     point_charge_group = point_charge_symmetry_setting() == "auto" and not is_periodic
+    if is_periodic:
+        # PARSEC_CONFINED_SETUP, PARSEC_SPLINE_SETUP and PARSEC_PERIODIC_OBLIQUE_SPLIT: refused here if unknown, before
+        # the reference preparation reads them
+        from .V_ion.confined_setup import confined_setup_setting
+        from .V_ion.spline_setup import spline_setup_setting
+
+        confined_setup_setting()
+        spline_setup_setting()
+        periodic_oblique_split()
     if point_charges and not point_charge_group:
         # The potential of the point charges is in the ionic potential of the
         # reference preparation (ionpot.f90), which has no point group of the
@@ -4735,13 +4967,25 @@ def _prepare_single_point(
 
     # (PARSEC_LDAU_WEIGHTED_SECTORS too, which _orbital_group_refusal reads for an LDA+U run only)
     ldau_weighted_sectors_setting()
+    from .Symmetry.axis_reflection import slab_wire_sectors_setting
+    from .Symmetry.oblique_frame import oblique_sectors_setting
+
+    # (PARSEC_SLAB_WIRE_SECTORS and PARSEC_OBLIQUE_SECTORS, the sectors of a wire, slab or oblique cell: read in every
+    # run, so that a value they do not know is refused before the SCF)
+    slab_wire_sectors_setting()
+    oblique_sectors_setting()
     # A periodic cell in an MPI sector context: one sector of the identity
     # whose basis the ranks share (a bulk cell at Gamma; see
     # periodic_sector_refusal for what that route does not take).
+    # An unpolarized Gamma-point hybrid on the ranks of the MPI runner: its sectors or the one sector of the identity
+    # (_mpi_periodic_hybrid, since 2026-11-22; None: not such a run).
+    mpi_hybrid = _mpi_periodic_hybrid(problem, mpi_context) if is_periodic else None
     periodic_refusal = (
         periodic_sector_refusal(
             problem,
-            hybrid_sectors=_gamma_hybrid_in_sectors(problem, mpi_context, sector_forces=sector_forces),
+            hybrid_sectors=(
+                _gamma_hybrid_in_sectors(problem, mpi_context, sector_forces=sector_forces) or mpi_hybrid is not None
+            ),
             features=mpi_context is None,
         )
         if is_periodic
@@ -4789,6 +5033,10 @@ def _prepare_single_point(
         else (None, periodic_floor, _PERIODIC_FLOOR_SWITCH)
     )
     if below_floor is not None:
+        periodic_symmetry = False
+    if mpi_hybrid is False:
+        # (a hybrid of the ranks below the floor of its sectors, or under PARSEC_GAMMA_HYBRID_SECTORS=off: the one
+        # sector of the identity, the full grid that one process takes there)
         periodic_symmetry = False
     if is_periodic and symmetry_mode == "on" and not periodic_symmetry:
         raise ValueError(
@@ -4942,8 +5190,12 @@ def _prepare_single_point(
     # (the NOTE of a spin or occup.in run that keeps the abelian group by PARSEC_ORBITAL_GROUP_MPI=off or the floor of
     # PARSEC_ORBITAL_GROUP_SPIN_FLOOR: _kept_abelian_note)
     orbital_group_note = None
+    # (the NOTE of an LDA+U run whose units of PARSEC_ORBITAL_IRREPS keep the rows of their sectors)
+    irrep_rows_note = None
     # the commuting signed permutations about the origin (the last group of the palette ladder below)
     origin_group = None
+    # the frame of the grid indices of the detection of an oblique cell (PARSEC_OBLIQUE_SECTORS, Symmetry/oblique_frame.py)
+    symmetry_frame = None
     symmetry_maps = preparation.symmetry_maps
     maps_beside = False
     # The atoms of the detection: the fixed atoms of a relaxation with Move_Flag as a species of their own
@@ -4989,6 +5241,11 @@ def _prepare_single_point(
                     f"{cell_floor} entries ({cell_floor_switch})"
                 )
                 if below_floor is not None
+                else (
+                    "a hybrid of the MPI ranks whose grid points x states are below the 2^24 of its sectors, or "
+                    "PARSEC_GAMMA_HYBRID_SECTORS=off"
+                )
+                if mpi_hybrid is False and periodic_refusal is None
                 else f"the route of the sectors does not take {periodic_refusal}"
             )
             + "; the full grid is used)"
@@ -5002,16 +5259,27 @@ def _prepare_single_point(
             reference.grid, detection_atoms
         )
         try:
+            # A cell whose grid axes are not the Cartesian axes (PARSEC_OBLIQUE_SECTORS=auto): its detection in the
+            # frame of the grid indices (Symmetry/oblique_frame.py: the atoms at S^-1 r, a grid of the same rows with
+            # the box of its counts as cell, the admissible operations); every other grid as it is.
+            symmetry_frame = (
+                _symmetry_index_frame(reference.grid, problem, mpi_context) if is_periodic else None
+            )
+            detection_grid = reference.grid if symmetry_frame is None else symmetry_frame.frame_grid
+            frame_atoms = detection_atoms if symmetry_frame is None else symmetry_frame.atoms(detection_atoms)
+            frame_tolerance = atom_tolerance if symmetry_frame is None else symmetry_frame.tolerance(atom_tolerance)
             if maps_beside:
                 candidate, symmetry_geometry_cache_info = symmetry_maps.reduction()
             else:
                 candidate, symmetry_geometry_cache_info = stages.timed(
                     "symmetry_reduction", load_or_detect_reflection_reduction
                 )(
-                    reference.grid,
-                    detection_atoms,
-                    cache_directory=symmetry_cache_directory,
-                    atom_tolerance=atom_tolerance,
+                    detection_grid,
+                    frame_atoms,
+                    # (no symmetry cache in the frame of an oblique cell: its key holds the indices, not the lattice
+                    # whose operations are admissible)
+                    cache_directory=symmetry_cache_directory if symmetry_frame is None else None,
+                    atom_tolerance=frame_tolerance,
                 )
         except (ValueError, RuntimeError) as error:
             if symmetry_mode == "on":
@@ -5055,10 +5323,10 @@ def _prepare_single_point(
                     from .Symmetry import detect_point_group_reduction
 
                     candidate = stages.timed("orbital_group", detect_point_group_reduction)(
-                        reference.grid,
-                        detection_atoms,
+                        detection_grid,
+                        frame_atoms,
                         candidate,
-                        atom_tolerance=atom_tolerance,
+                        atom_tolerance=frame_tolerance,
                         # the fixed cost of a sector of a cell in one process (PARSEC_SECTOR_OVERHEAD)
                         sector_cost=_periodic_sector_cost(problem, reference, mpi_context) if is_periodic else 0.0,
                     )
@@ -5078,7 +5346,7 @@ def _prepare_single_point(
                 from .Symmetry.axis_reflection import periodic_abelian_reduction
 
                 abelian_group = stages.timed("orbital_group", periodic_abelian_reduction)(
-                    reference.grid, detection_atoms, candidate, atom_tolerance=atom_tolerance
+                    detection_grid, frame_atoms, candidate, atom_tolerance=frame_tolerance
                 )
                 if abelian_group is candidate or _ranks_divide_sectors(abelian_group, mpi_context):
                     candidate = abelian_group
@@ -5092,13 +5360,13 @@ def _prepare_single_point(
                 )
             if candidate.group_order > 1:
                 dropped_note = None
-                if _sectors_keep_orbits(reference, ldau_orbits, candidate, detection_atoms):
+                if _sectors_keep_orbits(reference, ldau_orbits, candidate, frame_atoms, grid=detection_grid):
                     # Abelian sectors take the projectors of one atom per orbit, as those of a point group do
                     # (PARSEC_SECTOR_PROJECTOR_ORBITS; the device LDA+U columns follow the KB columns of their
                     # atom, and their coefficients those of the representatives, PARSEC_LDAU_PROJECTOR_ORBITS).
                     from .Symmetry.axis_reflection import attach_abelian_atom_orbits
 
-                    attach_abelian_atom_orbits(candidate, detection_atoms, reference.grid)
+                    attach_abelian_atom_orbits(candidate, frame_atoms, detection_grid)
                     if len(detection_atoms) > len(real_atoms):
                         # the pseudo-atoms of the detection (point charges, a field axis, the constraints of
                         # PARSEC_MOVING_SECTORS) after the atoms have orbits of their own labels: the orbits of the
@@ -5131,16 +5399,26 @@ def _prepare_single_point(
                         "symmetry='on' requested, but only the identity "
                         "operation preserves the labeled atoms and active grid"
                     )
-            from .Symmetry.axis_reflection import lost_operations_note
+            from .Symmetry.axis_reflection import LOOSE_ATOM_TOLERANCE, lost_operations_note
 
             # Operations the atoms keep only to more than the atom tolerance (PARSEC_SYMMETRY_ATOM_TOLERANCE):
             # said in the report, since the positions are not symmetrized.
             try:
                 lost_note = lost_operations_note(
-                    reference.grid,
-                    detection_atoms,
+                    detection_grid,
+                    frame_atoms,
                     candidate,
-                    atom_tolerance=atom_tolerance,
+                    atom_tolerance=frame_tolerance,
+                    **(
+                        {}
+                        if symmetry_frame is None
+                        else {
+                            # (the frame's units in the search, bohr in the line)
+                            "loose_tolerance": symmetry_frame.tolerance(LOOSE_ATOM_TOLERANCE),
+                            "frame": symmetry_frame,
+                            "reported_tolerances": (atom_tolerance, LOOSE_ATOM_TOLERANCE),
+                        }
+                    ),
                 )
             except (ValueError, RuntimeError, AttributeError):
                 lost_note = None
@@ -5160,7 +5438,14 @@ def _prepare_single_point(
                 # (PARSEC_PERIODIC_DEFECT_CENTRE): named with the site, since it is not the origin of the cell.
                 try:
                     defect_note = defect_centre_note(
-                        reference.grid, getattr(reference, "atoms", ()), atom_tolerance=atom_tolerance
+                        detection_grid,
+                        (
+                            getattr(reference, "atoms", ())
+                            if symmetry_frame is None
+                            else symmetry_frame.atoms(getattr(reference, "atoms", ()))
+                        ),
+                        atom_tolerance=frame_tolerance,
+                        frame=symmetry_frame,
                     )
                 except (ValueError, RuntimeError, AttributeError):
                     defect_note = None
@@ -5203,7 +5488,8 @@ def _prepare_single_point(
             built = symmetry_maps.decomposition(orbital) if maps_beside else None
             if built is None:
                 built = stages.timed("symmetry_decomposition", load_or_build_reflection_decomposition)(
-                    reference.grid,
+                    # (the row maps of an oblique cell's index operations: the grid of its frame, the same rows)
+                    reference.grid if symmetry_frame is None else symmetry_frame.frame_grid,
                     orbital,
                     reduction_key=getattr(symmetry_geometry_cache_info, "key", None),
                     cache_directory=symmetry_cache_directory,
@@ -5230,7 +5516,7 @@ def _prepare_single_point(
 
                 try:
                     abelian = stages.timed("orbital_group", periodic_abelian_reduction)(
-                        reference.grid, detection_atoms, origin_group, atom_tolerance=atom_tolerance
+                        detection_grid, frame_atoms, origin_group, atom_tolerance=frame_tolerance
                     )
                 except (ValueError, RuntimeError):
                     abelian = None
@@ -5259,10 +5545,10 @@ def _prepare_single_point(
                         break
                     refusals.append(refusal)
             if chosen is not None:
-                if _sectors_keep_orbits(reference, ldau_orbits, chosen, detection_atoms):
+                if _sectors_keep_orbits(reference, ldau_orbits, chosen, frame_atoms, grid=detection_grid):
                     from .Symmetry.axis_reflection import attach_abelian_atom_orbits
 
-                    attach_abelian_atom_orbits(chosen, detection_atoms, reference.grid)
+                    attach_abelian_atom_orbits(chosen, frame_atoms, detection_grid)
                 else:
                     chosen = _without_atom_orbits(chosen)
                 palette_note = (
@@ -5296,6 +5582,15 @@ def _prepare_single_point(
         symmetry_detection = _minimum_sector_order_text(symmetry_reduction, minimum_sector_order, symmetry_detection)
         symmetry_reduction = None
         palette_note = None
+    if symmetry_frame is not None and symmetry_reduction is not None:
+        # The operations of this reduction are the signed permutations W of the grid indices of an oblique cell
+        # (Symmetry/oblique_frame.py; the Cartesian ones are S W S^-1): kept on it for the readers that turn vectors
+        # (the forces refuse such sectors, Forces/compute.py).
+        object.__setattr__(symmetry_reduction, "index_frame", symmetry_frame)
+        symmetry_detection += (
+            f"; detected in the frame of the grid indices (PARSEC_OBLIQUE_SECTORS=auto: {symmetry_frame.order} "
+            "signed permutations of the grid axes are isometries of the cell that keep its finite-difference operators)"
+        )
     # Without a point group the orbitals may still take the route of the
     # sectors, as one sector of the identity, so that the devices of the
     # process share its basis (PARSEC_CUPY_SINGLE_SECTOR).
@@ -5450,7 +5745,8 @@ def _prepare_single_point(
                 built = stages.timed(
                     "symmetry_decomposition", load_or_build_reflection_decomposition
                 )(
-                    reference.grid,
+                    # (the row maps of an oblique cell's index operations: the grid of its frame, the same rows)
+                    reference.grid if symmetry_frame is None or single_sector else symmetry_frame.frame_grid,
                     orbital_reduction,
                     reduction_key=getattr(symmetry_geometry_cache_info, "key", None),
                     cache_directory=None if single_sector else symmetry_cache_directory,
@@ -5467,6 +5763,25 @@ def _prepare_single_point(
                 f"{type(error).__name__}: {error})"
             )
         else:
+            if getattr(orbital_decomposition, "partner_units", ()) and any(
+                getattr(item, "has_hubbard", False) for item in getattr(problem, "pseudopotentials", {}).values()
+            ):
+                # LDA+U forms its occupation matrices from the sector orbitals on the rows of their sectors
+                # (hubbard_device): the units of PARSEC_ORBITAL_IRREPS keep those rows under the partner default of
+                # PARSEC_ORBITAL_IRREP_ROWS.  Decided here, from the input, before the placement reads the solved sizes,
+                # alike on every MPI rank.
+                partner_units = tuple(orbital_decomposition.partner_units)
+                orbital_decomposition.keep_sector_rows("LDA+U")
+                clause = _partner_rows_note(orbital_decomposition.reduction)
+                if clause and isinstance(symmetry_detection, str):
+                    symmetry_detection = symmetry_detection.replace(
+                        clause, ", on the rows of their sectors for LDA+U (PARSEC_ORBITAL_IRREP_ROWS)"
+                    )
+                irrep_rows_note = (
+                    f"LDA+U keeps the units {', '.join(str(index + 1) for index in partner_units)} of "
+                    "PARSEC_ORBITAL_IRREPS on the rows of their sectors (PARSEC_ORBITAL_IRREP_ROWS=partner is not "
+                    "taken with LDA+U)"
+                )
             sector_sizes = orbital_decomposition.sector_sizes
             # The first counts of weighted sectors from their shares of the valence orbitals of the atoms
             # (PARSEC_WEIGHTED_FIRST_SHARE: auto, the default since 2026-11-21, takes them in one process from a
@@ -5478,9 +5793,22 @@ def _prepare_single_point(
             share_plan = share_filter_plan = _filter_plan(reference)
             # (a grid without a size, a stand-in of the tests, counts as not known: the even share)
             grid_points = getattr(reference.grid, "size", None)
+            # (an oblique cell: its atoms and grid in the frame of its indices, whose signed permutations W have the
+            # characters of their Cartesian R = S W S^-1, a matrix of the same trace and determinant)
             valence_counts = attach_valence_orbital_counts(
-                orbital_decomposition, tuple(getattr(reference, "atoms", ()) or ()),
-                getattr(reference, "pseudopotentials", None), reference.grid, tolerance=symmetry_atom_tolerance(),
+                orbital_decomposition,
+                (
+                    tuple(getattr(reference, "atoms", ()) or ())
+                    if symmetry_frame is None
+                    else symmetry_frame.atoms(tuple(getattr(reference, "atoms", ()) or ()))
+                ),
+                getattr(reference, "pseudopotentials", None),
+                reference.grid if symmetry_frame is None else symmetry_frame.frame_grid,
+                tolerance=(
+                    symmetry_atom_tolerance()
+                    if symmetry_frame is None
+                    else symmetry_frame.tolerance(symmetry_atom_tolerance())
+                ),
                 mpi=mpi_context is not None,
                 entries=(
                     None
@@ -5615,6 +5943,9 @@ def _prepare_single_point(
     if orbital_group_note is not None and symmetry_reduction is not None:
         # a spin or occup.in run that keeps the abelian group (_kept_abelian_note), at every output level
         full_grid_notes.append(orbital_group_note)
+    if irrep_rows_note is not None and orbital_decomposition is not None:
+        # LDA+U with units of PARSEC_ORBITAL_IRREPS on the rows of their sectors, at every output level
+        full_grid_notes.append(irrep_rows_note)
     # A spin run in the sectors: where the full grid of both channels would go if its guard fired, and a NOTE where it
     # would not fit one device (PARSEC_SPIN_FALLBACK_SHARED; the shared full grid of a fallback is that full grid).
     spin_fallback = None
@@ -5875,6 +6206,8 @@ def _prepare_single_point(
     native_symmetry_boundary = False
     hartree_boundary_tail = None
     resident_hartree = None
+    # The solver of A u = rho of PARSEC_HARTREE_VARIATIONAL, set by the route of the Hartree solve.
+    zero_boundary_solver = None
     # The GPU direct boundary of an ellipsoid or a cylinder, where one is built.
     direct_boundary = None
     native_xc_evaluator = None
@@ -5884,8 +6217,8 @@ def _prepare_single_point(
         from .Eigensolvers import CuPySymmetrySCFEigensolver
         from .Eigensolvers.symmetry import irrep_units_refusal
 
-        # The units of irreducible representations (PARSEC_ORBITAL_IRREPS) need a CHEBFF first solve: refused here,
-        # before the SCF, for the first solver the input names.
+        # The units of irreducible representations (PARSEC_ORBITAL_IRREPS) need a CHEBFF or CHEBDAV first solve:
+        # another one is refused here, before the SCF, for the first solver the input names.
         input_eigensolver = getattr(getattr(reference, "input", None), "eigensolver", None)
         if input_eigensolver is not None:
             from types import SimpleNamespace
@@ -5895,9 +6228,19 @@ def _prepare_single_point(
             if refusal is not None:
                 raise ValueError(refusal)
         stage_started = perf_counter()
+        # An oblique cell (PARSEC_OBLIQUE_SECTORS=auto): the Laplacian of its grid with the weights of the second
+        # differences that its admissible operations exchange averaged, where a cell typed to finite precision leaves
+        # them unequal by about 1e-11 (Symmetry/oblique_frame.sector_negative_laplacian); its own otherwise.
+        sector_kinetic = None
+        if symmetry_frame is not None:
+            from .Symmetry.oblique_frame import sector_negative_laplacian
+
+            sector_kinetic = stages.timed("sector_kinetic", sector_negative_laplacian)(
+                reference.grid, symmetry_frame.operations
+            )
         symmetry_eigensolver = CuPySymmetrySCFEigensolver(
             implementation.eigensolver_operator,
-            reference.negative_laplacian,
+            reference.negative_laplacian if sector_kinetic is None else sector_kinetic,
             reference.nonlocal_operator if orbital_nonlocal is None else orbital_nonlocal,
             orbital_decomposition,
             timing_stats=implementation.timing_stats,
@@ -5910,8 +6253,8 @@ def _prepare_single_point(
             # The key of a deferred Laplacian if a cache directory made it
             # hash one.  Without it the reduced-operator cache asks the
             # descriptor itself, and only when it looks a key up.
-            kinetic_cache_key=getattr(
-                reference.negative_laplacian, "hashed_cache_key", None
+            kinetic_cache_key=(
+                getattr(reference.negative_laplacian, "hashed_cache_key", None) if sector_kinetic is None else None
             ),
             decomposition_cache_key=(
                 None
@@ -5941,7 +6284,14 @@ def _prepare_single_point(
         from .Eigensolvers.symmetry import fixed_state_count_requested
 
         symmetry_eigensolver.fixed_state_count = fixed_state_count_requested(reference)
+        # Fermi occupations (not occup.in): the level that the window ends in may share the states left of it
+        # (PARSEC_WEIGHTED_STATE_COUNT, CuPySymmetrySCFEigensolver._weighted_selection)
+        symmetry_eigensolver.fermi_occupations = (
+            getattr(getattr(getattr(reference, "input", None), "scf", None), "fixed_occupations", None) is None
+        )
         _fixed_eigensolver = getattr(getattr(reference, "input", None), "eigensolver", None)
+        # (whose states within the eigensolver tolerance of the last count as one level: weighted_level_width)
+        symmetry_eigensolver.level_tolerance = getattr(_fixed_eigensolver, "tolerance", None)
         symmetry_eigensolver.fixed_state_buffer = fixed_states_sector_buffer(_fixed_eigensolver)
         _fixed_note = fixed_states_note(_fixed_eigensolver)
         if _fixed_note is not None and not sector_worker:
@@ -6202,6 +6552,9 @@ def _prepare_single_point(
             raise RuntimeError("CuPy Hartree requires the CuPy execution backend")
         poisson_solver = CuPyPoissonSolver(implementation.device_operator)
         implementation.poisson_solver = poisson_solver
+        from parsec_python.Hartree.variational import ZeroBoundaryDeviceSolver
+
+        zero_boundary_solver = ZeroBoundaryDeviceSolver(poisson_solver.negative_laplacian, reference.grid)
         hartree_boundary_tail = _hartree_boundary_tail(
             reference, on_device=not tail_on_host, device_id=None
         )
@@ -6362,6 +6715,18 @@ def _prepare_single_point(
                 "native", hartree_reduction
             )
         stages.add("poisson_solver", hartree_started)
+        from parsec_python.Hartree.variational import ZeroBoundaryBackendSolver
+
+        # The CG of this route (host or GPU, full grid or wedge) solves A u = rho
+        # of PARSEC_HARTREE_VARIATIONAL; the resident chain shares it.  The
+        # wedge solver (SymmetryReducedPoissonSolver) comes with its reduction
+        # from build_poisson_solver and wraps the CG of the reduced operator; a
+        # full-grid solver comes with none.
+        zero_boundary_solver = (
+            ZeroBoundaryBackendSolver(poisson_solver.solver.backend, reference.grid, hartree_reduction)
+            if hartree_reduction is not None
+            else ZeroBoundaryBackendSolver(poisson_solver.backend, reference.grid)
+        )
         if boundary_setup_eligible:
             if boundary_setup_future is not None:
                 wait_started = perf_counter()
@@ -6760,6 +7125,9 @@ def _prepare_single_point(
         hartree_boundary_tail = _hartree_boundary_tail(
             reference, on_device=False, device_id=None
         )
+        from parsec_python.Hartree.variational import ZeroBoundaryHostSolver
+
+        zero_boundary_solver = ZeroBoundaryHostSolver(reference.negative_laplacian, reference.grid)
 
         def accelerated_hartree(density, initial_potential=None, **kwargs):
             started = perf_counter()
@@ -6782,6 +7150,19 @@ def _prepare_single_point(
         raise RuntimeError(
             f"unhandled Hartree backend {selection.hartree_backend!r}"
         )
+    # PARSEC_HARTREE_VARIATIONAL: the derivative of the Hartree energy as the
+    # potential of every solve (Hartree/variational.py), on the rank that solves.
+    hartree_variational, hartree_variational_reason = _variational_hartree(
+        reference,
+        zero_boundary_solver,
+        sector_worker=sector_worker,
+        is_periodic=is_periodic,
+        # the closures read the reference of the present structure (move_atoms rebinds it)
+        charges=lambda: tail_charges(reference),
+        atoms=lambda: reference.atoms,
+    )
+    if hartree_variational is not None:
+        accelerated_hartree = VariationalHartreeSolve(accelerated_hartree, hartree_variational)
     stages.add("hartree_solver", hartree_started)
 
     boundary_on_gpu = type(native_boundary_builder).__name__ in _GPU_BOUNDARY_BUILDERS
@@ -6974,6 +7355,7 @@ def _prepare_single_point(
         *_hartree_boundary_details(
             reference, hartree_boundary_tail, native_boundary_builder
         ),
+        ("hartree_variational", hartree_variational_reason),
         (
             # The kernels that build the boundary values of every solve.
             "hartree_boundary_kernel",
@@ -8012,6 +8394,8 @@ def _prepare_single_point(
             reducer=scf_reducer if spin_sectors else None,
             decomposition=orbital_decomposition if spin_sectors else None,
         )
+        if spin_flip is not None:
+            spin_flip = replace(spin_flip, stability=spin_flip_stability)
         stages.add("spin_flip_detection", stage_started)
         implementation.info = replace(
             implementation.info,
@@ -8028,7 +8412,14 @@ def _prepare_single_point(
                             if label != partner
                         )
                         + "); the state keeps this magnetic symmetry unless a loop leaves the route (a fractional "
-                        "occupation of the up channel or a failed test of the spin sectors: a NOTE, then both channels)"
+                        "occupation of the up channel"
+                        + (
+                            ", a state unstable against perturbations that break the operation "
+                            "(PARSEC_SPIN_FLIP_STABILITY=auto),"
+                            if spin_flip_stability == "auto"
+                            else ""
+                        )
+                        + " or a failed test of the spin sectors: a NOTE, then both channels)"
                     )
                     if spin_flip is not None
                     else f"auto: both channels solved ({spin_flip_reason})",
@@ -8089,6 +8480,7 @@ def _prepare_single_point(
             implementation, "eigenproblem_solver", None
         ),
         hartree_solver=accelerated_hartree,
+        hartree_variational=hartree_variational,
         boundary_tail_maximum=tail_maximum(),
         # A periodic cell moves its atoms on the Gamma-point path of
         # Forces/periodic_device.py (Ewald terms, projectors with images) with
@@ -8550,7 +8942,9 @@ class _SpinSectorFallback:
     (:meth:`replace_with_abelian`; on every rank of ``mpi_context``, which the root tells to prepare them with it),
     whose own guard may still send a spin run to the full grid.  A spin guard whose report the abelian sectors
     would repeat on the same levels (``FractionalOccupations.abelian``: a multiplet with partners in two or more of
-    their sectors; a cluster, or a cell whose operations take no translation) goes straight to the full grid under
+    their sectors; a cluster, a cell whose operations take no translation, and since 2026-11-22 a cell whose abelian
+    sectors take its commuting involutions with their translations, ``PARSEC_WEIGHTED_GUARD_SHORTCUT_TRANSLATIONS``)
+    goes straight to the full grid under
     ``PARSEC_WEIGHTED_GUARD_SHORTCUT=auto``: those sectors would solve the same state again and stop it there
     (``off``: through them, as before).  At the start Hamiltonian (test 1), which both share, that is exact, and the
     result is the abelian route's bit for bit; at the end of the SCF (test 3) it is predicted from the weighted
@@ -8712,6 +9106,8 @@ class _SpinSectorFallback:
             return
         from parsec_python.models import SpinSectorFallbackRecord
 
+        from .SCF.spin_sectors import SECTOR_DOUBLET_REASON
+
         stage, report = noted
         callback(
             SpinSectorFallbackRecord(
@@ -8721,7 +9117,8 @@ class _SpinSectorFallback:
                 multiplets=report.lines,
                 reason=report.reason,
                 measure=report.measure,
-                route="doublet",
+                # (levels of one label of the abelian sectors, SCF.spin_sectors.fractional_sector_doublets)
+                route="sector_doublet" if report.reason == SECTOR_DOUBLET_REASON else "doublet",
                 doublet=True,
             )
         )
@@ -8730,8 +9127,9 @@ class _SpinSectorFallback:
     def abelian_shortcut(report) -> bool:
         """Whether a guard ``report`` of the weighted sectors goes straight to the full grid
         (``PARSEC_WEIGHTED_GUARD_SHORTCUT=auto`` and the abelian sectors would report the same levels:
-        ``FractionalOccupations.abelian``, set by the guard of the weighted sectors of a cluster or of a cell whose
-        operations take no translation)."""
+        ``FractionalOccupations.abelian``, set by the guard of the weighted sectors of a cluster, of a cell whose
+        operations take no translation, or of a cell with translations under
+        ``PARSEC_WEIGHTED_GUARD_SHORTCUT_TRANSLATIONS=auto``)."""
 
         from .Symmetry.weighted_inputs import guard_shortcut_setting
 
@@ -8968,6 +9366,14 @@ class _SpinSectorFallback:
             full_grid.orbital_density_builder = MPISymmetryDensityBuilder(
                 full_grid.orbital_density_builder, context, full_grid.backend.symmetry_eigensolver
             )
+        elif not shared and self.spin and self.mpi_context is None:
+            # PARSEC_SPIN_FALLBACK_DENSITY=abelian: the channel densities keep the abelian group of the atoms
+            # (SCF/fallback_density.py); off (the default) keeps the full grid without symmetry.
+            from .SCF.fallback_density import with_fallback_density
+
+            pinned = with_fallback_density(full_grid)
+            if pinned is not None:
+                note = (note[0], f"{note[1]}, {pinned}")
         full_grid.backend_info = replace(
             full_grid.backend_info,
             details=tuple(item for item in full_grid.backend_info.details if item[0] != note[0]) + (note,),
@@ -9069,6 +9475,13 @@ def run_scf(
     if boundary_check:
         result.backend = replace(
             result.backend, details=result.backend.details + boundary_check
+        )
+    variational = getattr(system, "hartree_variational", None)
+    if variational is not None:
+        # The solves of A u = rho so far (PARSEC_HARTREE_VARIATIONAL), all structures of the run.
+        result.backend = replace(
+            result.backend,
+            details=result.backend.details + (("hartree_variational_solves", variational.report()),),
         )
     solver = getattr(system, "hartree_solver", None)
     fallback = getattr(solver, "fallback", None)

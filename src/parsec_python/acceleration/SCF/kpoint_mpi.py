@@ -180,8 +180,9 @@ class MPIKPointSolver:
             results.append(self.context.allsum_host(partial))  # the extras are sums over the rows
         return results
 
-    def vectors(self, task: int) -> np.ndarray:
-        """Wavefunctions are not gathered: an empty block of the right number of rows."""
+    def vectors(self, task: int, columns: int | None = None) -> np.ndarray:
+        """Wavefunctions are not gathered: an empty block of the right number of rows (``columns`` changes
+        nothing)."""
         return np.empty((self.job_dimension(), 0), dtype=np.complex128)
 
     def job_dimension(self) -> int:

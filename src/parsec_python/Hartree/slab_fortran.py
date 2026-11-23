@@ -157,11 +157,15 @@ def build_slab_boundary_plan(
 
     exterior = np.asarray(exterior_integer_points, dtype=np.int64)
     wrapped = grid.wrap_periodic(exterior)
-    eu = (wrapped[:, 0] + grid.shift[0]) * grid.spacings[0]
-    ev = (wrapped[:, 1] + grid.shift[1]) * grid.spacings[1]
-    boundary_phase = (
+    # the phases depend on the in-plane indices alone: once per distinct (i, j) (the exterior points of a column
+    # share them), the same expressions, gathered
+    columns, column_of = np.unique(wrapped[:, :2], axis=0, return_inverse=True)
+    eu = (columns[:, 0] + grid.shift[0]) * grid.spacings[0]
+    ev = (columns[:, 1] + grid.shift[1]) * grid.spacings[1]
+    column_phase = (
         eu[:, None] * vectors[None, :, 0] * wave[0] + ev[:, None] * vectors[None, :, 1] * wave[1]
     )
+    column_of = np.asarray(column_of, dtype=np.int64).reshape(-1)
     distinct, boundary_plane = np.unique(exterior[:, 2], return_inverse=True)
     source_planes = np.arange(grid.index_min[2], grid.index_max[2] + 1)
     separation = np.abs(distinct[:, None] - source_planes[None, :])
@@ -179,8 +183,8 @@ def build_slab_boundary_plan(
         plane_used=plane_used,
         plane_counts=plane_counts,
         boundary_plane=np.asarray(boundary_plane, dtype=np.int64).reshape(-1),
-        boundary_cos=np.cos(boundary_phase),
-        boundary_sin=np.sin(boundary_phase),
+        boundary_cos=np.cos(column_phase)[column_of],
+        boundary_sin=np.sin(column_phase)[column_of],
         decay=decay,
         distance=distance,
         to_box=grid.to_box,

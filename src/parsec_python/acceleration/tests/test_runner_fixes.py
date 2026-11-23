@@ -286,8 +286,24 @@ class SpinCellRefusalTests(unittest.TestCase):
         self.assertNotIn("PARSEC_CUPY_SINGLE_SECTOR", text)
         # Since 2026-11-21 the forces and moves of such a cell run on the ranks as one sector of the identity.
         self.assertIn("--symmetry off", text)
-        self.assertIn("PARSEC_CUPY_DISTRIBUTED_FILTER=0", text)
+        # Since 2026-11-22 the distributed filter keeps the sectors of both channels on the ranks.
+        self.assertNotIn("PARSEC_CUPY_DISTRIBUTED_FILTER", text)
         self.assertNotIn("takes no spin channels", text)
+
+    def test_the_distributed_filter_keeps_the_spin_sectors_of_the_ranks(self) -> None:
+        from parsec_python.acceleration.driver import _spin_sector_refusal
+
+        problem = SimpleNamespace(
+            scf=SimpleNamespace(spin_symmetry_sector_mode="auto", symmetrize_density=False), pseudopotentials={}
+        )
+        with mock.patch.dict(os.environ, {"PARSEC_CUPY_DISTRIBUTED_FILTER": "1"}):
+            # one process: the full grid, as before
+            self.assertIn("PARSEC_CUPY_DISTRIBUTED_FILTER=1", _spin_sector_refusal(problem))
+            # the ranks of the MPI runner, which have no full grid to fall back to: the sectors
+            self.assertIsNone(_spin_sector_refusal(problem, mpi_context=object()))
+        with mock.patch.dict(os.environ, {"PARSEC_CUPY_DISTRIBUTED_FILTER": "0"}):
+            self.assertIsNone(_spin_sector_refusal(problem))
+            self.assertIsNone(_spin_sector_refusal(problem, mpi_context=object()))
 
 
 class LocalForceSwitchTests(unittest.TestCase):

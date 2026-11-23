@@ -282,6 +282,44 @@ class CellLevelTests(_Problem):
             np.testing.assert_array_equal(archive["representations"], full.representations[dealt])
             np.testing.assert_array_equal(archive["eigenvalues_ry"], cut.eigenvalues[dealt])
 
+    def test_more_levels_per_kpoint_fill_every_kpoint(self) -> None:
+        # PARSEC_KPOINT_SUPERCELL_STATES=n: the supercell solves M (N + n) states and the cell's files keep N levels a
+        # k-point; here N = 5 of the 6 Bloch states of every k-point, and the cut supercell of
+        # test_unequal_counts_keep_the_fewest (5 to 7 levels a k-point) holds the 5 of every k-point
+        result, points = self._result()
+        drop = np.flatnonzero(points == 7)[np.argmax(result.eigenvalues[points == 7])]
+        keep = np.setdiff1d(np.arange(points.size), [drop])
+        gamma = np.flatnonzero(points == 0)[0]
+        cut = SimpleNamespace(
+            eigenvalues=np.append(result.eigenvalues[keep], 100.0),
+            occupations=np.append(result.occupations[keep], 0.0),
+            wavefunctions=np.column_stack([result.wavefunctions[:, keep], result.wavefunctions[:, gamma]]),
+        )
+        with mock.patch.dict(os.environ, {route.STATES_SWITCH: "1"}):
+            levels._CACHE.clear()
+            found = levels.cell_levels(cut, self.problem, (2, 2, 2))
+            self.assertEqual(found.per_k, 5)
+            self.assertEqual(found.states, 5)
+            self.assertIsNone(found.note)
+            for block in range(len(found.weights)):
+                self.assertTrue(np.all(np.diff(found.eigenvalues[5 * block : 5 * (block + 1)]) >= 0.0))
+            # the dealt levels (off): the cell's states of each k-point
+            with mock.patch.dict(os.environ, {levels.LEVELS_SWITCH: "off"}):
+                levels._CACHE.clear()
+                dealt = levels.cell_levels(cut, self.problem, (2, 2, 2))
+            self.assertEqual((dealt.per_k, dealt.states, dealt.eigenvalues.size), (5, 5, 40))
+            # the supercell solves M (N + n) states
+            supercell = route._supercell_problem(self.problem, (2, 2, 2), states=5)
+            self.assertEqual(supercell.scf.number_of_states, 8 * 6)
+        levels._CACHE.clear()
+        self.assertEqual(route._supercell_problem(self.problem, (2, 2, 2), states=5).scf.number_of_states, 40)
+        for value in ("-1", "some"):
+            with mock.patch.dict(os.environ, {route.STATES_SWITCH: value}):
+                with self.assertRaisesRegex(ValueError, route.STATES_SWITCH):
+                    route.validate_settings()
+        with mock.patch.dict(os.environ, {route.STATES_SWITCH: "cell"}):
+            self.assertEqual(route.kpoint_supercell_extra_states(), 0)
+
 
 class SectorCharacterTests(unittest.TestCase):
     def test_characters_of_a_group_with_the_translation(self) -> None:

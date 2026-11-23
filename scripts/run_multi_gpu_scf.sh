@@ -15,16 +15,22 @@
 # point group (about its origin or a symmetric site off it, with half-cell
 # translations) runs in the sectors of that group, on either layout; its forces (Skip_Force: false) and its relaxations (bfgs, simple,
 # every atom movable) on the default routines run there too, every rank
-# moving the projectors of its sectors. Molecular dynamics, manual movements
-# and fixed atoms (Move_Flag) of a cell, and every forces or moving run under
-# PARSEC_PERIODIC_SECTOR_FORCES=off, take one sector of the identity, as
+# moving the projectors of its sectors. Molecular dynamics and manual
+# movements of a cell keep the sectors of the group their structures keep
+# (PARSEC_MOVING_SECTORS, as main.py), and every forces or moving run under
+# PARSEC_PERIODIC_SECTOR_FORCES=off takes one sector of the identity, as
 # main.py takes the full grid: one rank on one node, --rank-per-gpu, or (with
 # Eigensolver: chebff) one rank per node, each spreading its share of the basis
 # over the GPUs of its node (PARSEC_MPI_NESTED_SHARING=auto, the default).
-# K-points go to parsec_python/main.py --mpi; spin, hybrids, meta-GGAs,
-# oblique cells, wires, slabs and the forces of Use_Fortran_Routines of a cell
-# to main.py (the runner refuses them by name). See "Periodic cells at the
-# Gamma point on several nodes" in MULTI_GPU.md.
+# A spin-polarized cell runs in the abelian sectors of its group, and the SCF
+# of an unpolarized hybrid (PBE0, HSE06, ...) in its abelian sectors or, for a
+# small cell, as one sector of the identity, the pair densities of its exchange
+# on every GPU of every rank.
+# K-points go to parsec_python/main.py --mpi; meta-GGAs, oblique cells, wires,
+# slabs, the forces and moves of a periodic hybrid and the forces of a
+# spin-polarized cell on Use_Fortran_Routines to main.py (the runner refuses
+# them by name). See "Periodic cells at the Gamma point on several nodes" in
+# MULTI_GPU.md.
 #
 # An input with Minimization (bfgs, simple) runs the structural relaxation on
 # the same layout, and Skip_Force: false adds the forces to a single point;

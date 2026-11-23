@@ -101,8 +101,11 @@ def load_pseudopotentials(
     (:func:`parsec_python.V_xc.libxc.libxc_pseudopotential_functional`); a
     file of another label is used with a warning.
     """
+    from ..Pseudopotential.potre import projector_tail_setting
     from ..V_xc.libxc import is_libxc_functional
 
+    # an unknown value is refused here, before any projector is built
+    projector_tail_setting()
     libxc = is_libxc_functional(xc_functional)
     result: dict[str, ParsecPseudopotential] = {}
     hybrid_labels = hybrid_pseudopotential_labels(xc_functional.strip().lower())
@@ -603,6 +606,41 @@ def _coulomb_to_round_off(potential: ParsecPseudopotential, local_l: int) -> boo
     return following < radii.size and float(radii[following]) < potential.interpolation_cutoff
 
 
+def atomic_density_images(
+    grid,
+    position: np.ndarray,
+    potential: ParsecPseudopotential,
+    specification: SpeciesPotential,
+    lattice_vectors: np.ndarray | None,
+    *,
+    core: bool,
+    periodic_dimensions: int = 3,
+) -> tuple[float, np.ndarray]:
+    """``(support, translations)``: the radius of the terms of one atom in :func:`superpose_atomic_density` (it adds
+    the points at distances below it) and the translations of the atom's images it sums."""
+
+    if lattice_vectors is not None and periodic_dimensions == 2:
+        # a slab of Andrew Grieder's slab_boundary: the images along the in-plane vectors, to the table's end
+        support = potential.interpolation_cutoff
+        return support, _periodic_image_translations(lattice_vectors, support, periodic_dimensions)
+    if lattice_vectors is not None and (
+        not uses_fortran_routines(grid)
+        # Two sums of the Fortran-derived routines take his too (the same fields to 2.4e-10 Ry):
+        # Fortran's general (oblique) grid, whose readable sum to the end of the table took 34-300 s, and a
+        # Cubic_Spline core density of a bulk cell (the spline of the whole table at every image: 137 s, Ge3)
+        or (
+            not getattr(grid, "is_confined_periodic", False)
+            and (getattr(grid, "is_general_periodic", False) or (core and specification.use_spline))
+        )
+    ):
+        # Andrew Grieder's periodic sum: the images of the atom out to where its density is below 1e-16
+        support = atomic_density_support_radius(potential, specification, core=core)
+        return support, _periodic_image_translations(lattice_vectors, support)
+    # an isolated system (one centre), and the Fortran-derived routines: the cutoff of the table
+    support = potential.interpolation_cutoff
+    return support, _image_translations(grid, lattice_vectors, position, support)
+
+
 def superpose_atomic_density(
     grid: RealSpaceGrid,
     atoms: Sequence[Atom],
@@ -658,27 +696,10 @@ def superpose_atomic_density(
             continue
 
         position = np.asarray(atom.position, dtype=np.float64)
-        if lattice_vectors is not None and periodic_dimensions == 2:
-            # a slab of Andrew Grieder's slab_boundary: the images along the in-plane vectors, to the table's end
-            support = potential.interpolation_cutoff
-            translations = _periodic_image_translations(lattice_vectors, support, periodic_dimensions)
-        elif lattice_vectors is not None and (
-            not uses_fortran_routines(grid)
-            # Two sums of the Fortran-derived routines take his too (the same fields to 2.4e-10 Ry):
-            # Fortran's general (oblique) grid, whose readable sum to the end of the table took 34-300 s, and a
-            # Cubic_Spline core density of a bulk cell (the spline of the whole table at every image: 137 s, Ge3)
-            or (
-                not getattr(grid, "is_confined_periodic", False)
-                and (getattr(grid, "is_general_periodic", False) or (core and specification.use_spline))
-            )
-        ):
-            # Andrew Grieder's periodic sum: the images of the atom out to where its density is below 1e-16
-            support = atomic_density_support_radius(potential, specification, core=core)
-            translations = _periodic_image_translations(lattice_vectors, support)
-        else:
-            # an isolated system (one centre), and the Fortran-derived routines: the cutoff of the table
-            support = potential.interpolation_cutoff
-            translations = _image_translations(grid, lattice_vectors, position, support)
+        support, translations = atomic_density_images(
+            grid, position, potential, specification, lattice_vectors, core=core,
+            periodic_dimensions=periodic_dimensions,
+        )
         reconstruct_from_wavefunctions = not core and not specification.read_valence_density
         # A table interpolated linearly below: the density rebuilt from the
         # radial functions, or the one fourier_f.f90 filtered, which replaces

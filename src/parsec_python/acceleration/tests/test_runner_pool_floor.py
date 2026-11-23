@@ -35,7 +35,8 @@ class PoolFloorTests(unittest.TestCase):
     def setUp(self):
         self.environment = patch.dict(os.environ)
         self.environment.start()
-        for name in ("PARSEC_CUPY_SECTOR_POOL_MIN_BYTES", "PARSEC_SECTOR_DEVICE_POOL", "PARSEC_SECTOR_PLACEMENT"):
+        for name in ("PARSEC_CUPY_SECTOR_POOL_MIN_BYTES", "PARSEC_SECTOR_DEVICE_POOL", "PARSEC_SECTOR_PLACEMENT",
+                     "PARSEC_MPI_SECTOR_POOL_MIN_GAIN"):
             os.environ.pop(name, None)
 
     def tearDown(self):
@@ -68,6 +69,38 @@ class PoolFloorTests(unittest.TestCase):
                     with patch.dict(os.environ, {"PARSEC_CUPY_SECTOR_POOL_MIN_BYTES": "0"}):
                         self.assertEqual(sector_device_groups(5, 1, 0, _DEVICES, costs=costs, divided=True,
                                                               pool_floor=True), pooled)
+
+    def test_ten_sectors_keep_disjoint_groups_and_five_the_pool(self):
+        # Equal sectors of 1446 MiB per GPU per sector on the four GPUs of one rank (diamond 14^3 has ten): the pool
+        # would save a sixth of the fullest GPU for ten (three against 2.5 sectors), 3/8 for five (two against 1.25).
+        from parsec_python.acceleration.experimental.mpi_scf import _pool_gain, runner_pool_min_gain
+
+        self.assertEqual(runner_pool_min_gain(), 0.25)
+        expectations = {3: True, 5: True, 6: True, 7: False, 9: True, 10: False, 11: False, 13: False}
+        for count, pooled in expectations.items():
+            with self.subTest(sectors=count):
+                costs = (1446.0 * 2**20 * len(_DEVICES) / 8.0,) * count
+                notes = []
+                groups = sector_device_groups(count, 1, 0, _DEVICES, costs=costs, divided=True, pool_floor=True,
+                                              notes=notes)
+                self.assertEqual(all(group == _DEVICES for group in groups.values()), pooled, notes)
+                self.assertIn("PARSEC_MPI_SECTOR_POOL_MIN_GAIN = 25 %", notes[0])
+                gain = _pool_gain(tuple(range(count)), costs, _DEVICES)
+                self.assertIn(f"save {100.0 * gain:.1f} % of the fullest GPU", notes[0])
+                # 0.05: the decisions of 2026-11-21 (the memory rule asks a gain of 5 % in any case)
+                with patch.dict(os.environ, {"PARSEC_MPI_SECTOR_POOL_MIN_GAIN": "0.05"}):
+                    before = sector_device_groups(count, 1, 0, _DEVICES, costs=costs, divided=True, pool_floor=True)
+                self.assertEqual(before, {sector: _DEVICES for sector in range(count)})
+        self.assertAlmostEqual(_pool_gain(tuple(range(10)), (1.0,) * 10, _DEVICES), 1.0 / 6.0)
+        self.assertAlmostEqual(_pool_gain(tuple(range(5)), (1.0,) * 5, _DEVICES), 3.0 / 8.0)
+
+    def test_an_unknown_gain_is_refused(self):
+        from parsec_python.acceleration.experimental.mpi_scf import runner_pool_min_gain
+
+        for value in ("-0.1", "1.5", "25%", "half"):
+            with self.subTest(value=value), patch.dict(os.environ, {"PARSEC_MPI_SECTOR_POOL_MIN_GAIN": value}):
+                with self.assertRaisesRegex(ValueError, "PARSEC_MPI_SECTOR_POOL_MIN_GAIN"):
+                    runner_pool_min_gain()
 
     def test_the_floor_touches_no_layout_without_a_pool(self):
         costs = _scaled(1.0)

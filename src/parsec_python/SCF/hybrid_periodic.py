@@ -631,8 +631,10 @@ class BlochExchange:
         self.spin_polarized = bool(system.input.scf.spin_polarized)
         # The Bloch-phase projectors of the k-points of this structure, kept for every SCF loop.
         self.projector_cache: dict = {}
-        # the marks of the cache that every loop of this engine reads (kept through the move to the wedge)
-        self._cache_marks: tuple = () if any_size_key is None else (any_size_key,)
+        # the marks of the cache that every loop of this engine reads (kept through the move to the wedge): that the
+        # loops belong to a Fock loop (the k-point sectors keep every sector solved and complex there,
+        # PARSEC_KPOINT_SECTOR_CLASSES and PARSEC_KPOINT_SECTOR_REAL), and PARSEC_HYBRID_KPOINT_SECTORS=on
+        self._cache_marks: tuple = (FOCK_LOOP_KEY,) + (() if any_size_key is None else (any_size_key,))
         for key in self._cache_marks:
             self.projector_cache[key] = True
 
@@ -1145,6 +1147,10 @@ def set_device_engine(factory=None) -> None:
 
     global _device_engine
     _device_engine = factory
+
+
+# the mark of the projector cache of the SCF loops of a Fock loop (read by acceleration/SCF/kpoint_sectors.py)
+FOCK_LOOP_KEY = "kpoint_fock_loop"
 
 
 def _any_size_key() -> str | None:

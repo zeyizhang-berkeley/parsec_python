@@ -137,6 +137,90 @@ class PlanTests(unittest.TestCase):
         plan, _ = _plan(folder, _dynamics(), environment={"PARSEC_MOVING_SECTORS": "on"})
         self.assertEqual(plan.order, 24)
 
+    def test_two_spin_channels_follow_their_switch(self) -> None:
+        from parsec_python.acceleration.SCF.moving_sectors import moving_spin_sectors_setting
+
+        spin = _dynamics() + "Spin_Polarization: .true.\n"
+        folder = self.folder()
+        _breathing(folder)
+        plan, reason = _plan(folder, spin, environment={"PARSEC_MOVING_SPIN_SECTORS": "off"})
+        self.assertIsNone(plan)
+        self.assertIn("two spin channels", reason)
+        folder = self.folder()
+        _breathing(folder)
+        plan, reason = _plan(folder, spin, environment={"PARSEC_MOVING_SPIN_SECTORS": "auto"})
+        self.assertIsNone(reason)
+        self.assertEqual((plan.kind, plan.order), ("molecular_dynamics", 24))
+        # (an unpolarized run never reads it but refuses a value it does not know)
+        folder = self.folder()
+        _breathing(folder)
+        with self.assertRaisesRegex(ValueError, "PARSEC_MOVING_SPIN_SECTORS must be auto, on or off"):
+            _plan(folder, _dynamics(), environment={"PARSEC_MOVING_SPIN_SECTORS": "maybe"})
+        with mock.patch.dict(os.environ):
+            os.environ.pop("PARSEC_MOVING_SPIN_SECTORS", None)
+            self.assertEqual(moving_spin_sectors_setting(), "auto")
+
+    def test_two_spin_channels_the_driver_keeps_on_the_full_grid_plan_it(self) -> None:
+        # one process under PARSEC_CUPY_DISTRIBUTED_FILTER=1 or with Spin_Symmetry_Sectors: off solves both channels on
+        # the full grid: the plan says so instead of announcing sectors the preparation then drops
+        spin = _dynamics() + "Spin_Polarization: .true.\n"
+        folder = self.folder()
+        _breathing(folder)
+        plan, reason = _plan(folder, spin, environment={"PARSEC_CUPY_DISTRIBUTED_FILTER": "1"})
+        self.assertIsNone(plan)
+        self.assertIn("two spin channels whose SCF keeps the full grid", reason)
+        self.assertIn("PARSEC_CUPY_DISTRIBUTED_FILTER=1", reason)
+        folder = self.folder()
+        _breathing(folder)
+        plan, reason = _plan(folder, spin + "Spin_Symmetry_Sectors: off\n")
+        self.assertIsNone(plan)
+        self.assertIn("Spin_Symmetry_Sectors: off", reason)
+        folder = self.folder()
+        _breathing(folder)
+        plan, reason = _plan(folder, spin, environment={"PARSEC_CUPY_DISTRIBUTED_FILTER": "0"})
+        self.assertIsNone(reason)
+        self.assertEqual(plan.kind, "molecular_dynamics")
+
+    def test_antiferromagnetic_labels_keep_the_full_grid_under_auto(self) -> None:
+        # labels of opposite Initial_Spin_Polarization (H_a +0.8, H_b -0.8): the sectors of the labels can hold a
+        # symmetric state that the full grid leaves (Fe2, Co2 on A100), so auto keeps their full grid; on takes them
+        from types import SimpleNamespace
+
+        from parsec_python.Input import parse_parsec_input
+        from parsec_python.acceleration.SCF.moving_sectors import (
+            ANTIFERROMAGNETIC_REASON,
+            antiferromagnetic_labels,
+            plan_moving_sectors,
+        )
+        from parsec_python.acceleration.tests.test_spin_flip import _write_h2
+        from parsec_python.models import Atom
+
+        folder = self.folder()
+        folder.mkdir(parents=True)
+        path = _write_h2(folder, extra=("Minimization: manual", "Movement_Num: 0"))
+        for setting, expected in (("auto", "antiferromagnetic"), ("on", None), ("off", "two spin channels")):
+            with self.subTest(setting=setting), mock.patch.dict(
+                os.environ, {"PARSEC_MOVING_SECTORS": "on", "PARSEC_MOVING_SPIN_SECTORS": setting}
+            ):
+                translation = parse_parsec_input(path)
+                plan, reason = plan_moving_sectors(translation, manual=())
+                if expected is None:
+                    self.assertIsNone(reason)
+                    self.assertEqual(plan.kind, "manual")
+                else:
+                    self.assertIsNone(plan)
+                    self.assertIn(expected, reason)
+        self.assertTrue(reason.startswith("two spin channels"))
+        with mock.patch.dict(os.environ, {"PARSEC_MOVING_SECTORS": "on", "PARSEC_MOVING_SPIN_SECTORS": "auto"}):
+            _, reason = plan_moving_sectors(parse_parsec_input(path), manual=())
+        self.assertTrue(reason.startswith(ANTIFERROMAGNETIC_REASON))
+        # one sign (a label at 0 beside one at 0.3) is no antiferromagnetic start
+        species = {"A": SimpleNamespace(initial_spin_polarization=0.3), "B": SimpleNamespace(initial_spin_polarization=0.0)}
+        one_sign = SimpleNamespace(pseudopotentials=species, atoms=(Atom("A", (0.0, 0.0, 1.0)), Atom("B", (0.0, 0.0, -1.0))))
+        self.assertFalse(antiferromagnetic_labels(one_sign))
+        species["B"] = SimpleNamespace(initial_spin_polarization=-0.3)
+        self.assertTrue(antiferromagnetic_labels(one_sign))
+
     def test_random_velocities_and_the_langevin_force_keep_the_full_grid(self) -> None:
         plan, reason = _plan(self.folder(), _dynamics(restart=False))
         self.assertIsNone(plan)
@@ -492,6 +576,22 @@ class TrackerTests(unittest.TestCase):
         np.testing.assert_array_equal(start.input_potential, np.full(self.grid.size, 3.0))
         np.testing.assert_array_equal(start.hartree_potential, np.full(self.grid.size, 3.0))
         self.assertIsNone(start.eigensolver_state)
+        # two spin channels (PARSEC_MOVING_SPIN_SECTORS=auto): the potential of each channel, no subspace of either
+        tracker._pending[id(system)] = np.zeros(self.grid.size)
+        channels = (
+            SimpleNamespace(next_effective_potential=np.full(self.grid.size, 2.0)),
+            SimpleNamespace(next_effective_potential=np.full(self.grid.size, 5.0)),
+        )
+        previous = SimpleNamespace(
+            next_effective_potential=np.full(self.grid.size, 3.5),
+            hartree_potential=np.full(self.grid.size, 3.0),
+            spin=channels,
+        )
+        start = warm(system, previous, system)
+        self.assertEqual(len(start.input_potential), 2)
+        np.testing.assert_array_equal(start.input_potential[0], np.full(self.grid.size, 3.0))
+        np.testing.assert_array_equal(start.input_potential[1], np.full(self.grid.size, 6.0))
+        self.assertEqual(start.eigensolver_state, (None, None))
 
     def test_the_forces_are_averaged_over_the_group_of_the_sectors(self) -> None:
         tracker, _, _ = self.tracker("manual")
@@ -672,6 +772,21 @@ class DeviceTests(unittest.TestCase):
         self.assert_dynamics_match(runs)
         self.assertIn("PARSEC_MOVING_SECTORS=on", runs["auto"][2])
         self.assertNotIn("PARSEC_MOVING_SECTORS", runs["off"][2])
+        self.assertNotIn("leaves the group", runs["auto"][2])
+
+    def test_two_spin_channels_follow_the_trajectory_of_the_full_grid(self) -> None:
+        # PARSEC_MOVING_SPIN_SECTORS=auto: both channels in the sectors of Td, against both on the full grid (off)
+        runs = {}
+        for mode in ("off", "auto"):
+            folder = self.root / "spin" / mode
+            _breathing(folder)
+            path = _ge5_input(folder, extra=_dynamics() + "Spin_Polarization: .true.\n")
+            runs[mode] = _run_cli(path, {"PARSEC_MOVING_SECTORS": "on", "PARSEC_MOVING_SPIN_SECTORS": mode})
+            status, _, log, errors = runs[mode]
+            self.assertIn(status, (0, 4), f"spin {mode}: {errors}\n{log[-3000:]}")
+        self.assert_dynamics_match(runs)
+        self.assertIn("PARSEC_MOVING_SECTORS=on", runs["auto"][2])
+        self.assertNotIn("PARSEC 1.5 uses no point group for molecular dynamics", runs["off"][2])
         self.assertNotIn("leaves the group", runs["auto"][2])
 
     def test_a_restart_that_keeps_a_subgroup_takes_its_sectors(self) -> None:

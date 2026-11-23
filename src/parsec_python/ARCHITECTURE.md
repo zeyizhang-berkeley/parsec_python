@@ -89,10 +89,15 @@ the last bits (1e-11 Ry in energies); `PARSEC_PERIODIC_SETUP_REACH=table` reache
 bit the definitions (the default before).
 `acceleration/tests/test_periodic_setup.py` checks them against the definitions. The replacements serve the
 orthorhombic grid of `Grid.pbc.build_periodic_grid` only; `GeneralPeriodicGrid` and `ConfinedPeriodicGrid`
-(subclasses with other point positions) keep the definitions, except the local potential of a `GeneralPeriodicGrid`
-cell with a `Cubic_Spline` species, which takes the split of the orthorhombic grid over lattice balls
-(`PARSEC_PERIODIC_OBLIQUE_SPLIT`, since 2026-11-07: the direct sum ran into the spline error near the end of the
-tables as the cell grew).  For the forces, relaxation and dynamics of
+are subclasses with other point positions.  The local potential of a `GeneralPeriodicGrid` cell takes the split of
+the orthorhombic grid over lattice balls (`PARSEC_PERIODIC_OBLIQUE_SPLIT`: for a `Cubic_Spline` species since
+2026-11-07, where the direct sum ran into the spline error near the end of the tables as the cell grew, and for linear
+POTRE and FHIPP tables since 2026-11-22, where the direct sum took minutes; MARTINS_OLD and MARTINS_WANG tables keep
+the direct sum unless `fast`, `auto` restores it for every linear species).  A
+`ConfinedPeriodicGrid` (wire, slab) keeps the definitions with their numbers bit for bit, the sums of
+`acceleration/V_ion/confined_setup.py` (`PARSEC_CONFINED_SETUP`): index-box balls, the image sums of the densities on
+the device in the definitions' order, the image terms of the local potential on threads.  For the forces, relaxation
+and dynamics of
 such a cell the accelerated command line installs, for that calculation only, device builders of the local
 potential and of the atomic densities (`acceleration/V_ion/periodic_device.py`, through the same provider hook
 and `V_ion.ionic_potential.set_atomic_density_provider`) and their derivatives as the local terms of

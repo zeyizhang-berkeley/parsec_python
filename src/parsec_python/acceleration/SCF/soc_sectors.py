@@ -1,7 +1,8 @@
 """Double-group sectors and Kramers pairs of the self-consistent spin-orbit loop of a cluster.
 
-``PARSEC_SOC_SECTORS`` (``auto`` by default since 2026-11-21, ``off`` before; ``kramers``, ``on``; ``auto`` is
-``kramers`` from :data:`MINIMUM_ENTRIES` on, :func:`resolve_soc_sectors`).  PARSEC 1.5 drops to the identity with
+``PARSEC_SOC_SECTORS`` (``auto`` by default since 2026-11-21, ``off`` before; ``kramers``, ``on``, ``fourfold``;
+``auto`` is ``kramers`` from :data:`MINIMUM_ENTRIES` on, and ``fourfold`` from :data:`FOURFOLD_MINIMUM_ENTRIES` on
+under the opt-in ``PARSEC_SOC_AUTO_FOURFOLD=auto``, :func:`resolve_soc_sectors`).  PARSEC 1.5 drops to the identity with
 spin-orbit coupling, and so does the accelerated spinor loop of :mod:`.self_consistent_soc` under ``off``: it filters
 ``N_e + 6`` complex spinors of ``2 n`` rows.  With it, the loop solves the sectors of the double group of the cluster
 that hold one state of every Kramers pair:
@@ -56,7 +57,7 @@ import numpy as np
 import scipy.sparse as sp
 
 SWITCH = "PARSEC_SOC_SECTORS"
-_SETTINGS = ("off", "auto", "kramers", "on")
+_SETTINGS = ("off", "auto", "kramers", "on", "fourfold")
 #: The value where none is named (since 2026-11-21; ``off`` before): :func:`resolve_soc_sectors`.
 DEFAULT = "auto"
 #: The smallest whole-grid spinor basis, ``2 n`` rows times the states and the buffer of the filter (complex
@@ -68,6 +69,26 @@ DEFAULT = "auto"
 #: Au13 at h = 0.33 bohr 47.0 -> 26.7 (6.68e7), Au20 74.6 -> 29.1 (1.30e8); with a warm cache the sector is faster
 #: at every size (README, ``PARSEC_SOC_SECTORS``).
 MINIMUM_ENTRIES = 1 << 25
+#: ``PARSEC_SOC_AUTO_FOURFOLD``: ``off`` (the default) keeps ``kramers`` at every size under ``PARSEC_SOC_SECTORS=auto``;
+#: ``auto`` (opt-in since 2026-11-22) lets it take ``fourfold`` from :data:`FOURFOLD_MINIMUM_ENTRIES` on, mainly to save
+#: GPU memory (the peak 18 to 31 % lower on the clusters measured).  It is not on by default because it is not faster
+#: on every cluster above that size: the two sectors' own Lanczos bounds and Rayleigh-Ritz problems cost more per
+#: iteration on clusters with few states, and its gain elsewhere partly comes from SCF loops that happened to take
+#: fewer iterations.
+FOURFOLD_SWITCH = "PARSEC_SOC_AUTO_FOURFOLD"
+#: The smallest whole-grid spinor basis (complex entries, as :data:`MINIMUM_ENTRIES`) from which
+#: ``PARSEC_SOC_AUTO_FOURFOLD=auto`` splits the Kramers sector by a four-fold operation about z (2^26).  One A100,
+#: fresh processes, process wall seconds ``kramers`` -> ``fourfold``, first runs with an empty kernel cache (warm in
+#: brackets), entries.  Faster: Ag13 at h = 0.30 bohr 27.3 -> 26.2 (11.8 -> 10.5, the same iterations), 8.90e7; Ge29
+#: (Td) 28.0 -> 25.3 (15.0 -> 11.9, 23 -> 18 iterations), 8.86e7; Au20 27.6 -> 24.9 (15.0 -> 12.1, the same), 1.30e8;
+#: Ge35 (Td) 41.7 -> 27.6 (28.6 -> 14.5, 45 -> 16), 1.38e8; Ag38 28.8 -> 25.8 (18.9 -> 15.8), 2.06e8; Au6 (Oh)
+#: 28.5 -> 27.4 (12.7 -> 11.7, 22 -> 17 iterations, slower per iteration), 7.27e7.  Slower: Au4 (D2d, S4z, h = 0.26
+#: bohr) in a sphere of 13.5 bohr 30.5 -> 30.8 (14.9 -> 15.5, 24 iterations both), 7.27e7, and of 15.5 bohr 36.6 ->
+#: 38.9 (21.0 -> 23.4, 23 -> 30), 1.10e8.  Just below the floor Au13 at h = 0.33 bohr (6.68e7) was faster, 25.6 -> 24.6 (9.7 -> 9.2); the small
+#: clusters further below slower, SCF seconds with a warm cache Au2 3.6 -> 4.8 (1.48e7), Au4 3.1 -> 4.3 (1.80e7),
+#: Au13 3.4 -> 3.4-3.6 and Ag13 4.3 -> 4.6 (3.76e7), Ge4, Ge6 and Ge8 2.3-5.2 -> 4.4-6.2 (5e6 to 8e6) (README,
+#: ``PARSEC_SOC_AUTO_FOURFOLD``).
+FOURFOLD_MINIMUM_ENTRIES = 1 << 26
 
 # Sign operations (x, y, z) -> (s_x x, s_y y, s_z z) of the axis-reflection group.
 _C2Z = (-1, -1, 1)
@@ -78,6 +99,14 @@ _PERPENDICULAR = ((1, -1, -1), (-1, 1, -1), (-1, 1, 1), (1, -1, 1))
 # The choices of g in order: along z, then along x, then along y.
 _FIRST = (_C2Z, _MZ, (1, -1, -1), (-1, 1, 1), (-1, 1, -1), (1, -1, 1))
 _ROOT_HALF = 2.0 ** -0.5
+# Four-fold operations about z (``fourfold``): the matrix ``R`` of ``r -> R r`` and the name.  Both square to C2z and
+# turn a spinor as the rotation by +pi/2 about z, ``diag(exp(-i pi/4), exp(+i pi/4))`` (S4z is the inversion, which
+# turns no spin, times that rotation).
+_FOUR_FOLD = (
+    (((0, -1, 0), (1, 0, 0), (0, 0, 1)), "C4z"),
+    (((0, 1, 0), (-1, 0, 0), (0, 0, -1)), "S4z"),
+)
+_EIGHTH = complex(np.exp(0.25j * np.pi))
 # |+a>, |-a> (eigenstates of sigma_a with +1, -1) as (up, down) amplitudes, per axis a.
 _SPIN_STATES = {
     0: ((_ROOT_HALF + 0j, _ROOT_HALF + 0j), (_ROOT_HALF + 0j, -_ROOT_HALF + 0j)),
@@ -98,14 +127,30 @@ _NAMES = {
 
 def soc_sectors_setting() -> str:
     """``PARSEC_SOC_SECTORS``: ``auto`` (the default since 2026-11-21: ``kramers`` from :data:`MINIMUM_ENTRIES` on,
-    :func:`resolve_soc_sectors`), ``off`` (the whole grid, the default before), ``kramers`` (the ``+i`` sector of a
-    two-fold operation at every size: one state per Kramers pair) or ``on`` (that sector split by inversion parity
-    where the cluster has a centre of inversion).  A cluster without a two-fold rotation or mirror keeps the whole
-    grid with a note.  Another value is an error before the SCF."""
+    and ``fourfold`` from :data:`FOURFOLD_MINIMUM_ENTRIES` on under the opt-in ``PARSEC_SOC_AUTO_FOURFOLD=auto``,
+    :func:`resolve_soc_sectors`), ``off``
+    (the whole grid, the default before), ``kramers`` (the ``+i`` sector of a two-fold operation at every size: one
+    state per Kramers pair), ``on`` (that sector split by inversion parity where the cluster has a centre of
+    inversion) or ``fourfold`` (since 2026-11-22, at every size: the real sector of C2z split by the eigenvalues of a
+    four-fold rotation or rotoinversion about z where the cluster has one, :func:`_four_fold_splits`; ``kramers``
+    otherwise).  A cluster without a two-fold rotation or mirror keeps the
+    whole grid with a note.  Another value is an error before the SCF."""
 
     text = os.environ.get(SWITCH, DEFAULT).strip().lower() or DEFAULT
     if text not in _SETTINGS:
         raise ValueError(f"{SWITCH} must be one of {', '.join(_SETTINGS)}, not {text!r}")
+    return text
+
+
+def soc_auto_fourfold_setting() -> str:
+    """``PARSEC_SOC_AUTO_FOURFOLD``: ``off`` (the default: ``kramers`` at every size above :data:`MINIMUM_ENTRIES`)
+    or ``auto`` (opt-in since 2026-11-22: ``PARSEC_SOC_SECTORS=auto`` takes ``fourfold`` where the whole-grid spinor
+    basis reaches :data:`FOURFOLD_MINIMUM_ENTRIES`, which lowers the GPU memory and is faster on some clusters but not
+    on all, :data:`FOURFOLD_SWITCH`).  Another value is an error before the SCF."""
+
+    text = os.environ.get(FOURFOLD_SWITCH, "off").strip().lower() or "off"
+    if text not in ("auto", "off"):
+        raise ValueError(f"{FOURFOLD_SWITCH} must be auto or off, not {text!r}")
     return text
 
 
@@ -120,20 +165,23 @@ def whole_grid_spinor_entries(system) -> int:
 
 
 def resolve_soc_sectors(setting: str, system, *, forced: bool = False) -> tuple[str, str]:
-    """The route of ``setting`` for ``system``: ``(route, reason)`` with ``route`` ``off``, ``kramers`` or ``on``.
+    """The route of ``setting`` for ``system``: ``(route, reason)`` with ``route`` ``off``, ``kramers``, ``on`` or
+    ``fourfold``.
 
     ``auto`` takes ``kramers`` where the whole-grid spinor basis (:func:`whole_grid_spinor_entries`) reaches
     :data:`MINIMUM_ENTRIES`, or where ``--symmetry on`` asks for a reduction (``forced``), and ``off`` below it with
-    the ``reason`` of the note; every other value is its own route (``reason`` empty).  The decision reads only the
-    grid and the input, so it is the same in every process that prepares the run.
+    the ``reason`` of the note; from :data:`FOURFOLD_MINIMUM_ENTRIES` on it takes ``fourfold`` instead under the
+    opt-in ``PARSEC_SOC_AUTO_FOURFOLD=auto`` (since 2026-11-22; ``kramers`` where the cluster has no four-fold
+    operation about z or its sector is complex).  Every other value is its own route (``reason`` empty).  The decision reads only the grid
+    and the input, so it is the same in every process that prepares the run.
     """
 
     if setting != "auto":
         return setting, ""
-    if forced:
-        return "kramers", ""
     entries = whole_grid_spinor_entries(system)
-    if entries >= MINIMUM_ENTRIES:
+    if entries >= FOURFOLD_MINIMUM_ENTRIES and soc_auto_fourfold_setting() == "auto":
+        return "fourfold", ""
+    if forced or entries >= MINIMUM_ENTRIES:
         return "kramers", ""
     return "off", (
         f"the whole-grid spinor basis ({entries} complex entries: 2 x {int(system.grid.size)} rows x states and "
@@ -200,15 +248,26 @@ class SpinorSectorPlan:
     generators: tuple[str, ...]
     group: tuple[str, ...]
     parities: tuple[int | None, ...]
+    # ``fourfold``: the sectors of a four-fold operation as ``(parity sector, C)``: their columns are the real
+    # combinations ``C`` (sparse, columns orthonormal) of the columns of the blocks of that parity sector; the name of
+    # the operation; ``None``: no such split
+    splits: tuple | None = None
+    split_name: str = ""
+    # the folded parts of the blocks the splits combine, kept for the sectors of one set of operators
+    _fold_cache: dict = dataclasses.field(default_factory=dict, repr=False, compare=False)
 
     @property
     def sector_count(self) -> int:
-        return len(self.parities)
+        return len(self.splits) if self.splits else len(self.parities)
 
     def sector_blocks(self, sector: int) -> tuple[SectorBlock, ...]:
+        if self.splits:
+            sector = int(self.splits[sector][0])
         return tuple(block for block in self.blocks if block.sector == sector)
 
     def sector_dimension(self, sector: int) -> int:
+        if self.splits:
+            return int(self.splits[sector][1].shape[1])
         return sum(block.size for block in self.sector_blocks(sector))
 
     @property
@@ -220,7 +279,18 @@ class SpinorSectorPlan:
         text = f"group {{{', '.join(self.group)}}}; sector +i of {self.generators[0]}"
         if self.real:
             text += f" made real by T {self.generators[1]}"
-        if self.sector_count > 1:
+        if self.splits:
+            sizes = " and ".join(
+                f"{self.sector_dimension(index)} ("
+                + ("" if self.parities[base] is None else ("even, " if self.parities[base] > 0 else "odd, "))
+                + f"{'+' if index % 2 == 0 else '-'}exp(i pi/4))"
+                for index, (base, _) in enumerate(self.splits)
+            )
+            text += (
+                (", split by the parity of i" if len(self.parities) > 1 else "")
+                + f", split by the eigenvalues of {self.split_name}: {sizes} {arithmetic} rows"
+            )
+        elif self.sector_count > 1:
             sizes = " and ".join(
                 f"{self.sector_dimension(index)} ({'even' if parity > 0 else 'odd'})"
                 for index, parity in enumerate(self.parities)
@@ -263,6 +333,8 @@ class _SectorGenerators:
     second: tuple[int, ...] | None
     inversion: bool
     reason: str
+    # ``fourfold``: the four-fold operation about z that splits the real sector of C2z, ``(matrix, name)``
+    four_fold: tuple | None = None
 
     def describe(self) -> str:
         """The generators in words (the ``orbital_symmetry`` line of the report)."""
@@ -271,11 +343,32 @@ class _SectorGenerators:
             text += f" made real by T {_NAMES[self.second]}"
         if self.inversion:
             text += ", split by the parity of i"
+        if self.four_fold is not None:
+            text += f", split by the eigenvalues of {self.four_fold[1]}"
         return text + f" in the double group of {{{', '.join(self.group)}}}"
 
 
-def _sector_generators(grid, atoms, *, parity: bool, atom_tolerance: float | None) -> _SectorGenerators:
-    """The group of the atoms on the grid and the operations :func:`detect_sector_plan` builds the sectors of."""
+def _four_fold_operation(grid, atoms, tolerance: float):
+    """The first operation of :data:`_FOUR_FOLD` that maps the atoms (within ``tolerance``) and the grid points onto
+    themselves, as ``(matrix, name, row map)`` (``map[i]``: the row of ``R r_i``), or ``None``."""
+
+    from ..Symmetry.axis_reflection import _atoms_are_invariant_operation, _grid_row_mapping_operation
+
+    for matrix, name in _FOUR_FOLD:
+        operation = np.asarray(matrix, dtype=np.int8)
+        if not _atoms_are_invariant_operation(atoms, operation, tolerance):
+            continue
+        mapping = _grid_row_mapping_operation(grid, operation, 1.0e-10)
+        if mapping is not None:
+            return matrix, name, np.asarray(mapping, dtype=np.int64)
+    return None
+
+
+def _sector_generators(
+    grid, atoms, *, parity: bool, atom_tolerance: float | None, fourfold: bool = False
+) -> _SectorGenerators:
+    """The group of the atoms on the grid and the operations :func:`detect_sector_plan` builds the sectors of
+    (with ``fourfold`` the four-fold operation about z that splits a real sector of C2z, where there is one)."""
 
     from ..Symmetry.axis_reflection import AxisReflectionReduction, symmetry_atom_tolerance
 
@@ -297,17 +390,30 @@ def _sector_generators(grid, atoms, *, parity: bool, atom_tolerance: float | Non
     second = None
     if _spin_axis(first) == 2:
         second = next((signs for signs in _PERPENDICULAR if signs in present), None)
+    four_fold = None
+    if fourfold and first == _C2Z and second is not None:
+        # (a real sector of C2z: the four-fold operation squares to it and T h inverts it, so its two eigenspaces
+        # in the sector are real, _four_fold_splits)
+        found = _four_fold_operation(grid, atoms, tolerance)
+        four_fold = None if found is None else found[:2]
     return _SectorGenerators(
-        group=group, first=first, second=second, inversion=bool(parity and _INVERSION in present), reason=""
+        group=group,
+        first=first,
+        second=second,
+        inversion=bool(parity and _INVERSION in present),
+        reason="",
+        four_fold=four_fold,
     )
 
 
 def soc_orbital_symmetry(grid, atoms, setting: str, *, atom_tolerance: float | None = None) -> tuple[str, str]:
-    """What the report says of the orbitals of a run with ``PARSEC_SOC_SECTORS=setting`` (``kramers`` or ``on``)
-    whose input allows symmetry, and the reason the spinors stay on the whole grid (``""`` where the sectors are
-    used).  It finds the group as :func:`detect_sector_plan` does, without building the bases."""
+    """What the report says of the orbitals of a run with ``PARSEC_SOC_SECTORS=setting`` (``kramers``, ``on`` or
+    ``fourfold``) whose input allows symmetry, and the reason the spinors stay on the whole grid (``""`` where the
+    sectors are used).  It finds the group as :func:`detect_sector_plan` does, without building the bases."""
 
-    generators = _sector_generators(grid, atoms, parity=setting == "on", atom_tolerance=atom_tolerance)
+    generators = _sector_generators(
+        grid, atoms, parity=setting == "on", atom_tolerance=atom_tolerance, fourfold=setting == "fourfold"
+    )
     if generators.first is None:
         return f"full grid ({SWITCH}={setting}: {generators.reason})", generators.reason
     return (
@@ -317,14 +423,17 @@ def soc_orbital_symmetry(grid, atoms, setting: str, *, atom_tolerance: float | N
 
 
 def detect_sector_plan(
-    grid, atoms, *, parity: bool = True, atom_tolerance: float | None = None
+    grid, atoms, *, parity: bool = True, atom_tolerance: float | None = None, fourfold: bool = False
 ) -> tuple[SpinorSectorPlan | None, str]:
     """The reduced bases of a cluster (split by inversion parity with ``parity`` where the cluster has a centre of
-    inversion), or ``None`` with the reason the whole grid stays."""
+    inversion; with ``fourfold`` instead by the eigenvalues of a four-fold operation about z where the sector is a
+    real one of C2z, :func:`_four_fold_splits`), or ``None`` with the reason the whole grid stays."""
 
     from ..Symmetry.axis_reflection import _grid_row_mapping, _orbit_labels
 
-    chosen = _sector_generators(grid, atoms, parity=parity, atom_tolerance=atom_tolerance)
+    chosen = _sector_generators(
+        grid, atoms, parity=parity, atom_tolerance=atom_tolerance, fourfold=fourfold
+    )
     group = chosen.group
     if chosen.first is None:
         return None, chosen.reason
@@ -388,7 +497,119 @@ def detect_sector_plan(
         raise RuntimeError(f"the spinor sectors have {plan.dimension} rows, not the {size} of half the spinor space")
     if any(plan.sector_dimension(index) == 0 for index in range(plan.sector_count)):
         raise RuntimeError("a parity sector of the spinors is empty")
+    if chosen.four_fold is not None:
+        from ..Symmetry.axis_reflection import symmetry_atom_tolerance
+
+        tolerance = symmetry_atom_tolerance() if atom_tolerance is None else float(atom_tolerance)
+        found = _four_fold_operation(grid, atoms, tolerance)
+        splits = []
+        for sector in range(len(parities)) if found is not None else ():
+            pair = _four_fold_splits(plan, found[2], plan.sector_blocks(sector))
+            if pair is None or any(int(split.shape[1]) == 0 for split in pair):
+                splits = []
+                break
+            splits += [(sector, split) for split in pair]
+        if splits:
+            plan = dataclasses.replace(
+                plan, splits=tuple(splits), split_name=found[1], generators=plan.generators + (found[1],)
+            )
     return plan, ""
+
+
+def _sector_unfold(plan: SpinorSectorPlan, blocks) -> tuple[sp.csr_matrix, sp.csr_matrix]:
+    """The up and down components ``(n, rows)`` of the columns of ``blocks`` of ``plan``, complex."""
+
+    size = plan.grid_size
+    components = []
+    for spin in (0, 1):
+        pieces = []
+        for block in blocks:
+            amplitude = block.spinor[spin] * block.phase
+            if amplitude != 0:
+                pieces.append(block.basis * amplitude)
+            else:
+                pieces.append(sp.csr_matrix((size, block.size), dtype=np.complex128))
+        components.append(sp.hstack(pieces, format="csr").astype(np.complex128))
+    return components[0], components[1]
+
+
+def _four_fold_splits(plan: SpinorSectorPlan, mapping: np.ndarray, blocks, tolerance: float = 1.0e-9):
+    """The columns of the two eigenspaces of a four-fold operation ``Q`` about z in the real sector of C2z of
+    ``plan`` (``PARSEC_SOC_SECTORS=fourfold``), as real combinations of its columns, or ``None``.
+
+    ``Q`` (C4z or S4z) turns a spinor as the rotation by +pi/2 about z and maps the grid points by ``mapping``
+    (``map[i]``: the row of ``R r_i``), so ``Q^2`` is the operation ``g = C2z`` of the sector, ``+i`` there: the
+    eigenvalues of ``Q`` in the sector are ``+-exp(i pi/4)``, and ``Q`` commutes with the Hamiltonian of a cluster
+    whose atoms and grid it keeps.  The columns of the sector are real symmetry functions of the abelian group
+    ``<C2z, h>`` times a spin state and a phase, real under ``A = T h``; ``R`` normalizes that group, so ``Q`` maps
+    every column onto one column times a phase, and ``h Q h^-1 = Q^-1`` makes its matrix ``M`` in these columns
+    symmetric (``M_ab = <a|Q|b>``, the transpose of a unitary matrix that ``A`` turns into its inverse): a permutation
+    of order two with phases.  A column that ``Q`` keeps is an eigenvector; a pair ``a, b`` that it exchanges gives
+    ``(a + b)/sqrt 2`` and ``(a - b)/sqrt 2`` for ``+-M_ab``: real combinations, so both eigenspaces keep the real
+    arithmetic.  ``blocks``: those of one parity sector (inversion commutes with ``Q`` and ``A``), whose columns
+    are split.  ``None`` where ``M`` is not of that form (it then keeps the sector unsplit)."""
+
+    size = sum(block.size for block in blocks)
+    up, down = _sector_unfold(plan, blocks)
+    inverse = np.empty_like(mapping)
+    inverse[mapping] = np.arange(mapping.size, dtype=mapping.dtype)
+    # (Q psi)(r) = U psi(R^-1 r): the rows of Q psi at the points r = R r_i are those of psi at r_i
+    turned_up = up[inverse] * np.exp(-0.25j * np.pi)
+    turned_down = down[inverse] * np.exp(0.25j * np.pi)
+    matrix = (up.conj().T @ turned_up + down.conj().T @ turned_down).tocsc()
+    matrix.data[np.abs(matrix.data) < tolerance] = 0.0
+    matrix.eliminate_zeros()
+    columns = int(matrix.shape[1])
+    counts = np.diff(matrix.indptr)
+    if columns != size or np.any(counts != 1):
+        return None
+    targets = matrix.indices.astype(np.int64)
+    values = matrix.data.astype(np.complex128)
+    if np.max(np.abs(np.abs(values) - 1.0)) > 1.0e-8:
+        return None
+    if np.any(targets[targets] != np.arange(columns)) or np.max(np.abs(values[targets] - values)) > 1.0e-8:
+        return None
+    rows = {0: [], 1: []}
+    cols = {0: [], 1: []}
+    data = {0: [], 1: []}
+    count = {0: 0, 1: 0}
+
+    def sector_of(value) -> int | None:
+        if abs(value - _EIGHTH) < 1.0e-8:
+            return 0
+        if abs(value + _EIGHTH) < 1.0e-8:
+            return 1
+        return None
+
+    root = _ROOT_HALF
+    for column in range(columns):
+        target = int(targets[column])
+        if target < column:
+            continue
+        value = values[column]
+        sector = sector_of(value)
+        if sector is None:
+            return None
+        if target == column:
+            rows[sector].append(column)
+            cols[sector].append(count[sector])
+            data[sector].append(1.0)
+            count[sector] += 1
+            continue
+        other = 1 - sector
+        for which, sign in ((sector, 1.0), (other, -1.0)):
+            rows[which] += [column, target]
+            cols[which] += [count[which], count[which]]
+            data[which] += [root, sign * root]
+            count[which] += 1
+    splits = tuple(
+        sp.csr_matrix(
+            (np.asarray(data[index], dtype=np.float64), (np.asarray(rows[index]), np.asarray(cols[index]))),
+            shape=(columns, count[index]),
+        )
+        for index in (0, 1)
+    )
+    return splits
 
 
 # --------------------------------------------------------------- folded host matrices
@@ -442,10 +663,63 @@ class FoldedParts:
 def fold_operator(
     plan: SpinorSectorPlan, laplacian, nonlocal_operator, soc_projectors, sector: int = 0
 ) -> FoldedParts:
-    """Fold the static terms of the spinor operator into the reduced basis of one sector of ``plan``."""
+    """Fold the static terms of the spinor operator into the reduced basis of one sector of ``plan``.
+
+    The sectors of a four-fold operation (``plan.splits``) are real combinations ``C`` of the columns of the blocks:
+    their parts are those of the blocks (folded once for the sectors of one set of operators) turned by ``C``
+    (:func:`_split_parts`)."""
+
+    if plan.splits:
+        anchors = (laplacian, nonlocal_operator, soc_projectors)
+        cached = plan._fold_cache.get("anchors")
+        if cached is None or any(a is not b for a, b in zip(anchors, cached)):
+            plan._fold_cache.clear()
+            plan._fold_cache["anchors"] = anchors
+        base_sector, split = plan.splits[sector]
+        base = plan._fold_cache.get(base_sector)
+        if base is None:
+            base = plan._fold_cache[base_sector] = _fold_blocks(
+                plan, plan.sector_blocks(sector), laplacian, nonlocal_operator, soc_projectors
+            )
+        return _split_parts(base, split)
+    return _fold_blocks(plan, plan.sector_blocks(sector), laplacian, nonlocal_operator, soc_projectors)
+
+
+def _split_parts(base: FoldedParts, split: sp.csr_matrix) -> FoldedParts:
+    """The parts of the sector whose columns are ``B C`` (``split`` = ``C``, real, orthonormal columns) from the
+    parts of the columns ``B`` (:func:`_fold_blocks`): ``C^T K C``, ``C^T P``, ``G C``, ``U C``, and the orbit
+    averages ``(C o C)^T`` of those of ``B`` (the potential is constant on the orbits of the scalar group and the
+    same on the orbits a four-fold operation of the atoms exchanges, so it stays diagonal)."""
+
+    split = sp.csr_matrix(split, dtype=np.float64)
+    transposed = split.T.tocsr()
+    kinetic = (transposed @ (base.kinetic @ split)).tocsr()
+    kinetic.sort_indices()
+    averages = (transposed.multiply(transposed) @ base.averages).tocsr()
+    projectors = None if base.projectors is None else (transposed @ base.projectors).tocsr()
+    soc = None if base.soc is None else (base.soc @ split).tocsr()
+    if soc is not None:
+        soc.eliminate_zeros()
+    unfold = (base.unfold @ split).tocsr()
+    unfold.eliminate_zeros()
+    return FoldedParts(
+        kinetic=kinetic,
+        averages=averages,
+        projectors=projectors,
+        projector_signs=base.projector_signs,
+        soc=soc,
+        soc_signs=base.soc_signs,
+        soc_atoms=base.soc_atoms,
+        unfold=unfold,
+        real=base.real,
+        grid_size=base.grid_size,
+    )
+
+
+def _fold_blocks(plan: SpinorSectorPlan, blocks, laplacian, nonlocal_operator, soc_projectors) -> FoldedParts:
+    """The parts of the columns of ``blocks`` (:func:`fold_operator`)."""
 
     size = plan.grid_size
-    blocks = plan.sector_blocks(sector)
     laplacian = sp.csr_matrix(laplacian, dtype=np.float64)
     kinetic_blocks, average_blocks, projector_blocks = [], [], []
     projectors = None

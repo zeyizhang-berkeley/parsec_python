@@ -68,6 +68,7 @@ from ..models import (
     SpinPolarizedSinglePointResult,
 )
 from ..Hamiltonian.hubbard import hubbard_operator, hubbard_terms_from_orbitals
+from ..Hartree.variational import electrostatic_hartree
 from .pbc import PeriodicPreparedSinglePointSystem
 from .single_point import (
     PreparedSinglePointSystem,
@@ -89,6 +90,7 @@ from .single_point import (
     require_reference_hooks,
     warm_start_mixer,
 )
+from .state_extension import MultipletCloser, working_levels
 
 
 SPIN_NAMES = ("up", "down")
@@ -101,6 +103,25 @@ START_LEVEL_WINDOW = 3.0e-2
 #: a partly filled pair, which two solved channels may fill unequally (test 3 of the spin sectors, for the pair of
 #: channels that the operation exchanges; ``acceleration.SCF.spin_sectors.SPIN_SECTOR_OCCUPATION_TOLERANCE``).
 SPIN_FLIP_OCCUPATION_TOLERANCE = 0.05
+
+# PARSEC_SPIN_FLIP_STABILITY=auto (_flip_stability): the test of the converged state of a loop of
+# PARSEC_SPIN_FLIP_SYMMETRY=auto against perturbations that break the operation.
+#: Largest change (Ry) of the down potential of one probe of the linear response.
+FLIP_STABILITY_KICK = 5.0e-3
+#: Probes (Arnoldi steps) of the response, at most.
+FLIP_STABILITY_STEPS = 5
+#: Largest eigenvalue of the response from which the state is unstable: an SCF map ``V -> V_out`` whose Jacobian
+#: has an eigenvalue above 1 on the perturbations that break the operation has a direction of negative curvature
+#: of the energy there (the second variation is ``<d rho, ((-chi_0)^-1 + K) d rho>``).
+FLIP_STABILITY_BOUND = 1.0
+#: Largest change (Ry) of a level up to the window above the Fermi level between two passes of the down channel's
+#: eigensolver after which a probe (or the first solve) is taken as converged.
+FLIP_STABILITY_LEVEL_TOLERANCE = 1.0e-8
+#: Eigensolver passes of a probe at most, and of the first solve of the down channel.
+FLIP_STABILITY_PASSES = 4
+FLIP_STABILITY_FIRST_PASSES = 16
+#: Seed of the random part of the first probe direction (the same on every process).
+FLIP_STABILITY_SEED = 20261122
 
 
 def _spin_occupations(eigenvalues, system, settings, weights=None, partners=None):
@@ -468,6 +489,334 @@ def _spin_flip_guard_record(error):
     )
 
 
+class FlipStabilityReport:
+    """What the stability test of a converged flip loop found (:func:`_flip_stability`).
+
+    ``largest`` is the largest real part of the Ritz values of the response after the last probe, ``history`` that
+    after every probe, ``ritz`` the real parts of the last Ritz values (largest first); ``probes`` the probes made,
+    ``passes`` the eigensolver passes of the down channel in all, ``first_deviation`` the largest difference of its
+    levels at the converged potential from those of the up channel (Ry, up to the window above the Fermi level),
+    ``seconds`` the time of the test, ``first_passes`` and ``first_seconds`` those of the first solve of the down
+    channel at the converged potential.
+    """
+
+    def __init__(
+        self, *, largest, history, ritz, probes, passes, first_deviation, seconds, bound, first_passes=0,
+        first_seconds=0.0,
+    ):
+        self.largest = float(largest)
+        self.history = tuple(float(value) for value in history)
+        self.ritz = tuple(float(value) for value in ritz)
+        self.probes = int(probes)
+        self.passes = int(passes)
+        self.first_deviation = float(first_deviation)
+        self.seconds = float(seconds)
+        self.bound = float(bound)
+        self.first_passes = int(first_passes)
+        self.first_seconds = float(first_seconds)
+
+    @property
+    def unstable(self) -> bool:
+        return not self.largest < self.bound
+
+    def text(self) -> str:
+        return (
+            f"largest eigenvalue {self.largest:.4f} of the SCF response to perturbations that break the operation "
+            f"(unstable from {self.bound:g}; {self.probes} probes, Ritz values "
+            + " ".join(f"{value:.3f}" for value in self.ritz[:4])
+            + f"; {self.seconds:.2f} s, of which {self.first_seconds:.2f} s for the {self.first_passes} passes of the "
+            f"first solve of the down channel, its levels {self.first_deviation:.1e} Ry from the up channel's; "
+            f"{self.passes} passes in all)"
+        )
+
+
+class _SpinFlipUnstable(Exception):
+    """The converged loop of ``PARSEC_SPIN_FLIP_SYMMETRY`` is unstable against perturbations that break the
+    operation (``PARSEC_SPIN_FLIP_STABILITY=auto``); :func:`run_spin_scf` solves the loop again with both channels."""
+
+    def __init__(self, report: FlipStabilityReport) -> None:
+        super().__init__(report.text())
+        self.report = report
+
+
+def _spin_flip_unstable_record(report: FlipStabilityReport):
+    """The note of a flip loop whose state the stability test found unstable: the loop starts again from its start
+    and solves both channels."""
+
+    from ..models import SpinSectorFallbackRecord
+
+    return SpinSectorFallbackRecord(
+        stage="the stability test after the SCF loop",
+        largest_fractional_occupation=report.largest,
+        tolerance=report.bound,
+        multiplets=(report.text(),),
+        reason=(
+            "the state of the converged loop is unstable against perturbations that break the operation (an "
+            "eigenvalue of their SCF response above 1: two solved channels move away from it); the loop starts again "
+            "from its start"
+        ),
+        measure="largest eigenvalue of the response",
+        route="spin_flip",
+    )
+
+
+def _spin_flip_stable_record(report: FlipStabilityReport):
+    """The note of a flip loop whose state the stability test kept (``route`` ``spin_flip_stable``)."""
+
+    from ..models import SpinSectorFallbackRecord
+
+    return SpinSectorFallbackRecord(
+        stage="the stability test after the SCF loop",
+        largest_fractional_occupation=report.largest,
+        tolerance=report.bound,
+        multiplets=(report.text(),),
+        reason="the state of the converged loop is stable against perturbations that break the operation",
+        measure="largest eigenvalue of the response",
+        route="spin_flip_stable",
+    )
+
+
+def _mirrored_levels(base, base_labels, levels, labels) -> np.ndarray | None:
+    """The levels of the up channel under the opposite perturbation, to first order: ``2 e0 - e`` sector by sector
+    (``base`` and ``levels`` the down channel's levels at the converged and at the perturbed potential, ``labels``
+    their sectors); ``None`` where a sector holds different numbers of levels in the two."""
+
+    base = np.asarray(base, dtype=np.float64)
+    levels = np.asarray(levels, dtype=np.float64)
+    base_labels = np.asarray(base_labels)
+    labels = np.asarray(labels)
+    if base.shape != levels.shape or base_labels.shape != base.shape or labels.shape != levels.shape:
+        return None
+    mirrored = np.empty_like(levels)
+    for label in np.unique(labels):
+        before = np.flatnonzero(base_labels == label)
+        after = np.flatnonzero(labels == label)
+        if before.size != after.size:
+            return None
+        before = before[np.argsort(base[before], kind="stable")]
+        after = after[np.argsort(levels[after], kind="stable")]
+        mirrored[after] = 2.0 * base[before] - levels[after]
+    return mirrored
+
+
+def _flip_stability(
+    system,
+    flip,
+    *,
+    solve,
+    number_of_states: int,
+    eigensolver_settings,
+    neighbors,
+    settings,
+    up_potential,
+    up_eigenvalues,
+    fermi_level: float,
+    ionic_potential,
+    hartree_potential,
+    reduced: bool,
+    adapter,
+    orbital_density_builder,
+    volume_element: float,
+) -> FlipStabilityReport:
+    """The stability of the converged state of a flip loop against perturbations that break the operation
+    (``PARSEC_SPIN_FLIP_STABILITY=auto``).
+
+    At a state of the route the down potential is the image of the up potential, ``d = g u``.  A perturbation
+    ``(du, dd)`` breaks the operation where ``w = dd - g du`` is not zero; the SCF map ``(u, d) -> (U, D)`` commutes
+    with the operation, so ``w_out = dD - g dU`` is a linear map ``J`` of ``w`` to first order, whose eigenvalues
+    decide: the second variation of the energy along such perturbations is negative in some direction where ``J``
+    has an eigenvalue above 1 (:data:`FLIP_STABILITY_BOUND`), and two solved channels move away from the state.
+
+    The response is probed with the down channel alone, which the route does not solve otherwise: the up channel
+    keeps its subspace and the orbitals of the result.  A probe ``dd = s v`` (``max |dd|`` =
+    :data:`FLIP_STABILITY_KICK`) with ``du = -g^-1 dd`` has ``w = 2 s v``; the down channel is solved at ``g u + dd``
+    (the levels of the up channel then follow from the operation, ``2 e0 - e`` to first order, for the common Fermi
+    level), its density change ``d rho_down`` gives ``d rho_up = -g^-1 d rho_down`` by the operation, and the
+    Hartree and exchange-correlation potentials of both densities give ``J v = w_out / (2 s)``.  The first solve
+    of the down channel is at the converged potential (its levels are those of the up channel); the Ritz values of
+    :data:`FLIP_STABILITY_STEPS` Arnoldi steps on ``J`` (inner product of the grid or of the orbits) give the
+    largest eigenvalue.  The first probe direction mixes the moment density, its magnitude (a field on the moments)
+    and a seeded random field times the density.
+    """
+
+    started = time.perf_counter()
+    if reduced:
+        field_of = adapter.field
+        weights = np.asarray(adapter.weights, dtype=np.float64)
+
+        def values_of(field):
+            return np.asarray(getattr(field, "values", field), dtype=np.float64)
+
+    else:
+        weights = None
+
+        def field_of(values):
+            return values
+
+        def values_of(field):
+            return np.asarray(field, dtype=np.float64)
+
+    def dot(left, right) -> float:
+        return float(np.dot(left * weights, right)) if weights is not None else float(np.dot(left, right))
+
+    def operator(potential):
+        hamiltonian = system.hamiltonian(potential)
+        factory = getattr(hamiltonian, "as_eigensolver_operator", hamiltonian.as_linear_operator)
+        return factory()
+
+    def density(vectors, occupations):
+        if orbital_density_builder is None:
+            return spin_density_from_orbitals(vectors, occupations, volume_element)
+        built = orbital_density_builder(vectors, 0.5 * occupations, volume_element)
+        return built if reduced else np.asarray(built, dtype=np.float64)
+
+    probe_settings = eigval_settings_for(eigensolver_settings, eigensolver_settings.filter_degree, neighbors=neighbors)
+    window = float(fermi_level) + START_LEVEL_WINDOW
+    passes_total = 0
+    vectors = None
+
+    def solve_down(potential, state, previous, passes):
+        """Passes of the down channel at ``potential`` until no level up to the window moves by more than the
+        tolerance; returns the last solution."""
+
+        nonlocal vectors, passes_total
+        hamiltonian_operator = operator(potential)
+        solution = None
+        for _ in range(passes):
+            release = getattr(vectors, "release_intermediate_storage", None)
+            if reduced and callable(release):
+                release()
+            solution = solve(hamiltonian_operator, number_of_states, settings=probe_settings, state=state)
+            passes_total += 1
+            state, vectors = solution.state, solution.vectors
+            values = np.asarray(solution.eigenvalues, dtype=np.float64)
+            if previous is not None and previous.shape == values.shape:
+                shown = (values <= window) | (previous <= window)
+                if float(np.max(np.abs(values - previous)[shown], initial=0.0)) < FLIP_STABILITY_LEVEL_TOLERANCE:
+                    break
+            previous = values
+        return solution
+
+    def occupations_of(solution, mirrored):
+        weights_down = getattr(solution, "state_weights", None)
+        partners_down = getattr(solution, "state_partners", None)
+        levels = np.asarray(solution.eigenvalues, dtype=np.float64)
+        # The levels of the up channel in ascending order (the occupations of both channels sort them), with the
+        # weights and partners of their states: only their Fermi level is read.
+        order = np.arange(levels.size) if mirrored is None else np.argsort(mirrored, kind="stable")
+        up_levels = levels if mirrored is None else np.asarray(mirrored, dtype=np.float64)[order]
+        pair_weights = (
+            None
+            if weights_down is None
+            else (
+                np.asarray(weights_down, dtype=np.float64)[order],
+                np.asarray(weights_down, dtype=np.float64),
+            )
+        )
+        pair_partners = (
+            None
+            if partners_down is None
+            else (tuple(np.asarray(partners_down)[order].tolist()), partners_down)
+        )
+        result = _spin_occupations([up_levels, levels], system, settings, pair_weights, pair_partners)
+        return _weighted_occupations(result, pair_weights)[1]
+
+    def labels_of(solution):
+        labels = getattr(solution, "representations", None)
+        levels = np.asarray(solution.eigenvalues)
+        return np.zeros(levels.size, dtype=np.int64) if labels is None else np.asarray(labels, dtype=np.int64)
+
+    def outputs(up_density, down_density):
+        hartree = system.solve_hartree(up_density + down_density, initial_potential=hartree_potential)
+        xc = system.evaluate_spin_xc(up_density, down_density)
+        return (
+            values_of(ionic_potential + hartree.potential + xc.potentials[0]),
+            values_of(ionic_potential + hartree.potential + xc.potentials[1]),
+        )
+
+    # The down channel at the converged potential of the route: its levels are those of the up channel.
+    base_down = flip.down_field(up_potential)
+    restart = getattr(solve, "start_new_scf_loop", None)
+    state = restart() if callable(restart) else None
+    first_started = time.perf_counter()
+    base = solve_down(base_down, state, None, FLIP_STABILITY_FIRST_PASSES)
+    first_passes, first_seconds = passes_total, time.perf_counter() - first_started
+    state = base.state
+    base_levels = np.asarray(base.eigenvalues, dtype=np.float64)
+    base_labels = labels_of(base)
+    up_levels = np.asarray(up_eigenvalues, dtype=np.float64)
+    count = min(base_levels.size, up_levels.size)
+    shown = np.sort(base_levels)[:count] <= window
+    first_deviation = float(
+        np.max(np.abs(np.sort(base_levels)[:count] - np.sort(up_levels)[:count])[shown], initial=0.0)
+    )
+    down_density = density(base.vectors, occupations_of(base, None))
+    down_values = values_of(down_density)
+    up_values = values_of(flip.up_field(down_values))
+    base_up, base_down_output = outputs(field_of(up_values), field_of(down_values))
+    base_potential = values_of(base_down)
+
+    rng = np.random.default_rng(FLIP_STABILITY_SEED)
+    moment = down_values - up_values
+    total = down_values + up_values
+    scale = max(float(np.max(np.abs(moment), initial=0.0)), 1.0e-30)
+    start = (
+        np.abs(moment) / scale
+        + 0.5 * moment / scale
+        + 0.25 * rng.standard_normal(moment.shape) * total / max(float(np.max(np.abs(total), initial=0.0)), 1.0e-30)
+    )
+    basis = [start / np.sqrt(dot(start, start))]
+    hessenberg = np.zeros((FLIP_STABILITY_STEPS + 1, FLIP_STABILITY_STEPS), dtype=np.float64)
+    history: list[float] = []
+    ritz = np.zeros(0)
+    probes = 0
+    for step in range(FLIP_STABILITY_STEPS):
+        direction = basis[step]
+        size = FLIP_STABILITY_KICK / max(float(np.max(np.abs(direction), initial=0.0)), 1.0e-30)
+        solution = solve_down(
+            field_of(base_potential + size * direction), state, np.asarray(base.eigenvalues), FLIP_STABILITY_PASSES
+        )
+        state = solution.state
+        probes += 1
+        mirrored = _mirrored_levels(base_levels, base_labels, solution.eigenvalues, labels_of(solution))
+        changed = values_of(density(solution.vectors, occupations_of(solution, mirrored))) - down_values
+        up_new = up_values - values_of(flip.up_field(changed))
+        up_output, down_output = outputs(field_of(up_new), field_of(down_values + changed))
+        response = (
+            (down_output - base_down_output) - values_of(flip.down_field(up_output - base_up))
+        ) / (2.0 * size)
+        for _ in range(2):
+            # (Gram-Schmidt twice)
+            for row in range(step + 1):
+                projection = dot(basis[row], response)
+                hessenberg[row, step] += projection
+                response = response - projection * basis[row]
+        norm = float(np.sqrt(max(dot(response, response), 0.0)))
+        hessenberg[step + 1, step] = norm
+        ritz = np.sort(np.linalg.eigvals(hessenberg[: step + 1, : step + 1]).real)[::-1]
+        history.append(float(ritz[0]))
+        if norm <= 1.0e-12 * max(1.0, float(np.max(np.abs(hessenberg[: step + 1, : step + 1])))):
+            break
+        basis.append(response / norm)
+    release = getattr(vectors, "release_intermediate_storage", None)
+    if reduced and callable(release):
+        release()
+    # The device Hamiltonian holds the potential of the up channel again, as the loop left it.
+    system.hamiltonian(up_potential)
+    return FlipStabilityReport(
+        largest=history[-1] if history else float("nan"),
+        history=history,
+        ritz=ritz,
+        probes=probes,
+        passes=passes_total,
+        first_deviation=first_deviation,
+        first_passes=first_passes,
+        first_seconds=first_seconds,
+        seconds=time.perf_counter() - started,
+        bound=FLIP_STABILITY_BOUND,
+    )
+
+
 def _take_flipped_channel(flip, eigenvalues, wavefunctions, representations, states, weights=None,
                           partners=None) -> None:
     """The down channel of a step as the image of the up channel (PARSEC_SPIN_FLIP_SYMMETRY).
@@ -513,9 +862,11 @@ def run_spin_scf(
 
     A loop of ``PARSEC_SPIN_FLIP_SYMMETRY`` (the down channel taken as the image of the up channel) is not kept where
     its up channel ends with a fractional Fermi-Dirac occupation (``min(f, 1 - f)`` from
-    :data:`SPIN_FLIP_OCCUPATION_TOLERANCE`) or where a test of the spin sectors of the accelerated driver fails in it
-    (test 1 of the start Hamiltonian, tests 2 and 3 of the result: they would leave the sectors for a state of the
-    operation that two solved channels need not reach).  A note goes to ``callback``, ``system`` leaves the route for
+    :data:`SPIN_FLIP_OCCUPATION_TOLERANCE`), where its converged state is unstable against perturbations that break
+    the operation (``PARSEC_SPIN_FLIP_STABILITY=auto``, :func:`_flip_stability`), or where a test of the spin sectors
+    of the accelerated driver fails in it (test 1 of the start Hamiltonian, tests 2 and 3 of the result: they would
+    leave the sectors for a state of the operation that two solved channels need not reach).  A note goes to
+    ``callback``, ``system`` leaves the route for
     the rest of the run (:func:`leave_spin_flip`), and the loop runs again from its start with both channels, in the
     sectors the flip loop started in: the loop of ``off``, whose result the guard of the spin sectors then tests as
     any other.  A warm start (an ionic step) is taken again without its saved subspaces, which the flip loop moved on.
@@ -543,6 +894,13 @@ def run_spin_scf(
         # exception.
         record = _spin_flip_fractional_record(broken)
         why = f"a fractional occupation of the up channel, min(f, 1-f) = {broken.largest:.3e}"
+    except _SpinFlipUnstable as unstable:
+        # PARSEC_SPIN_FLIP_STABILITY=auto: the state the route converged to is unstable.
+        record = _spin_flip_unstable_record(unstable.report)
+        why = (
+            "a state unstable against perturbations that break the operation (largest eigenvalue "
+            f"{unstable.report.largest:.3f} of their SCF response)"
+        )
     except Exception as error:
         if not taken or not _sector_guard(error):
             raise
@@ -678,12 +1036,21 @@ def _run_spin_loop(
         )
     neighbors = preconditioner_neighbors(system, eigensolver_settings)
     diagonalization_tolerance = first_diagonalization_tolerance(eigensolver_settings)
+    # PARSEC_STATES_CLOSE_MULTIPLET: more states where States_Num cuts an occupied multiplet (full-grid loops).
+    closer = MultipletCloser.for_loop(
+        system,
+        adapter=scalar_field_adapter,
+        exchange=exchange_term is not None,
+        criterion=settings.convergence_criterion,
+    )
 
     # 1. First potentials.  The Hartree potential is that of the normalized
     # total starting density; the exchange-correlation potentials are those
     # of the two starting channels, which initchrg.f90 builds so that they
     # add up to twice that density (see initial_spin_densities).
     eigval_states: list[object | None] = [None, None]
+    # PARSEC_STATES_CLOSE_MULTIPLET: the Ritz values of the working subspace of each channel's last solve.
+    channel_levels: list[np.ndarray | None] = [None, None]
     if warm_start is None:
         stage_start = time.perf_counter()
         initial_hartree = system.solve_hartree(
@@ -745,6 +1112,9 @@ def _run_spin_loop(
                     bound,
                 )
                 flip = None
+    if closer is not None:
+        # (a loop that continues one whose States_Num was raised keeps that count)
+        number_of_states = closer.carried(number_of_states, eigval_states)
     if flip_refusal is not None and callback is not None:
         callback(_spin_flip_record(flip_refusal))
     if flip is not None and flip_taken is not None:
@@ -908,6 +1278,7 @@ def _run_spin_loop(
                     state=eigval_states[spin],
                 )
             eigval_states[spin] = eigensolution.state
+            channel_levels[spin] = working_levels(eigensolution)
             solver_counts.append(getattr(eigensolution, "iterative_counts", None))
             diagonalization_seconds += time.perf_counter() - diagonalization_start
             eigenvalues[spin] = np.asarray(eigensolution.eigenvalues, dtype=np.float64)
@@ -992,6 +1363,7 @@ def _run_spin_loop(
                         state=eigval_states[spin],
                     )
                     eigval_states[spin] = eigensolution.state
+                    channel_levels[spin] = working_levels(eigensolution)
                     eigenvalues[spin] = np.asarray(eigensolution.eigenvalues, dtype=np.float64)
                     wavefunctions[spin] = eigensolution.vectors
                     state_weights[spin] = getattr(eigensolution, "state_weights", None)
@@ -1015,6 +1387,29 @@ def _run_spin_loop(
                 occupations = _weighted_occupations(occupation_result, weights)
                 electrons = occupation_result.electrons
                 fermi_level = occupation_result.fermi_level
+        state_count_change = None
+        if closer is not None and weights is None and not refining:
+            # PARSEC_STATES_CLOSE_MULTIPLET (SCF/state_extension.py), with the levels of both channels.
+            state_count_change = closer.check(
+                iteration,
+                number_of_states,
+                tuple(
+                    (
+                        SPIN_NAMES[spin],
+                        eigenvalues[spin],
+                        occupations[spin],
+                        channel_levels[0 if spin == 1 and flip is not None else spin],
+                    )
+                    for spin in range(2)
+                ),
+                [step.plain_residual if settings.use_plain_residual else step.weighted_residual for step in history],
+                fermi_level,
+            )
+            if state_count_change is not None:
+                number_of_states = state_count_change.states
+                reset = getattr(mixer, "reset", None)
+                if callable(reset):
+                    reset()
         for spin in range(2):
             if spin == 1 and flip is not None:
                 # rho_down(r) = rho_up(g^-1 r): one gather of the up channel's values.
@@ -1231,6 +1626,7 @@ def _run_spin_loop(
                 for values in densities
             ),
             density_symmetrization=symmetrization,
+            **({} if state_count_change is None else {"state_count_note": state_count_change.lines()}),
             **hubbard_iteration_record(hubbard_state),
             **iteration_eigensolver_fields(
                 tuple(solver_counts),
@@ -1325,6 +1721,31 @@ def _run_spin_loop(
         largest, lines = _flip_fractional_occupations(eigenvalues[0], occupation_result.occupations[0])
         if largest >= SPIN_FLIP_OCCUPATION_TOLERANCE:
             raise _SpinFlipFractional(largest, lines)
+    stability = None
+    if flip is not None and converged and getattr(flip, "stability", "off") == "auto":
+        # PARSEC_SPIN_FLIP_STABILITY=auto: the converged state against perturbations that break the operation, from
+        # the response of the down channel (the up channel and its orbitals are not touched); run_spin_scf solves the
+        # loop again with both channels where it is unstable.
+        stability = _flip_stability(
+            system,
+            flip,
+            solve=solvers[1],
+            number_of_states=number_of_states,
+            eigensolver_settings=eigensolver_settings,
+            neighbors=neighbors,
+            settings=settings,
+            up_potential=last_input_potentials[0],
+            up_eigenvalues=eigenvalues[0],
+            fermi_level=fermi_level,
+            ionic_potential=ionic_potential,
+            hartree_potential=hartree_potential,
+            reduced=reduced,
+            adapter=scalar_field_adapter,
+            orbital_density_builder=orbital_density_builder,
+            volume_element=volume_element,
+        )
+        if stability.unstable:
+            raise _SpinFlipUnstable(stability)
     output_potentials = [
         ionic_potential + hartree_potential + xc_potential
         for xc_potential in xc_potentials
@@ -1397,7 +1818,8 @@ def _run_spin_loop(
         density=densities[0] + densities[1],
         core_density=system.core_density,
         ionic_potential=system.ionic_potential,
-        hartree_potential=hartree_potential,
+        # V_H of the Poisson solve, also where the loop ran with V' (PARSEC_HARTREE_VARIATIONAL)
+        hartree_potential=electrostatic_hartree(system, hartree_potential),
         # Averages of the two channels, as forcloc.f90 forms them.
         xc_potential=0.5 * (xc_potentials[0] + xc_potentials[1]),
         input_effective_potential=0.5
@@ -1426,6 +1848,9 @@ def _run_spin_loop(
         # accelerated driver): a result that breaks the symmetry of the atoms
         # or has fractional occupations is not kept.
         check(result)
+    if stability is not None and callback is not None:
+        # (PARSEC_SPIN_FLIP_STABILITY: the note of a kept state)
+        callback(_spin_flip_stable_record(stability))
     return result
 
 

@@ -47,10 +47,16 @@ checked in every preparation):
   cell whose operations take no translation (whose abelian route keeps the group about the origin), whose guard
   stops the weighted sectors goes straight to the full grid where the sectors of the abelian group would stop the
   same state (the reported multiplet holds a representation of ``G`` whose partners lie in two or more abelian
-  sectors, ``PointGroupReduction.sector_abelian_split``; ``None`` for a cell with translations, which keeps the way
-  through its abelian sectors).  For a stop at the start Hamiltonian (test 1), which both routes share, the run of
+  sectors, ``PointGroupReduction.sector_abelian_split``; for a cell whose abelian sectors take its commuting
+  involutions with their translations those flags are formed against that group where a report asks for them,
+  ``PointGroupReduction.sector_abelian_split_source``, under ``PARSEC_WEIGHTED_GUARD_SHORTCUT_TRANSLATIONS=auto``;
+  ``off`` of that switch keeps the way through its abelian sectors, as before 2026-11-22).  For a stop at the start
+  Hamiltonian (test 1), which both routes share, the run of
   the abelian sectors that would follow is the one ``off`` of ``PARSEC_ORBITAL_GROUP_SPIN`` pays before its own full
-  grid, bit for bit; a stop at the end of the SCF (test 3) is predicted from the weighted run's own occupations, and
+  grid, bit for bit, wherever those sectors stop there too, as on the clusters and cells about the origin measured; for
+  a cell with translations that is a prediction as well (the neutral vacancy on a B site of a diamond 3^3 cell: its
+  abelian sectors passed test 1 and stopped at test 3, the same energy in 26 against 16 iterations); a stop at the
+  end of the SCF (test 3) is predicted from the weighted run's own occupations, and
   gives the full-grid result, which is the abelian route's wherever that route stops at its end too.  ``off``:
   always through the abelian sectors, as before.
 * ``PARSEC_ORBITAL_GROUP_SPIN_FLOOR`` (:func:`spin_floor_setting`) -- the smallest basis (grid points times states
@@ -102,11 +108,14 @@ def weighted_route_settings() -> tuple[str, str, int]:
     """The three switches of the module's end read and checked: ``PARSEC_ORBITAL_GROUP_MPI``,
     ``PARSEC_WEIGHTED_GUARD_SHORTCUT`` and ``PARSEC_ORBITAL_GROUP_SPIN_FLOOR``."""
 
+    # (and PARSEC_WEIGHTED_GUARD_SHORTCUT_TRANSLATIONS, which the guard reads where it stops)
+    guard_shortcut_translations_setting()
     return mpi_weighted_setting(), guard_shortcut_setting(), spin_floor_setting()
 
 
 MPI_SWITCH = "PARSEC_ORBITAL_GROUP_MPI"
 GUARD_SHORTCUT_SWITCH = "PARSEC_WEIGHTED_GUARD_SHORTCUT"
+GUARD_SHORTCUT_TRANSLATIONS_SWITCH = "PARSEC_WEIGHTED_GUARD_SHORTCUT_TRANSLATIONS"
 SPIN_FLOOR_SWITCH = "PARSEC_ORBITAL_GROUP_SPIN_FLOOR"
 #: The floor of ``PARSEC_ORBITAL_GROUP_SPIN_FLOOR=auto``: grid points times states of a channel (see the module: the
 #: measurements found no size below which the abelian sectors are faster, so none).
@@ -132,6 +141,15 @@ def guard_shortcut_setting() -> str:
     the full grid) or ``off`` (through the abelian sectors, as before)."""
 
     return _auto_or_off(GUARD_SHORTCUT_SWITCH)
+
+
+def guard_shortcut_translations_setting() -> str:
+    """``PARSEC_WEIGHTED_GUARD_SHORTCUT_TRANSLATIONS``: ``auto`` (the shortcut of ``PARSEC_WEIGHTED_GUARD_SHORTCUT``
+    also for a cell whose abelian route takes its commuting involutions with their translations: the flags against
+    that group, ``PointGroupReduction.sector_abelian_split_source``) or ``off`` (such a cell goes through its abelian
+    sectors, as before 2026-11-22)."""
+
+    return _auto_or_off(GUARD_SHORTCUT_TRANSLATIONS_SWITCH)
 
 
 def spin_floor_setting() -> int:

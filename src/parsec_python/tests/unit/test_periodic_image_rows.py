@@ -75,9 +75,13 @@ def _cases():
 
 
 def _both(grid, group):
-    """The group without its table (``on``: at any size and thread count) and with it (``off``)."""
+    """The group without its table (the rows of ``auto`` at any size and thread count, which keep the row of an
+    oblique operation; ``on`` keeps none since 2026-11-22: tests/unit/test_symmetry_table_memory.py) and with it
+    (``off``)."""
 
-    with mock.patch.dict(os.environ, {"PARSEC_PERIODIC_IMAGE_ROWS": "on"}):
+    with mock.patch.dict(os.environ, {"PARSEC_PERIODIC_IMAGE_ROWS": "auto"}), mock.patch(
+        "parsec_python.Grid.space_group._image_rows_taken", return_value=True
+    ):
         rows = periodic_grid_symmetry(grid, group)
     with mock.patch.dict(os.environ, {"PARSEC_PERIODIC_IMAGE_ROWS": "off"}):
         table = periodic_grid_symmetry(grid, group)

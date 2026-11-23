@@ -23,14 +23,18 @@ here, after the accelerated SCF, with the readable post-processing of the refere
 Everything else these features combine with stays on the reference solver by name
 (:func:`acceleration.cli._reference_only_features`): k-point SCFs (whose eigensolves already run on
 the device workers), spin and spin-orbit bands, LDA+U, wires and slabs, Fortran's general grid, the
-periodic DOS (it needs k-points), and both features under ``--mpi`` (the accelerated periodic path
-has no MPI; the MPI k-point solver is a reference-driver path).
+periodic DOS (it needs k-points), and the DOS under ``--mpi``.  Under ``--mpi`` every rank runs the
+accelerated SCF of a Gamma cell (the SCF of one process), and the band k-points are dealt to the ranks
+(``PARSEC_MPI_ACCELERATED_BANDS=auto``; ``off`` runs such an input on the reference solver, as before).
 """
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 import time
+
+MPI_BANDS_SWITCH = "PARSEC_MPI_ACCELERATED_BANDS"
 
 
 def _mpi_requested() -> bool:
@@ -39,12 +43,29 @@ def _mpi_requested() -> bool:
     return mpi.requested()
 
 
+def mpi_accelerated_bands_setting() -> str:
+    """``PARSEC_MPI_ACCELERATED_BANDS``: ``auto`` (the default since 2026-11-22) keeps the ``bandstruc`` of a scalar
+    Gamma-point cell on the accelerated path under ``--mpi``: every rank runs the accelerated SCF that one process
+    runs, and the band k-points are dealt to the ranks, each solved by the band solver of one process on the GPUs of its
+    rank (:func:`..SCF.band_sectors.solve_band_sectors`; k-points solved whole by
+    :func:`..SCF.kpoint_parallel.map_tasks`), so the levels are those of one process.  ``off``: such an input runs
+    whole on the reference solver under ``--mpi``, as before: its SCF on the MPI k-point pools (the full grid, another
+    route) and band levels tested on every state at ``Diag_Tolerance`` (216-atom diamond: levels 3.4e-5 Ry from one
+    process, largest residual 9.8e-4 Ry, 669 s against 16 s)."""
+
+    value = os.environ.get(MPI_BANDS_SWITCH, "auto").strip().lower() or "auto"
+    if value not in ("auto", "off"):
+        raise ValueError(f"{MPI_BANDS_SWITCH} must be auto or off, not {value!r}")
+    return value
+
+
 def accelerated_band_structure(translation) -> bool:
     """Whether the ``bandstruc`` of ``translation`` runs after the accelerated SCF.
 
     A scalar periodic cell sampled at Gamma only (the accelerated periodic SCF), not a wire or slab,
-    without spin, spin-orbit species, LDA+U or ``--mpi``.  Inputs that fail any of these keep the
-    feature on the reference solver; most of them are routed there by another feature as well.
+    without spin, spin-orbit species or LDA+U; under ``--mpi`` only with ``PARSEC_MPI_ACCELERATED_BANDS=auto``.
+    Inputs that fail any of these keep the feature on the reference solver; most of them are routed there
+    by another feature as well.
     """
 
     problem = translation.problem
@@ -60,7 +81,7 @@ def accelerated_band_structure(translation) -> bool:
     for specification in problem.pseudopotentials.values():
         if specification.spin_orbit or getattr(specification, "has_hubbard", False):
             return False
-    return not _mpi_requested()
+    return not _mpi_requested() or mpi_accelerated_bands_setting() == "auto"
 
 
 def accelerated_dos(translation) -> bool:
@@ -141,7 +162,10 @@ def run_post_scf_outputs(system, translation, result, reporter, write, directory
     dos = accelerated_dos(translation)
     if not (bands or dos):
         return
+    import parsec_python.cli as reference_cli
     from parsec_python.cli import _run_band_structure, _run_dos
+
+    from ..Parallel import mpi
 
     started = time.perf_counter()
     text_reporter = getattr(reporter, "reference", reporter)
@@ -152,16 +176,30 @@ def run_post_scf_outputs(system, translation, result, reporter, write, directory
         # The k-points of the path in the sectors of their little groups where the SCF ran in sectors
         # (PARSEC_BAND_KPOINT_SECTORS; off: every k-point on the whole grid, as before).
         symmetry = band_symmetry_of(system) if band_kpoint_sectors_setting() == "auto" else None
-        _run_band_structure(
-            reference_system, translation, band_hand_over(system, result), text_reporter, directory,
-            **({} if symmetry is None else {"symmetry": symmetry}),
-        )
+        # Under --mpi every rank solves its share of the band k-points and gets all the levels; rank 0 writes the
+        # band files (bands.dat, bands_plot.dat, parsec_python_bands.npz), the others none.
+        context = mpi.context()
+        writes = reference_cli._WRITE_DATA_FILES
+        if context is not None and not context.is_root:
+            reference_cli._WRITE_DATA_FILES = False
+        try:
+            _run_band_structure(
+                reference_system, translation, band_hand_over(system, result), text_reporter, directory,
+                **({} if symmetry is None else {"symmetry": symmetry}),
+            )
+        finally:
+            reference_cli._WRITE_DATA_FILES = writes
         record = last_band_sector_record() if symmetry is not None else {}
         if record:
             write(
                 f" Band k-points in the sectors of their little groups: {record['split']} of {record['kpoints']} "
                 f"k-points split, at most {record['largest']} sectors, under the {record['group']} operations of the "
                 "SCF potential (PARSEC_BAND_KPOINT_SECTORS=auto)"
+                + (
+                    f"; {record['images']} sectors not solved, images of others (PARSEC_KPOINT_SECTOR_CLASSES=auto)"
+                    if record.get("images")
+                    else ""
+                )
             )
     if dos:
         _run_dos(reference_system, translation, result, text_reporter, directory)

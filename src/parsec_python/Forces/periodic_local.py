@@ -36,6 +36,9 @@ from ..Pseudopotential import ParsecPseudopotential
 from ..Pseudopotential.radial_derivatives import (
     evaluate_density_derivative,
     evaluate_local_potential_derivative,
+    linear_slope_setting,
+    smooth_center_radius,
+    spline_force_center_setting,
 )
 from ..V_ion import ionic_potential as _ionic
 from ..V_ion.ewald import ewald_local_image_sets, local_potential_uses_spline
@@ -137,6 +140,8 @@ def dense_periodic_local_forces(
     weight = np.exp(-g_squared / (4.0 * eta**2)) / g_squared if g_squared is not None else None
     half_width = grid.settings.stencil_half_width
     tables: dict = {}
+    center = spline_force_center_setting()
+    slopes = linear_slope_setting()  # PARSEC_LINEAR_TABLE_SLOPES (the core density of a species without Cubic_Spline)
 
     for index, atom in enumerate(atoms):
         potential = potentials[atom.symbol]
@@ -158,6 +163,7 @@ def dense_periodic_local_forces(
                 table=species.local_potential_derivative,
                 use_spline=local_potential_uses_spline(specification),
                 spline_padding_width=half_width,
+                center=smooth_center_radius(potential, center),
             ) + _erf_over_r_slope(charge, radius, eta)
             inverse = np.zeros_like(radius)
             positive = radius > 0.0
@@ -184,6 +190,8 @@ def dense_periodic_local_forces(
                     table=species.core_density_derivative,
                     use_spline=specification.use_spline,
                     spline_padding_width=half_width,
+                    center=smooth_center_radius(potential, center),
+                    slopes=slopes,
                 )
                 inverse = np.zeros_like(radius)
                 positive = radius > 0.0

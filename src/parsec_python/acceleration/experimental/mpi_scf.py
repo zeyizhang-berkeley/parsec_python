@@ -245,6 +245,65 @@ def _rank_device_groups(owned, costs, devices, pool=True):
     return {sector: disjoint[sector] for sector in owned}
 
 
+RUNNER_POOL_GAIN_SETTING = 'PARSEC_MPI_SECTOR_POOL_MIN_GAIN'
+#: The share of the fullest GPU of the disjoint groups that the device pool must save on a rank of the runner under its
+#: launch settings (:func:`runner_pool_min_gain`).
+RUNNER_POOL_MIN_GAIN = 0.25
+
+
+def runner_pool_min_gain() -> float:
+    """``PARSEC_MPI_SECTOR_POOL_MIN_GAIN``: the least share of the fullest GPU of its disjoint groups that the device
+    pool of a rank of the MPI full-SCF runner must save where the floor of the pool applies
+    (:func:`runner_pool_floor_applies`: the launch settings); ``0.25`` by default (since 2026-11-22).
+
+    The pool spreads every sector of the rank over all its GPUs and solves them one after another; it saves the
+    imbalance of the disjoint groups (``1 - pooled / fullest``: ten equal sectors on four GPUs hold three on the
+    fullest against 2.5 in the pool, 1/6; five hold two against 1.25, 3/8) and costs the exchanges and
+    synchronizations of a shared basis in every sector.  With the launch settings ten sectors on four GPUs were
+    faster in disjoint groups at every size measured, with less on the fullest GPU, while five were faster in the
+    pool from about half a GiB of basis per GPU per sector: one rank of four A100, first runs, SCF seconds with the
+    kernel cache warm, disjoint against the pool, the fullest GPU: diamond 10^3 (ten sectors, 193.6 MiB per GPU per
+    sector) 7.14 against 9.18 s, 4.3 against 5.1 GiB; 12^3 (574.8 MiB) 15.64 against 17.50 s, 9.6 against 12.0 GiB;
+    14^3 (1446 MiB) 33.81 against 36.90 s, 20.6 against 27.8 GiB; 16^3 (3216 MiB) 76.50 against 78.78 s, 42.9
+    against 52.1 GiB; silicon 8^3 (4096 atoms, CA, 121.5 MiB) 11.40 against 15.77 s, 3.4 against 4.5 GiB; and with
+    five sectors silicon 5^3 (29.7 MiB) 3.22 against 5.66 s, diamond 11^3 (1361 MiB) 20.95 against 18.08 s, 12.6
+    against 13.1 GiB, 13^3 (3703 MiB) 59.44 against 46.62 s, 32.1 against 30.9 GiB; diamond 9^3 (410 MiB) 7.48
+    against 7.85 s; diamond 12^3 on two nodes (five sectors per rank, 574.8 MiB) 11.22 against 9.78 s.  So a rank
+    takes the pool only where it saves at least this share (and its sectors reach the floor of the bytes,
+    ``PARSEC_CUPY_SECTOR_POOL_MIN_BYTES``, as before): ten, seven, eleven or thirteen equal sectors on four GPUs
+    keep disjoint groups, three, five, six or nine the pool of before.  ``0.05`` or below restores the decisions of
+    before (the memory rule takes the pool only from a gain of 5 %); a number from 0 to 1, refused otherwise when
+    the runner starts.
+    """
+
+    import os
+
+    raw = os.environ.get(RUNNER_POOL_GAIN_SETTING, '').strip()
+    if not raw:
+        return RUNNER_POOL_MIN_GAIN
+    try:
+        value = float(raw)
+    except ValueError as error:
+        raise ValueError(f'{RUNNER_POOL_GAIN_SETTING} must be a number from 0 to 1, not {raw!r}') from error
+    if not 0.0 <= value <= 1.0:
+        raise ValueError(f'{RUNNER_POOL_GAIN_SETTING} must be a number from 0 to 1, not {raw!r}')
+    return value
+
+
+def _pool_gain(owned, costs, devices):
+    """``1 - pooled / fullest``: the share of the fullest GPU of the disjoint groups of ``owned`` that the pool
+    saves."""
+    disjoint = _rank_device_groups(owned, costs, devices, pool=False)
+    loads = {device: 0.0 for device in devices}
+    for sector, group in disjoint.items():
+        for device in group:
+            loads[device] += float(costs[sector]) / len(group)
+    fullest = max(loads.values(), default=0.0)
+    if fullest <= 0.0:
+        return 0.0
+    return 1.0 - sum(float(costs[sector]) for sector in owned) / len(devices) / fullest
+
+
 def _pool_floor_groups(owned, costs, devices, groups, notes=None):
     """``groups`` of one rank, or its disjoint groups where the device pool gives its GPUs too little basis each.
 
@@ -255,9 +314,11 @@ def _pool_floor_groups(owned, costs, devices, groups, notes=None):
     of each sector, ``sector_placement_costs`` with a filter plan); below it the sectors keep the disjoint groups,
     whose bases lie whole on single GPUs: the exchanges and synchronizations of a shared basis cost more than the
     imbalance there (one process, diamond: slower at 9.4 and 12.5 MiB per GPU, not slower from 25.7 MiB).  ``notes``
-    (a list) receives the reason of a pool decision.  The value ``0`` takes the pool by the memory rule alone, as the
-    MPI runner did before 2026-11-21 and still does under the code defaults of the start vectors and the filter
-    (:func:`runner_pool_floor_applies`).
+    (a list) receives the reason of a pool decision.  Since 2026-11-22 the pool must also save
+    ``PARSEC_MPI_SECTOR_POOL_MIN_GAIN`` of the fullest GPU (:func:`runner_pool_min_gain`), which ``0`` here does not
+    lift: the memory rule alone, as the MPI runner took it before 2026-11-21 and still takes it under the code defaults
+    of the start vectors and the filter (:func:`runner_pool_floor_applies`), needs ``0`` together with
+    ``PARSEC_MPI_SECTOR_POOL_MIN_GAIN=0.05``; the decisions of 2026-11-21 need that ``0.05`` alone.
     """
     owned = tuple(owned)
     devices = tuple(devices)
@@ -267,7 +328,13 @@ def _pool_floor_groups(owned, costs, devices, groups, notes=None):
 
     floor = process_pool_min_bytes()
     share = process_pool_share_bytes(tuple(costs[sector] for sector in owned), len(devices))
-    if share < floor:
+    # Since 2026-11-22 the pool must also save PARSEC_MPI_SECTOR_POOL_MIN_GAIN of the fullest GPU
+    # (runner_pool_min_gain).
+    least = runner_pool_min_gain()
+    gain = _pool_gain(owned, costs, devices)
+    # (a gain of exactly a quarter, three sectors on four GPUs or five, is no less than 0.25 in floating point)
+    small = gain < least - 1e-9
+    if share < floor or small:
         groups = _rank_device_groups(owned, costs, devices, pool=False)
         reason = 'disjoint groups: the device pool would give'
     else:
@@ -275,7 +342,8 @@ def _pool_floor_groups(owned, costs, devices, groups, notes=None):
     if notes is not None:
         notes.append(f"{reason} {share / 2**20:.1f} MiB of basis per GPU per sector, "
                      f"{'below' if share < floor else 'at least'} PARSEC_CUPY_SECTOR_POOL_MIN_BYTES = "
-                     f"{floor / 2**20:g} MiB")
+                     f"{floor / 2**20:g} MiB, and save {100.0 * gain:.1f} % of the fullest GPU, "
+                     f"{'below' if small else 'at least'} {RUNNER_POOL_GAIN_SETTING} = {100.0 * least:g} %")
     return groups
 
 
@@ -612,6 +680,9 @@ class MPISectorContext:
         # Called on every rank after each forces or spin_forces command with the command and how many of it this
         # rank has served (the full-SCF runner records the memory of its devices there); None calls nothing.
         self.command_observer = None
+        # The input of a moving run in sectors, on every rank (the full-SCF runner sets it): a reprepare with
+        # ``moving`` gives it the atoms of the new structure (SCF/moving_sectors.MovingSectors).
+        self.moving_problem = None
 
     # configure, planned_groups and divides take the costs of the sectors (Eigensolvers/symmetry.py,
     # sector_placement_costs; the sector eigensolver passes them where this is True), and configure and
@@ -851,13 +922,19 @@ class MPISectorContext:
         ``abelian_reason`` (a run that left the weighted sectors of a subgroup, ``driver._SpinSectorFallback.
         replace_with_abelian``): the same input in the sectors of the abelian group, prepared with that reason
         (:func:`..Symmetry.weighted_inputs.abelian_orbitals`) and the other keywords of the payload (``symmetry``,
-        ``symmetry_fixed_atoms``, ``symmetry_constraints``, ``sector_forces``), as the root prepares it next.
+        ``symmetry_fixed_atoms``, ``symmetry_constraints``, ``sector_forces``), as the root prepares it next.  With
+        ``moving`` (molecular dynamics or manual movements whose structure left the group of its sectors,
+        ``SCF/moving_sectors.MovingSectors``, since 2026-11-22): the input of the run with the ``atoms`` and
+        ``recenter_geometry`` of the payload, which every rank applies to its own problem (:attr:`moving_problem`,
+        whose pseudopotential files it read), prepared with ``symmetry``, ``symmetry_fixed_atoms`` and
+        ``symmetry_constraints``: the sectors of the group the structure keeps, or (``off``) the one sector of the
+        identity that the ranks share.
         """
         if self.rank != self.root:
             raise MPISCFError('only root may dispatch SCF commands')
         if self.failed or self.stopped:
             raise MPISCFError('MPI sector context is no longer active')
-        if payload.get('abelian_reason') is None:
+        if payload.get('abelian_reason') is None and not payload.get('moving'):
             self.spin_fallback_layout = True
         self.comm.bcast(('reprepare', payload, None), root=self.root)
         self.command_counts['reprepare'] = self.command_counts.get('reprepare', 0) + 1
@@ -873,7 +950,8 @@ class MPISectorContext:
 
         self.command_counts['reprepare'] = self.command_counts.get('reprepare', 0) + 1
         abelian_reason = payload.get('abelian_reason')
-        if abelian_reason is None:
+        moving = bool(payload.get('moving'))
+        if abelian_reason is None and not moving:
             self.spin_fallback_layout = True
         solver.restore_memory_allocator()
         solver._mpi_latest_results = {}
@@ -882,7 +960,18 @@ class MPISectorContext:
         import gc
 
         gc.collect()
-        if abelian_reason is None:
+        if moving:
+            # A moving run prepared again for its new structure: this rank's own input with the atoms of the root.
+            from dataclasses import replace as _replace
+
+            problem = _replace(self.moving_problem, atoms=tuple(payload['atoms']),
+                               recenter_geometry=bool(payload['recenter_geometry']))
+            system = prepare_single_point(problem, backend=payload['backend'], symmetry=payload['symmetry'],
+                                          symmetry_cache_directory=payload.get('symmetry_cache_directory'),
+                                          symmetry_fixed_atoms=payload.get('symmetry_fixed_atoms'),
+                                          symmetry_constraints=tuple(payload.get('symmetry_constraints') or ()),
+                                          sector_forces=False, mpi_context=self)
+        elif abelian_reason is None:
             system = prepare_single_point(payload['problem'], backend=payload['backend'], symmetry='off',
                                           symmetry_cache_directory=payload.get('symmetry_cache_directory'),
                                           mpi_context=self, spin_identity_sector=True)

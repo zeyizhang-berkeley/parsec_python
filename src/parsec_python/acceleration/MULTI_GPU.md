@@ -188,8 +188,9 @@ The ranks divide the symmetry sectors of the structure. A structure without
 point-group symmetry, a relaxation whose `Move_Flag` breaks the symmetry under
 `PARSEC_MOVE_FLAG_SUBGROUP=off` (under `auto` it keeps the sectors of the
 subgroup that maps the fixed atoms onto fixed atoms), a
-`manual` relaxation and molecular dynamics have one sector in the runner (`main.py`
-keeps the sectors of the group their structures keep, `PARSEC_MOVING_SECTORS`): one rank solves it
+`manual` relaxation and molecular dynamics have one sector in the runner (unless
+`PARSEC_MOVING_SECTORS` keeps the sectors of the group their structures keep, as on `main.py`, which the
+runner does on the layouts below since 2026-11-22): one rank solves it
 on the GPUs of one node, or one rank per GPU on several nodes
 (`scripts/run_multi_gpu_scf.sh --rank-per-gpu`), whose ranks share its basis
 (`Eigensolvers/mpi_shared_basis.py`; numbers in
@@ -454,9 +455,15 @@ run on several nodes takes the decisions of one node.
   trajectory of `main.py` to 5.8e-10 bohr; 1 rank, 4 ranks and 2 nodes give
   the same bits of the final energy, forces within 4.2e-13 Ry/bohr and the
   trajectory within 7e-15 bohr of each other). Like every spin-polarized run
-  of the runner they need `PARSEC_CUPY_DISTRIBUTED_FILTER=0`, the code
-  default: `scripts/run_multi_gpu_scf.sh` sets 1 unless the variable is set,
-  and under 1 the runner stops within seconds with a message that names it.
+  of the runner they also run under the `PARSEC_CUPY_DISTRIBUTED_FILTER=1` of
+  `scripts/run_multi_gpu_scf.sh` since 2026-11-22 (before, the runner stopped
+  within seconds under 1; one process keeps the full grid of both channels
+  under 1, `driver._spin_sector_refusal`). With each of the two sectors of the
+  NH2 radical in Cs filtered over two GPUs of one rank, `1` gave the bits of `0`
+  (spin forces, -22.033833289371316 Ry, 7e-15 Ry from `main.py` in the sectors,
+  2.7e-13 Ry and 1.2e-9 Ry/bohr from `--symmetry off`), and the same energy on
+  two nodes; OH in Cs, whose guard sends it to the shared sector of the identity
+  over all four GPUs, the bits of `0` and of `main.py`.
   Measured on 2 nodes against one rank:
   O2 PBE dE -2.8e-14 Ry, O2 PBE0 -3.3e-13, O2 Hartree-Fock 1.4e-14, each with
   the iterations of one node.
@@ -553,10 +560,11 @@ of an even diamond cube in 20 units of their irreducible representations
 instead, each representation once (64,000 atoms on 16 A100: SCF 208.7 ->
 170.0 and 175.9 s in two runs, the peak 1.4 % higher, 46.0 -> 46.6 GiB; README
 "Units of the irreducible representations"), 16 of them on the orbits of
-subgroups of 64 or 192 operations with the opt-in partner rows of
-`PARSEC_ORBITAL_IRREP_ROWS=partner` (eigensolves of the SCF 200.2 s off,
-163.8 s on sector rows, the default, 115.8 s on partner rows, at 46.0, 46.6
-and 32.1 GiB on the fullest GPU; README "Partner rows"). Without
+subgroups of 64 or 192 operations with the partner rows of
+`PARSEC_ORBITAL_IRREP_ROWS=partner` (its default since 2026-11-22;
+eigensolves of the SCF 200.2 s off, 163.8 s on sector rows, 115.8 s on
+partner rows, at 46.0, 46.6 and 32.1 GiB on the fullest GPU; README "Partner
+rows"). Without
 one, or with `PARSEC_PERIODIC_SYMMETRY=off`, the cell is one sector of the
 identity (every grid point an orbit, `AxisReflectionReduction.identity`), the
 sector of a molecular dynamics run: on several nodes one rank per GPU shares
@@ -632,8 +640,10 @@ the Ewald and local terms and averages the total over the full group of the
 sectors; every rank moves the projectors of its sectors (`geometry`, the
 projectors alone on ranks without the ionic potential). A `Move_Flag` fixing
 atoms keeps the sectors of its subgroup (`PARSEC_MOVE_FLAG_SUBGROUP=auto`).
-Molecular dynamics and manual movements (which `main.py` keeps in the sectors of
-the group their structures keep under `PARSEC_MOVING_SECTORS=auto`), a `Move_Flag`
+Molecular dynamics and manual movements (which `main.py`, and since 2026-11-22 the
+runner on the layouts below, keep in the sectors of the group their structures keep
+under `PARSEC_MOVING_SECTORS=auto`, a structure that leaves the group prepared again
+on every rank), a `Move_Flag`
 fixing atoms under `PARSEC_MOVE_FLAG_SUBGROUP=off` (or on the Fortran-derived
 routines, which `main.py` keeps in the sectors of their subgroup under
 `PARSEC_MOVING_SECTORS=auto` above the floor of the sectors and with 4
@@ -1823,8 +1833,17 @@ SCF on one node with the block, 49.0 s in the translation classes), on the
 full grid below that floor (a forces or relaxation run there has its forces
 and moves averaged over the operations of the cell,
 `PARSEC_GAMMA_HYBRID_SECTOR_FORCES=auto`; `sectors` keeps the sectors for it)
-and under `off` (one eigensolver GPU, the pair tiles on all of them); the MPI runner
-refuses a hybrid of a periodic cell (run it with `main.py`). With k-points or
+and under `off` (one eigensolver GPU, the pair tiles on all of them). Since
+2026-11-22 the MPI runner runs the SCF of such a cell as well
+(`driver._mpi_periodic_hybrid`): the same sectors above the same floor, each basis
+on one GPU of its rank, the sector of the identity on the root's first GPU below
+it, and the pair tiles of every build on every GPU of every rank with the cuFFT
+pair solver of the cell (the tiles of the sectors; the translation classes of one
+process are not built there, so a cell that fits one node is faster in `main.py`:
+Si64 PBE0 24.4 s of SCF in one process, 42.4 s on one rank of four GPUs, 12.2 s on
+four ranks, the same energy; diamond 512 atoms PBE0 25.6 s in one process, 62.9 s
+on four ranks, 33.5 s on two nodes of four ranks); its forces and moves stay with
+`main.py`. With k-points or
 spin the k-point pool
 deals the k-points (and spin channels) to one worker per GPU, each keeping its
 k-points' orbitals, `W` and `xi` on its device; the pair tiles of a build go

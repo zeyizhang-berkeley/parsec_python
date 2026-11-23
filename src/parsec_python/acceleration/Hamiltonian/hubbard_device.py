@@ -968,7 +968,12 @@ class DeviceHubbard:
                 # list every partner, f each; the sums over the partners of a solved state are the occupations
                 # times the weights that the SCF loop gives the density and these matrices.
                 repeats = np.asarray(repeats, dtype=np.int64)
-                if occupations.size == int(repeats.sum()) and occupations.size != repeats.size:
+                solved = getattr(wavefunctions, "state_occupations", None)
+                if solved is not None and occupations.size in {int(repeats.sum()), repeats.size}:
+                    # a level at the end of the window shares the states left: its listed partners are not those
+                    # of single solved states, whose occupations the orbitals keep
+                    occupations = np.asarray(solved, dtype=np.float64)
+                elif occupations.size == int(repeats.sum()) and occupations.size != repeats.size:
                     starts = np.concatenate(([0], np.cumsum(repeats)[:-1]))
                     occupations = np.add.reduceat(occupations, starts)
             if wavefunctions.sector_vectors is None or wavefunctions.representation_columns is None:

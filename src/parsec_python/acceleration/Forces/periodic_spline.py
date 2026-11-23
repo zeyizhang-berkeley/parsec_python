@@ -17,9 +17,9 @@ over the balls of :func:`~parsec_python.acceleration.V_ion.periodic_setup_fortra
 radius that the potential uses (``_local_reach``: the erfc tail of the fast ``eta`` or the Coulomb tail of
 the table), ``s'`` the derivative of the spline that
 :meth:`~parsec_python.Pseudopotential.ParsecPseudopotential.local_potential` evaluates
-(:func:`parsec_python.Forces.periodic.local_potential_slope`; for a ``Cubic_Spline`` species zero closer to the
-atom than its first radial sample, the rule of ``forcloc.f90``, so that an atom on a grid point takes no slope of the
-cone of the spline at its tip: :func:`parsec_python.Forces.periodic.spline_force_center_setting`), and ``F_long``
+(:func:`parsec_python.Forces.periodic.local_potential_slope`; next to the atom the slope of the smooth behaviour of
+the table, ``s(c) d/c`` within ``c = 2 rs(2)``, so that an atom on or next to a grid point takes no slope of
+the cone of the spline at its tip: :func:`parsec_python.Forces.periodic.spline_force_center_setting`), and ``F_long``
 the force of the Fourier
 series of the potential (one FFT of the density, the formula of the device forces evaluated with
 NumPy).  The self-consistency term (``V_out - V_in`` times the slope of the atomic valence density) and
@@ -56,7 +56,9 @@ from parsec_python.Forces.periodic import (
     _erf_over_r_slope_over_r,
     _valence_density_table,
     local_potential_slope,
+    smooth_center_radius,
     spline_force_center_setting,
+    with_smooth_center,
     without_spline_center,
 )
 from parsec_python.Pseudopotential import ParsecRadialSpline
@@ -233,13 +235,23 @@ def spline_periodic_local_forces(
             if potential.has_nonlinear_core_correction and specification.use_spline:
                 core_spline = ParsecRadialSpline.from_positive_grid(potential.radii, potential.core_density, padding)
 
-            def local_slope(distances, _p=potential, _l=local_l, _s=specification, _z=float(potential.ionic_charge)):
-                # s'(d)/d of the terms V_a(d) + 2 Z erf(eta d)/d that fft_local_ionic_potential sums
+            def potential_slope(distances, _p=potential, _l=local_l, _s=specification):
                 slope = local_potential_slope(_p, distances, _l, use_spline=_s.use_spline, spline_padding_width=padding)
                 if _s.use_spline:
                     # the cone of the spline at the atom (Forces.periodic.spline_force_center_setting)
                     slope = without_spline_center(slope, distances, _p, center)
-                return slope / distances + _erf_over_r_slope_over_r(_z, distances, eta)
+                return slope
+
+            def core_slope(distances, _p=potential, _c=core_spline):
+                slope = _density_slope(_p, distances, _p.core_density, spline=_c)
+                return slope if _c is None else without_spline_center(slope, distances, _p, center)
+
+            # within 2 rs(2) the slope of the smooth behaviour (PARSEC_SPLINE_FORCE_CENTER=auto)
+            smooth = smooth_center_radius(potential, center)
+
+            def local_slope(distances, _z=float(potential.ionic_charge), _v=potential_slope, _c=smooth):
+                # s'(d)/d of the terms V_a(d) + 2 Z erf(eta d)/d that fft_local_ionic_potential sums
+                return with_smooth_center(_v, distances, _c) / distances + _erf_over_r_slope_over_r(_z, distances, eta)
 
             species[atom.symbol] = {
                 "reach": _setup._local_reach(potential, specification, eta, erfc_cutoff, rule),
@@ -249,14 +261,7 @@ def spline_periodic_local_forces(
                 "core_reach": _density_reach(potential, potential.core_density)
                 if potential.has_nonlinear_core_correction
                 else 0.0,
-                "core": lambda distances, _p=potential, _c=core_spline: (
-                    _density_slope(_p, distances, _p.core_density, spline=_c)
-                    if _c is None
-                    else without_spline_center(
-                        _density_slope(_p, distances, _p.core_density, spline=_c), distances, _p, center
-                    )
-                )
-                / distances,
+                "core": lambda distances, _s=core_slope, _c=smooth: with_smooth_center(_s, distances, _c) / distances,
             }
         terms = species[atom.symbol]
         position = positions[index]

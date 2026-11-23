@@ -89,6 +89,42 @@ class AgreementTests(unittest.TestCase):
             with host_room(1 << 60) as unknown:
                 self.assertTrue(unknown)
 
+    def test_the_ranks_of_a_node_divide_its_room(self):
+        from parsec_python.acceleration.Eigensolvers import sector_growth
+
+        before = sector_growth._host_processes
+        try:
+            with patch.object(sector_growth, "host_available_bytes", lambda: 1000):
+                sector_growth.set_host_processes(4)
+                with patch.dict(os.environ, {"PARSEC_CUPY_SECTOR_WARM_GROWTH_HOST": ""}):
+                    self.assertEqual(sector_growth.host_processes(), 4)
+                    # half of the available 1000 bytes among four ranks: 125 each
+                    with host_room(125) as fits:
+                        self.assertTrue(fits)
+                    with host_room(126) as fits:
+                        self.assertFalse(fits)
+                with patch.dict(os.environ, {"PARSEC_CUPY_SECTOR_WARM_GROWTH_HOST": "process"}):
+                    # the whole half for every process, as before
+                    self.assertEqual(sector_growth.host_processes(), 1)
+                    with host_room(500) as fits:
+                        self.assertTrue(fits)
+                    with host_room(501) as fits:
+                        self.assertFalse(fits)
+                sector_growth.set_host_processes(0)
+                self.assertEqual(sector_growth.host_processes(), 1)
+        finally:
+            sector_growth._host_processes = before
+
+    def test_the_host_switch(self):
+        from parsec_python.acceleration.Eigensolvers.sector_growth import warm_growth_host_setting
+
+        for raw, value in (("", "node"), ("node", "node"), (" PROCESS ", "process")):
+            with patch.dict(os.environ, {"PARSEC_CUPY_SECTOR_WARM_GROWTH_HOST": raw}):
+                self.assertEqual(warm_growth_host_setting(), value)
+        with patch.dict(os.environ, {"PARSEC_CUPY_SECTOR_WARM_GROWTH_HOST": "rank"}):
+            with self.assertRaises(ValueError):
+                warm_growth_host_setting()
+
 
 class ExchangeTests(unittest.TestCase):
     """The saved columns reach the ranks that hold them in the layout of the larger basis."""

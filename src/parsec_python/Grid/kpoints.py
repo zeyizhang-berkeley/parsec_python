@@ -994,6 +994,67 @@ def mesh_preserving_operations(group, dimensions, shift, *, tolerance: float = 1
     )
 
 
+def list_preserving_operations(group, k_points, weights, lattice_vectors, *, tolerance: float = 1.0e-6):
+    """The operations of ``group`` whose rotation maps a weighted k-point list onto itself, as a ``SpaceGroup``.
+
+    ``k_points`` are Cartesian (1/bohr), ``weights`` their weights.  The list is taken as the weights of its classes
+    ``{k, -k}`` modulo the reciprocal lattice (time reversal: ``k`` and ``-k`` give the same density and forces for
+    scalar and collinear-spin orbitals); an operation is kept where ``G f`` (``G`` its
+    :attr:`~parsec_python.Grid.space_group.SpaceGroup.reciprocal_rotations`, ``f`` the reciprocal-lattice coordinates)
+    of every class is a class of the same total weight (relative ``1e-8``).  Coordinates compare to ``tolerance``, the
+    precision of a written list.  Returns ``group`` itself when every operation is kept.
+    """
+
+    from .space_group import SYMMETRY_TOLERANCE, SpaceGroup
+
+    vectors = reciprocal_lattice(np.asarray(lattice_vectors, dtype=float))
+    fractions = np.atleast_2d(np.asarray(k_points, dtype=float)) @ np.linalg.inv(vectors)
+    weights = np.asarray(weights, dtype=float).reshape(-1)
+    scale = 1.0 / float(tolerance)
+
+    def key(fraction) -> tuple:
+        # the class of f: the smaller (lexicographically) of f and -f, both reduced to [0, 1) on the tolerance's grid
+        candidates = []
+        for value in (fraction, -fraction):
+            whole = np.rint(np.asarray(value) * scale).astype(np.int64)
+            candidates.append(tuple(int(item) for item in np.mod(whole, int(round(scale)))))
+        return min(candidates)
+
+    classes: dict[tuple, float] = {}
+    for fraction, weight in zip(fractions, weights):
+        classes[key(fraction)] = classes.get(key(fraction), 0.0) + float(weight)
+    representatives = {}
+    for fraction in fractions:
+        representatives.setdefault(key(fraction), fraction)
+    total = float(np.sum(weights))
+    kept = []
+    for index, rotation in enumerate(group.reciprocal_rotations):
+        matrix = np.asarray(rotation, dtype=np.float64)
+        keeps = True
+        for label, fraction in representatives.items():
+            image = classes.get(key(fraction @ matrix.T))
+            if image is None or abs(image - classes[label]) > 1.0e-8 * max(total, 1.0e-300):
+                keeps = False
+                break
+        if keeps:
+            kept.append(index)
+    if len(kept) == group.order:
+        return group
+    last = group.translations[kept[-1]]
+    return SpaceGroup(
+        rotations=tuple(group.rotations[index] for index in kept),
+        translations=tuple(group.translations[index] for index in kept),
+        cartesian_rotations=tuple(group.cartesian_rotations[index] for index in kept),
+        labels=tuple(group.labels[index] for index in kept),
+        crystal_system=group.crystal_system,
+        full_holohedry=False,
+        lattice_operations=group.lattice_operations,
+        candidate_numbers=tuple(group.candidate_numbers[index] for index in kept),
+        symmorphic=not (abs(last[0]) + abs(last[1]) + abs(last[2]) > SYMMETRY_TOLERANCE),
+        ignored=group.ignored,
+    )
+
+
 def default_stencil_lines(lattice_vectors, counts) -> list[tuple[tuple[int, int, int], float]]:
     """The second differences ``((offset, weight), ...)`` of the Laplacian of the default routines' grid of
     ``counts`` points along ``lattice_vectors`` (offsets in grid steps): the three axes, then the extra directions of
@@ -1482,6 +1543,30 @@ def move_flag_space_group_setting() -> str:
     return value
 
 
+SPINOR_MOVE_FLAG_SUBGROUP_ENV = "PARSEC_SPINOR_MOVE_FLAG_SUBGROUP"
+
+
+def spinor_move_flag_subgroup_setting() -> str:
+    """``PARSEC_SPINOR_MOVE_FLAG_SUBGROUP``: ``auto`` (default, since 2026-11-22) or ``off``.
+
+    The subgroup of ``PARSEC_MOVE_FLAG_SPACE_GROUP`` (the operations that map the atoms ``Move_Flag`` fixes onto fixed
+    atoms) for the spinors of non-magnetic self-consistent spin-orbit coupling, on both routine sets: their k-point
+    mesh is reduced by the subgroup and time reversal (the SU(2) matrices turn a spinor, time reversal maps it onto
+    its Kramers partner at ``-k``, neither changes the density or the forces), the density averaged over it, the
+    forces completed and averaged over it, as for scalar orbitals.  ``off`` keeps the routes of before: the whole
+    mesh as its time-reversal pairs on the default routines, the refusal by name on the Fortran-derived ones.
+    Non-collinear magnetism and spin-polarized spin-orbit coupling keep their routes under both values (time
+    reversal flips the moments), and so does a Gamma-point relaxation of spinors with ``Symmetrize_Charge_Density``
+    on the Fortran-derived routines (its density is averaged over nothing, as before)."""
+
+    import os
+
+    value = os.environ.get(SPINOR_MOVE_FLAG_SUBGROUP_ENV, "auto").strip().lower() or "auto"
+    if value not in ("auto", "off"):
+        raise ValueError(f"{SPINOR_MOVE_FLAG_SUBGROUP_ENV} must be auto or off, got {value!r}")
+    return value
+
+
 SOC_KPOINT_WEDGE_ENV = "PARSEC_SOC_KPOINT_WEDGE"
 
 
@@ -1595,8 +1680,8 @@ def kpoint_list_fold_setting() -> str:
 
     The discrete Bloch operator ``-L - 2i k.G + k^2`` of an oblique grid has plane waves with ``-L < |G|^2``, so it is
     not bounded below in ``k``: beyond some ``|k|``, in general outside the first Brillouin zone, it has levels below
-    zero that no continuum state has (:func:`lowest_free_levels`).  On an orthogonal grid ``-L >= |G|^2`` and every
-    value keeps the written vectors.
+    zero that no continuum state has (:func:`lowest_free_levels`).  On an orthogonal grid ``-L >= |G|^2``; its points
+    outside the first zone follow :func:`kpoint_orthogonal_list_fold_setting` (``literal`` keeps them as written).
 
     * ``auto`` (default): on the default routines every point runs at its shortest images modulo the reciprocal
       lattice, a point of the zone boundary at all of them with equal shares of its weight (:func:`tie_shared_points`).
@@ -1623,6 +1708,37 @@ def kpoint_list_fold_setting() -> str:
     return value
 
 
+KPOINT_ORTHOGONAL_LIST_FOLD_ENV = "PARSEC_KPOINT_ORTHOGONAL_LIST_FOLD"
+
+
+def kpoint_orthogonal_list_fold_setting() -> str:
+    """``PARSEC_KPOINT_ORTHOGONAL_LIST_FOLD``: the points of a ``Kpoint_List`` on an orthogonal cell that lie outside the
+    first Brillouin zone.
+
+    * ``auto`` (default): on the default routines and on Fortran-derived routines the run chose itself (and on every
+      route under ``PARSEC_KPOINT_LIST_FOLD=shared``) such a point runs at its shortest image modulo the reciprocal
+      lattice, with its weight, the same point of the zone.
+      An orthogonal grid has no level below zero (:func:`kpoint_list_fold_setting`), but the finite-difference
+      dispersion still departs from ``|k + G|^2`` the more the farther the written vector lies from the zone: a Bloch
+      state of the zone point ``k_s`` written at ``k_s + G0`` is held by the waves ``q - G0``, nearer the edge of the
+      grid (the plane waves within 2 bohr^-1 of a 7.71 bohr cube at 0.35 bohr and order 6 take a free-level error of
+      3.6e-3 Ry at (3/4, 3/4, 3/4) against 3.1e-4 Ry at its image (-1/4, -1/4, -1/4)).  A point of the zone boundary,
+      where its images are equally short (a component of 1/2), keeps its written vector: its images give the same
+      levels and density by time reversal on these grids (the u-gauge operator at ``-k`` is the conjugate of that at
+      ``k``); a list whose points all lie in the first zone keeps every bit.  ``Use_Fortran_Routines: .true.`` keeps the
+      written vectors, as PARSEC 1.5, under ``PARSEC_KPOINT_LIST_FOLD=auto``, and ``literal`` keeps them everywhere.
+    * ``off``: the written vectors of an orthogonal cell on every route, as before.
+
+    Any other value is refused before the SCF."""
+
+    import os
+
+    value = os.environ.get(KPOINT_ORTHOGONAL_LIST_FOLD_ENV, "auto").strip().lower() or "auto"
+    if value not in ("auto", "off"):
+        raise ValueError(f"{KPOINT_ORTHOGONAL_LIST_FOLD_ENV} must be auto or off, got {value!r}")
+    return value
+
+
 KPOINT_MESH_GUARD_ENV = "PARSEC_KPOINT_MESH_GUARD"
 
 
@@ -1644,6 +1760,37 @@ def kpoint_mesh_guard_setting() -> str:
     value = os.environ.get(KPOINT_MESH_GUARD_ENV, "auto").strip().lower() or "auto"
     if value not in ("auto", "off"):
         raise ValueError(f"{KPOINT_MESH_GUARD_ENV} must be auto or off, got {value!r}")
+    return value
+
+
+KPOINT_GUARD_WEDGE_ENV = "PARSEC_KPOINT_GUARD_WEDGE"
+
+
+def kpoint_guard_wedge_setting() -> str:
+    """``PARSEC_KPOINT_GUARD_WEDGE``: the operations of the wedge of a mesh that :func:`kpoint_mesh_guard_setting`
+    moves to the shortest representatives of its points, and the group its density is averaged over (a hybrid keeps
+    its k-points: on its time-reversal pairs, the whole mesh, it averages no density, and its wedge averages over
+    these operations, :func:`hybrid_wedge_operations`).
+
+    * ``auto`` (default): the operations of the space group that also map the finite-difference operators of the grid
+      onto themselves (:func:`stencil_preserving_operations` with :func:`grid_stencil_lines`: on Fortran's general
+      grid of an oblique cell the axes and the auxiliary directions of its Laplacian, with the first differences along
+      the axes), with time reversal, the density averaged over them, the forces over every operation of the space
+      group under ``PARSEC_KPOINT_FORCE_GROUP=crystal`` (``SinglePointInput.force_space_group``).  The others turn a
+      grid axis onto a direction with no first difference and change the discrete Bloch Hamiltonian at the order of
+      the discretization, so that their wedge is not the energy of the same points without symmetry; with these the
+      guarded mesh is the whole mesh at its shortest images with its ties shared, as the default routines take it
+      (``PARSEC_SCALAR_KPOINT_WEDGE`` and ``PARSEC_SOC_KPOINT_WEDGE`` at ``auto``).  Where they are all the space group
+      nothing changes.
+    * ``crystal``: every operation of the space group, as before.
+
+    Any other value is refused before the SCF."""
+
+    import os
+
+    value = os.environ.get(KPOINT_GUARD_WEDGE_ENV, "auto").strip().lower() or "auto"
+    if value not in ("auto", "crystal"):
+        raise ValueError(f"{KPOINT_GUARD_WEDGE_ENV} must be auto or crystal, got {value!r}")
     return value
 
 
@@ -1849,6 +1996,33 @@ def kpoint_force_group_setting() -> str:
     return value
 
 
+#: The switch of the forces of a ``Kpoint_List`` of the default routines (:func:`kpoint_list_force_group_setting`).
+KPOINT_LIST_FORCE_GROUP_ENV = "PARSEC_KPOINT_LIST_FORCE_GROUP"
+
+
+def kpoint_list_force_group_setting() -> str:
+    """``PARSEC_KPOINT_LIST_FORCE_GROUP``: the operations the forces and the moved positions of a ``Kpoint_List`` of
+    scalar or collinear-spin orbitals on the default routines of a bulk cell are averaged over.
+
+    * ``auto`` (default, since 2026-11-22): the operations of the space group that map the grid and the weighted list
+      (its classes ``{k, -k}`` modulo the reciprocal lattice) onto themselves
+      (:func:`list_preserving_operations`; ``SinglePointInput.force_space_group``), as the forces of the same points
+      given as a ``Monkhorst_Pack_Grid`` are (``PARSEC_KPOINT_FORCE_GROUP=crystal``): the forces of the converged grid
+      have that symmetry, and the average removes only the part the oblique grid breaks (the in-plane forces of an
+      hcp atom on the three-fold axis, 4.2e-5 Ry/bohr for Au2 at 0.3 bohr).  Nothing where only the identity keeps
+      the list, with ``Ignore_Symmetry``, or where an operation exchanges fixed and movable atoms.
+    * ``off``: no average, as before.
+
+    Any other value is refused before the SCF."""
+
+    import os
+
+    value = os.environ.get(KPOINT_LIST_FORCE_GROUP_ENV, "auto").strip().lower() or "auto"
+    if value not in ("auto", "off"):
+        raise ValueError(f"{KPOINT_LIST_FORCE_GROUP_ENV} must be auto or off, got {value!r}")
+    return value
+
+
 def time_reversal_reduced(k_points, weights, lattice_vectors) -> tuple[np.ndarray, np.ndarray]:
     """The representatives of a uniform mesh under time reversal (``k ~ -k``).
 
@@ -1933,6 +2107,7 @@ __all__ = [
     "IBZ_TOLERANCE",
     "KPOINT_UNITS",
     "MOVE_FLAG_SPACE_GROUP_ENV",
+    "SPINOR_MOVE_FLAG_SUBGROUP_ENV",
     "MonkhorstPackSampling",
     "explicit_kpoints",
     "band_path_kpoints",
@@ -1948,6 +2123,8 @@ __all__ = [
     "WRITTEN_TIE_TOLERANCE",
     "kpoint_list_fold_setting",
     "kpoint_mesh_guard_setting",
+    "kpoint_guard_wedge_setting",
+    "kpoint_orthogonal_list_fold_setting",
     "lowest_free_levels",
     "negation_closed_written",
     "written_tie_images",
@@ -1969,6 +2146,7 @@ __all__ = [
     "kpoint_time_reversal_setting",
     "mesh_preserving_operations",
     "move_flag_space_group_setting",
+    "spinor_move_flag_subgroup_setting",
     "monkhorst_pack_grid",
     "partly_filled_states",
     "read_kpoint_file",

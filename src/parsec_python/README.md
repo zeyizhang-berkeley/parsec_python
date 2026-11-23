@@ -320,7 +320,16 @@ Not currently supported as production physics:
 
 PARSEC's restart files are read: `parsec.dat` (`Restart_Run`, `nscf_kpoints`),
 `wfn.dat` (`Restart_From_Wfndat`, orbitals included), `relax_restart.dat` and
-`mdinit.dat`.
+`mdinit.dat`. A periodic restart builds the grid of its own input; where that
+is not the grid of `parsec.dat` (`Restart_Run` selects the Fortran-derived
+routines, whose counts the fractional translations of the space group divide,
+and an SCF whose symmetry check kept the identity alone, or the default
+routines, may have written the file on another count), PARSEC's error 364
+names both grids and what writes the file on the restart's grid: its spacing
+where its steps are equal (silicon cube at 0.45 bohr: 22 points stored, 20
+built; the first run at 0.513 bohr restarts), else the restart's routines in
+the first run (hexagonal Si on the default routines: 26 points along c stored,
+24 built; with `Use_Fortran_Routines: .true.` it restarts).
 
 Unsupported requested input is rejected rather than silently approximated.
 Sphere Hartree boundaries use a multipole expansion; box boundaries use the
@@ -376,6 +385,25 @@ happened to cancel the error of the density at the sphere; with 1.5 A both
 are 3e-5 Ry above it. `Full_Hartree: true` sums the boundary values exactly
 and is the choice for a sphere that small; an energy at thin vacuum is
 evidence for or against a boundary only when compared with it.
+
+A multipole boundary also makes the Poisson solution differ from the
+derivative of the Hartree energy that the run reports (the operator is not
+symmetric, and the tail moves with the atoms), and Hellmann-Feynman forces
+assume that it is that derivative. Where density reaches the sphere the forces
+of a cluster are therefore not the exact slope of its energy: those of Au2 in
+a sphere of 8 bohr stay up to 4.6e-5 Ry/bohr from it (1.6e-4 with an atom off
+the grid), those of H2O at the radius of the default rule 1e-9.
+`PARSEC_HARTREE_VARIATIONAL=on` takes the derivative as the Hartree potential
+and adds the force of the tail, at the cost of one more Poisson solve per SCF
+step (`auto` only where the forces are computed and a first estimate finds a
+change from 3e-7 Ry/bohr); the forces then follow the energy of that sphere to
+the truncation of a finite difference. That makes them consistent, not more
+accurate: the energy of the multipole boundary is itself an approximation, and
+the forces of the Poisson solution lie closer to those of the boundary summed
+directly (`Full_Hartree: true`) than the consistent ones, by up to 2e-4
+Ry/bohr in small spheres. The switch is therefore off by default; a larger
+sphere is the way to accurate forces (`Hartree/variational.py`, "Forces at a
+fixed structure" in `FORCES_AND_RELAXATION.md`).
 
 ### Sphere radius left to the code
 
@@ -1911,8 +1939,9 @@ as an `off` relaxation, with new subspaces (equal to `off` within the SCF
 tolerance). Forces, outputs and the next steps of a relaxation then use the
 full grid. `auto` keeps the full grid, and says why in `orbital_symmetry`,
 without a point group, with `--symmetry off`, on a CPU backend, with LDA+U,
-`Symmetrize_Charge_Density`, `PARSEC_CUPY_RITZ_HANDOVER=triangular` or
-`PARSEC_CUPY_DISTRIBUTED_FILTER=1`. A restart (`Restart_Run`) of a
+`Symmetrize_Charge_Density`, `PARSEC_CUPY_RITZ_HANDOVER=triangular` or, in
+one process, `PARSEC_CUPY_DISTRIBUTED_FILTER=1` (the ranks of the MPI
+full-SCF runner keep the sectors with it since 2026-11-22). A restart (`Restart_Run`) of a
 spin-polarized run solves both channels on the full grid (a `NOTE` says so),
 and with `--symmetry on` a run that leaves the sectors drops the forced
 symmetry for the full grid. What the tests cannot see: a partly filled
@@ -1936,7 +1965,9 @@ weighted state, and degenerate ones that several sectors hold, such as the e
 of Td in two sectors of D2d) take equal entries in each channel. A run the guard
 or that check stops there starts again in the abelian sectors, and from there,
 where their guard stops it too, on the full grid (two `NOTE`s); since 21
-November a cluster, or a cell whose operations take no translation, whose
+November a cluster, or a cell whose operations take no translation (since
+22 November also a cell whose abelian sectors take its translations,
+`PARSEC_WEIGHTED_GUARD_SHORTCUT_TRANSLATIONS`), whose
 reported multiplet the abelian sectors would split as well (a t2 of Td, not
 its e) goes to the full grid at once (`PARSEC_WEIGHTED_GUARD_SHORTCUT`).
 The reference solver (`reference_main.py`) keeps the full grid in every
@@ -2138,7 +2169,17 @@ general grid) with `Cubic_Spline` species take the same sums since then; their
 earlier direct sum met the same spline error as the cell grew (a 54-atom fcc
 silicon cell 0.049 Ry low in the potential), and primitive fcc cells move by
 less than 5e-5 Ry (`PARSEC_PERIODIC_OBLIQUE_SPLIT=readable` restores the
-earlier sum; acceleration/README.md has the numbers).
+earlier sum; acceleration/README.md has the numbers). Since 2026-11-22 the
+linear POTRE and FHIPP tables take them too (the direct sum took 4 to 14
+minutes to prepare a 64- to 216-atom cell, now 2 s): POTRE tables to
+round-off, a FHIPP table without the noise of its digits past the Coulomb
+tail, a constant of 1e-11 to 8e-10 Ry in the potential. The direct sum adds
+that noise out to a reach that grows with the cell; with a clean tail the two
+agree to 5e-14 Ry. The noise of the MARTINS_OLD and MARTINS_WANG tables of the
+tests varies over the cell (2e-8 and 6e-7 Ry; the energy of a 64-atom Na
+cell would move by 8e-5 Ry), so they keep the direct sum unless
+`PARSEC_PERIODIC_OBLIQUE_SPLIT=fast`; `auto` restores the direct sum for every
+linear table.
 
 `Pseudopot_File` (PARSEC 1.5, one per Atom_Type, the n-th to the n-th) names
 the file of a species instead of `<Atom_Type>_<suffix>.DAT`: a relative path
@@ -2190,7 +2231,12 @@ layer, with 1.5's validation (`Input/parsec_input.py`, block `_INPUT15_*`):
   occupation above 1e-6 says so after `Maximum SCF iterations reached without convergence.`
   (`Output/state_truncation.py`; the scalar, k-point, collinear-spin and self-consistent spin-orbit reports): `States_Num` may cut a degenerate multiplet whose partners `Fermi_Temp` occupies,
   and the eigensolver then returns another part of it every iteration, so the density cannot settle (an 8-atom
-  silicon cube at Gamma with 20 states at 300 K; 22 states converge in 15 iterations).  Nothing else changes.
+  silicon cube at Gamma with 20 states at 300 K; 22 states converge in 15 iterations).  The note is printed under
+  every value of `PARSEC_STATES_CLOSE_MULTIPLET`.  Opt-in `auto` (`SCF/state_extension.py`): a loop on the full grid
+  (the reference solver, the full grid of the accelerated driver, one sector of the identity of the MPI runner)
+  whose residual stays above the criterion and falls by less than a factor 2 over three iterations while its highest
+  returned state holds more than 3 x `Convergence_Criterion` takes the levels of the eigensolver's buffer down to the
+  first below that occupation from the next iteration on, with a NOTE; `off`, the default, keeps `States_Num`.
 
 Eigensolver and SCF controls (`Input/solver_options.py`, measured in the 1.5 round):
 
@@ -2205,7 +2251,11 @@ Eigensolver and SCF controls (`Input/solver_options.py`, measured in the 1.5 rou
   default 3 cycles, with a warning. `Bands_FF_MaxIter` defaults to `FF_MaxIter`, as in 1.5. Since 2026-11-21 the
   band and `nscf` k-points of a CHEBFF run go on past those cycles until their residuals pass CHEBDAV's test
   with `Diag_Tolerance` (1e-4 without a positive one), at most `PARSEC_KPOINT_EXTRA_CYCLES` (24) more
-  (`PARSEC_BAND_CONVERGENCE=auto`; `off` keeps 1.5's fixed cycles).
+  (`PARSEC_BAND_CONVERGENCE=auto`; `off` keeps 1.5's fixed cycles). Since 2026-11-22 those solved on the whole grid
+  carry a working buffer of 60 % of their states instead of `Subspace_Buffer_Size` alone (1.5's `nstate + winsize`),
+  so that their top levels converge within those cycles (`PARSEC_BAND_BUFFER`; `off` keeps the buffer of 1.5), and
+  a band k-point that still misses the test is named in a WARNING of the band summary with its largest residual
+  (the `nscf` output prints the residuals without one).
 - The later-SCF Chebyshev degree may be lowered by one at the end of every iteration after the fourth (PARSEC 1.5's
   `iter > 4`; before 4 November 2026 after the fifth). `Chebyshev_Degree_Decrease_After: 5` (an extension of this port) gives the earlier rule bit
   for bit; `Convergence_Criterion_Approach` (default 100 x `Convergence_Criterion`; 1.5's is 2 x) sets the SRE below

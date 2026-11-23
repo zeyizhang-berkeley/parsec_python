@@ -278,6 +278,7 @@ def _kernel_constants() -> dict[str, float]:
         return import_module(f"parsec_python.V_xc.{name}")
 
     lb = module("asymptotic_correction")
+    ca_lda = module("ca_lda")
     ca_lda_spin = module("ca_lda_spin")
     local_density = module("local_density")
     pbe = module("pbe")
@@ -333,6 +334,8 @@ def _kernel_constants() -> dict[str, float]:
         # ca_lda.py: np.pi * a0 with a0 = (4/(9 pi))**(1/3).
         "CA_PI_A0": np.pi * (4.0 / (9.0 * np.pi)) ** (1.0 / 3.0),
         "CA_GAMMA": ca_lda_spin._GAMMA,
+        # PARSEC_CA_CONTINUITY: PARSEC's high-density coefficients by default.
+        **dict(zip(("CA_C3", "CA_C4", "CA_C5", "CA_CS", "CA_DS"), ca_lda.ca_high_density_coefficients())),
         "LB_TWO_BETA": 2.0 * lb.LB94_BETA,
         "LB_THREE_BETA": 3.0 * lb.LB94_BETA,
     }
@@ -372,7 +375,10 @@ def _kernels(cp, device_id: int, names: tuple[str, ...] = _KERNEL_NAMES) -> dict
     of them on a first run, which CuPy's kernel cache then keeps.
     """
 
-    key = (int(device_id), tuple(sorted(names)))
+    from parsec_python.V_xc.ca_lda import ca_continuity_setting
+
+    # The CA kernels take the coefficients of PARSEC_CA_CONTINUITY (kernel_source).
+    key = (int(device_id), tuple(sorted(names)), ca_continuity_setting())
     kernels = _MODULES.get(key)
     if kernels is None:
         options = ("-std=c++11", "--fmad=false") + tuple(

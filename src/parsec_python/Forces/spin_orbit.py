@@ -24,9 +24,10 @@ Fortran's ``forcso`` (``soforc.F90``) differentiates the same bilinear form, wit
 ``lm`` with ``lm +- 1``, so it is not a reference for these forces.  They are exact derivatives of the energy of this
 package (checked against finite differences of that energy at fixed orbitals in the unit tests).
 
-The radial functions of the spin-orbit projectors are interpolated linearly in the Hamiltonian
-(:func:`parsec_python.Eigensolvers.perturbative_soc.build_spin_orbit_projectors`), so the gradient takes the slope of that
-interpolant and not a separate derivative table: the force is the derivative of the energy the SCF loop minimized.  Next
+The gradient takes the derivative of the radial functions the Hamiltonian samples
+(:func:`parsec_python.Eigensolvers.perturbative_soc.spin_orbit_radial_functions`: PARSEC's cubic spline for a
+``Cubic_Spline`` species under ``PARSEC_SOC_PROJECTOR_SPLINE=auto``, the linear interpolation of the table otherwise) and
+not a separate derivative table: the force is the derivative of the energy the SCF loop minimized.  Next
 to an atom the gradient is taken at a fixed distance, where the table follows ``c r^l``
 (:func:`build_spin_orbit_projector_gradients`).
 """
@@ -39,7 +40,7 @@ from typing import Mapping, Sequence
 import numpy as np
 import scipy.sparse as sp
 
-from ..Eigensolvers.perturbative_soc import AtomSpinOrbitProjectors
+from ..Eigensolvers.perturbative_soc import AtomSpinOrbitProjectors, spin_orbit_radial_functions
 from ..Hamiltonian.spinor_operator import (
     _LADDER_FROM_DOWN,
     _LADDER_FROM_UP,
@@ -179,8 +180,10 @@ def build_spin_orbit_projector_gradients(
         rows_union = atom_projectors.support_rows
         components = np.zeros((3, rows_union.size, 16), dtype=complex)
         seen: list[np.ndarray] = []
+        # the tables the Hamiltonian samples: linear, or PARSEC's spline under Cubic_Spline
+        # (perturbative_soc.spin_orbit_radial_functions, PARSEC_SOC_PROJECTOR_SPLINE)
         radial = {
-            l: potential.spin_orbit_projectors(l, local_l)[:2]
+            l: spin_orbit_radial_functions(potential, l, specifications[atom.symbol], grid)[:2]
             for l in _COLUMN_OF_L
             if l in potential.spin_orbit_channel_potentials
         }
@@ -209,9 +212,14 @@ def build_spin_orbit_projector_gradients(
                 width = 2 * angular_momentum + 1
                 column = _COLUMN_OF_L[angular_momentum]
                 harmonics, harmonic_gradients = complex_harmonics_with_gradients(angular_momentum, unit, inverse)
-                for offset, table in ((0, radial_ion), (8, radial_so)):
-                    value = np.interp(clamped, potential.radii, table, left=table[0], right=0.0)
-                    slope = _interpolant_slope(potential.radii, table, clamped)
+                for offset, function in ((0, radial_ion), (8, radial_so)):
+                    if function.spline is None:
+                        table = function.table
+                        value = np.interp(clamped, potential.radii, table, left=table[0], right=0.0)
+                        slope = _interpolant_slope(potential.radii, table, clamped)
+                    else:
+                        value = function.values(clamped)
+                        slope = function.slopes(clamped)
                     gradient = scale[:, None, None] * (
                         value[:, None, None] * harmonic_gradients
                         + (slope[:, None] * harmonics)[:, :, None] * unit[:, None, :]

@@ -53,6 +53,9 @@ MODES = ("scalar", "spin_polarized", "soc", "soc_spin_polarized", "noncollinear"
 
 BAND_CONVERGENCE_SWITCH = "PARSEC_BAND_CONVERGENCE"
 BAND_REPORTED_RESIDUALS_SWITCH = "PARSEC_BAND_REPORTED_RESIDUALS"
+BAND_BUFFER_SWITCH = "PARSEC_BAND_BUFFER"
+#: The working buffer of a whole-grid band k-point under ``PARSEC_BAND_BUFFER=auto``, as a fraction of its states.
+BAND_BUFFER_FRACTION = 0.6
 
 
 def band_convergence_setting() -> str:
@@ -90,6 +93,96 @@ def band_reported_residuals_setting() -> str:
     return value
 
 
+def band_buffer_setting() -> float | None:
+    """``PARSEC_BAND_BUFFER``: the working buffer of the converged first solve of a band or ``nscf`` k-point solved on
+    the whole grid.  ``auto``: at least :data:`BAND_BUFFER_FRACTION` of its states (``Subspace_Buffer_Size`` where that
+    is more), so that the top reported levels are not next to the edge of the working space, where the CHEBFF cycles
+    converge them slowly; a number in ``(0, 2]``: that fraction; ``off``: ``Subspace_Buffer_Size``, as before and as
+    PARSEC 1.5's ``calc_bands`` (``nstate + winsize``).  Returns the fraction, ``None`` for ``off``."""
+
+    import os
+
+    value = os.environ.get(BAND_BUFFER_SWITCH, "auto").strip().lower() or "auto"
+    if value == "off":
+        return None
+    if value == "auto":
+        return BAND_BUFFER_FRACTION
+    try:
+        fraction = float(value)
+    except ValueError:
+        fraction = float("nan")
+    if not 0.0 < fraction <= 2.0:
+        raise ValueError(f"{BAND_BUFFER_SWITCH} must be auto, off or a fraction in (0, 2], not {value!r}")
+    return fraction
+
+
+def band_working_buffer(eigval_settings, number_of_states: int, *, host_chebdav: bool = False) -> int:
+    """The working buffer of a whole-grid band k-point (:func:`band_buffer_setting`): ``Subspace_Buffer_Size`` for a
+    first solve with fixed cycles, for the host CHEBDAV (``host_chebdav``: it converges every working state, so more
+    of them only cost time) or under ``off``, else the larger of it and the fraction of ``number_of_states``."""
+
+    import math
+
+    from ..Eigensolvers.eigval import first_solve_converges
+
+    buffer = int(eigval_settings.safety_buffer)
+    fraction = band_buffer_setting()
+    if fraction is None or host_chebdav or not first_solve_converges(eigval_settings):
+        return buffer
+    return max(buffer, int(math.ceil(fraction * int(number_of_states))))
+
+
+def band_stage_route(backend=None, workers=None, n_tasks: int = 1, problem_size: int | None = None):
+    """``(device, host chebdav in sectors, bytes)`` of the band stage
+    (:func:`parsec_python.acceleration.SCF.kpoint_parallel.band_stage_route`); without the accelerated solvers the
+    host eigensolvers in this process with the available host memory."""
+
+    from .kpoint_solver import parallel_backend_installed
+
+    if parallel_backend_installed():
+        from ..acceleration.SCF.kpoint_parallel import band_stage_route as accelerated
+
+        return accelerated(backend, workers, n_tasks, problem_size)
+    try:
+        from ..acceleration.Eigensolvers.spill_buffers import host_available_bytes
+    except ImportError:
+        return False, False, _host_available_bytes()
+    return False, False, host_available_bytes()
+
+
+#: The share of the memory of one solve (:func:`band_stage_route`: a device, or the available host memory, divided
+#: by the solves that share it) the bases of a band k-point may take before the buffer of PARSEC_BAND_BUFFER is cut
+#: back, and the bases the first solve holds (the Ritz basis and the filtered block, with room for the chunks of the
+#: filter and the Rayleigh-Ritz pass).
+BAND_BUFFER_MEMORY_SHARE = 0.5
+BAND_BUFFER_COPIES = 3
+
+
+def affordable_band_buffer(wanted: int, base: int, requested: int, rows: int, memory_bytes) -> int:
+    """``wanted`` (the buffer of :func:`band_working_buffer`) cut back so that :data:`BAND_BUFFER_COPIES` complex bases
+    of ``rows`` x (``requested`` + buffer) stay within :data:`BAND_BUFFER_MEMORY_SHARE` of ``memory_bytes``, but never
+    below ``base`` (``Subspace_Buffer_Size``, the buffer of before); ``memory_bytes`` ``None``: not cut."""
+
+    wanted, base = int(wanted), int(base)
+    if wanted <= base or memory_bytes is None:
+        return wanted
+    fits = int(BAND_BUFFER_MEMORY_SHARE * float(memory_bytes) // (BAND_BUFFER_COPIES * 16 * max(int(rows), 1)))
+    return max(base, min(wanted, fits - int(requested)))
+
+
+def _host_available_bytes() -> int | None:
+    """``MemAvailable`` of ``/proc/meminfo`` in bytes (``None`` where there is none)."""
+
+    try:
+        with open("/proc/meminfo", encoding="ascii") as info:
+            for line in info:
+                if line.startswith("MemAvailable:"):
+                    return int(line.split()[1]) * 1024
+    except (OSError, ValueError, IndexError):
+        pass
+    return None
+
+
 def validate_band_settings() -> None:
     """Read the switches of the first solve of the band and ``nscf`` k-points (``PARSEC_BAND_CONVERGENCE``,
     ``PARSEC_BAND_REPORTED_RESIDUALS``, ``PARSEC_KPOINT_EXTRA_CYCLES``), so that a value they do not know is refused
@@ -99,6 +192,7 @@ def validate_band_settings() -> None:
 
     band_convergence_setting()
     band_reported_residuals_setting()
+    band_buffer_setting()
     first_solve_extra_cycles()
 
 
@@ -328,7 +422,28 @@ def run_band_structure(
         spin_expectation=bands.spin_expectation,
         attempts=bands.attempts,
         residual_scope=bands.residual_scope,
+        residual_test=bands.residual_test,
+        residual_tested=bands.residual_tested,
     )
+
+
+def unconverged_band_points(residuals, eigenvalues, relative: float | None, tested=None) -> np.ndarray:
+    """``(channel, k)`` mask of the band k-points whose largest residual exceeds the relative test ``relative`` times
+    the largest ``|e|`` of their levels (the test of a converged first solve, :class:`ConvergedFirstSolveSettings`);
+    all false where no test applies (``relative`` ``None``: fixed cycles) and where ``tested`` (a ``(channel, k)``
+    mask; ``None``: every k-point) says the solve of the k-point did not apply it (the host CHEBDAV, whose own test
+    is relative to its running Ritz values)."""
+
+    residuals = np.asarray(residuals, dtype=float)
+    if relative is None or residuals.size == 0:
+        return np.zeros(residuals.shape, dtype=bool)
+    levels = np.asarray(eigenvalues, dtype=float)
+    scale = np.maximum(np.max(np.abs(levels), axis=-1), 1.0e-8)
+    with np.errstate(invalid="ignore"):
+        failed = residuals > float(relative) * scale
+    if tested is not None:
+        failed &= np.asarray(tested, dtype=bool)
+    return failed
 
 
 @dataclasses.dataclass
@@ -352,6 +467,11 @@ class KPointBands:
     # ``"reported levels"`` where the residuals were tested on those levels alone in the sectors of the k-points
     # (PARSEC_BAND_REPORTED_RESIDUALS=auto); ``None`` otherwise.
     residual_scope: str | None = None
+    # The relative residual test of a converged first solve (Diag_Tolerance; :func:`unconverged_band_points`), ``None``
+    # where the first solve makes fixed cycles; ``residual_tested`` the ``(channel, k)`` mask of the k-points whose
+    # solve applied it.
+    residual_test: float | None = None
+    residual_tested: np.ndarray | None = None
 
 
 def solve_kpoint_bands(
@@ -503,13 +623,43 @@ def solve_kpoint_bands(
             )
         ]
 
-    def solve(operator, attempt: int):
+    # the k-points solved on the whole grid: a working buffer in proportion to the states (PARSEC_BAND_BUFFER) for a
+    # CHEBFF-based converged first solve (the device-resident one, or the host CHEBFF), within the memory one solve may
+    # take, decided once for the band stage (the same on every MPI rank); the sectors of solve_band_sectors keep theirs,
+    # each with its margin
+    from ..Eigensolvers.eigval import first_solve_converges
+
+    on_device, sector_chebdav_on_host, memory = band_stage_route(backend, workers, n_k, int(system.grid.size))
+    host_chebdav = not on_device and eigval_settings.initial_method == "chebdav"
+    base_buffer = int(eigval_settings.safety_buffer)
+    rows = int(system.grid.size) * (2 if mode in ("soc", "soc_spin_polarized", "noncollinear") else 1)
+    whole_buffer = affordable_band_buffer(
+        band_working_buffer(eigval_settings, number_of_states, host_chebdav=host_chebdav),
+        base_buffer,
+        number_of_states,
+        rows,
+        memory,
+    )
+    whole_settings = (
+        eigval_settings
+        if whole_buffer == base_buffer
+        else dataclasses.replace(eigval_settings, safety_buffer=whole_buffer)
+    )
+    # which solves apply the relative test of a converged first solve (the WARNING of unconverged_band_points): the
+    # CHEBFF-based ones; the host CHEBDAV locks its pairs against its running Ritz values instead
+    converges = first_solve_converges(eigval_settings)
+    whole_tested = converges and not host_chebdav
+    sector_tested = converges and (
+        eigval_settings.initial_method == "chebff" or (on_device and not sector_chebdav_on_host)
+    )
+
+    def solve(operator, attempt: int, whole_settings):
         """One diagonalization; later attempts use a larger CHEBDAV block and a new seed."""
-        settings_now = eigval_settings
-        if attempt and eigval_settings.initial_method == "chebdav":
-            base = eigval_settings.chebdav
+        settings_now = whole_settings
+        if attempt and whole_settings.initial_method == "chebdav":
+            base = whole_settings.chebdav
             settings_now = dataclasses.replace(
-                eigval_settings,
+                whole_settings,
                 chebdav=dataclasses.replace(
                     base,
                     block_size=base.block_size + 2 * attempt,
@@ -553,9 +703,9 @@ def solve_kpoint_bands(
             for attempt in range(max_attempts if can_retry else 1):
                 try:
                     if device_solve:
-                        trial = converter.eigensolve(hamiltonian, number_of_states, eigval_settings, attempt)
+                        trial = converter.eigensolve(hamiltonian, number_of_states, whole_settings, attempt)
                     else:
-                        trial = solve(operator, attempt)
+                        trial = solve(operator, attempt, whole_settings)
                 except FloatingPointError as error:
                     # A diverged Chebyshev recurrence (a bad spectral bound from an
                     # unlucky start vector): try again with another block size and seed.
@@ -582,7 +732,11 @@ def solve_kpoint_bands(
         return point_values, point_residuals, point_attempts, point_sigma, point_vectors
 
     indices = None
+    retried: set[int] = set()  # k-points solved in sectors and again whole (the CHEBDAV re-solve): the better of the two
     residual_scope = None
+    # the test the residuals are measured against (unconverged_band_points), and the k-points whose solve applied it
+    residual_test = float(eigval_settings.chebdav.convergence_tolerance) if converges else None
+    tested = np.full((len(channels), n_k), whole_tested)
     if symmetry is not None and mode == "scalar" and hubbard_matrices is None and not keep_vectors:
         # The k-points of a Gamma cell solved in sectors (acceleration/SCF/band_sectors.py): None where none splits.
         from ..acceleration.SCF.band_sectors import last_band_sector_record, solve_band_sectors
@@ -598,25 +752,33 @@ def solve_kpoint_bands(
             callback=callback,
             workers=workers,
             backend=backend,
+            # under PARSEC_BAND_BUFFER the k-points that do not split are solved below, whole, with its buffer
+            keep_whole=whole_buffer == base_buffer,
         )
         if found is not None:
-            eigenvalues[0], residuals[0] = found
+            eigenvalues[0], residuals[0], unsplit = found
             if last_band_sector_record().get("residuals_of_reported") and band_reported_residuals_setting() == "auto":
                 residual_scope = "reported levels"
+            in_sector_solver = [k for k in range(n_k) if k not in set(unsplit)]
+            tested[0, in_sector_solver] = sector_tested
             # A CHEBDAV first solver re-solves, whole and with its attempts below, a k-point whose largest residual
             # in the sectors exceeds residual_tolerance, and keeps the better of the two (CHEBFF: never retried).
-            again = [k for k in range(n_k) if can_retry and not residuals[0, k] <= residual_tolerance]
-            if not again:
+            again = [k for k in in_sector_solver if can_retry and not residuals[0, k] <= residual_tolerance]
+            if not again and not unsplit:
                 return KPointBands(
                     channels=channels,
                     eigenvalues=eigenvalues,
                     residual_norms=residuals,
                     attempts=attempts,
                     residual_scope=residual_scope,
+                    residual_test=residual_test,
+                    residual_tested=tested,
                 )
-            indices = again
+            retried = set(again)
+            for k_index in again:
+                tested[0, k_index] = whole_tested
+            indices = sorted(set(again) | set(unsplit))
 
-    in_sectors = indices is not None
     if indices is None:
         indices = list(range(n_k))
     for task, (
@@ -633,7 +795,7 @@ def solve_kpoint_bands(
         backend=backend,
     ):
         k_index = indices[task]
-        if in_sectors:
+        if k_index in retried:
             # after the solve in sectors: the better of the two, one attempt more
             point_attempts = point_attempts + 1
             if float(residuals[0, k_index]) <= float(point_residuals.max()):
@@ -664,6 +826,8 @@ def solve_kpoint_bands(
         spin_expectation=sigma,
         vectors=kept_vectors,
         residual_scope=residual_scope,
+        residual_test=residual_test,
+        residual_tested=tested,
     )
 
 

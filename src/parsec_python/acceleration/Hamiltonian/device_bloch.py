@@ -94,7 +94,11 @@ class CupyArrayBackend:
         self.cp.cuda.Device(self.device_id).use()
 
     def matrix(self, host_matrix: sp.spmatrix, dtype=None):
-        return self.cpsparse.csr_matrix(_cast_matrix(host_matrix, dtype))
+        from .complex_csr_device import ordered_device_matrix
+
+        # PARSEC_ORDERED_SUMS=auto: products in a fixed order of summation (the same bits in every run); off: the
+        # CuPy (cuSPARSE) products, as before
+        return ordered_device_matrix(self.cpsparse.csr_matrix(_cast_matrix(host_matrix, dtype)))
 
     def asarray(self, host_array):
         return self.cp.asarray(np.ascontiguousarray(host_array))
@@ -1122,6 +1126,10 @@ class DeviceBlochConverter:
         (:attr:`DeviceBlochOperator.real_arithmetic`) where :attr:`real_gamma` asks for it and
         :meth:`_takes_real` finds every part real (``real=False``: complex in any case).
         """
+        if getattr(hamiltonian, "real_form_sector", False):
+            # a sector of a k-point in its real form (PARSEC_KPOINT_SECTOR_REAL, ..SCF.kpoint_real_forms): a real
+            # operator in any case (a complex block goes by its parts)
+            return hamiltonian.device_operator(self, real=real)
         exchange = getattr(hamiltonian, "exchange", None)
         base = getattr(hamiltonian, "base", None)
         if exchange is not None and base is not None:

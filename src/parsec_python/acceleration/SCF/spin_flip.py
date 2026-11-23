@@ -55,6 +55,15 @@ Not detected, and the reason the route is not the default: a flip loop that sett
 another minimum than two solved channels reach (A100, PBE, 80 K, against ``off``: Ni2 at 4.06 bohr from
 ``+0.6 / -0.6``, -138.78451344 against -138.84084192 Ry, 0.77 eV higher, no note; Fe2, Co2, Cr2, Cr4 and MnO
 agree with ``off``), and a closed shell that a rotation across its gap would lower, as in the sectors.
+``PARSEC_SPIN_FLIP_STABILITY=auto`` (:func:`spin_flip_stability_setting`, opt-in) tests the converged state of every
+loop against perturbations that break the operation (the eigenvalues of the linear SCF response of the down channel,
+:func:`parsec_python.SCF.spin_polarized._flip_stability`) and leaves the route where one reaches 1.  It does not see
+the Ni2 miss: the state of the route is a local minimum there (largest eigenvalue 0.61, 0.86 at 300 K; Cr2 0.95, Cr4
+0.36, Co2 0.44, Fe2 0.48, MnO 0.31),
+``off`` reaches its own state along its own path (the down channel solved apart from the first iteration on; it ends
+unconverged after 150 iterations, the levels of its channels 5.6e-4 Ry apart), and a ferromagnetic state with a
+moment of 4 lies below both (-138.85078776 Ry, reached from the state of the route with both channels solved from a
+first down solve of its own).  No test of the converged state can make the route match ``off`` there.
 A same-label start (one ``Initial_Spin_Polarization`` per species) has no flip operation; a state that breaks the
 point group of such atoms fires test 2 of :mod:`.spin_sectors` as before.  Units Ry, bohr.
 """
@@ -78,6 +87,7 @@ __all__ = [
     "WARM_START_TOLERANCE",
     "detect_spin_flip",
     "spin_flip_setting",
+    "spin_flip_stability_setting",
     "spin_partner_labels",
 ]
 
@@ -128,6 +138,35 @@ def spin_flip_setting() -> str:
         value = "auto"
     if value not in ("off", "auto"):
         raise ValueError(f"{_SWITCH} must be off or auto, not {value!r}")
+    return value
+
+
+_STABILITY_SWITCH = "PARSEC_SPIN_FLIP_STABILITY"
+
+
+#: The value of ``PARSEC_SPIN_FLIP_STABILITY`` where none is named: ``off`` (the test found no unstable state in six
+#: antiferromagnetic inputs and costs about what the route saves on them; it does not see the Ni2 miss, a stable
+#: state of the route: see the module).
+STABILITY_DEFAULT = "off"
+
+
+def spin_flip_stability_setting() -> str:
+    """``PARSEC_SPIN_FLIP_STABILITY``: ``off`` (the default) or ``auto`` (on request); used where the flip route is
+    taken, read and checked in every preparation.
+
+    ``auto`` tests the state of every converged loop of ``PARSEC_SPIN_FLIP_SYMMETRY=auto`` against perturbations that
+    break the operation (the linear response of the down channel, which the route does not solve otherwise:
+    ``SCF.spin_polarized._flip_stability``), notes the largest eigenvalue of that response and leaves the route where
+    it reaches 1 (an unstable state); ``off`` keeps the state untested, bit for bit as before 2026-11-22.
+    """
+
+    value = os.environ.get(_STABILITY_SWITCH, STABILITY_DEFAULT).strip().lower() or STABILITY_DEFAULT
+    if value in {"0", "false", "no"}:
+        value = "off"
+    if value in {"1", "true", "yes", "on"}:
+        value = "auto"
+    if value not in ("off", "auto"):
+        raise ValueError(f"{_STABILITY_SWITCH} must be off or auto, not {value!r}")
     return value
 
 
@@ -234,7 +273,11 @@ class SpinFlipOperation:
     tolerance: float = ATOM_TOLERANCE
     period: np.ndarray | None = None
     steps: np.ndarray | None = None
+    #: ``PARSEC_SPIN_FLIP_STABILITY`` of the run (:func:`spin_flip_stability_setting`): ``auto`` tests the state of
+    #: every converged loop of the route (``SCF.spin_polarized``), ``off`` keeps it untested.
+    stability: str = "off"
     _device_rows: dict = field(default_factory=dict, repr=False, compare=False)
+    _inverse_orbit_map: list = field(default_factory=list, repr=False, compare=False)
 
     @property
     def description(self) -> str:
@@ -260,6 +303,29 @@ class SpinFlipOperation:
         if self.orbit_map is not None and array.shape == self.orbit_map.shape:
             return np.ascontiguousarray(array[self.orbit_map])
         raise ValueError("the field matches neither the grid nor the orbits of the spin-flip operation")
+
+    def up_field(self, values):
+        """The inverse of :meth:`down_field`: the up-channel field whose image is the down-channel field ``values``
+        (``f_up(r) = f_down(g r)``), on the grid or the orbits."""
+
+        from .symmetry_fields import SymmetryScalarField
+
+        if isinstance(values, SymmetryScalarField):
+            return SymmetryScalarField(values.reduction, values.values[self._orbit_inverse()])
+        array = np.asarray(values, dtype=np.float64)
+        if array.shape == self.rows.shape:
+            return np.ascontiguousarray(array[self.rows])
+        if self.orbit_map is not None and array.shape == self.orbit_map.shape:
+            return np.ascontiguousarray(array[self._orbit_inverse()])
+        raise ValueError("the field matches neither the grid nor the orbits of the spin-flip operation")
+
+    def _orbit_inverse(self) -> np.ndarray:
+        if self.orbit_map is None:
+            raise ValueError("this spin-flip operation has no orbit map of the sector fields")
+        if not self._inverse_orbit_map:
+            # (the orbit map is a permutation of the orbits: _orbit_map)
+            self._inverse_orbit_map.append(np.argsort(np.asarray(self.orbit_map, dtype=np.int64), kind="stable"))
+        return self._inverse_orbit_map[0]
 
     def field_deviation(self, up, down=None) -> float:
         """``max |down_field(up) - down|`` over the grid or the orbits; ``down`` is ``up`` where not given."""

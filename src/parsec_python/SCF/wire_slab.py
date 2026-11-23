@@ -39,7 +39,7 @@ from ..Hartree.confined import (
     plan_confined_hartree,
     solve_confined_hartree,
 )
-from ..Laplacian import build_gradient, build_negative_laplacian
+from ..Laplacian import build_negative_laplacian
 from ..Laplacian.nonorthogonal import (
     NonorthogonalLaplacianCoefficients,
     grid_laplacian_coefficients,
@@ -63,11 +63,40 @@ from ..V_ion.wire_slab import (
     slab_ewald,
     wire_ion_ion_energy_and_forces,
 )
-from .pbc import PeriodicPreparedSinglePointSystem
+from .pbc import LazyGradient, PeriodicPreparedSinglePointSystem
 
 #: Fortran behaviours that :func:`prepare_wire_slab_single_point` can reproduce
 #: for validation (each is a documented defect, fixed by default).
 FORTRAN_QUIRKS = frozenset({"wire_axis_points", "slab_lowest_plane", "sheet_force"})
+
+#: The switch of the solve of the potential of the Gaussian charges (:func:`gaussian_solve_setting`).
+GAUSSIAN_SOLVE_ENV = "PARSEC_WIRE_SLAB_GAUSSIAN_SOLVE"
+#: The relative residual of that solve under ``auto`` (the conjugate gradients stop at
+#: ``||r|| <= rel ||r_0|| + abs``, ``r_0`` the residual of the start ``n_g``).
+GAUSSIAN_SOLVE_RELATIVE_TOLERANCE = 1.0e-12
+
+
+def gaussian_solve_setting() -> str:
+    """``PARSEC_WIRE_SLAB_GAUSSIAN_SOLVE``: the tolerance of the solve of ``V_G``, the potential of the Gaussian charges of
+    a wire or slab (``ionpot_wire.f90``/``ionpot_slab.f90`` call ``hpotcg`` once per structure, from ``n_g``).
+
+    The error of that solve enters the energy at first order (``-dV sum rho V_G``) and moves with the atoms (the start
+    ``n_g`` moves with them), so the energy over steps of 1e-3 bohr carries its slope: with the Hartree tolerance of the
+    run (relative 1e-7) 7.4e-5 Ry/bohr in F_z of B in an hBN slab, where the force of the Gaussian charges is the
+    derivative of the energy of the converged ``V_G`` within 1.3e-7.
+
+    * ``auto`` (default since 2026-11-22): relative residual 1e-12 (and an absolute one of at most 1e-14, at most 4
+      times the iterations of the run; a solve that stops short keeps what it reached), a deliberate departure from
+      PARSEC 1.5.  The energies change by the error of the former solve.
+    * ``off``: the Hartree settings of the run, as before (bit for bit).
+    """
+
+    import os
+
+    value = os.environ.get(GAUSSIAN_SOLVE_ENV, "auto").strip().lower() or "auto"
+    if value not in ("auto", "off"):
+        raise ValueError(f"{GAUSSIAN_SOLVE_ENV} must be auto or off, not {value!r}")
+    return value
 
 
 @dataclass(frozen=True)
@@ -185,7 +214,8 @@ def prepare_wire_slab_single_point(
 
     stage_start = time.perf_counter()
     negative_laplacian = build_negative_laplacian(grid)
-    gradient = build_gradient(grid)
+    # built when first read (k points, bands, meta-GGAs, the forces): a Gamma single point never reads it
+    gradient = LazyGradient(grid)
     hartree_plan = plan_confined_hartree(
         grid, problem.hartree.multipole_order, fortran_quirks=quirks
     )
@@ -250,14 +280,32 @@ def _atom_dependent_parts(
     short_range = short_range_local_potential(
         grid, atoms, pseudopotentials, problem.pseudopotentials
     )
-    # hpotcg starts from the Gaussian density itself (ionpot_wire.f90:223).
-    gaussian_solution = solve_confined_hartree(
-        short_range.gaussian_density,
-        hartree_plan,
-        negative_laplacian,
-        problem.hartree,
-        short_range.gaussian_density,
-    )
+    # hpotcg starts from the Gaussian density itself (ionpot_wire.f90:223); its error enters the energy at first order
+    # and moves with the atoms: a tight solve under PARSEC_WIRE_SLAB_GAUSSIAN_SOLVE=auto (gaussian_solve_setting)
+    if gaussian_solve_setting() == "auto":
+        settings = problem.hartree
+        tight = replace(
+            settings,
+            relative_tolerance=min(float(settings.relative_tolerance), GAUSSIAN_SOLVE_RELATIVE_TOLERANCE),
+            absolute_tolerance=min(float(settings.absolute_tolerance), 1.0e-14),
+            max_iterations=4 * int(settings.max_iterations),
+        )
+        gaussian_solution = solve_confined_hartree(
+            short_range.gaussian_density,
+            hartree_plan,
+            negative_laplacian,
+            tight,
+            short_range.gaussian_density,
+            raise_on_nonconvergence=False,
+        )
+    else:
+        gaussian_solution = solve_confined_hartree(
+            short_range.gaussian_density,
+            hartree_plan,
+            negative_laplacian,
+            problem.hartree,
+            short_range.gaussian_density,
+        )
     gaussian_potential = gaussian_solution.potential
     ionic_potential = short_range.potential - gaussian_potential
     if problem.charged_sheets:

@@ -60,6 +60,7 @@ from ..SCF.single_point import (
 )
 from ..models import SelfConsistentSOCIteration, SelfConsistentSOCResult
 from .stage_timer import StageTimer
+from ..Hartree.variational import electrostatic_hartree
 
 
 def spinor_density_from_orbitals(
@@ -536,7 +537,7 @@ def run_self_consistent_soc(
         input_effective_potential=used_potential,
         output_effective_potential=output_potential,
         next_effective_potential=input_potential,
-        hartree_potential=hartree_potential,
+        hartree_potential=electrostatic_hartree(system, hartree_potential),
     )
 
 

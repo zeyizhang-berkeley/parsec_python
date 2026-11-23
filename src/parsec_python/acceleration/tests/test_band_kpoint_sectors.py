@@ -98,7 +98,7 @@ SETTINGS = {
 }
 
 
-def _bands(directory: Path, setting: str, transform=None):
+def _bands(directory: Path, setting: str, transform=None, environment=None):
     import parsec_python.acceleration.cli as cli_module
     from parsec_python.acceleration.SCF import band_sectors, kpoint_sectors
 
@@ -112,7 +112,7 @@ def _bands(directory: Path, setting: str, transform=None):
         return found if transform is None or found is None else transform(found)
 
     errors = StringIO()
-    variables = {"PARSEC_BAND_KPOINT_SECTORS": setting, "PARSEC_PERIODIC_SECTOR_BANDS": "auto"}
+    variables = {"PARSEC_BAND_KPOINT_SECTORS": setting, "PARSEC_PERIODIC_SECTOR_BANDS": "auto", **(environment or {})}
     with mock.patch.dict(os.environ, variables), mock.patch.object(kpoint_sectors, "_MINIMUM_ENTRIES", 0), \
             mock.patch.object(band_sectors, "solve_band_sectors", side_effect=recorder), \
             redirect_stdout(StringIO()), redirect_stderr(errors):
@@ -147,14 +147,35 @@ class SectorBandPathTests(unittest.TestCase):
         np.testing.assert_allclose(values, reference, rtol=0, atol=1e-8)
         self.assertLess(float(np.nanmax(sectors["residual_norms"])), 1e-6)
 
+    def test_the_bands_of_classes_equal_those_of_the_whole_grid(self) -> None:
+        # PARSEC_KPOINT_SECTOR_CLASSES=auto: the sectors of a band k-point that the operations of its little group
+        # beyond the commuting involutions carry into each other are solved once, the others take their levels
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as name:
+            root = Path(name)
+            classes = {"PARSEC_KPOINT_SECTOR_CLASSES": "auto"}
+            status, sectors, calls, errors = _bands(root / "classes", "auto", environment=classes)
+            self.assertEqual(status, 0, errors[-4000:])
+            self.assertEqual(calls, [True])
+            self.assertIn("sectors not solved, images of others (PARSEC_KPOINT_SECTOR_CLASSES=auto)", errors)
+            status, whole, calls, errors = _bands(root / "whole", "off", environment=classes)
+            self.assertEqual(status, 0, errors[-4000:])
+            self.assertEqual(calls, [])
+        values, reference = np.asarray(sectors["eigenvalues_ry"]), np.asarray(whole["eigenvalues_ry"])
+        self.assertEqual(values.shape, reference.shape)
+        difference = float(np.abs(values - reference).max())
+        print(f"\n largest band difference, classes of sectors - whole k-points: {difference:.3e} Ry")
+        np.testing.assert_allclose(values, reference, rtol=0, atol=1e-8)
+        self.assertLess(float(np.nanmax(sectors["residual_norms"])), 1e-6)
+
     def test_a_chebdav_solve_re_solves_a_k_point_beyond_the_residual_tolerance_whole(self) -> None:
         # the first k-point reported with a residual of 1 Ry by the sectors: the CHEBDAV first solve of the input
         # re-solves it whole (SCF/bands.py, residual_tolerance 2e-2) and keeps its levels
         def spoiled(found):
-            values, residuals = found
+            # (levels, residuals and the k-points left to the whole-grid route of PARSEC_BAND_BUFFER)
+            values, residuals, unsplit = found
             residuals = np.array(residuals, copy=True)
             residuals[0] = 1.0
-            return np.array(values, copy=True), residuals
+            return np.array(values, copy=True), residuals, unsplit
 
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as name:
             root = Path(name)

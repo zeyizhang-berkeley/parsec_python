@@ -58,6 +58,7 @@ from ..Eigensolvers.perturbative_soc import (
     _SOC_ANGULAR_MOMENTA,
     AtomSpinOrbitProjectors,
     build_spin_orbit_projectors,
+    spin_orbit_radial_functions,
 )
 from ..Hamiltonian.spinor_operator import spin_orbit_coefficients
 from ..models import Atom, SpeciesPotential
@@ -195,10 +196,13 @@ def build_spin_orbit_projector_gradients(
 
     The same atoms, images, union of support rows and Bloch phases
     ``exp(-i k.(r - T))``; each image contributes
-    ``sqrt(dV) [R'(|d|) Y d/|d| + R grad Y]`` with ``R'`` the slope of the
-    linear interpolant of the radial table (``np.interp`` with the first value
-    continued inwards and zero beyond the table), the derivative of the
-    sampled projector; under ``PARSEC_PROJECTOR_CENTER=auto`` a point within
+    ``sqrt(dV) [R'(|d|) Y d/|d| + R grad Y]`` with ``R'`` the derivative of
+    the radial function the projector samples
+    (:func:`parsec_python.Eigensolvers.perturbative_soc.spin_orbit_radial_functions`):
+    that of PARSEC's cubic spline for a ``Cubic_Spline`` species under
+    ``PARSEC_SOC_PROJECTOR_SPLINE=auto``, otherwise the slope of the linear
+    interpolant of the table (``np.interp`` with the first value continued
+    inwards and zero beyond the table); under ``PARSEC_PROJECTOR_CENTER=auto`` a point within
     3e-3 bohr of the atom takes it at that distance, the slope of the energy
     over the steps of a relaxation (:func:`_projector_gradient_samples`).  The
     phase does not depend on the atom position, so
@@ -254,7 +258,9 @@ def build_spin_orbit_projector_gradients(
                 continue
             width = 2 * angular_momentum + 1
             column = column_by_l[angular_momentum]
-            radial_ion, radial_so, _ = potential.spin_orbit_projectors(angular_momentum, local_l)
+            # the tables the Hamiltonian samples: linear, or PARSEC's spline under Cubic_Spline
+            # (perturbative_soc.spin_orbit_radial_functions, PARSEC_SOC_PROJECTOR_SPLINE)
+            radial_ion, radial_so, _ = spin_orbit_radial_functions(potential, angular_momentum, specification, grid)
             for rows, relative, radius, phase in images:
                 # the centre radius of the harmonics (PARSEC_PROJECTOR_CENTER, Forces.periodic._projector_inverse_radius)
                 sampled, inverse, inside = _projector_gradient_samples(radius, potential, center_setting)
@@ -264,11 +270,16 @@ def build_spin_orbit_projector_gradients(
                 )
                 local_rows = np.searchsorted(union, rows)
                 phase_column = phase if np.isscalar(phase) else phase[:, None]
-                for offset, radial in ((0, radial_ion), (8, radial_so)):
-                    value = np.interp(
-                        sampled, potential.radii, radial, left=radial[0], right=0.0
-                    )
-                    slope = _interpolant_slope(sampled, potential.radii, radial)
+                for offset, function in ((0, radial_ion), (8, radial_so)):
+                    if function.spline is None:
+                        radial = function.table
+                        value = np.interp(
+                            sampled, potential.radii, radial, left=radial[0], right=0.0
+                        )
+                        slope = _interpolant_slope(sampled, potential.radii, radial)
+                    else:
+                        value = function.values(sampled)
+                        slope = function.slopes(sampled)
                     for component in range(3):
                         gradients[
                             component, local_rows, offset + column : offset + column + width
@@ -301,8 +312,9 @@ def _double_grid_spin_orbit_projector_gradients(
     points ``s_f = r + d_f - R_a - T`` inside ``r_c`` (the weights of
     :func:`parsec_python.V_ion.double_grid.double_grid_support`) and carries
     the Bloch phase of the coarse point.  Each fine sample contributes the
-    gradient of :func:`build_spin_orbit_projector_gradients` (slope of the
-    linear interpolant; next to the atom as in the single-grid builder) times its
+    gradient of :func:`build_spin_orbit_projector_gradients` (the derivative of
+    the sampled radial function, spline or linear interpolant; next to the atom
+    as in the single-grid builder) times its
     weight; the same support rows (union over the images) as the projectors.
     As for the Kleinman-Bylander double grid, the support itself (which
     coarse points have a fine point inside ``r_c``) is held fixed: the
@@ -357,7 +369,9 @@ def _double_grid_spin_orbit_projector_gradients(
                 continue
             width = 2 * angular_momentum + 1
             column = column_by_l[angular_momentum]
-            radial_ion, radial_so, _ = potential.spin_orbit_projectors(angular_momentum, local_l)
+            # the tables the Hamiltonian samples: linear, or PARSEC's spline under Cubic_Spline
+            # (perturbative_soc.spin_orbit_radial_functions, PARSEC_SOC_PROJECTOR_SPLINE)
+            radial_ion, radial_so, _ = spin_orbit_radial_functions(potential, angular_momentum, specification, grid)
             for support, phase in images:
                 points, fine = support.radius.shape
                 radius = support.radius.reshape(-1)
@@ -370,11 +384,16 @@ def _double_grid_spin_orbit_projector_gradients(
                 )
                 local_rows = np.searchsorted(union, support.rows)
                 phase_column = phase if np.isscalar(phase) else phase[:, None]
-                for offset, radial in ((0, radial_ion), (8, radial_so)):
-                    value = np.interp(
-                        sampled, potential.radii, radial, left=radial[0], right=0.0
-                    )
-                    slope = _interpolant_slope(sampled, potential.radii, radial)
+                for offset, function in ((0, radial_ion), (8, radial_so)):
+                    if function.spline is None:
+                        radial = function.table
+                        value = np.interp(
+                            sampled, potential.radii, radial, left=radial[0], right=0.0
+                        )
+                        slope = _interpolant_slope(sampled, potential.radii, radial)
+                    else:
+                        value = function.values(sampled)
+                        slope = function.slopes(sampled)
                     for component in range(3):
                         sample = (slope * unit[:, component])[:, None] * harmonics + value[
                             :, None
@@ -650,6 +669,10 @@ def compute_spin_orbit_forces(system, result, *, symmetrize: bool = True, operat
             if lattice is None
             else periodic_force_operations(system, getattr(result, "k_points", None))
         )
+    from ..Hartree.variational import hartree_tail_forces
+
+    # a cluster whose SCF took the potential of the Hartree energy (PARSEC_HARTREE_VARIATIONAL)
+    tail_term = None if lattice is not None else hartree_tail_forces(system, result)
     return assemble_forces(
         positions,
         repulsion,
@@ -664,6 +687,7 @@ def compute_spin_orbit_forces(system, result, *, symmetrize: bool = True, operat
         # TS-vdW (the spinor drivers); LDA+U is refused with
         # spinors.  Empty without them: the call stays what it was.
         **correction_forces(system, result),
+        **({} if tail_term is None else {"hartree_boundary": tail_term}),
     )
 
 

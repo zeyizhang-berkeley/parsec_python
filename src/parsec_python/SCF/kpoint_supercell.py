@@ -41,6 +41,7 @@ BLOCH_SWITCH = "PARSEC_SUPERCELL_KPOINTS"
 TOLERANCE_SWITCH = "PARSEC_KPOINT_SUPERCELL_TOLERANCE"
 MINIMUM_SWITCH = "PARSEC_KPOINT_SUPERCELL_MINIMUM"
 GPUS_SWITCH = "PARSEC_KPOINT_SUPERCELL_GPUS"
+STATES_SWITCH = "PARSEC_KPOINT_SUPERCELL_STATES"
 #: The most GPUs of one process for which the default route takes the supercell (the command line; the full-SCF
 #: runner divides the sectors of the supercell among its ranks and has no k-point route).  Measured on four A100
 #: in one process (k-points against the supercell, peak GPU memory): 216 carbon atoms at a/18 1.37 against 4.27 GiB,
@@ -119,6 +120,28 @@ def kpoint_supercell_gpus() -> int:
     return value
 
 
+def kpoint_supercell_extra_states() -> int:
+    """``PARSEC_KPOINT_SUPERCELL_STATES``: the levels per k-point that the supercell solves beyond the cell's states.
+
+    ``cell`` (default) or ``0``: ``M`` times the cell's states, as before; the k-points of the cell's files then hold
+    the fewest levels any k-point of the supercell's holds, which can be a few below ``States_Num`` (a
+    ``Fix_Number_Eigenvalues`` restart from such a file stops with error 404).  A positive integer ``n``: ``M (N + n)``
+    states, the levels the cell's files keep per k-point capped at ``N``, so that every k-point holds ``States_Num``
+    where the ``n`` more per k-point reach its own; the ``M n`` more states are empty ones solved in every iteration.
+    """
+    raw = os.environ.get(STATES_SWITCH, "").strip().lower()
+    if raw in ("", "cell"):
+        return 0
+    message = f"{STATES_SWITCH} must be cell or a non-negative integer (levels per k-point), not {raw!r}"
+    try:
+        value = int(raw)
+    except ValueError as error:
+        raise ValueError(message) from error
+    if value < 0:
+        raise ValueError(message)
+    return value
+
+
 def process_gpu_count() -> int:
     """The GPUs this process computes on: those ``PARSEC_CUPY_DEVICES`` names (``auto``: every visible one;
     ``current``: one), as ``acceleration.Eigensolvers.symmetry.selected_device_ids`` reads it."""
@@ -145,6 +168,7 @@ def validate_settings() -> None:
     kpoint_supercell_tolerance()
     kpoint_supercell_minimum()
     kpoint_supercell_gpus()
+    kpoint_supercell_extra_states()
     supercell_kpoints_setting()
     # the levels of the cell's files (read when they are written, after the SCF)
     supercell_levels_setting()
@@ -262,7 +286,8 @@ MINIMUM_MESH_ENTRIES = 1 << 24
 def _supercell_problem(problem, repeats, states: int | None = None):
     """The supercell of ``problem`` repeated ``repeats`` times on the cell's grid steps, or ``None``.
 
-    ``states``: those of each k-point of the cell (:func:`_cell_states`), ``M`` times as many in the supercell.
+    ``states``: those of each k-point of the cell (:func:`_cell_states`), ``M`` times as many in the supercell, with
+    ``PARSEC_KPOINT_SUPERCELL_STATES`` more per k-point (:func:`kpoint_supercell_extra_states`).
     """
     lattice = np.asarray(problem.periodic_cell.lattice_vectors, dtype=np.float64)
     count = int(np.prod(repeats))
@@ -282,7 +307,8 @@ def _supercell_problem(problem, repeats, states: int | None = None):
         # the sectors of the supercell's own group, not the density symmetrization of the k-point wedge with the
         # space group of the cell; Net_Charges is the charge of one cell, M cells carry M times as much (the
         # electrons of the supercell M times those of the cell, as the states)
-        scf=replace(problem.scf, number_of_states=int(states) * count, symmetrize_density=False,
+        scf=replace(problem.scf, number_of_states=(int(states) + kpoint_supercell_extra_states()) * count,
+                    symmetrize_density=False,
                     net_charge=_cell_charge(problem) * count),
         space_group=None,
         monkhorst_pack_dimensions=None,
@@ -806,8 +832,9 @@ def cell_parsec_dat_view(cell_problem, repeats):
     k-points, their weights and levels those of the k-point route (:func:`parsec_python.SCF.supercell_levels.
     cell_levels`: every state of the supercell at the k-point of its Bloch phases, the irreducible wedge of the
     cell; under ``PARSEC_KPOINT_SUPERCELL_LEVELS=off``, or where the orbitals do not tell, the whole mesh with the
-    levels dealt to the k-points in turn, whose union is the mesh's); the file holds no orbitals, as that of the
-    k-points.  ``Restart_Run`` of the cell reads it on either route.
+    levels dealt to the k-points in turn, whose union is the mesh's); the file holds no orbitals (the supercell's
+    states are no Bloch states of the cell; the k-point route writes those of every k-point,
+    ``PARSEC_KPOINT_WAVEFUNCTIONS``).  ``Restart_Run`` of the cell reads it on either route.
     """
     from types import SimpleNamespace
 

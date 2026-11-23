@@ -31,6 +31,8 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from .ca_lda import ca_high_density_coefficients
+
 
 # Constants of exc_spn.f90, with the digits of the source.  ``_AX`` is the
 # exchange coefficient -(3/4)(3/pi)**(1/3) in Hartree; the correlation
@@ -38,7 +40,8 @@ import numpy as np
 _AX = -0.738558766382022405884230032680836
 _FOUR_THIRDS = 4.0 / 3.0
 _GAMMA = 0.5198421
-# Unpolarized gas: high density (r_s < 1), then low density.
+# Unpolarized gas: high density (r_s < 1), then low density.  ``_C3``, ``_C4``, ``_CS`` and ``_DS`` are PARSEC's; an
+# evaluation takes those of PARSEC_CA_CONTINUITY (ca_lda.ca_high_density_coefficients), the same by default.
 _C1, _C2, _C3, _C4 = 0.0622, 0.0960, 0.0040, 0.0232
 _G, _B1, _B2 = -0.2846, 1.0529, 0.3334
 # Fully polarized gas.
@@ -156,17 +159,18 @@ def ca_lda_spin(
         polarized_potential = np.empty_like(rs)
         high_density = rs < 1.0
         if np.any(high_density):
+            c3, c4, _c5, cs, ds = ca_high_density_coefficients()
             r = rs[high_density]
             log_r = np.log(r)
-            eu = _C1 * log_r - _C2 + (_C3 * log_r - _C4) * r
+            eu = _C1 * log_r - _C2 + (c3 * log_r - c4) * r
             unpolarized[high_density] = eu
             unpolarized_potential[high_density] = (
-                eu - (_C1 + (_C3 * log_r + _C3 - _C4) * r) / 3.0
+                eu - (_C1 + (c3 * log_r + c3 - c4) * r) / 3.0
             )
-            es = _AS * log_r + _BS + (_CS * log_r + _DS) * r
+            es = _AS * log_r + _BS + (cs * log_r + ds) * r
             polarized[high_density] = es
             polarized_potential[high_density] = (
-                es - (_AS + (_CS * log_r + _CS + _DS) * r) / 3.0
+                es - (_AS + (cs * log_r + cs + ds) * r) / 3.0
             )
         low_density = ~high_density
         if np.any(low_density):

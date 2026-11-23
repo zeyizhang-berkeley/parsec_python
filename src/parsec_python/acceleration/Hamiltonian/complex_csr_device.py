@@ -99,6 +99,73 @@ extern "C" __global__ void complex_csr_long_rows(
 }
 """
 
+# The same two products for a real matrix and a real block (a complex block goes through its real view, two real
+# columns per complex one).
+_REAL_SOURCE = r"""
+extern "C" __global__ void real_csr_block_product(
+    const long long rows, const long long count,
+    const int* __restrict__ indptr, const int* __restrict__ indices, const double* __restrict__ values,
+    const double* __restrict__ block, const long long block_stride,
+    double* __restrict__ output, const long long output_stride,
+    const double* __restrict__ diagonal, const int with_diagonal, const int accumulate)
+{
+    const long long t = (long long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (t >= rows * count) return;
+    const long long r = t / count;
+    const long long c = t - r * count;
+    double sum = 0.0;
+    const int end = indptr[r + 1];
+    for (int p = indptr[r]; p < end; ++p) {
+        sum += values[p] * block[(long long)indices[p] * block_stride + c];
+    }
+    if (with_diagonal) {
+        sum += diagonal[r] * block[r * block_stride + c];
+    }
+    const long long o = r * output_stride + c;
+    if (accumulate) {
+        output[o] += sum;
+    } else {
+        output[o] = sum;
+    }
+}
+
+extern "C" __global__ void real_csr_long_rows(
+    const long long rows, const long long count,
+    const int* __restrict__ indptr, const int* __restrict__ indices, const double* __restrict__ values,
+    const double* __restrict__ block, const long long block_stride,
+    double* __restrict__ output, const long long output_stride, const int accumulate)
+{
+    __shared__ double partial[256];
+    const long long r = blockIdx.x;
+    const int lane = threadIdx.x & 31;
+    const int column_in_tile = threadIdx.x >> 5;
+    const long long c = (long long)blockIdx.y * 8 + column_in_tile;
+    double sum = 0.0;
+    if (r < rows && c < count) {
+        const int end = indptr[r + 1];
+        for (int p = indptr[r] + lane; p < end; p += 32) {
+            sum += values[p] * block[(long long)indices[p] * block_stride + c];
+        }
+    }
+    partial[threadIdx.x] = sum;
+    __syncthreads();
+    for (int width = 16; width > 0; width >>= 1) {
+        if (lane < width) {
+            partial[threadIdx.x] += partial[threadIdx.x + width];
+        }
+        __syncthreads();
+    }
+    if (lane == 0 && r < rows && c < count) {
+        const long long o = r * output_stride + c;
+        if (accumulate) {
+            output[o] += partial[threadIdx.x];
+        } else {
+            output[o] = partial[threadIdx.x];
+        }
+    }
+}
+"""
+
 _KERNELS: dict[tuple[int, str], object] = {}
 # rows of more entries than this on average take the kernel that splits a row over 32 threads
 _LONG_ROWS = 256
@@ -108,10 +175,34 @@ def _kernel(cp, name: str):
     device = int(cp.cuda.Device().id)
     kernel = _KERNELS.get((device, name))
     if kernel is None:
-        kernel = cp.RawKernel(_SOURCE, name, options=("--std=c++11", "--fmad=false"))
+        source = _REAL_SOURCE if name.startswith("real_") else _SOURCE
+        kernel = cp.RawKernel(source, name, options=("--std=c++11", "--fmad=false"))
         kernel.compile()
         _KERNELS[(device, name)] = kernel
     return kernel
+
+
+ORDERED_SUMS_SWITCH = "PARSEC_ORDERED_SUMS"
+
+
+def ordered_sums_setting() -> str:
+    """``PARSEC_ORDERED_SUMS``: ``auto`` (the default since 2026-11-22) gives the sparse matrices of the device
+    operators of the k-point, band and spin-orbit solvers (Laplacian and ``k.grad`` where no stencil kernel takes
+    them, the Kleinman-Bylander, LDA+U and spin-orbit projectors), of the overlaps of the k-point nonlocal forces, the
+    fields of a periodic meta-GGA, the reduction of a hybrid's exchange to a sector, the boundary term of the device
+    wire and slab Hartree solve and the spinor backend products that add their terms in a fixed order
+    (:class:`OrderedCSR`, :func:`ordered_device_matrix`), and the k-point workers of one process add their density
+    parts in the order of the workers: the same input on the same devices gives the same bits in every run.  ``off``: the CuPy (cuSPARSE) products and the order in which the
+    workers finish, as before; cuSPARSE's ``csr @ dense`` differs in the last bits from call to call (A100: all 30
+    repeats of a projector product, by up to 1e-13), which a slowly converging SCF can amplify into other iteration
+    counts or, on a chaotic one, other states."""
+
+    import os
+
+    value = os.environ.get(ORDERED_SUMS_SWITCH, "auto").strip().lower() or "auto"
+    if value not in ("auto", "off"):
+        raise ValueError(f"{ORDERED_SUMS_SWITCH} must be auto or off, not {value!r}")
+    return value
 
 
 class DeviceComplexCSR:
@@ -182,4 +273,120 @@ class DeviceComplexCSR:
         return output
 
 
-__all__ = ["DeviceComplexCSR"]
+class OrderedCSR:
+    """A CuPy CSR matrix (real or complex) whose products with dense device blocks add their terms in a fixed order.
+
+    ``M @ X`` (and :meth:`dot`, :meth:`product`) runs the kernels of this module: one thread per entry of the result
+    for rows of few entries, a fixed tree over 32 threads per entry for long rows (the adjoint of the projectors), so a
+    product gives the same bits in every run, where the cuSPARSE product of CuPy does not.  A real matrix takes a
+    complex block through its real view; a complex matrix takes a real block as complex.  The result is a new
+    row-major array (a vector for a vector).  Every other attribute (``data``, ``indices``, ``indptr``, ``nnz``,
+    ``dtype``, ``shape``, ...) is that of the CuPy matrix, which keeps the only copy of the entries.
+    """
+
+    def __init__(self, matrix) -> None:
+        import cupy as cp
+
+        # (the order of the stored entries is the order of the sums: sorted or not, the same in every run)
+        self.matrix = matrix
+        self.cp = cp
+        self.shape = tuple(int(value) for value in matrix.shape)
+        self.dtype = matrix.dtype
+        self.complex = bool(cp.iscomplexobj(matrix.data))
+        if max(self.shape) >= 2**31 or int(matrix.nnz) >= 2**31:
+            raise ValueError("an ordered device CSR matrix needs fewer than 2**31 entries and rows")
+        self.long_rows = int(matrix.nnz) > _LONG_ROWS * max(1, self.shape[0])
+
+    def __getattr__(self, name):
+        # (only reached for attributes this class does not define)
+        return getattr(self.__dict__["matrix"], name)
+
+    def __matmul__(self, other):
+        return self.dot(other)
+
+    def dot(self, other):
+        cp = self.cp
+        if not isinstance(other, cp.ndarray):
+            return self.matrix @ other
+        if other.ndim == 1:
+            return self.product(other[:, None]).reshape(-1)
+        return self.product(other)
+
+    def product(self, block, output=None, *, diagonal=None, accumulate: bool = False):
+        """``output (+)= M block (+ diag(diagonal) block)`` for a dense block ``(columns of M, k)``; the signature of
+        :meth:`DeviceComplexCSR.product`, for blocks of either kind."""
+
+        cp = self.cp
+        if block.ndim != 2 or block.shape[0] != self.shape[1]:
+            raise ValueError("the block does not match the matrix")
+        if diagonal is not None and self.shape[0] != self.shape[1]:
+            raise ValueError("a diagonal term needs a square matrix")
+        rows, count = self.shape[0], int(block.shape[1])
+        complex_out = self.complex or block.dtype == cp.complex128
+        dtype = cp.complex128 if complex_out else cp.float64
+        if output is None:
+            output = cp.empty((rows, count), dtype=dtype)
+            accumulate = False
+        elif output.shape != (rows, count) or not output.flags.c_contiguous or output.dtype != dtype:
+            raise ValueError("the output must be a row-major block of the product's shape and kind")
+        if rows * count == 0:
+            return output
+        matrix = self.matrix
+        if self.complex:
+            source = cp.ascontiguousarray(block, dtype=cp.complex128)
+            out, width = output, count
+            name, unit, values = "complex_csr", 16, cp.ascontiguousarray(matrix.data, dtype=cp.complex128)
+        else:
+            if block.dtype == cp.complex128:
+                # the real view: two real columns per complex one (a diagonal term applies to both)
+                source = cp.ascontiguousarray(block).view(cp.float64)
+                out, width = output.view(cp.float64), 2 * count
+            else:
+                source = cp.ascontiguousarray(block, dtype=cp.float64)
+                out, width = output, count
+            name, unit, values = "real_csr", 8, cp.ascontiguousarray(matrix.data, dtype=cp.float64)
+        indptr = cp.ascontiguousarray(matrix.indptr, dtype=cp.int32)
+        indices = cp.ascontiguousarray(matrix.indices, dtype=cp.int32)
+        diagonal_values = None if diagonal is None else cp.ascontiguousarray(diagonal, dtype=cp.float64)
+        if self.long_rows and diagonal_values is None:
+            tiles = (width + 7) // 8
+            _kernel(cp, f"{name}_long_rows")(
+                (rows, tiles),
+                (256,),
+                (
+                    np.int64(rows), np.int64(width), indptr, indices, values,
+                    source, np.int64(source.strides[0] // unit),
+                    out, np.int64(out.strides[0] // unit), np.int32(bool(accumulate)),
+                ),
+            )
+            return output
+        threads = 256
+        total = rows * width
+        _kernel(cp, f"{name}_block_product")(
+            ((total + threads - 1) // threads,),
+            (threads,),
+            (
+                np.int64(rows), np.int64(width), indptr, indices, values,
+                source, np.int64(source.strides[0] // unit),
+                out, np.int64(out.strides[0] // unit),
+                values if diagonal_values is None else diagonal_values,
+                np.int32(diagonal_values is not None), np.int32(bool(accumulate)),
+            ),
+        )
+        return output
+
+
+def ordered_device_matrix(matrix):
+    """A CuPy sparse matrix with products in a fixed order under ``PARSEC_ORDERED_SUMS=auto`` (an
+    :class:`OrderedCSR`; a CSC matrix becomes CSR first), the matrix as it is under ``off``."""
+
+    if ordered_sums_setting() != "auto":
+        return matrix
+    if max(int(value) for value in matrix.shape) >= 2**31 or int(matrix.nnz) >= 2**31:
+        return matrix  # beyond the int32 indices of the kernels: CuPy's product
+    if getattr(matrix, "format", "csr") != "csr":
+        matrix = matrix.tocsr()
+    return OrderedCSR(matrix)
+
+
+__all__ = ["DeviceComplexCSR", "OrderedCSR", "ordered_device_matrix", "ordered_sums_setting"]

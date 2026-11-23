@@ -597,6 +597,59 @@ class BandRetryTests(unittest.TestCase):
                 self.assertEqual(set(cycles), {expected})
 
 
+    def test_the_host_routes_and_the_band_buffer(self) -> None:
+        # PARSEC_BAND_BUFFER reaches the CHEBFF-based converged first solves only: the host CHEBDAV keeps
+        # Subspace_Buffer_Size (it converges every working state) and its own test (no WARNING of the relative
+        # test); the host CHEBFF takes the buffer and the relative test
+        from unittest import mock
+
+        from parsec_python.Eigensolvers import solve_eigval as real_solve
+        from parsec_python.driver import prepare_periodic_single_point
+        from parsec_python.Grid import kpoint_sampling
+        from parsec_python.SCF import bands as bands_module
+        from parsec_python.SCF.kpoints import run_scf_kpoints
+
+        for method in ("chebdav", "chebff"):
+            with self.subTest(method=method), tempfile.TemporaryDirectory() as tmp:
+                directory = Path(tmp)
+                shutil.copy(_AU_POTRE, directory / "Au_POTRE.DAT")
+                text = _INPUT.format(states=12, so_psp="false", extra="", kpoints=_MP, bands=_PATH)
+                text = text.replace("Eigensolver: chebdav", f"Eigensolver: {method}")
+                (directory / "parsec.in").write_text(text, encoding="utf-8")
+                problem = parse_parsec_input(directory / "parsec.in").problem
+                system = prepare_periodic_single_point(problem)
+                k_points, weights = kpoint_sampling(problem)
+                scf = run_scf_kpoints(system, k_points, weights)
+                potentials = bands_module.band_potentials(scf, "scalar")
+                buffers: list[int] = []
+
+                def recording(operator, requested, *, settings, state):
+                    buffers.append(int(settings.safety_buffer))
+                    return real_solve(operator, requested, settings=settings, state=state)
+
+                with mock.patch.dict(os.environ, {"PARSEC_BAND_BUFFER": "auto"}), mock.patch.object(
+                    bands_module, "solve_eigval", recording
+                ):
+                    result = bands_module.run_band_structure(
+                        system,
+                        problem.bands,
+                        mode="scalar",
+                        potentials=potentials,
+                        fermi_level=scf.fermi_level,
+                        number_of_states=12,
+                        workers=1,
+                        backend="cpu",
+                    )
+                base = int(problem.eigensolver.working_buffer)
+                self.assertIsNotNone(result.residual_test)
+                if method == "chebdav":
+                    self.assertEqual(set(buffers), {base})
+                    self.assertFalse(np.any(result.residual_tested))
+                else:
+                    self.assertEqual(set(buffers), {max(base, int(np.ceil(bands_module.BAND_BUFFER_FRACTION * 12)))})
+                    self.assertTrue(np.all(result.residual_tested))
+
+
 class ParallelBandTests(unittest.TestCase):
     """Band k-points are independent: workers must not change the bands.
 

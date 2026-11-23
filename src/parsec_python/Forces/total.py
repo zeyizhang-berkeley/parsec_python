@@ -75,6 +75,11 @@ class ForceResult:
     # FDET (PARSEC 1.5, forcnloc.F90:869-875): the net force is not removed,
     # ``total`` is ``symmetrized``.
     net_force_kept: bool = False
+    # The explicit term of the atomic tail of the Hartree boundary of a
+    # cluster (Ry/bohr) where the SCF took the potential of the Hartree
+    # energy (Hartree.variational, PARSEC_HARTREE_VARIATIONAL); ``None``
+    # without it.
+    hartree_boundary: np.ndarray | None = None
 
     @property
     def local_with_ion_ion(self) -> np.ndarray:
@@ -105,6 +110,7 @@ def assemble_forces(
     spin_orbit: np.ndarray | None = None,
     keep_torque: bool = False,
     keep_net_force: bool = False,
+    hartree_boundary: np.ndarray | None = None,
 ) -> ForceResult:
     """Combine the force terms as ``forcnloc.f90`` does at its end.
 
@@ -117,9 +123,13 @@ def assemble_forces(
     keep the value of the symmetrized forces (``keep_torque``), which their
     report does not print.  ``keep_net_force`` (FDET) keeps the net force in
     ``total``, as ``forcnloc.F90:869-875`` does with ``fex_is``.
+    ``hartree_boundary`` is the explicit term of the atomic tail of a
+    cluster's Hartree boundary (:func:`parsec_python.Hartree.variational.hartree_tail_forces`).
     """
 
     unsymmetrized = ion_ion + local.total + nonlocal_pseudopotential
+    if hartree_boundary is not None:
+        unsymmetrized = unsymmetrized + hartree_boundary
     if spin_orbit is not None:
         unsymmetrized = unsymmetrized + spin_orbit
     if hubbard is not None:
@@ -155,6 +165,7 @@ def assemble_forces(
         periodic=periodic,
         spin_orbit=spin_orbit,
         **({"net_force_kept": True} if keep_net_force else {}),
+        **({} if hartree_boundary is None else {"hartree_boundary": hartree_boundary}),
     )
 
 
@@ -257,6 +268,10 @@ def compute_forces(
         operations = None
     elif operations is None:
         operations = atom_symmetry_operations(atoms)
+    from ..Hartree.variational import hartree_tail_forces
+
+    # The atomic tail of the boundary moves with the atoms (PARSEC_HARTREE_VARIATIONAL).
+    tail_term = hartree_tail_forces(system, result)
     return assemble_forces(
         positions,
         repulsion,
@@ -267,6 +282,7 @@ def compute_forces(
         point_charge=charged,
         **correction_forces(system, result),
         **({"keep_net_force": True} if embedded else {}),
+        **({} if tail_term is None else {"hartree_boundary": tail_term}),
     )
 
 
@@ -394,6 +410,9 @@ def compute_spinor_forces(
         operations = None
     elif operations is None:
         operations = atom_symmetry_operations(atoms)
+    from ..Hartree.variational import hartree_tail_forces
+
+    tail_term = hartree_tail_forces(system, result)
     return assemble_forces(
         positions,
         repulsion,
@@ -401,6 +420,7 @@ def compute_spinor_forces(
         separable,
         operations,
         seconds=perf_counter() - started,
+        **({} if tail_term is None else {"hartree_boundary": tail_term}),
     )
 
 

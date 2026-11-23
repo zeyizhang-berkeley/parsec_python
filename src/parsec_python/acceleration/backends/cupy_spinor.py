@@ -169,16 +169,19 @@ class CuPySpinorHamiltonian:
         if nonlocal_operator.shape != (size, size):
             raise ValueError("nonlocal operator does not match the kinetic operator")
 
+        from ..Hamiltonian.complex_csr_device import ordered_device_matrix
+
+        # PARSEC_ORDERED_SUMS=auto: the products in a fixed order of summation (CSR); off: CuPy's, as before
         laplacian_complex = sp.csr_matrix(negative_laplacian, dtype=np.complex128)
-        self._negative_laplacian = cpsparse.csr_matrix(laplacian_complex)
+        self._negative_laplacian = ordered_device_matrix(cpsparse.csr_matrix(laplacian_complex))
         self._effective_potential = cp.asarray(potential, dtype=cp.float64)
         projectors_complex = sp.csc_matrix(
             nonlocal_operator.projectors, dtype=np.complex128
         )
-        self._projectors = cpsparse.csc_matrix(projectors_complex)
-        self._projectors_h = cpsparse.csc_matrix(
+        self._projectors = ordered_device_matrix(cpsparse.csc_matrix(projectors_complex))
+        self._projectors_h = ordered_device_matrix(cpsparse.csc_matrix(
             projectors_complex.conj().T.tocsc()
-        )
+        ))
         self._signs = cp.asarray(
             np.asarray(nonlocal_operator.signs, dtype=np.float64)
         )

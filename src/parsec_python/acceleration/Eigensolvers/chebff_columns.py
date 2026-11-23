@@ -62,6 +62,7 @@ from .chebff_spinor import (
     _CountingOperator,
     START_COLUMNS,
     _filter_columns,
+    start_column_scale,
     _filter_group,
     _filter_group_fused,
     _lanczos_upper_bound,
@@ -1234,6 +1235,24 @@ def _filter_local(
     return out
 
 
+def _start_columns(xp, group: ColumnGroup, saved, old_layout: ColumnLayout, layout: ColumnLayout, dimension: int,
+                   dtype):
+    """``(columns, kept)``: this rank's columns of ``layout`` whose leading ``kept`` global columns are the saved
+    columns of a former basis (``saved``, this rank's columns of ``old_layout``, host or device) and the others zero;
+    collective over ``group`` (the columns move through blocks of rows, as :func:`.kpoint_sectors.trimmed_state`
+    moves a cut basis)."""
+    kept = min(int(old_layout.columns), int(layout.columns))
+    old = xp.asarray(saved, dtype=dtype)
+    rows = group.to_rows(old, old_layout, dimension)
+    del old
+    padded = xp.zeros((int(rows.shape[0]), int(layout.columns)), dtype=dtype)
+    padded[:, :kept] = rows[:, :kept]
+    del rows
+    columns = group.to_columns(padded, layout, dimension)
+    del padded
+    return columns, kept
+
+
 def solve_column_eigval(
     operator: Any,
     requested_states: int,
@@ -1248,12 +1267,17 @@ def solve_column_eigval(
     max_extra_cycles: int | None = None,
     residual_period: int | None = None,
     route: str | None = None,
+    start=None,
 ) -> SpinorEigvalResult:
     """One eigensolve of the SCF loop with the basis shared by the ranks of ``group``.
 
     The policy, arguments and result of :func:`.chebff_spinor.solve_spinor_eigval`; ``operator`` is
     this rank's replica of the whole operator; ``result.vectors`` and ``result.state.vectors`` are this
     rank's columns (``result.state.layout``); the eigenvalues and residuals are the same on every rank.
+
+    ``start``: for a first solve of a basis that grows (a k-point sector, ``PARSEC_KPOINT_SECTOR_WARM_GROWTH``), the
+    pair ``(layout, columns)`` of its former basis on this rank (host or device), whose columns replace the leading
+    columns of the random start (collective: every rank of ``group`` gives its own or every rank ``None``).
     """
     if xp is None:
         from ..backends.cupy import require_cupy
@@ -1290,10 +1314,29 @@ def solve_column_eigval(
                 env = os.environ.get("PARSEC_KPOINT_EXTRA_CYCLES", "").strip()
                 max_extra_cycles = int(env) if env.isdigit() else 24
             extra = int(max_extra_cycles)
+        saved = None
+        if start is not None:
+            # the saved columns laid out as the leading columns of the new basis, before its random start is drawn
+            saved = _start_columns(
+                xp, group, start[1], start[0], layout, dimension,
+                xp.float64 if _real_arithmetic(operator) else xp.complex128,
+            )
+            start = None
         vectors = _random_columns(
             xp, chebff.random_seed, dimension, working, layout, group.rank, chunk, group if block_route else None,
             real_basis=_real_arithmetic(operator),
         )
+        if saved is not None:
+            columns, kept = saved
+            del saved
+            scale = start_column_scale(dimension, not _real_arithmetic(operator))
+            for g0, l0, count in layout.spans(group.rank):
+                inside = max(0, min(count, kept - g0))
+                if inside:
+                    vectors[:, l0 : l0 + inside] = columns[:, l0 : l0 + inside]
+                if inside < count:
+                    vectors[:, l0 + inside : l0 + count] *= scale
+            del columns
         bound_rule, bound_steps = bound_request(chebff)
         upper_bound, smallest_ritz = _bounds(
             xp, counted, dimension, bound_steps, chebff.random_seed + 1, group, stats, rule=bound_rule

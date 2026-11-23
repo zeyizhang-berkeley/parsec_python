@@ -469,7 +469,7 @@ def fortran_spinor_backend(k_sampling=None, *, periodic: bool = False) -> IonicB
 
 
 def periodic_backend(
-    k_points=None, k_weights=None, potential_extrapolation: str = "none"
+    k_points=None, k_weights=None, potential_extrapolation: str = "none", *, file_keep=None
 ) -> IonicBackend:
     """The readable path for a periodic cell: the Gamma point, or a uniform k-point sampling.
 
@@ -481,6 +481,9 @@ def periodic_backend(
     the irreducible wedge of a mesh (``PARSEC_KPOINT_FORCE_WEDGE``) they are completed and averaged over its group,
     which keeps the structure in it.  The
     k-point loops start their eigenproblems cold after a move; the Gamma loop carries its eigensubspace over.
+    ``file_keep`` (a function of no arguments) gives the keywords that make the k-point loop of every structure keep
+    its orbitals for ``parsec.dat`` (:meth:`parsec_python.Output.output_files.RunOutputFiles.kpoint_keep`); the other
+    fields that keeping adds are dropped, so the energies, forces and moves are those without it.
     """
 
     from functools import partial
@@ -513,14 +516,21 @@ def periodic_backend(
                 compute_forces=True,
             )
         if sampled:
-            return run_scf_kpoints(
-                system,
-                k_points,
-                k_weights,
-                callback=callback,
-                compute_forces=True,
-                warm_start=warm_start,
-                convergence_criterion=convergence_criterion,
+            from ..Output.output_files import orbitals_for_file_only
+
+            keep = {} if file_keep is None else dict(file_keep())
+            return orbitals_for_file_only(
+                run_scf_kpoints(
+                    system,
+                    k_points,
+                    k_weights,
+                    callback=callback,
+                    compute_forces=True,
+                    warm_start=warm_start,
+                    convergence_criterion=convergence_criterion,
+                    **keep,
+                ),
+                bool(keep),
             )
         return run_scf(
             system, callback=callback, warm_start=warm_start, convergence_criterion=convergence_criterion

@@ -229,15 +229,42 @@ class ParserTests(_Directory):
         # (no free level below zero on this grid: nothing to say)
         self.assertEqual(self.notes(translation), [])
 
-    def test_orthogonal_cells_keep_the_written_vectors(self) -> None:
-        text = _listed(_text(cell="cube", **_SCALAR), "4 4 4", _mesh((4, 4, 4)))
+    def test_orthogonal_cells_move_the_points_outside_the_zone(self) -> None:
+        """PARSEC_KPOINT_ORTHOGONAL_LIST_FOLD=auto: a point of an orthogonal cell outside the first zone runs at its
+        shortest image with its weight, a point of the boundary (a component 1/2) and every point of a list inside the
+        zone keep their written vectors; literal and off keep every written vector."""
+
+        written = _mesh((4, 4, 4))
+        text = _listed(_text(cell="cube", **_SCALAR), "4 4 4", written)
         reference = self.parse(text, {"PARSEC_KPOINT_LIST_FOLD": "literal"}).problem
-        for value in ("auto", "shared", "literal"):
+        reciprocal = reciprocal_lattice(reference.periodic_cell.lattice_vectors)
+        np.testing.assert_allclose(reference.kpoints, written @ reciprocal, atol=1.0e-14)
+        expected = np.where(written > 0.5 + 1.0e-12, written - 1.0, written) @ reciprocal
+        for value in ("auto", "shared"):
             with self.subTest(value=value):
                 translation = self.parse(text, {"PARSEC_KPOINT_LIST_FOLD": value})
-                np.testing.assert_array_equal(translation.problem.kpoints, reference.kpoints)
+                np.testing.assert_allclose(translation.problem.kpoints, expected, atol=1.0e-14)
+                np.testing.assert_array_equal(translation.problem.kpoint_weights, reference.kpoint_weights)
                 self.assertFalse(translation.problem.kpoint_tie_images)
-                self.assertEqual(self.notes(translation), [])
+                self.assertTrue(any("orthogonal cell" in note for note in translation.warnings))
+        off = self.parse(text, {"PARSEC_KPOINT_ORTHOGONAL_LIST_FOLD": "off"}).problem
+        np.testing.assert_array_equal(off.kpoints, reference.kpoints)
+        # a list inside the first zone keeps its bits
+        inside = _listed(_text(cell="cube", **_SCALAR), "4 4 4", np.where(written > 0.5 + 1.0e-12, written - 1.0, written))
+        kept = self.parse(inside, {"PARSEC_KPOINT_ORTHOGONAL_LIST_FOLD": "off"}).problem
+        np.testing.assert_array_equal(self.parse(inside).problem.kpoints, kept.kpoints)
+        with self.assertRaisesRegex(Exception, "PARSEC_KPOINT_ORTHOGONAL_LIST_FOLD"):
+            self.parse(text, {"PARSEC_KPOINT_ORTHOGONAL_LIST_FOLD": "on"})
+        # Fortran-derived routines the run chose itself (a grid of 6 points per axis at order 6) fold too; requested
+        # ones keep the written vectors
+        coarse = text.replace("Grid_Spacing: 0.31", "Grid_Spacing: 0.8")
+        chosen = self.parse(coarse)
+        self.assertTrue(chosen.routines.fortran)
+        self.assertIsNot(chosen.routines.requested, True)
+        np.testing.assert_allclose(chosen.problem.kpoints, expected, atol=1.0e-14)
+        requested = self.parse(coarse.replace("Correlation_Type: CA", "Correlation_Type: CA\nUse_Fortran_Routines: .true."))
+        self.assertIs(requested.routines.requested, True)
+        np.testing.assert_allclose(requested.problem.kpoints, written @ reciprocal, atol=1.0e-14)
 
     def test_unrequested_fortran_routines_keep_a_list_without_a_level_below_zero(self) -> None:
         written = _mesh((4, 4, 4))
@@ -406,6 +433,68 @@ class MeshGuardTests(_Directory):
                 kpoint_mesh_guard_setting()
         with self.assertRaisesRegex(Exception, "PARSEC_KPOINT_MESH_GUARD"):
             self.parse(_text(cell="cube", **_SCALAR), {"PARSEC_KPOINT_MESH_GUARD": "on"})
+
+    def test_the_wedge_keeps_the_operations_of_the_stencil(self) -> None:
+        """PARSEC_KPOINT_GUARD_WEDGE=auto: the guarded mesh of a primitive bcc cell on Fortran's general grid (axes and
+        the fourth body diagonal, first differences along the axes) is reduced by the 12 of 48 operations that keep the
+        grid's operators, the forces averaged over all 48; crystal keeps the 48 operations, as before."""
+
+        from parsec_python.Grid.kpoints import grid_stencil_lines, stencil_preserving_operations
+
+        auto = self.parse(_bcc(mesh="4 4 4"))
+        # a restart reads the same subgroup again (before another input replaces the file it reads)
+        positions = np.asarray([atom.position for atom in auto.problem.atoms], dtype=float)
+        fresh = read_symmetry_of_structure(auto, positions)
+        self.assertEqual(symmetry_signature(fresh), symmetry_signature(auto))
+        crystal = self.parse(_bcc(mesh="4 4 4"), {"PARSEC_KPOINT_GUARD_WEDGE": "crystal"})
+        whole = crystal.problem.space_group
+        self.assertEqual(whole.order, 48)
+        self.assertIsNone(crystal.problem.force_space_group)
+        problem = auto.problem
+        self.assertEqual(problem.space_group.order, 12)
+        self.assertEqual(problem.force_space_group.order, 48)
+        self.assertTrue(problem.scf.symmetrize_density)
+        counts, lines = grid_stencil_lines(problem.periodic_cell, problem.grid)
+        kept = stencil_preserving_operations(whole, problem.periodic_cell.lattice_vectors, counts, lines=lines)
+        self.assertEqual(sorted(map(str, kept.rotations)), sorted(map(str, problem.space_group.rotations)))
+        self.assertTrue(any("reduced by 12 of the 48 operations" in note for note in auto.warnings))
+        self.assertFalse(any("moved mesh" in note for note in crystal.warnings))
+        # the subgroup's wedge holds every point of the mesh at its shortest images: more stars, the same total weight
+        k_auto, w_auto = kpoint_sampling(problem)
+        k_crystal, w_crystal = kpoint_sampling(crystal.problem)
+        self.assertGreater(len(k_auto), len(k_crystal))
+        self.assertAlmostEqual(float(np.sum(w_auto)), 1.0, places=13)
+        self.assertFalse(np.any(lowest_free_levels(k_auto, problem.periodic_cell, problem.grid) < -1.0e-8))
+        # a hybrid keeps its k-points (the time-reversal pairs here, the whole mesh) and does not average their density
+        hybrid_text = _bcc(mesh="4 4 4").replace("Correlation_Type: CA", "Correlation_Type: PBE0")
+        hybrid = self.parse(hybrid_text).problem
+        hybrid_whole = self.parse(hybrid_text, {"PARSEC_KPOINT_GUARD_WEDGE": "crystal"}).problem
+        self.assertFalse(hybrid.scf.symmetrize_density)
+        self.assertTrue(hybrid_whole.scf.symmetrize_density)
+        self.assertEqual(hybrid.space_group.order, 12)
+        self.assertEqual(hybrid.force_space_group.order, 48)
+        self.assertEqual(hybrid_whole.space_group.order, 48)
+        self.assertIsNone(hybrid_whole.force_space_group)
+        np.testing.assert_array_equal(kpoint_sampling(hybrid)[0], kpoint_sampling(hybrid_whole)[0])
+        # the guard of PARSEC_KPOINT_MESH_GUARD=off and a requested routine set keep the whole group
+        for text, environment in (
+            (_bcc(mesh="4 4 4"), {"PARSEC_KPOINT_MESH_GUARD": "off"}),
+            (_bcc("Use_Fortran_Routines: .true.", mesh="4 4 4"), {}),
+        ):
+            with self.subTest(text=text[:40], environment=environment):
+                found = self.parse(text, environment).problem
+                self.assertIsNone(found.force_space_group)
+                if found.space_group is not None:
+                    self.assertEqual(found.space_group.order, 48)
+
+    def test_an_unknown_wedge_value_stops_every_input(self) -> None:
+        from parsec_python.Grid.kpoints import kpoint_guard_wedge_setting
+
+        with mock.patch.dict(os.environ, {"PARSEC_KPOINT_GUARD_WEDGE": "off"}):
+            with self.assertRaisesRegex(ValueError, "PARSEC_KPOINT_GUARD_WEDGE"):
+                kpoint_guard_wedge_setting()
+        with self.assertRaisesRegex(Exception, "PARSEC_KPOINT_GUARD_WEDGE"):
+            self.parse(_text(cell="cube", **_SCALAR), {"PARSEC_KPOINT_GUARD_WEDGE": "off"})
 
 
 class WrittenTieTests(unittest.TestCase):

@@ -67,6 +67,11 @@ class MPIContext:
         self.local_rank = int(node.Get_rank())
         self.ranks_per_node = int(node.Get_size())
         node.Free()
+        # The ranks of a node divide the host room of the saved columns of a growing sector
+        # (PARSEC_CUPY_SECTOR_WARM_GROWTH_HOST=node, Eigensolvers/sector_growth.host_room).
+        from ..Eigensolvers.sector_growth import set_host_processes
+
+        set_host_processes(self.ranks_per_node)
         self.cuda_aware = os.environ.get(CUDA_AWARE_ENV, "").strip().lower() in ("1", "true", "on", "yes")
         self.cuda_aware_reduce = os.environ.get(CUDA_AWARE_REDUCE_ENV, "").strip().lower() in ("1", "true", "on", "yes")
         self.allsum_seconds = 0.0  # time of the sums over the ranks (``allsum``), for the report

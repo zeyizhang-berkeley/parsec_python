@@ -93,7 +93,12 @@ from scipy.special import erf
 from ..Grid.cell import fractional_coordinates
 from ..models import Atom, SpeciesPotential
 from ..Pseudopotential import ParsecPseudopotential, ParsecRadialSpline
+from ..Pseudopotential import radial_derivatives as _radial_derivatives
 from ..Pseudopotential.radial_derivatives import (
+    density_derivative_table,
+    evaluate_density_derivative,
+    evaluate_local_potential_derivative,
+    local_potential_derivative_table,
     radial_projector_with_derivative,
     spline_derivative,
 )
@@ -124,22 +129,24 @@ from .symmetry import POSITION_TOLERANCE, SpaceGroupAtomOperation, symmetrize_fo
 # ---------------------------------------------------------------------------
 # Radial slopes of the interpolants the energy uses.
 
-#: How the nonlocal force differentiates the radial projectors:
-#: ``"interpolant"`` (default) the slope of the sampled projector, so that the
-#: force is the derivative of the computed energy; ``"tabulated"`` the slope
-#: table of ``pseudo.f90`` that Fortran's ``forcnloc.f90`` uses (and the forces
-#: of an isolated system here).  On 2-atom fcc and 8-atom cubic Si cells at
-#: h = 0.6-0.64 bohr the two differ by up to 1e-2 Ry/bohr.  The environment
-#: variable ``PARSEC_PERIODIC_FORCE_SLOPES`` selects one for
-#: :func:`compute_periodic_forces`.
-RADIAL_SLOPES = ("interpolant", "tabulated")
+#: How the forces of these routines differentiate the radial tables of a species without ``Cubic_Spline``:
+#: ``"interpolant"`` (default) the slopes of the linear interpolants the energy samples (local potential, densities,
+#: projectors), the exact derivative of the computed energy; ``"tabulated"`` the slope table ``dvw`` of
+#: ``pseudo.f90`` for the projectors only, as Fortran's ``forcnloc.f90`` (its nonlocal forces to 1e-6 Ry/bohr);
+#: ``"tables"`` every slope from the tables of ``pseudo.f90`` (``dvion``, ``drhodr``, ``ddenc`` and ``dvw``,
+#: interpolated linearly as ``forcloc.f90`` and ``forcnloc.f90`` do), the forces of the clusters and of the default
+#: routines of a cell (``PARSEC_LINEAR_TABLE_SLOPES=tabulated``).  The energy of linear tables is rough on the scale
+#: of a relaxation step, so its exact derivative is a noisy force.  On 2-atom fcc and 8-atom cubic Si cells at
+#: h = 0.6-0.64 bohr the projector slopes differ by up to 1e-2 Ry/bohr.  The environment variable
+#: ``PARSEC_PERIODIC_FORCE_SLOPES`` selects one for :func:`compute_periodic_forces`.
+RADIAL_SLOPES = ("interpolant", "tabulated", "tables")
 SLOPES_ENV = "PARSEC_PERIODIC_FORCE_SLOPES"
 
 
 #: The round-off distance (bohr): under ``PARSEC_PROJECTOR_CENTER=off`` the distance below which ``1/|d|`` of a
 #: projector gradient is clamped, at most the first radial knot (an atom within round-off of a grid point got the
 #: gradient of this distance instead of ``1/1e-15``, found when both sets of routines were compared), and the radius
-#: within which ``PARSEC_SPLINE_FORCE_CENTER=auto`` drops the spline slopes.  Far below any physical displacement,
+#: within which ``PARSEC_SPLINE_FORCE_CENTER=tip`` drops the spline slopes.  Far below any physical displacement,
 #: far above round-off.  The projectors take the same rule for their harmonics under ``off``
 #: (``V_ion.ionic_potential.PROJECTOR_CENTER_ROUND_OFF``); ``auto`` and ``tip`` clamp at the first radial knot.
 ROUND_OFF_DISTANCE = _ionic_potential.PROJECTOR_CENTER_ROUND_OFF
@@ -198,7 +205,7 @@ def _interpolant_gradient_terms(radius, potential, radial_grid, spline, setting:
 
 
 def radial_slope_setting() -> str:
-    """``PARSEC_PERIODIC_FORCE_SLOPES``: ``interpolant`` (default) or ``tabulated``."""
+    """``PARSEC_PERIODIC_FORCE_SLOPES``: ``interpolant`` (default), ``tabulated`` or ``tables`` (:data:`RADIAL_SLOPES`)."""
 
     import os
 
@@ -208,47 +215,32 @@ def radial_slope_setting() -> str:
     return value
 
 
-#: The switch of the centre of the spline slopes in the local forces of a cell (:func:`spline_force_center_setting`).
-SPLINE_CENTER_ENV = "PARSEC_SPLINE_FORCE_CENTER"
+#: The switch of the radial slopes of the local forces next to an atom (:func:`spline_force_center_setting`).
+SPLINE_CENTER_ENV = _radial_derivatives.SPLINE_FORCE_CENTER_ENV
 
 
 def spline_force_center_setting() -> str:
-    """``PARSEC_SPLINE_FORCE_CENTER``: the spline slopes of the local forces of a cell at grid points next to an atom.
+    """``PARSEC_SPLINE_FORCE_CENTER``: the radial slopes of the local potential and of the core density in the local
+    forces at grid points next to an atom
+    (:func:`parsec_python.Pseudopotential.radial_derivatives.spline_force_center_setting`, where the values are
+    described).
 
-    The padded cubic spline of a ``Cubic_Spline`` local potential (or core density) has a slope of its own at
-    ``r = 0+``, so the potential (and the energy) is a cone at the atom.  The slope at the tip, per table: carbon
-    POTRE 3.6e-3 Ry/bohr (first radial sample 1.3e-5 bohr), silicon POTRE 5.5e-6 (2.2e-6 bohr); FHI tables Si 0.035
-    (4.5e-4 bohr), Mg 3.4e-3 (5.2e-4), O 0.73 (7.8e-4), C 0.42 (1.04e-3).  A grid point within round-off of an atom
-    (an atom placed on the grid, whose distance comes out as 1e-11 bohr instead of 0) took that slope along the
-    direction of the round-off: a random vector in the forces that changed when the atom moved by 1e-11 bohr (up to
-    1.5e-5 Ry/bohr on the POTRE diamond cubes, 5.6e-3 on an O FHI table).
-
-    * ``auto`` (default since 2026-11-21): the points within ``min(rs(2), 1e-6 bohr)`` of the atom
-      (:data:`ROUND_OFF_DISTANCE`) take the symmetric value at the tip, zero, the central difference of the energy
-      there.  Every other point keeps the slope of the spline, the exact derivative of the energy, bit for bit as
-      under ``off``.
-    * ``fortran``: the rule of ``forcloc.f90`` (``if (r1 < rs(2)) cycle``, also the rule of this port's cluster,
-      wire and slab forces and of the default routines of a cell,
-      :func:`parsec_python.Pseudopotential.radial_derivatives.evaluate_local_potential_derivative`): every point
-      closer than the first radial sample leaves the slope out.  Between 1e-6 bohr and ``rs(2)`` the force is then
-      not the derivative of the energy (whose cone stays): 2.9e-3 to 5.2e-3 Ry/bohr off on an O FHI table at h 0.3
-      at 3e-4 to 6e-4 bohr from a grid point.
-    * ``off``: the spline slope at every positive distance, as before 2026-11-21.
-
-    The Fortran-derived routines of a cell read it (:func:`periodic_local_forces` and
-    :mod:`parsec_python.acceleration.Forces.periodic_spline`); the linear tables already have no slope there.
+    On the Fortran-derived routines of a cell (:func:`periodic_local_forces`,
+    :mod:`parsec_python.acceleration.Forces.periodic_spline` and :mod:`parsec_python.acceleration.Forces.periodic_device`):
+    ``auto`` the slope of the smooth behaviour within ``2 rs(2)`` of the atom; ``tip`` (the default
+    of 2026-11-21) the points within ``min(rs(2), 1e-6 bohr)`` of the atom (:data:`ROUND_OFF_DISTANCE`) take the
+    symmetric value at the tip of the cone of a spline, zero, every other point the slope of the spline or of the
+    interpolant (a grid point within round-off of an atom took the slope of the cone along the direction of the
+    round-off before: up to 1.5e-5 Ry/bohr on the POTRE diamond cubes, 5.6e-3 on an O FHI table); ``fortran`` every
+    spline slope closer than the first radial sample left out; ``off`` the spline slope at every positive distance.
     """
 
-    import os
-
-    value = os.environ.get(SPLINE_CENTER_ENV, "auto").strip().lower() or "auto"
-    if value not in ("auto", "fortran", "off"):
-        raise ValueError(f"{SPLINE_CENTER_ENV} must be auto, fortran or off, not {value!r}")
-    return value
+    return _radial_derivatives.spline_force_center_setting()
 
 
 def spline_center_radius(potential: ParsecPseudopotential, setting: str) -> float:
-    """The radius below which :func:`without_spline_center` drops a spline slope (0 under ``off``)."""
+    """The radius below which :func:`without_spline_center` drops a spline slope (0 under ``off``; ``auto`` as ``tip``,
+    whose radius lies inside that of the rule of ``auto``, :func:`smooth_center_radius`)."""
 
     if setting == "off":
         return 0.0
@@ -263,6 +255,10 @@ def without_spline_center(slope, distances, potential: ParsecPseudopotential, se
     if setting == "off":
         return slope
     return np.where(np.asarray(distances) < spline_center_radius(potential, setting), 0.0, slope)
+
+
+smooth_center_radius = _radial_derivatives.smooth_center_radius
+with_smooth_center = _radial_derivatives.with_smooth_center
 
 
 
@@ -500,10 +496,15 @@ def periodic_local_forces(
     superposed atomic valence densities, both with their lattice images.
 
     A provider installed with :func:`set_local_force_provider` takes the
-    cell first (see there).
+    cell first (see there), except under ``PARSEC_PERIODIC_FORCE_SLOPES=tables``
+    with a species without ``Cubic_Spline``: the slopes of ``pseudo.f90``'s
+    tables are summed here.
     """
 
-    if _local_force_provider is not None:
+    tables = radial_slope_setting() == "tables" and any(
+        not specifications[atom.symbol].use_spline for atom in atoms
+    )
+    if _local_force_provider is not None and not tables:
         provided = _local_force_provider(
             grid,
             atoms,
@@ -561,6 +562,8 @@ def periodic_local_forces(
     xc_present = bool(np.any(xc != 0.0))
     valence_tables: dict[str, np.ndarray] = {}
     core_splines: dict[str, ParsecRadialSpline | None] = {}
+    # PARSEC_PERIODIC_FORCE_SLOPES=tables: the derivative tables of pseudo.f90 per species (dvion, drhodr, ddenc)
+    slope_tables: dict[tuple[str, str], np.ndarray] = {}
     center = spline_force_center_setting()
     g_space = getattr(grid.settings, "local_potential", "real_space") == "g_space"
     if g_space:
@@ -577,22 +580,35 @@ def periodic_local_forces(
         # Short-range Ewald piece: every translation of the potential (whose
         # radial function is always interpolated as r*V or by the spline:
         # Old_Interpolation_Format applies to clusters only).
+        def local_slope(points, _p=potential, _s=specification, _symbol=atom.symbol):
+            if tables and not _s.use_spline:
+                # PARSEC_PERIODIC_FORCE_SLOPES=tables: dvion of pseudo.f90, interpolated as forcloc.f90 does
+                key = (_symbol, "local")
+                if key not in slope_tables:
+                    slope_tables[key] = local_potential_derivative_table(_p, _s.local_angular_momentum)
+                return evaluate_local_potential_derivative(
+                    _p, points, _s.local_angular_momentum, table=slope_tables[key], slopes="tabulated"
+                )
+            slope = local_potential_slope(
+                _p, points, _s.local_angular_momentum, use_spline=_s.use_spline, spline_padding_width=padding
+            )
+            if _s.use_spline:
+                # the cone at the atom (spline_force_center_setting)
+                slope = without_spline_center(slope, points, _p, center)
+            return slope
+
+        # the slope of the smooth behaviour next to the atom (PARSEC_SPLINE_FORCE_CENTER=auto)
+        smooth = smooth_center_radius(potential, center)
+        smooth_slope = local_slope(np.array([smooth])) if smooth > 0.0 else None
         reaching = np.linalg.norm(position + all_translations - cell_center, axis=1) <= real_cutoff + cell_radius
         for translation in all_translations[reaching]:
             relative = coordinates - (position + translation)
             radius = np.sqrt(np.einsum("ij,ij->i", relative, relative))
             slope_over_r = np.zeros_like(radius)
             nonzero = radius > 0.0
-            slope = local_potential_slope(
-                potential,
-                radius[nonzero],
-                specification.local_angular_momentum,
-                use_spline=specification.use_spline,
-                spline_padding_width=padding,
-            )
-            if specification.use_spline:
-                # the cone at the atom (spline_force_center_setting)
-                slope = without_spline_center(slope, radius[nonzero], potential, center)
+            slope = local_slope(radius[nonzero])
+            if smooth_slope is not None:
+                slope = _radial_derivatives.apply_smooth_center(slope, radius[nonzero], smooth, smooth_slope)
             slope_over_r[nonzero] = slope / radius[nonzero]
             slope_over_r += _erf_over_r_slope_over_r(charge, radius, eta) * nonzero
             ionic[index] += (density * slope_over_r) @ relative
@@ -622,7 +638,13 @@ def periodic_local_forces(
                 radius = np.sqrt(np.einsum("ij,ij->i", relative, relative))
                 if not np.any(radius < cutoff):
                     continue
-                slope = _density_slope(potential, radius, table)
+                if tables and not specification.use_spline:
+                    key = (atom.symbol, "valence")
+                    if key not in slope_tables:
+                        slope_tables[key] = density_derivative_table(potential, table)
+                    slope = evaluate_density_derivative(potential, radius, table, table=slope_tables[key])
+                else:
+                    slope = _density_slope(potential, radius, table)
                 nonzero = radius > 0.0
                 weight = np.zeros_like(radius)
                 weight[nonzero] = residual[nonzero] * slope[nonzero] / radius[nonzero]
@@ -638,6 +660,22 @@ def periodic_local_forces(
                 )
             spline = core_splines[atom.symbol]
             cutoff = _density_reach(potential, potential.core_density)
+
+            def core_slope(points, _p=potential, _c=spline, _symbol=atom.symbol):
+                if tables and _c is None:
+                    # PARSEC_PERIODIC_FORCE_SLOPES=tables: ddenc of pseudo.f90, interpolated as forcloc.f90 does
+                    key = (_symbol, "core")
+                    if key not in slope_tables:
+                        slope_tables[key] = density_derivative_table(_p, _p.core_density)
+                    return evaluate_density_derivative(_p, points, _p.core_density, table=slope_tables[key])
+                slope = _density_slope(_p, points, _p.core_density, spline=_c)
+                if _c is not None:
+                    slope = without_spline_center(slope, points, _p, center)
+                return slope
+
+            # the slope of the smooth behaviour next to the atom (PARSEC_SPLINE_FORCE_CENTER=auto)
+            smooth = smooth_center_radius(potential, center)
+            smooth_slope = core_slope(np.array([smooth])) if smooth > 0.0 else None
             for translation in _reaching_translations(
                 grid,
                 position,
@@ -648,11 +686,9 @@ def periodic_local_forces(
                 radius = np.sqrt(np.einsum("ij,ij->i", relative, relative))
                 if not np.any(radius < cutoff):
                     continue
-                slope = _density_slope(
-                    potential, radius, potential.core_density, spline=spline
-                )
-                if spline is not None:
-                    slope = without_spline_center(slope, radius, potential, center)
+                slope = core_slope(radius)
+                if smooth_slope is not None:
+                    slope = _radial_derivatives.apply_smooth_center(slope, radius, smooth, smooth_slope)
                 nonzero = radius > 0.0
                 weight = np.zeros_like(radius)
                 weight[nonzero] = xc[nonzero] * slope[nonzero] / radius[nonzero]
@@ -716,7 +752,7 @@ def build_periodic_projector_gradients(
 
     if radial_slopes not in RADIAL_SLOPES:
         raise ValueError("radial_slopes must be one of " + ", ".join(RADIAL_SLOPES))
-    tabulated = radial_slopes == "tabulated"
+    tabulated = radial_slopes in ("tabulated", "tables")
     wanted = _selected_atoms(len(atoms), atom_indices)
     center_setting = _ionic_potential.projector_center_setting()
 
@@ -1435,8 +1471,9 @@ def core_force_xc_average(system, result) -> float:
     takes ``dE_xc/dn_core`` of its own record, which keeps its average.  Otherwise the potential of the density of the
     result is evaluated once more without the shift (``evaluate_xc`` of the host system with ``zero_average=False``; a
     collinear spin result: the mean of the channel averages, which is what the averaged potential of the core term
-    lost).  Zero also for a spin result that keeps only the total density (collinear spin with spin-orbit coupling
-    and an explicit ``Zero_Average_Vxc``), whose channel averages cannot be formed again.
+    lost; collinear spin with spin-orbit coupling and an explicit ``Zero_Average_Vxc``: the same from the output
+    densities of both channels that the spinor result keeps for ``parsec.dat``, since 2026-11-22, before which its
+    core term kept the shifted potential).  Zero for a non-collinear spinor result, which keeps no channel densities.
     """
 
     if core_force_xc_setting() == "shifted":
@@ -1468,8 +1505,15 @@ def core_force_xc_average(system, result) -> float:
         xc = owner.evaluate_xc_spin_polarized(_host_array(up), _host_array(down), zero_average=False)
         return 0.5 * (float(np.mean(_host_array(xc.potential_up))) + float(np.mean(_host_array(xc.potential_down))))
     if getattr(scf, "spin_polarized", False):
-        # a spin result that keeps the total density alone (collinear spin with spin-orbit coupling): the channel
-        # averages cannot be formed again, the potential stays as the loop left it
+        # collinear spin with spin-orbit coupling: the spinor result keeps the output densities of both channels in
+        # the fields of parsec.dat (kind 2, spin-orbit), the densities its potential was made of
+        fields = getattr(result, "parsec_dat_fields", None) or {}
+        densities = fields.get("densities")
+        if hasattr(result, "spinors") and fields.get("kind") == 2 and densities is not None:
+            xc = owner.evaluate_xc_spin_polarized(_host_array(densities[0]), _host_array(densities[1]), zero_average=False)
+            return 0.5 * (float(np.mean(_host_array(xc.potential_up))) + float(np.mean(_host_array(xc.potential_down))))
+        # a spin result that keeps the total density alone (a non-collinear magnetization): the channel averages
+        # cannot be formed again, the potential stays as the loop left it
         return 0.0
     xc = owner.evaluate_xc(_host_array(result.density), zero_average=False)
     return float(np.mean(_host_array(xc.potential)))

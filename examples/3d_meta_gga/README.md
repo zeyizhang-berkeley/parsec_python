@@ -82,14 +82,14 @@ process per input; peak device memory of the process):
 
 | mesh | irreducible k-points | functional | SCF iterations | wall (s) | peak device memory (GiB) |
 |---|---|---|---|---|---|
-| 2x2x2 | 3 | PBE | 12 | 10.5 | 0.7 |
-| 2x2x2 | 3 | SCAN | 18 | 18.9 | 0.8 |
-| 2x2x2 | 3 | r2SCAN | 15 | 17.0 | 0.8 |
-| 2x2x2 | 3 | TPSS | 18 | 17.1 | 0.8 |
-| 4x4x4 | 8 | PBE | 11 | 14.2 | 0.8 |
-| 4x4x4 | 8 | SCAN | 17 | 26.4 | 1.0 |
-| 4x4x4 | 8 | r2SCAN | 16 | 24.7 | 1.0 |
-| 4x4x4 | 8 | TPSS | 17 | 24.7 | 1.0 |
+| 2x2x2 | 3 | PBE | 12 | 9.2 | 0.7 |
+| 2x2x2 | 3 | SCAN | 18 | 17.6 | 0.8 |
+| 2x2x2 | 3 | r2SCAN | 15 | 15.1 | 0.8 |
+| 2x2x2 | 3 | TPSS | 18 | 15.4 | 0.8 |
+| 4x4x4 | 8 | PBE | 11 | 11.6 | 0.8 |
+| 4x4x4 | 8 | SCAN | 17 | 22.7 | 1.0 |
+| 4x4x4 | 8 | r2SCAN | 16 | 21.4 | 1.0 |
+| 4x4x4 | 8 | TPSS | 17 | 21.4 | 1.0 |
 
 The orbital terms of a meta-GGA (`tau` of the orbitals of every k-point and `-div(vtau grad)` in every Bloch
 Hamiltonian) and the evaluation of libxc on the GPU make a meta-GGA run 1.6 to 1.9 times as long as PBE here.

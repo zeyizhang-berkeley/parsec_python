@@ -51,6 +51,7 @@ from .kpoint_weights import KPointWeights
 from .orbital_density import spinor_sums
 from .single_point import first_diagonalization_tolerance, next_diagonalization_tolerance
 from .stage_timer import StageTimer, solver_residual_max, solver_timings
+from ..Hartree.variational import electrostatic_hartree
 from .kpoints_soc import (
     SpinorForceExtras,
     _eigval_settings,
@@ -535,7 +536,7 @@ def _run_noncollinear(
             output_effective_potential=output_potential,
             nonlocal_forces=nonlocal_forces,
             next_effective_potential=(input_potential, input_field),
-            hartree_potential=hartree_potential,
+            hartree_potential=electrostatic_hartree(system, hartree_potential),
             eigensolver_state=subspaces,
         )
 

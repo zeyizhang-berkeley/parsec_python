@@ -44,6 +44,84 @@ from ..V_ion.ionic_potential import _periodic_image_translations, _projector_sup
 # matching pls.F90's fixed lm=1..8 loop (do lj=1,2: do ml=-lj,lj).
 _SOC_ANGULAR_MOMENTA: tuple[int, ...] = (1, 2)
 
+SOC_PROJECTOR_SPLINE_ENV = "PARSEC_SOC_PROJECTOR_SPLINE"
+
+
+def soc_projector_spline_setting() -> str:
+    """``PARSEC_SOC_PROJECTOR_SPLINE``: ``auto`` (default, since 2026-11-22) or ``off``.
+
+    ``auto``: the radial functions of the spin-orbit projectors (``vionr`` and ``vsor``) of a species with
+    ``Cubic_Spline: .true.`` are evaluated with PARSEC's cubic spline, as ``nonloc.F90`` does under ``uspline`` and as
+    the Kleinman-Bylander projectors of that species already are, and their gradients take the derivative of that
+    spline: the forces are then the slope of a smooth energy.  ``off``: the linear interpolation of the tables for
+    every species, as before, whose energy has a kink wherever a grid point crosses a radial knot (forces within
+    1e-11 Ry/bohr of the energy over steps of 1e-6 bohr, but 1.6e-5 to 3.1e-5 Ry/bohr off its slope over steps of
+    1e-3 to 2e-3 bohr in the spin-orbit Ge8 cell).  A species without ``Cubic_Spline`` keeps the linear tables under
+    both values, as Fortran does."""
+
+    import os
+
+    value = os.environ.get(SOC_PROJECTOR_SPLINE_ENV, "auto").strip().lower() or "auto"
+    if value not in ("auto", "off"):
+        raise ValueError(f"{SOC_PROJECTOR_SPLINE_ENV} must be auto or off, got {value!r}")
+    return value
+
+
+@dataclass(frozen=True)
+class SpinOrbitRadialFunction:
+    """One radial table of the spin-orbit projectors (``vionr`` or ``vsor`` of a channel), evaluated as the
+    Hamiltonian samples it: linearly (``np.interp``, the first value continued inwards, zero beyond the table) or,
+    with ``spline``, by PARSEC's cubic spline at ``max(r, r_1)`` (:func:`spin_orbit_radial_functions`)."""
+
+    radii: np.ndarray
+    table: np.ndarray
+    spline: object | None = None
+
+    def values(self, radius: np.ndarray) -> np.ndarray:
+        """The radial function at the distances ``radius`` (the projector the Hamiltonian applies)."""
+
+        if self.spline is None:
+            return np.interp(radius, self.radii, self.table, left=self.table[0], right=0.0)
+        return self.spline(np.maximum(radius, self.radii[0]))
+
+    def slopes(self, radius: np.ndarray) -> np.ndarray:
+        """``d/dr`` of :meth:`values` at ``radius`` (``radius >= r_1`` where splined): the slope of the linear
+        interpolant (zero outside the table) or the derivative of the spline."""
+
+        if self.spline is None:
+            last = self.radii.size - 1
+            index = np.searchsorted(self.radii, radius, side="right") - 1
+            inside = (index >= 0) & (index < last)
+            clipped = np.clip(index, 0, last - 1)
+            slope = (self.table[clipped + 1] - self.table[clipped]) / (self.radii[clipped + 1] - self.radii[clipped])
+            return np.where(inside, slope, 0.0)
+        from ..Pseudopotential.radial_derivatives import spline_derivative
+
+        return spline_derivative(self.spline, np.maximum(radius, self.radii[0]))
+
+
+def spin_orbit_radial_functions(
+    potential: ParsecPseudopotential, angular_momentum: int, specification: SpeciesPotential, grid
+) -> tuple[SpinOrbitRadialFunction, SpinOrbitRadialFunction, float]:
+    """``(vionr, vsor, sign)`` of a spin-orbit channel as :class:`SpinOrbitRadialFunction` (``spin_orbit_projectors``
+    of the potential), splined where the species has ``Cubic_Spline`` and ``PARSEC_SOC_PROJECTOR_SPLINE=auto``
+    (:func:`soc_projector_spline_setting`; the padding of PARSEC's spline is ``Expansion_Order/2`` of ``grid``)."""
+
+    radial_ion, radial_so, sign = potential.spin_orbit_projectors(
+        angular_momentum, specification.local_angular_momentum
+    )
+    radii = np.asarray(potential.radii, dtype=np.float64)
+    if not (getattr(specification, "use_spline", False) and soc_projector_spline_setting() == "auto"):
+        return SpinOrbitRadialFunction(radii, radial_ion), SpinOrbitRadialFunction(radii, radial_so), sign
+    from ..Pseudopotential.radial_spline import ParsecRadialSpline
+
+    width = int(getattr(getattr(grid, "settings", None), "stencil_half_width", 0) or 0) or 1
+    return (
+        SpinOrbitRadialFunction(radii, radial_ion, ParsecRadialSpline.from_positive_grid(radii, radial_ion, width)),
+        SpinOrbitRadialFunction(radii, radial_so, ParsecRadialSpline.from_positive_grid(radii, radial_so, width)),
+        sign,
+    )
+
 
 def complex_spherical_harmonics(
     angular_momentum: int, relative_coordinates: np.ndarray, *, center_radius: float = 0.0
@@ -215,26 +293,15 @@ def build_spin_orbit_projectors(
                 continue
             width = 2 * angular_momentum + 1
             column = column_by_l[angular_momentum]
-            radial_ion, radial_so, sign = potential.spin_orbit_projectors(
-                angular_momentum, local_l
+            # linear tables, or PARSEC's spline under Cubic_Spline (PARSEC_SOC_PROJECTOR_SPLINE)
+            radial_ion, radial_so, sign = spin_orbit_radial_functions(
+                potential, angular_momentum, specification, grid
             )
             sign_by_l[angular_momentum] = sign
 
             for support_rows, relative_support, radius_support, phase in images:
-                interpolated_ion = np.interp(
-                    radius_support,
-                    potential.radii,
-                    radial_ion,
-                    left=radial_ion[0],
-                    right=0.0,
-                )
-                interpolated_so = np.interp(
-                    radius_support,
-                    potential.radii,
-                    radial_so,
-                    left=radial_so[0],
-                    right=0.0,
-                )
+                interpolated_ion = radial_ion.values(radius_support)
+                interpolated_so = radial_so.values(radius_support)
                 harmonics = complex_spherical_harmonics(
                     angular_momentum,
                     relative_support,
@@ -324,19 +391,16 @@ def _double_grid_spin_orbit_projectors(
                 continue
             width = 2 * angular_momentum + 1
             column = column_by_l[angular_momentum]
-            radial_ion, radial_so, sign = potential.spin_orbit_projectors(
-                angular_momentum, local_l
+            # linear tables, or PARSEC's spline under Cubic_Spline (PARSEC_SOC_PROJECTOR_SPLINE)
+            radial_ion, radial_so, sign = spin_orbit_radial_functions(
+                potential, angular_momentum, specification, grid
             )
             sign_by_l[angular_momentum] = sign
             for support, phase in images:
                 points, fine = support.radius.shape
                 radius = support.radius.reshape(-1)
-                interpolated_ion = np.interp(
-                    radius, potential.radii, radial_ion, left=radial_ion[0], right=0.0
-                )
-                interpolated_so = np.interp(
-                    radius, potential.radii, radial_so, left=radial_so[0], right=0.0
-                )
+                interpolated_ion = radial_ion.values(radius)
+                interpolated_so = radial_so.values(radius)
                 harmonics = complex_spherical_harmonics(
                     angular_momentum,
                     support.relative.reshape(-1, 3),

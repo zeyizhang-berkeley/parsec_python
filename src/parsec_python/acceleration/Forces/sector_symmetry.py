@@ -177,8 +177,11 @@ def sector_group_operations(reduction, atoms, grid, lattice_vectors=None):
     shifts = None if shifts is None else np.asarray(shifts, dtype=np.int64).reshape(-1, 3)
     # the rows of H and of the coset representatives, composed (raises where a row is not a permutation); matched to the
     # distance of the check of moved atoms, so that a structure check_sector_atoms accepts has its operations (the
-    # nearest atoms, the same table for atoms on the group)
-    images = group_atom_image_table(tuple(atoms), reduction, grid, max(ATOM_TOLERANCE, MOVE_TOLERANCE))
+    # nearest atoms, the same table for atoms on the group); an oblique cell in the frame of its grid indices
+    frame, image_atoms, image_grid, image_tolerance = _image_frame(
+        reduction, atoms, grid, max(ATOM_TOLERANCE, MOVE_TOLERANCE)
+    )
+    images = group_atom_image_table(tuple(image_atoms), reduction, image_grid, image_tolerance)
     if images is None:
         raise ValueError("an operation of the point group of the sectors carries an atom onto no atom of its species")
     identity = np.flatnonzero(
@@ -195,15 +198,47 @@ def sector_group_operations(reduction, atoms, grid, lattice_vectors=None):
         steps = np.diag(vectors) / np.asarray(grid.points_per_axis, dtype=np.float64)
     operations = []
     for g in order:
-        translation = None
-        if shifts is not None and np.any(shifts[g]):
-            translation = -matrices[g].T @ (shifts[g] * steps)
+        matrix, translation = _cartesian_operation(
+            frame, matrices[g], None if shifts is None else shifts[g], steps
+        )
         operations.append(
             PeriodicAtomSymmetryOperation(
-                matrix=matrices[g].copy(), image=images[g].copy(), lattice_vectors=vectors.copy(), translation=translation
+                matrix=matrix, image=images[g].copy(), lattice_vectors=vectors.copy(), translation=translation
             )
         )
     return tuple(operations)
+
+
+def _image_frame(reduction, atoms, grid, tolerance: float):
+    """``(frame, atoms, grid, tolerance)`` in which the atom images of the operations of ``reduction`` are matched:
+    those given, or for sectors detected in the frame of the grid indices of an oblique cell
+    (:class:`..Symmetry.oblique_frame.IndexFrame`, ``index_frame`` of the reduction) the atoms at ``S^-1 r``, the grid of
+    the frame and the tolerance in index units, where the operations act on the atoms as they act on the indices."""
+
+    frame = getattr(reduction, "index_frame", None)
+    if frame is None:
+        return None, tuple(atoms), grid, float(tolerance)
+    return frame, frame.atoms(tuple(atoms)), frame.frame_grid, frame.tolerance(tolerance)
+
+
+def _cartesian_operation(frame, matrix, shift, steps):
+    """``(R, tau)`` of the operation ``r -> R r + t`` of the sectors as an atom operation
+    (:class:`parsec_python.Forces.periodic.PeriodicAtomSymmetryOperation`: ``R (r_a - tau) = r_b`` modulo the lattice,
+    ``tau = -R^-1 t``, ``None`` without a translation).
+
+    ``matrix`` and ``shift`` (grid steps) as the reduction holds them: Cartesian, the steps of the axes of a box giving
+    ``t = shift * steps``; or, for an oblique cell in the frame of its grid indices (``frame``), the signed
+    permutation ``W`` of the indices, ``R = S W S^-1`` and ``t = S shift`` (``S`` the steps of the grid axes as
+    columns), so that ``tau = -S W^T shift``."""
+
+    matrix = np.asarray(matrix, dtype=np.float64)
+    moved = shift is not None and np.any(np.asarray(shift) != 0)
+    if frame is None:
+        translation = -matrix.T @ (np.asarray(shift, dtype=np.float64) * steps) if moved else None
+        return matrix.copy(), translation
+    rotation = frame.cartesian(matrix)
+    translation = -(frame.steps @ (matrix.T @ np.asarray(shift, dtype=np.float64))) if moved else None
+    return rotation, translation
 
 
 def sector_force_operations(system):
@@ -259,7 +294,11 @@ def abelian_cell_operations(system):
     if grid is None:
         grid = system.grid
     atoms = tuple(system.atoms)
-    images = atom_image_table(atoms, matrices, shifts, grid, max(ATOM_TOLERANCE, MOVE_TOLERANCE))
+    # (an oblique cell: in the frame of its grid indices, _image_frame)
+    frame, image_atoms, image_grid, image_tolerance = _image_frame(
+        reduction, atoms, grid, max(ATOM_TOLERANCE, MOVE_TOLERANCE)
+    )
+    images = atom_image_table(image_atoms, matrices, shifts, image_grid, image_tolerance)
     if images is None:
         raise ValueError("an operation of the group of the sectors carries an atom onto no atom of its species")
     identity = np.flatnonzero(
@@ -270,15 +309,18 @@ def abelian_cell_operations(system):
     vectors = np.asarray(cell.lattice_vectors, dtype=np.float64)
     steps = None if shifts is None else np.diag(vectors) / np.asarray(grid.points_per_axis, dtype=np.float64)
     order = [int(identity[0])] + [g for g in range(len(matrices)) if g != identity[0]]
-    return tuple(
-        PeriodicAtomSymmetryOperation(
-            matrix=matrices[g].copy(),
-            image=np.asarray(images[g], dtype=np.int64).copy(),
-            lattice_vectors=vectors.copy(),
-            translation=None if shifts is None or not np.any(shifts[g]) else -matrices[g].T @ (shifts[g] * steps),
+    operations = []
+    for g in order:
+        matrix, translation = _cartesian_operation(frame, matrices[g], None if shifts is None else shifts[g], steps)
+        operations.append(
+            PeriodicAtomSymmetryOperation(
+                matrix=matrix,
+                image=np.asarray(images[g], dtype=np.int64).copy(),
+                lattice_vectors=vectors.copy(),
+                translation=translation,
+            )
         )
-        for g in order
-    )
+    return tuple(operations)
 
 
 def abelian_orbit_operations(system):
@@ -363,9 +405,22 @@ def sector_symmetry_operations(system):
     return operations if operations is not None else abelian_cell_operations(system)
 
 
-def _operation_text(matrix: np.ndarray, shift) -> str:
+def _operation_text(matrix: np.ndarray, shift, frame=None) -> str:
+    """An operation for a message: a signed permutation of the axes plus a shift in grid steps; for the sectors of the
+    frame of the grid indices of an oblique cell (``frame``) the Cartesian operation ``R = S W S^-1`` and translation
+    ``S t`` (bohr), with ``W`` and ``t`` named as acting on the grid indices."""
+
     rows = "; ".join(" ".join(str(int(value)) for value in row) for row in np.asarray(matrix).reshape(3, 3))
-    return f"[{rows}]" + ("" if shift is None or not np.any(shift) else f" + {np.asarray(shift).tolist()} grid steps")
+    text = f"[{rows}]" + ("" if shift is None or not np.any(shift) else f" + {np.asarray(shift).tolist()} grid steps")
+    if frame is None:
+        return text
+    rotation = np.asarray(frame.cartesian(matrix), dtype=np.float64)
+    cartesian = "; ".join(" ".join(f"{value:.4f}" for value in row) for row in np.round(rotation, 4) + 0.0)
+    translation = ""
+    if shift is not None and np.any(shift):
+        bohr = np.round(np.asarray(frame.steps, dtype=np.float64) @ np.asarray(shift, dtype=np.float64), 4) + 0.0
+        translation = " + ({}) bohr".format(", ".join(f"{value:.4f}" for value in bohr))
+    return f"[{cartesian}]{translation} (on the grid indices {text})"
 
 
 def check_sector_atoms(reduction, atoms, grid, lattice_vectors=None, *, tolerance: float = MOVE_TOLERANCE) -> None:
@@ -386,11 +441,28 @@ def check_sector_atoms(reduction, atoms, grid, lattice_vectors=None, *, toleranc
     the nearest atom of its species.
     """
 
-    from ..Symmetry.axis_reflection import _folded, _lattice_period, _matching_tree, _query_workers
+    from ..Symmetry.axis_reflection import _folded, _lattice_period, _matching_tree, _minimum_image, _query_workers
 
     atoms = tuple(atoms)
     if not atoms:
         return
+    frame = getattr(reduction, "index_frame", None)
+    cartesian = None
+    if frame is not None:
+        # Sectors of an oblique cell detected in the frame of its grid indices: the atoms and the grid of that frame,
+        # where the operations of the reduction act (the cell itself is that of the frame's grid); the nearest atom is
+        # found there and its distance measured in bohr (``cartesian``: the steps S), against ``tolerance`` in bohr.
+        if lattice_vectors is not None and not np.allclose(
+            np.asarray(lattice_vectors, dtype=np.float64).reshape(3, 3),
+            np.asarray(frame.grid.cell.lattice_vectors, dtype=np.float64),
+            rtol=0.0,
+            atol=1.0e-10,
+        ):
+            raise ValueError("the lattice vectors are not those of the periodic grid of the sectors")
+        atoms = frame.atoms(atoms)
+        grid = frame.frame_grid
+        cartesian = np.asarray(frame.steps, dtype=np.float64)
+        lattice_vectors = None
     period = _lattice_period(grid)
     if lattice_vectors is not None:
         lattice = np.asarray(lattice_vectors, dtype=np.float64).reshape(3, 3)
@@ -420,11 +492,15 @@ def check_sector_atoms(reduction, atoms, grid, lattice_vectors=None, *, toleranc
                 image = image + np.asarray(shift, dtype=np.float64) * steps
             queries = image if period is None else _folded(image, period)
             distances, nearest = trees[symbol].query(queries, k=1, workers=_query_workers(queries.shape[0]))
+            if cartesian is not None:
+                difference = _minimum_image(image - positions[members][np.asarray(nearest)], period)
+                distances = np.linalg.norm(difference @ cartesian.T, axis=1)
             worst = int(np.argmax(distances))
             if not distances[worst] <= tolerance:
                 atom = int(members[worst])
                 raise ValueError(
-                    f"the moved atoms leave the group of the symmetry sectors: {name} {_operation_text(matrix, shift)} "
+                    "the moved atoms leave the group of the symmetry sectors: "
+                    f"{name} {_operation_text(matrix, shift, frame)} "
                     f"carries atom {atom + 1} ({symbol}) {float(distances[worst]):.3e} bohr from the nearest {symbol} "
                     f"atom (tolerance {tolerance:g} bohr). The sectors hold for the group of {order} operations of "
                     "the structure the calculation was prepared with: keep the atoms on that group, as a relaxation "
@@ -434,7 +510,8 @@ def check_sector_atoms(reduction, atoms, grid, lattice_vectors=None, *, toleranc
             images[members] = members[nearest]
         if np.unique(images).size != images.size:
             raise ValueError(
-                f"the moved atoms leave the group of the symmetry sectors: {name} {_operation_text(matrix, shift)} "
+                "the moved atoms leave the group of the symmetry sectors: "
+                f"{name} {_operation_text(matrix, shift, frame)} "
                 "carries two atoms onto one"
             )
         return images

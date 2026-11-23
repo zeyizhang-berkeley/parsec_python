@@ -20,7 +20,11 @@ values:
   with forces or a relaxation by an optimizer its forces and moved positions are averaged there over the operations
   of the cell (``PARSEC_GAMMA_HYBRID_SECTOR_FORCES=auto``; ``sectors`` takes the sectors instead:
   :func:`gamma_hybrid_sector_forces_setting`).
-  The MPI runner keeps refusing a periodic hybrid.
+  The MPI full-SCF runner takes the SCF of such a cell since 2026-11-22 (``driver._mpi_periodic_hybrid``): the same
+  sectors above the same floor, every sector basis on one GPU of its rank, and the one sector of the identity on the
+  first GPU of the root below it and under ``off``; the pair tiles of the exchange on every GPU of every rank with
+  the cuFFT pair solver of the cell (``SCF/hybrid_mpi.py``: the tiles of the sectors, not the coset blocks or the
+  pooled block of one process).  Its forces and moves, ``kpoint`` and a spin-polarized hybrid stay refused there.
 * ``kpoint``: a cell this module finds large enough (:func:`gamma_hybrid_sector_route`) runs as the 1x1x1 k-point
   mesh of the reference solver, whose k-point sectors split the Gamma point into the sectors of the abelian subgroup
   ``H_Gamma`` of its little group (:mod:`.kpoint_sectors`), the exchange built from their orbitals on the whole grid
@@ -213,6 +217,15 @@ def periodic_grid_points(problem) -> int:
     from parsec_python.Grid.pbc import build_periodic_grid, default_periodic_grid_counts
 
     cell, settings = problem.periodic_cell, problem.grid
+    if int(getattr(settings, "periodicity", 3)) in (1, 2):
+        from ..Symmetry.axis_reflection import slab_wire_sectors_setting
+
+        if slab_wire_sectors_setting() == "auto":
+            # a wire or slab of the Fortran-derived routines in the sectors (PARSEC_SLAB_WIRE_SECTORS=auto): the points
+            # of its cylinder or slab (off: the bulk grid of its cell, as before, which its stencil refuses)
+            from parsec_python.Grid.confined import build_confined_periodic_grid
+
+            return int(build_confined_periodic_grid(cell, settings).size)
     if getattr(settings, "fortran_routines", False) or int(getattr(cell, "dimensions", 3)) == 2:
         return int(build_periodic_grid(cell, settings).size)
     return int(np.prod(default_periodic_grid_counts(cell, settings)))

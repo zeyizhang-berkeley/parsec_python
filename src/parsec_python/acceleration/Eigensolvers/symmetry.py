@@ -56,7 +56,7 @@ from .handover import (
     ritz_columns,
     validate_handover_settings,
 )
-from .sector_growth import sector_warm_growth_setting
+from .sector_growth import sector_warm_growth_setting, warm_growth_host_setting
 from .rayleigh_ritz import (
     gram_multiple,
     one_array_buffer_limit,
@@ -118,6 +118,9 @@ class CuPySymmetryEigvalResult:
     # whose partners several solved states share (decomposition.sector_partner_masks; 0: none), which fixed
     # occupations must fill alike (Occupations.partner_occupations).  None otherwise.
     state_partners: tuple[int, ...] | None = None
+    # The levels of every solved state of the sectors in ascending order, those returned and the rest of each
+    # sector's count (one sector of the identity: the eigensolver's buffer), read by SCF/state_extension.py.
+    working_eigenvalues: np.ndarray | None = None
 
 
 @dataclass(frozen=True)
@@ -170,6 +173,18 @@ class CuPySymmetryOrbitals:
     # Set on the orbitals of a result (not those the SCF loop reads): the weight of every selected state,
     # whose partners :meth:`to_full_host` adds and :attr:`shape` counts.
     state_weights: np.ndarray | None = None
+    # With ``state_weights``: the level of every selected state, so that the partners of solved states of one
+    # multiplet are formed orthogonal to each other (PointGroupReduction.partner_states).
+    state_levels: np.ndarray | None = None
+    # With a level at the end of the window that shares the states left (PARSEC_WEIGHTED_STATE_COUNT, whose listed
+    # partners do not follow the solved states one by one): the occupations of the SCF loop, times the shares.
+    state_occupations: np.ndarray | None = None
+    # With such a level: ``(levels, occupations, weights)`` of every partner of each solved state of a share, each
+    # with its part of the occupation of its solved state (s f / w for a share s of a state of weight w, as the
+    # density spreads it; the lists add up to the electrons): the levels of the k-points of the TRIM supercell route
+    # (``SCF/supercell_levels.cell_levels``) give every k-point of the star of such a level its partner, and
+    # parsec.dat holds every partner (``acceleration.SCF.single_point.whole_partner_states``).
+    whole_levels: tuple | None = None
 
     def to_full_host(self, block_states: int = 8) -> np.ndarray:
         """Export orbitals in bounded host blocks, without a primary-GPU gather.
@@ -238,7 +253,7 @@ class CuPySymmetryOrbitals:
                 full[:, columns] = wedge[self.full_to_wedge, :] * phases[:, None]
         if self.state_weights is not None:
             # Every partner of a weighted state, from its images under the coset representatives.
-            return self.point_group.partner_states(full, self.state_weights)
+            return self.point_group.partner_states(full, self.state_weights, self.state_levels)
         return full
 
     @property
@@ -355,7 +370,9 @@ class CuPySymmetryOrbitals:
         if self.state_weights is not None:
             # The partners of weighted states are formed on the host (as in to_full_host).
             return cp.asfortranarray(
-                cp.asarray(self.point_group.partner_states(cp.asnumpy(full), self.state_weights))
+                cp.asarray(
+                    self.point_group.partner_states(cp.asnumpy(full), self.state_weights, self.state_levels)
+                )
             )
         return full
 
@@ -519,10 +536,12 @@ def irrep_units_refusal(decomposition, settings) -> str | None:
     """Why the units of irreducible representations of ``decomposition`` cannot be solved with ``settings``.
 
     The units with a projector (``PARSEC_ORBITAL_IRREPS``) keep their bases in the range of the projector after
-    every Chebyshev filter (:mod:`.irrep_projection`): the CHEBFF first solve and the SUBSPACE passes.  CHEBDAV
-    inserts random vectors between its filters and ARPACK and the dense solver filter nothing, so those first solves
-    are refused (``Eigensolver: chebff``, or ``PARSEC_ORBITAL_IRREPS=off``).  So is a unit whose representations
-    have no function on the grid (its projector's range is empty: a grid of a few points per edge of a large group,
+    every Chebyshev filter (:mod:`.irrep_projection`): the CHEBFF and CHEBDAV first solves (CHEBDAV projects every
+    filtered block it appends, random candidates included, and keeps each appended block in the range after its
+    orthonormalization, ``chebdav._orthonormalize_appended_in_unit``) and the SUBSPACE passes.  ARPACK and the dense
+    solver filter nothing, so those first solves are refused (``Eigensolver: chebff`` or ``chebdav``, or
+    ``PARSEC_ORBITAL_IRREPS=off``).  So is a unit whose representations have no function on the grid (its
+    projector's range is empty: a grid of a few points per edge of a large group,
     :attr:`..Symmetry.representations.ReflectionRepresentationDecomposition.empty_units`), with any first solve.
     ``None`` where nothing stands in the way.
     """
@@ -538,10 +557,10 @@ def irrep_units_refusal(decomposition, settings) -> str | None:
             f"representations of its point group); PARSEC_ORBITAL_IRREPS=off solves the sectors of before"
         )
     method = getattr(settings, "initial_method", "chebff")
-    if method != "chebff":
+    if method not in ("chebff", "chebdav"):
         return (
-            f"PARSEC_ORBITAL_IRREPS solves units of irreducible representations whose bases its CHEBFF filters "
-            f"project; the first solve {method!r} is refused there (Eigensolver: chebff, or "
+            f"PARSEC_ORBITAL_IRREPS solves units of irreducible representations whose bases its CHEBFF and CHEBDAV "
+            f"filters project; the first solve {method!r} is refused there (Eigensolver: chebff or chebdav, or "
             f"PARSEC_ORBITAL_IRREPS=off)"
         )
     return None
@@ -856,7 +875,10 @@ def process_pool_min_bytes() -> int:
     2026-11-21 so do the GPUs of each rank of the MPI runner under its launch settings (``PARSEC_CUPY_DEVICE_RANDOM=1``
     or ``PARSEC_CUPY_DISTRIBUTED_FILTER=1``, ``experimental/mpi_scf.runner_pool_floor_applies``; under the code
     defaults of both the runner keeps the memory rule alone).  A
-    nonnegative integer of bytes; ``0`` takes the pool by the memory rule alone.
+    nonnegative integer of bytes; ``0`` takes the pool by the memory rule alone in one process.  The ranks of the
+    runner also ask the pool to save ``PARSEC_MPI_SECTOR_POOL_MIN_GAIN`` of the fullest GPU since 2026-11-22
+    (``experimental/mpi_scf.runner_pool_min_gain``): their memory rule alone needs ``0`` together with
+    ``PARSEC_MPI_SECTOR_POOL_MIN_GAIN=0.05``.
     """
 
     raw = os.environ.get("PARSEC_CUPY_SECTOR_POOL_MIN_BYTES", "").strip()
@@ -1147,6 +1169,54 @@ def regrown_trim_setting() -> str:
     return value
 
 
+def weighted_state_count_setting() -> str:
+    """``PARSEC_WEIGHTED_STATE_COUNT``: ``auto`` (the default since 2026-11-22) or ``off``.
+
+    The states that weighted sectors return to the SCF are the lowest of their global order that hold ``States_Num``
+    states counted with their weights (:meth:`CuPySymmetrySCFEigensolver._leading_states`).  The last of them can
+    hold more partners than are left (a level of weight 3 at the top of the window where one state is left): under
+    ``off``, as before, all its partners enter the Fermi level, the occupations, the density and the energy, so the
+    run occupies more states than ``States_Num`` (19 instead of 17 in conventional bcc Na 2x2x2).  Where those states
+    take part of the electrons (Fermi smearing, a window that ends near the Fermi level) the energy differed from that
+    of the full grid with ``States_Num`` states: 8.7e-9 Ry at 300 K, 2.6e-4 Ry at 1000 K and 3.8e-3 Ry at 3000 K in
+    that cell, where the full grid takes ``States_Num`` states and with them some partners of that level.  ``auto``
+    lets the level that the window ends in share the states that are left, each of its solved states by its weight
+    (:meth:`CuPySymmetrySCFEigensolver._weighted_selection`), so that the weights add up to ``States_Num`` as the full
+    grid counts its states and its density stays symmetric.  Runs with ``occup.in`` and the spin channels keep the
+    whole level; a window that ends between whole levels is the same under both values.
+    """
+
+    value = os.environ.get("PARSEC_WEIGHTED_STATE_COUNT", "auto").strip().lower() or "auto"
+    if value not in {"auto", "off"}:
+        raise ValueError("PARSEC_WEIGHTED_STATE_COUNT must be auto or off")
+    return value
+
+
+# The bounds of the width of a level at the end of the window (Ry, times max(1, |e|)): weighted_level_width.
+WEIGHTED_LEVEL_WIDTH_BOUNDS = (1.0e-4, 1.0e-3)
+# The width (Ry, times max(1, |e|)) within which any two solved states count as one level at the end of the window.
+WEIGHTED_LEVEL_EXACT = 1.0e-8
+
+
+def weighted_level_width(tolerance: float | None, energy: float) -> float:
+    """The width (Ry) within which solved states belong to the level that the window ends in, at energy ``energy``.
+
+    ``tolerance`` is the eigensolver tolerance of the run (``Diag_Tolerance``, 1e-4 if unknown): states closer than
+    the accuracy of their eigenvalues cannot be told apart.  The partners of one level that two solved states of a
+    sector hold differ by the error of those states, which the Chebyshev filters near the top of the window leave
+    them, far more than rounding: 8e-7 to 4.3e-5 Ry in conventional bcc Na 2x2x2 at the default tolerance 1e-4, up to
+    8.7e-5 Ry after a CHEBFF first solve.  The later SCF steps filter once per step whatever ``Diag_Tolerance`` is
+    (CHEBFF at ``Diag_Tolerance`` 1e-8 left the pair 1.7e-8 Ry apart: a width of 1e-8 Ry did not converge in 150
+    steps), so the width is ``tolerance max(1, |e|)`` but at least 1e-4 and at most 1e-3 times ``max(1, |e|)``
+    (:data:`WEIGHTED_LEVEL_WIDTH_BOUNDS`).  At 1e-10 Ry a width of 1e-4 Ry gave the energies of 1e-8 Ry bit for bit
+    in that cell.
+    """
+
+    floor, cap = WEIGHTED_LEVEL_WIDTH_BOUNDS
+    value = 1.0e-4 if tolerance is None else float(tolerance)
+    return min(max(value, floor), cap) * max(1.0, abs(float(energy)))
+
+
 def regrown_count(count: int, increment: int) -> int:
     """The count of a sector after one growth from a new start at most (:meth:`_ensure_spectral_bracket`)."""
 
@@ -1322,6 +1392,9 @@ class CuPySymmetrySCFEigensolver:
         cut_sectors_first_setting()
         regrown_trim_setting()
         sector_warm_growth_setting()
+        warm_growth_host_setting()
+        # (and the count of the states the SCF receives, PARSEC_WEIGHTED_STATE_COUNT)
+        weighted_state_count_setting()
 
         # A unit of irreducible representations without a function on the grid stops the run before its sizes
         # place the sectors (the driver refuses it earlier, with the first solve of the input).
@@ -1555,7 +1628,13 @@ class CuPySymmetrySCFEigensolver:
 
             def prepare_partners():
                 started = perf_counter()
-                workers = operator_build_workers(len(partner_units))
+                # One worker per unit (at most four): the rank of the A1 and A2 units of a Td cluster waits for them
+                # (k14 on 16 GPUs: 1.8 s waited for both in turn); an explicit PARSEC_SYMMETRY_OPERATOR_WORKERS rules.
+                workers = (
+                    operator_build_workers(len(partner_units))
+                    if os.environ.get("PARSEC_SYMMETRY_OPERATOR_WORKERS") is not None
+                    else min(len(partner_units), 4)
+                )
                 if workers == 1:
                     built = [prepare_partner(representation) for representation in partner_units]
                 else:
@@ -4221,6 +4300,8 @@ class CuPySymmetrySCFEigensolver:
         values, representations, columns = self._global_order(results)
         # With weighted sectors the leading states that hold the requested ones counted with their weights.
         leading = self._leading_states(representations, requested_states)
+        # (and their weights: the level that the window ends in shares what is left of it, PARSEC_WEIGHTED_STATE_COUNT)
+        leading, selected_weights = self._weighted_selection(values, representations, leading, requested_states)
         selected_values = np.asarray(values[:leading], dtype=np.float64)
         selected_representations = representations[:leading]
         selected_columns = columns[:leading]
@@ -4289,14 +4370,109 @@ class CuPySymmetrySCFEigensolver:
             representations=np.asarray(selected_representations, dtype=np.int32),
             representation_columns=np.asarray(selected_columns, dtype=np.int32),
             iterative_counts=iterative_counts,
-            state_weights=(
-                np.asarray(self._sector_weight_array[np.asarray(selected_representations, dtype=np.int64)],
-                           dtype=np.float64)
-                if self._weighted
-                else None
-            ),
+            state_weights=selected_weights,
             state_partners=self._state_partners(selected_representations),
+            working_eigenvalues=np.asarray(values, dtype=np.float64),
         )
+
+    def _weighted_selection(self, values, representations, leading: int, requested_states: int):
+        """``(count, weights)`` of the states that weighted sectors return (``CuPySymmetryEigvalResult.state_weights``);
+        ``(leading, None)`` without weighted sectors.
+
+        The ``leading`` lowest states of the global order hold ``requested_states`` states counted with their weights,
+        the last of them possibly with more partners than are left.  Under ``PARSEC_WEIGHTED_STATE_COUNT=auto``, in a
+        run of Fermi occupations of one channel, the level that the window ends in (the last state and every solved
+        state within :func:`weighted_level_width` of it that can be its partner, :meth:`_level_partners`, or within
+        :data:`WEIGHTED_LEVEL_EXACT`, selected or not: partners of one level that several solved states hold; a
+        distinct level among them above the last state takes no state) shares the states that are left, each of its
+        states by its weight: the weights add up to
+        ``requested_states``, as the full grid counts its states, and stay those of the sectors below that level.  This
+        includes a window whose weights add up exactly but ends inside a level (the next solved state within the
+        width of the last).  The density of such a level is then that of its whole multiplet scaled, averaged over the
+        full group as every density of these sectors, whatever combinations of its partners the solved states are.
+        Under ``off``, with ``occup.in`` (whose entries go to whole partners) and in the spin channels, every partner
+        of the last state counts, as before.
+        """
+
+        if not self._weighted:
+            return leading, None
+        sector_weights = np.asarray(self._sector_weight_array, dtype=np.float64)
+        weights = sector_weights[np.asarray(representations[:leading], dtype=np.int64)].copy()
+        if (
+            not weights.size
+            or weighted_state_count_setting() != "auto"
+            or not getattr(self, "fermi_occupations", True)
+            or getattr(self, "_spin_channels", None) is not None
+        ):
+            return leading, weights
+        values = np.asarray(values, dtype=np.float64)
+        sectors = np.asarray(representations, dtype=np.int64)
+        last = float(values[leading - 1])
+        width = weighted_level_width(getattr(self, "level_tolerance", None), last)
+        exact = WEIGHTED_LEVEL_EXACT * max(1.0, abs(last))
+        partner = self._level_partners(int(sectors[leading - 1]))
+
+        def member(index: int) -> bool:
+            gap = abs(float(values[index]) - last)
+            return gap <= exact or (gap <= width and (partner is None or partner(int(sectors[index]))))
+
+        end = leading
+        while end < values.size and abs(float(values[end]) - last) <= width:
+            end += 1
+        above = [index for index in range(leading, end) if member(index)]
+        stop = above[-1] + 1 if above else leading
+        if stop == leading and float(np.sum(weights)) <= float(requested_states):
+            # the window ends between levels
+            return leading, weights
+        start = leading - 1
+        while start > 0 and abs(float(values[start - 1]) - last) <= width:
+            start -= 1
+        members = np.asarray([index for index in range(start, stop) if index == leading - 1 or member(index)])
+        level = sector_weights[sectors[:stop]].copy()
+        outside = np.ones(stop, dtype=bool)
+        outside[members] = False
+        # a level of another representation between the partners above the last state takes no state
+        level[leading:stop][outside[leading:stop]] = 0.0
+        left = float(requested_states) - float(np.sum(level[outside]))
+        group = float(np.sum(level[members]))
+        if not 0.0 < left < group:
+            return leading, weights
+        level[members] *= left / group
+        return stop, level
+
+    def _level_partners(self, sector: int):
+        """Whether the states of a sector may be partners of a level of a state of ``sector`` (``None``: not known).
+
+        States of sectors of one weight can be (two states of one sector, as the 6-fold levels of conventional bcc Na
+        2x2x2; two sectors that a symmetry of the cell beyond the group of the sectors exchanges, as the 12-fold
+        levels of bcc Na 4x4x4 in two sectors of weight 6, which ``sector_partner_masks`` does not flag); states of
+        sectors of different weights where both hold a representation whose partners several solved states share
+        (``decomposition.sector_partner_masks``, as ``occup.in`` compares partners) or where neither mask is set (a
+        level that such a symmetry spreads over sectors of weights 3 and 6: the 24-fold Fermi level of bcc Na 4x4x4,
+        whose window ends inside it with ``States_Num`` 66, 70 or 74 at 3000 K, converged in 9 steps; split by weight
+        none converged in 150, nor did the full grid or ``off``).  Other states are distinct levels however close:
+        a level of weight 1 that lies 1.75e-5 Ry above a t level of weight 3 in an Na15 cluster of Oh (whose sector
+        has a mask) does not share its states (7.3e-6 Ry from the full grid at 3000 K where it did).
+
+        A level is shared as a whole, and its density stays symmetric, only where every partner of it joins; a level
+        whose partners lie in sectors of different weights, one of them with a mask that the other does not share,
+        and that the eigensolver leaves more than 1e-8 Ry apart is shared in part.
+        """
+
+        decomposition = getattr(self, "decomposition", None)
+        masks = getattr(decomposition, "sector_partner_masks", None)
+        if masks is None:
+            return None
+        weights = np.asarray(self._sector_weight_array)
+
+        def partner(other: int) -> bool:
+            if int(weights[other]) == int(weights[sector]):
+                return True
+            if int(masks[sector]) == 0 and int(masks[other]) == 0:
+                return True
+            return bool(int(masks[sector]) & int(masks[other]))
+
+        return partner
 
     def _state_partners(self, representations) -> tuple[int, ...] | None:
         """The partner masks of the selected states of weighted sectors (``CuPySymmetryEigvalResult.state_partners``)."""

@@ -1430,7 +1430,8 @@ def apply_device_bloch_exchange(
 
                 found = gathers.get(operation)
                 if found is None:
-                    found = gathers[operation] = cp.asarray(channel.stars.gathers[operation])
+                    # (int64 on the device, which the turned partner kernel reads; the host keeps int32 rows)
+                    found = gathers[operation] = cp.asarray(channel.stars.gathers[operation]).astype(cp.int64)
                 return cp.take(copies[rep][0], found, axis=1)
 
             def partner_rows(rep: int):

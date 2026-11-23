@@ -424,8 +424,9 @@ class MeshStars:
     ``sources`` holds ``(rep, operation, conjugate, k')`` (Cartesian ``k'``) for every point of the mesh, each
     once, the identity (``operation`` -1) first: the representative itself, then its partner ``-k`` where that is
     another point of the mesh (``partners``), then the images by the operations.  ``gathers[operation]`` are the
-    rows ``P_g u = u[gathers[operation]]``; ``point_counts[rep]`` the points of the mesh the representative stands
-    for (its weight times ``mesh_size``).
+    rows ``P_g u = u[gathers[operation]]`` (int32 below 2^31 grid points, int64 before 2026-11-22: the same
+    integers in half the bytes); ``point_counts[rep]`` the points of the mesh the representative stands for (its
+    weight times ``mesh_size``).
 
     ``mirrors[(t, i)] = j``: the image source ``i = (r, g, c, k')`` and the target ``t`` have the mirror source
     ``j = (t, g^-1, c, k'')`` of the target ``r``, a source of the list (``PARSEC_HYBRID_IMAGE_PAIRS``).  The pair
@@ -448,6 +449,22 @@ class MeshStars:
         if operation >= 0:
             block = block[self.gathers[operation]]
         return block.conj() if conjugate else block
+
+
+def _gather_type(points: int):
+    """The integer type of the gathers of :class:`MeshStars` on a grid of ``points`` points: int32 below 2^31."""
+
+    return np.int32 if int(points) < 2**31 - 1 else np.int64
+
+
+def _image_row(symmetry, images, index: int) -> np.ndarray:
+    """``images[index]`` of ``symmetry`` as an integer array: through
+    :meth:`parsec_python.Grid.space_group.PeriodicGridSymmetry.image_row` where the group has it (a group without its
+    table forms the row where it is read), else the row of ``images``."""
+
+    reader = getattr(symmetry, "image_row", None)
+    row = reader(int(index)) if reader is not None else images[index]
+    return np.asarray(row)
 
 
 def mesh_stars(k_points, weights, counts, shift, reciprocal, symmetry, *, usable=None) -> MeshStars:
@@ -531,10 +548,11 @@ def mesh_stars(k_points, weights, counts, shift, reciprocal, symmetry, *, usable
     sources = tuple(sorted(covered.values(), key=lambda item: (item[0], item[1] >= 0, item[1], item[2])))
     gathers = {}
     for index in sorted(used):
-        mapped = np.asarray(images[index], dtype=np.int64)
-        # (P_g u)[images[i]] = u[i]: the rows of P_g u are those of u at the inverse permutation
-        gather = np.empty_like(mapped)
-        gather[mapped] = np.arange(mapped.size, dtype=np.int64)
+        mapped = _image_row(symmetry, images, index)
+        # (P_g u)[images[i]] = u[i]: the rows of P_g u are those of u at the inverse permutation; int32 below 2^31
+        # points (half the bytes of int64, the same integers)
+        gather = np.empty(mapped.size, dtype=_gather_type(mapped.size))
+        gather[mapped] = np.arange(mapped.size, dtype=gather.dtype)
         gathers[index] = gather
     partners = np.array(
         [any(source[0] == rep and source[1] < 0 and source[2] for source in sources) for rep in range(k_points.shape[0])],
@@ -546,10 +564,13 @@ def mesh_stars(k_points, weights, counts, shift, reciprocal, symmetry, *, usable
     rotation_of = {index: rotation for index, rotation in operations}
     inverse: dict[int, int] = {}
     for a in sorted(used):
+        row = None  # (the image row of a, formed once: a group without its table computes it where it is read)
         for b in sorted(used):
-            if np.allclose(rotation_of[b] @ rotation_of[a], np.eye(3), rtol=0.0, atol=1.0e-9) and np.array_equal(
-                gathers[b], np.asarray(images[a], dtype=np.int64)
-            ):
+            if not np.allclose(rotation_of[b] @ rotation_of[a], np.eye(3), rtol=0.0, atol=1.0e-9):
+                continue
+            if row is None:
+                row = _image_row(symmetry, images, a)
+            if np.array_equal(gathers[b], row):
                 inverse[a] = b
                 break
     position = {(item[0], item[1], item[2]): index for index, item in enumerate(sources) if item[1] >= 0}

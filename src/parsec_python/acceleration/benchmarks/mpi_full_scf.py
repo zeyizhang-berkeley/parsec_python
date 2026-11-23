@@ -18,7 +18,8 @@ a spin-polarized restart, whose two channels main.py solves on the full grid,
 except with --serial-control (since 2026-11-19; before, Restart_Run was
 ignored, which PARSEC_MPI_RESTART_RUN=off keeps).
 A bulk periodic cell at the Gamma point (orthorhombic, a native LDA or GGA,
-unpolarized or collinear spin) runs in the sectors of its group (about the
+unpolarized or collinear spin, or the SCF of an unpolarized hybrid since
+2026-11-22: driver._mpi_periodic_hybrid) runs in the sectors of its group (about the
 origin of the cell, about a symmetric site off it, with the half-cell
 translations; both spin channels in its sectors, since 2026-11-21 the weighted
 ones of a non-abelian point group as main.py takes them, PARSEC_ORBITAL_GROUP_MPI),
@@ -887,7 +888,8 @@ def _require_same_cell_grid(prepared):
                          f'{prepared[0]}, rank {different[0]} has {prepared[different[0]]}')
 
 
-def _periodic_sector_forces_refusal(translation, *, supercell: bool = False) -> str | None:
+def _periodic_sector_forces_refusal(translation, *, supercell: bool = False,
+                                    moving_sectors: bool = False) -> str | None:
     """Why the forces or the moved atoms of a periodic cell take one sector of the identity, or ``None``.
 
     The rule of the command line (``acceleration.cli.periodic_sector_forces_refusal``, PARSEC_PERIODIC_SECTOR_FORCES),
@@ -900,7 +902,8 @@ def _periodic_sector_forces_refusal(translation, *, supercell: bool = False) -> 
     of a cell under ``off``, take one sector of the identity, whose basis one rank solves or the ranks share (where main.py
     takes the full grid: the same numbers). A cell keeps no point group in the parser
     (``Relaxation.run.symmetry_decision`` says nothing about it), so this is decided here. ``None`` for an SCF
-    alone and for a cluster.
+    alone and for a cluster.  ``moving_sectors``: the molecular dynamics or manual movements of the cell run in the
+    sectors of the group its structures keep (``PARSEC_MOVING_SECTORS``, :func:`_moving_plan`), as on main.py.
     """
     if getattr(translation.problem, 'periodic_cell', None) is None:
         return None
@@ -908,12 +911,17 @@ def _periodic_sector_forces_refusal(translation, *, supercell: bool = False) -> 
             or getattr(translation, 'molecular_dynamics', None) is not None):
         return None
     from parsec_python.acceleration.cli import periodic_sector_forces_refusal
+    from parsec_python.acceleration.SCF.moving_sectors import runner_fortran_fixed_atoms
 
     # This runner reads no wfn.dat (execute refuses Restart_From_Wfndat, _restart_rules), so the clause of the
     # command line that keeps a run seeded by stored full-grid orbitals on the full grid does not apply here.
     if getattr(translation, 'restart_from_wfndat', False):
         translation = replace(translation, restart_from_wfndat=False)
-    return periodic_sector_forces_refusal(translation, supercell=supercell)
+    # PARSEC_RUNNER_FORTRAN_FIXED_SECTORS=auto (since 2026-11-22): a relaxation with atoms fixed by Move_Flag on the
+    # Fortran-derived routines keeps the sectors of the subgroup of the fixed atoms here, whatever their number
+    # (off: refused by name, as before)
+    return periodic_sector_forces_refusal(translation, supercell=supercell, moving_sectors=moving_sectors,
+                                          fortran_fixed_atoms=runner_fortran_fixed_atoms(translation))
 
 
 def _periodic_run_name(translation) -> str:
@@ -932,7 +940,12 @@ def _refuse_unsupported_periodic(translation, *, supercell: bool = False) -> Non
     GGA, unpolarized or collinear spin) in the sectors of its group (about
     the origin, about a symmetric site off it, with the half-cell
     translations), or as one sector of the identity whose basis the ranks
-    share (driver.periodic_sector_refusal). A spin cell
+    share (driver.periodic_sector_refusal).  The SCF of an unpolarized hybrid
+    of such a cell runs in its abelian sectors or, below their floor and under
+    PARSEC_GAMMA_HYBRID_SECTORS=off, as the one sector of the identity on the
+    root's first GPU, the pair tiles of its exchange on every GPU of every
+    rank (driver._mpi_periodic_hybrid, SCF/hybrid_mpi.py, since 2026-11-22);
+    its forces and moves stay with main.py. A spin cell
     (PARSEC_GAMMA_SPIN_SECTORS=auto, since 2026-11-19) solves both channels
     in the abelian sectors of the cell; one that has no such group is
     refused (driver.spin_cell_group_refusal: before the preparation where
@@ -964,9 +977,12 @@ def _refuse_unsupported_periodic(translation, *, supercell: bool = False) -> Non
     whose detection finds no group). The single-point forces and the
     optimizer relaxations of the Fortran-derived routines
     (Use_Fortran_Routines) run in the sectors as well under
-    PARSEC_FORTRAN_SECTOR_FORCES=auto; their other forces and moving runs
-    (a spin-polarized cell, a Restart_Run, whose parsec.dat this runner does
-    not read, a relaxation with fixed atoms, and all of them under off),
+    PARSEC_FORTRAN_SECTOR_FORCES=auto, and since 2026-11-22 their
+    relaxations with atoms fixed by Move_Flag in the sectors of the subgroup of
+    the fixed atoms (PARSEC_RUNNER_FORTRAN_FIXED_SECTORS=auto); their other
+    forces and moving runs (a spin-polarized cell, a Restart_Run, whose
+    parsec.dat this runner does not read, a relaxation with fixed atoms under
+    PARSEC_RUNNER_FORTRAN_FIXED_SECTORS=off, and all of them under off),
     those of the supercell of a k-point mesh
     (``supercell``: PARSEC_KPOINT_SUPERCELL, whose atoms are copies) and the
     band calculations after an SCF of a cell stay with main.py, as do k-points
@@ -987,9 +1003,13 @@ def _refuse_unsupported_periodic(translation, *, supercell: bool = False) -> Non
             raise ValueError(f'PARSEC_SUPERCELL_KPOINTS=auto: {found.describe()}. The full-SCF runner solves the '
                              'Gamma point and no k-points: run it with parsec_python/main.py --mpi (k-point pools), '
                              'or with PARSEC_SUPERCELL_KPOINTS=off as the Gamma point of the supercell')
-    from parsec_python.acceleration.driver import periodic_sector_refusal
+    from parsec_python.acceleration.driver import _mpi_periodic_hybrid, periodic_sector_refusal
 
-    reason = periodic_sector_refusal(problem)
+    # An unpolarized hybrid at the Gamma point: its sectors or the one sector of the identity, every GPU of every rank
+    # solving pair tiles of its exchange (driver._mpi_periodic_hybrid, SCF/hybrid_mpi.py; since 2026-11-22, refused
+    # before); a spin-polarized one and the kpoint value of PARSEC_GAMMA_HYBRID_SECTORS stay refused.
+    hybrid = bool(getattr(problem.scf, 'is_hybrid', False))
+    reason = periodic_sector_refusal(problem, hybrid_sectors=hybrid and _mpi_periodic_hybrid(problem, True) is not None)
     if reason is not None:
         where = 'parsec_python/main.py --mpi' if 'k-point' in reason else 'parsec_python/main.py'
         raise ValueError(f'{reason} of a periodic cell is not available in the full-SCF runner, which solves a bulk '
@@ -1003,12 +1023,19 @@ def _refuse_unsupported_periodic(translation, *, supercell: bool = False) -> Non
               or getattr(translation, 'molecular_dynamics', None) is not None)
     if not (getattr(translation, 'compute_forces', False) or moving):
         return
+    if hybrid:
+        # (the SCF of a periodic hybrid runs here; its forces, which main.py computes, have not been built on the ranks)
+        raise ValueError('forces, relaxation and molecular dynamics of a periodic cell with a hybrid functional are '
+                         'not available in the full-SCF runner, which runs its SCF: run them with '
+                         'parsec_python/main.py')
     if bool(getattr(problem.grid, 'fortran_routines', False)):
         from parsec_python.acceleration.Forces.sector_symmetry import fortran_sector_forces_setting
 
         # PARSEC_FORTRAN_SECTOR_FORCES=auto: the single-point forces and the relaxations by an optimizer of those
-        # routines in the sectors of the point group of the cell, as main.py takes them; what keeps their full grid
-        # (molecular dynamics, manual movements, fixed atoms, the supercell, PARSEC_PERIODIC_SECTOR_FORCES=off), a
+        # routines in the sectors of the point group of the cell, as main.py takes them, and their relaxations with
+        # fixed atoms in the sectors of the subgroup of those atoms (PARSEC_RUNNER_FORTRAN_FIXED_SECTORS=auto); what
+        # keeps their full grid (molecular dynamics, manual movements, fixed atoms under
+        # PARSEC_RUNNER_FORTRAN_FIXED_SECTORS=off, the supercell, PARSEC_PERIODIC_SECTOR_FORCES=off), a
         # spin-polarized cell (not validated here with those routines), a Restart_Run (this runner reads no
         # parsec.dat; main.py starts the SCF from it) and everything under off stays with main.py, as before. The
         # message names the reason.
@@ -1034,7 +1061,8 @@ def _refuse_unsupported_periodic(translation, *, supercell: bool = False) -> Non
                          'the forces of the mesh')
 
 
-def _periodic_solver_symmetry(translation, requested, symmetry, *, supercell: bool = False):
+def _periodic_solver_symmetry(translation, requested, symmetry, *, supercell: bool = False,
+                              moving_sectors: bool = False):
     """The symmetry mode that the solver of a periodic cell is prepared with.
 
     ``requested`` is ``--symmetry`` (``None`` where not given) and ``symmetry`` what the rules of a cluster gave.
@@ -1044,8 +1072,10 @@ def _periodic_solver_symmetry(translation, requested, symmetry, *, supercell: bo
     point charges, Ignore_Symmetry, and for the forces and moves that the rule of the command line keeps off the
     sectors (:func:`_periodic_sector_forces_refusal`: molecular dynamics, manual movements, fixed atoms under
     PARSEC_MOVE_FLAG_SUBGROUP=off, every one under PARSEC_PERIODIC_SECTOR_FORCES=off), for which ``--symmetry on`` is refused with that reason.
+    ``moving_sectors``: molecular dynamics and manual movements in the sectors of PARSEC_MOVING_SECTORS
+    (:func:`_moving_plan`).
     """
-    leaves = _periodic_sector_forces_refusal(translation, supercell=supercell)
+    leaves = _periodic_sector_forces_refusal(translation, supercell=supercell, moving_sectors=moving_sectors)
     if requested == 'on' and leaves is not None:
         raise ValueError(f'--symmetry on cannot be used here: {_periodic_run_name(translation)} of a periodic cell '
                          f'takes one sector of the identity ({leaves})')
@@ -1428,6 +1458,98 @@ def _refuse_spin_ionic_steps(translation, size: int, *, supercell: bool = False)
                          'with parsec_python/main.py or with --serial-control')
 
 
+def _moving_plan(translation, symmetry_argument, *, dynamics_restart, one_sector, hybrid, serial_control,
+                 supercell=False):
+    """The plan of ``PARSEC_MOVING_SECTORS`` for the molecular dynamics or manual movements of this run, or ``None``.
+
+    Since 2026-11-22 the ranks take what main.py takes (:func:`..SCF.moving_sectors.plan_moving_sectors`): the sectors
+    of the group the structures keep, checked at every structure, where a structure that leaves the group is prepared
+    again on every rank (:func:`_moving_tracker`, ``MPISectorContext.reprepare``) in the sectors of the group it keeps
+    or as the one sector of the identity whose basis the ranks share.  So only the layouts that hold that sector take
+    the plan (``one_sector``: one rank, ``--rank-per-gpu``, nested sharing); the others keep what they did before
+    (molecular dynamics is refused there, manual movements too).  A hybrid functional (whose exchange the ranks
+    would build again), the serial control and the supercell of a k-point mesh keep one sector of the identity, as
+    before; what main.py keeps on its full grid (spinors, ``Ignore_Symmetry``, ``--symmetry off``, a small basis under
+    ``auto``, ...) keeps it here, two spin channels keep it under every value of ``PARSEC_MOVING_SPIN_SECTORS`` (which
+    takes them into the sectors in one process only), and ``PARSEC_MOVING_SECTORS=off`` keeps every one as before.
+    The input alone decides, alike on every rank.
+    """
+    from parsec_python.acceleration.SCF.moving_sectors import moving_sectors_setting, plan_moving_sectors
+
+    moving_sectors_setting()
+    relaxation = getattr(translation, 'relaxation', None)
+    manual_run = relaxation is not None and relaxation.method == 'manual'
+    if getattr(translation, 'molecular_dynamics', None) is None and not manual_run:
+        return None
+    if serial_control or hybrid or supercell or not one_sector:
+        return None
+    if getattr(getattr(translation.problem, 'scf', None), 'spin_polarized', False):
+        # Two spin channels keep what they did before on the ranks (one sector of the identity of both channels whose
+        # basis the ranks share, _spin_moves_without_group): PARSEC_MOVING_SPIN_SECTORS takes them into the sectors in
+        # one process only. Its value is read so that one it does not know is refused here too.
+        from parsec_python.acceleration.SCF.moving_sectors import moving_spin_sectors_setting
+
+        moving_spin_sectors_setting()
+        return None
+    manual = None
+    if manual_run and moving_sectors_setting() != 'off':
+        from parsec_python.Relaxation.run import manual_structures
+
+        try:
+            manual = manual_structures(translation, translation.source.parent)
+        except (OSError, ValueError):
+            # (reported where the movements read manual.dat, as before: no plan)
+            return None
+    plan, _reason = plan_moving_sectors(translation, dynamics_restart=dynamics_restart, manual=manual,
+                                        mpi_requested=False, symmetry_argument=symmetry_argument)
+    if plan is None:
+        return None
+    if manual_run and relaxation.max_movements > 0 and manual is None:
+        return None
+    if plan.periodic:
+        from parsec_python.acceleration.cli import periodic_sector_forces_refusal
+
+        # (what keeps the full grid on main.py keeps one sector of the identity here: point charges, the Fortran-derived
+        # routines under their switch, PARSEC_PERIODIC_SECTOR_FORCES=off, ...)
+        if periodic_sector_forces_refusal(translation, supercell=supercell, moving_sectors=True) is not None:
+            return None
+    return plan
+
+
+def _moving_tracker(plan, translation, context, backend, cache, write):
+    """The :class:`..SCF.moving_sectors.MovingSectors` of the root, whose preparations every rank makes.
+
+    A structure that leaves the group of the sectors (or a start that does not keep it) is prepared again on the root
+    after the root has told the other ranks to do the same (``MPISectorContext.reprepare`` with ``moving``: each
+    applies the atoms to its own input, whose pseudopotential files it read), and the densities of the new sectors are
+    summed over the ranks, as the runner set up those of the first preparation.  Without a context (one process) the
+    root alone prepares.
+    """
+    from parsec_python.acceleration.driver import prepare_single_point
+    from parsec_python.acceleration.SCF.moving_sectors import MovingSectors
+
+    def prepare(problem, *, symmetry, constraints, fixed):
+        if context is not None:
+            context.reprepare(dict(moving=True, atoms=tuple(problem.atoms),
+                                   recenter_geometry=bool(problem.recenter_geometry), backend=backend,
+                                   symmetry=symmetry, symmetry_cache_directory=cache, symmetry_fixed_atoms=fixed,
+                                   symmetry_constraints=tuple(constraints)))
+        prepared = prepare_single_point(problem, backend=backend, symmetry=symmetry, symmetry_cache_directory=cache,
+                                        symmetry_fixed_atoms=fixed, sector_forces=False,
+                                        symmetry_constraints=tuple(constraints),
+                                        **({} if context is None else {'mpi_context': context}))
+        if context is not None:
+            from parsec_python.acceleration.experimental.mpi_scf import MPISymmetryDensityBuilder
+
+            prepared.orbital_density_builder = MPISymmetryDensityBuilder(
+                prepared.orbital_density_builder, context, prepared.backend.symmetry_eigensolver)
+        return prepared
+
+    molecular_dynamics = getattr(translation, 'molecular_dynamics', None)
+    return MovingSectors(plan, translation.problem, prepare=prepare, write=write,
+                         time_step=None if molecular_dynamics is None else molecular_dynamics.time_step)
+
+
 def _ranks_per_node_of_launch() -> int:
     """Ranks per node that Slurm started (``SLURM_NTASKS_PER_NODE``, e.g. ``4`` or ``4(x2)``); 1 outside Slurm."""
     raw = os.environ.get('SLURM_NTASKS_PER_NODE', '1').strip()
@@ -1458,6 +1580,12 @@ def execute(args, cp, comm, MPI, initialization_seconds, initial_affinity=None):
     if args.serial_control and size != 1:
         raise ValueError('--serial-control requires exactly one MPI rank')
     hosts = comm.allgather(socket.gethostname())
+    # The ranks of this node divide the host room of the saved columns of a growing sector among them
+    # (PARSEC_CUPY_SECTOR_WARM_GROWTH_HOST=node, Eigensolvers/sector_growth.host_room): each would see all of it.
+    from parsec_python.acceleration.Eigensolvers.sector_growth import set_host_processes, warm_growth_host_setting
+
+    warm_growth_host_setting()
+    set_host_processes(hosts.count(socket.gethostname()))
     if _nested_launch(args):
         # Every rank looked for the GPU transport layer in its own process before MPI_Init (main); the exchanges
         # of a nested group must travel alike on every rank, so a launch whose nodes answered differently stops.
@@ -1548,11 +1676,15 @@ def execute(args, cp, comm, MPI, initialization_seconds, initial_affinity=None):
     from parsec_python.acceleration.experimental.mpi_scf import nested_sharing_setting
 
     nested_sharing_setting()
-    # PARSEC_CUPY_SECTOR_POOL_MIN_BYTES (Eigensolvers/symmetry.process_pool_min_bytes): the floor of the device pool of
-    # the GPUs of a rank (MPISectorContext.pool_floor), read here so that a value it does not know is refused first.
+    # PARSEC_CUPY_SECTOR_POOL_MIN_BYTES (Eigensolvers/symmetry.process_pool_min_bytes) and
+    # PARSEC_MPI_SECTOR_POOL_MIN_GAIN (experimental/mpi_scf.runner_pool_min_gain, since 2026-11-22): the floor of the
+    # device pool of the GPUs of a rank (MPISectorContext.pool_floor), read here so that a value they do not know is
+    # refused first.
     from parsec_python.acceleration.Eigensolvers.symmetry import process_pool_min_bytes
+    from parsec_python.acceleration.experimental.mpi_scf import runner_pool_min_gain
 
     process_pool_min_bytes()
+    runner_pool_min_gain()
     _refuse_unsupported_periodic(translation, supercell=_found_supercell is not None)
     if getattr(translation, 'polarizability_field', None) is not None:
         # Refused rather than ignored: the seven field loops run in one process (main.py).
@@ -1609,6 +1741,12 @@ def execute(args, cp, comm, MPI, initialization_seconds, initial_affinity=None):
     restart_notes = [*restart_notes, *restart_rule_notes]
     if _found_supercell is not None:
         restart_notes = [*restart_notes, f' {_trim_route.note}']
+    # PARSEC_MOVING_SECTORS (SCF/moving_sectors.py, since 2026-11-22 on the ranks): molecular dynamics and manual
+    # movements in the sectors of the group their structures keep, checked at every structure, as main.py takes them,
+    # on the layouts that hold one sector of the identity, where a structure that leaves the group goes.
+    moving_plan = _moving_plan(translation, args.symmetry, dynamics_restart=dynamics_restart, one_sector=one_sector,
+                               hybrid=hybrid, serial_control=args.serial_control,
+                               supercell=_found_supercell is not None)
     # PARSEC_SYMMETRIZE_POSITIONS=on: the positions averaged over the group found within PARSEC_SYMMETRY_ATOM_TOLERANCE,
     # on every rank alike (off, the default: as given; a TRIM supercell is averaged as the cell it is solved as).
     from parsec_python.Forces.position_symmetry import symmetrize_input_positions
@@ -1617,10 +1755,19 @@ def execute(args, cp, comm, MPI, initialization_seconds, initial_affinity=None):
     restart_notes = [*restart_notes, *position_notes]
     # PARSEC_MOVE_FLAG_SUBGROUP, read in every run so that a value it does not know is refused on every rank alike.
     move_flag_subgroup_setting()
+    # and PARSEC_RUNNER_FORTRAN_FIXED_SECTORS (with PARSEC_MOVING_SECTORS, which it reads)
+    from parsec_python.acceleration.SCF.moving_sectors import moving_sectors_setting, runner_fortran_fixed_setting
+
+    runner_fortran_fixed_setting()
+    moving_sectors_setting()
     # PARSEC_BFGS_FIRST_STEP likewise: the root moves the atoms, but every rank refuses a value it does not know.
     from parsec_python.Relaxation.domove import bfgs_first_step_setting
 
     bfgs_first_step_setting()
+    # PARSEC_STATES_CLOSE_MULTIPLET (SCF/state_extension.py) likewise.
+    from parsec_python.SCF.state_extension import close_multiplet_setting
+
+    close_multiplet_setting()
     use_symmetry, symmetry_note = symmetry_decision(translation)
     # Whether the atoms stay in the point group of the first structure, which Ignore_Symmetry does not tell.
     # The command line may overrule that keyword, but not a run that leaves the group.
@@ -1644,19 +1791,34 @@ def execute(args, cp, comm, MPI, initialization_seconds, initial_affinity=None):
         restart_notes = [*restart_notes, kept_group_note(kept_reasons)]
     else:
         kept_reasons = ()
+    if moving_plan is not None and not moving_plan.periodic:
+        # A cluster: the sectors of the group its plan keeps (the pseudo-atoms of the state of the integrator or of
+        # the structures of manual.dat go to the preparation below); the NOTE of a cell names the operations of its
+        # sectors once they are found (MovingSectors.check_start).
+        symmetry = 'auto'
+        restart_notes = [*restart_notes, moving_plan.note()]
     # A periodic cell (a bulk cell at Gamma, the rest was refused above): the parser keeps no point group for a cell
     # (use_symmetry: its forces are not symmetrized), but the driver looks for the point group of the cell about its
     # origin (PARSEC_PERIODIC_SYMMETRY) and solves its sectors, also for forces and a relaxation, or one sector of
     # the identity.
     if periodic:
         symmetry = _periodic_solver_symmetry(translation, args.symmetry, symmetry,
-                                             supercell=_found_supercell is not None)
+                                             supercell=_found_supercell is not None,
+                                             moving_sectors=moving_plan is not None)
     # Forces or moves of a cell averaged over the group of its sectors: the cell keeps its sectors below the size floor
     # of one process too (PARSEC_PERIODIC_SECTOR_FLOOR applies to an SCF alone; --serial-control), as on main.py.
     sector_forces = bool(periodic and symmetry != 'off' and (
         getattr(translation, 'compute_forces', False) or getattr(translation, 'relaxation', None) is not None
         or getattr(translation, 'molecular_dynamics', None) is not None)
-        and _periodic_sector_forces_refusal(translation, supercell=_found_supercell is not None) is None)
+        and _periodic_sector_forces_refusal(translation, supercell=_found_supercell is not None,
+                                            moving_sectors=moving_plan is not None) is None)
+    if moving_plan is not None:
+        # The molecular dynamics and manual movements of PARSEC_MOVING_SECTORS=auto keep the floor of the sectors of an
+        # SCF (their structures need no average on the full grid), which their plan checked; on keeps the sectors at
+        # any size, as main.py does.
+        from parsec_python.acceleration.SCF.moving_sectors import moving_sectors_setting
+
+        sector_forces = sector_forces and moving_sectors_setting() == 'on'
     # Forces are symmetrized where the calculation itself uses the group; those of a cell are decided once it is
     # prepared (_periodic_force_symmetry).
     symmetrize_forces = keeps_group and symmetry != 'off'
@@ -1767,8 +1929,10 @@ def execute(args, cp, comm, MPI, initialization_seconds, initial_affinity=None):
         # Where the start vectors are drawn on the GPU or the distributed filter runs (PARSEC_CUPY_DEVICE_RANDOM=1,
         # PARSEC_CUPY_DISTRIBUTED_FILTER=1: the launch settings) the GPUs of a rank take the device pool for its
         # sectors only where the mean sector gives each at least PARSEC_CUPY_SECTOR_POOL_MIN_BYTES of basis, the rule
-        # of one process (main.py); 0 restores the memory rule alone, as before 2026-11-21, which the code defaults
-        # of both switches keep (experimental/mpi_scf.runner_pool_floor_applies, _pool_floor_groups).
+        # of one process (main.py), and, since 2026-11-22, where the pool saves at least PARSEC_MPI_SECTOR_POOL_MIN_GAIN
+        # of the fullest GPU of the disjoint groups; 0 together with PARSEC_MPI_SECTOR_POOL_MIN_GAIN=0.05 restores the
+        # memory rule alone, as before 2026-11-21, which the code defaults of both switches keep
+        # (experimental/mpi_scf.runner_pool_floor_applies, _pool_floor_groups).
         from parsec_python.acceleration.experimental.mpi_scf import runner_pool_floor_applies
 
         context.pool_floor = runner_pool_floor_applies()
@@ -1860,6 +2024,18 @@ def execute(args, cp, comm, MPI, initialization_seconds, initial_affinity=None):
             options['sector_forces'] = True
         if spin_identity:
             options['spin_identity_sector'] = True
+        fixed_atoms = symmetry_fixed_atoms(translation)
+        if moving_plan is not None:
+            # PARSEC_MOVING_SECTORS: the pseudo-atoms of the state or of the structures of a cluster, the operations
+            # the sectors of a cell need at least, the atoms that Move_Flag fixes in molecular dynamics
+            options['symmetry_constraints'] = moving_plan.constraints
+            if moving_plan.minimum_order > 1:
+                options['minimum_sector_order'] = moving_plan.minimum_order
+            if moving_plan.fixed is not None:
+                fixed_atoms = moving_plan.fixed
+            if context is not None:
+                # the input each rank prepares again with the atoms of a structure that leaves the group
+                context.moving_problem = translation.problem
         cp, system, device_records, sampler, cuda_contexts = _prepare_on_devices(
             cp, args.devices,
             lambda: prepare_single_point(translation.problem, backend=args.backend, symmetry=symmetry,
@@ -1867,7 +2043,7 @@ def execute(args, cp, comm, MPI, initialization_seconds, initial_affinity=None):
                                          # the fixed atoms of a relaxation that keeps the subgroup respecting
                                          # Move_Flag, a species of their own for the detection
                                          # (PARSEC_MOVE_FLAG_SUBGROUP=auto; None otherwise), alike on every rank
-                                         symmetry_fixed_atoms=symmetry_fixed_atoms(translation), **options),
+                                         symmetry_fixed_atoms=fixed_atoms, **options),
             memory)
         cuda_initialization_seconds = cuda_contexts['seconds']
         system.materialize_final_wavefunctions = False
@@ -1944,6 +2120,15 @@ def execute(args, cp, comm, MPI, initialization_seconds, initial_affinity=None):
         if rank == 0:
             if context is not None:
                 system.orbital_density_builder = MPISymmetryDensityBuilder(system.orbital_density_builder, context, solver)
+            moving_tracker = None
+            if moving_plan is not None:
+                # The state of a restart and the structures of manual.dat against the group the ranks found; a run
+                # that leaves it is prepared again on every rank (_moving_tracker).
+                moving_tracker = _moving_tracker(moving_plan, translation, context, args.backend, cache, log.write)
+                moving_tracker.check_start(system)
+                if periodic:
+                    # (a cell prepared again there has the group of its new sectors, or none)
+                    symmetrize_forces = _periodic_force_symmetry(translation, system)
             reporter.setup(system)
             # Restart_Run: the stored potential of parsec.dat starts the first SCF loop, with the restart lines of
             # main.py in parsec.out (_restart_rules decided before the preparation what this runner takes).
@@ -1957,6 +2142,9 @@ def execute(args, cp, comm, MPI, initialization_seconds, initial_affinity=None):
             scf_started = time.perf_counter()
             forces = outcome = dynamics = None
             moves = _ionic_backend_of(translation, ionic_backend, translation.potential_extrapolation, restart)
+            if moving_tracker is not None:
+                # PARSEC_MOVING_SECTORS: every structure checked against the group, the forces averaged over it
+                moves = moving_tracker.wrap(moves)
             if periodic and symmetry != 'off' and (translation.compute_forces or translation.relaxation is not None):
                 # The line of main.py for the forces of a cell in the sectors of its point group; G of a relaxation
                 # is kept for its first structure by the ionic backend.
@@ -1964,7 +2152,8 @@ def execute(args, cp, comm, MPI, initialization_seconds, initial_affinity=None):
                                                     if symmetrize_forces else None)
                 if line is not None:
                     log.write(line)
-                line = _fortran_sector_forces_line(system)
+                line = _fortran_sector_forces_line(
+                    system, translation.movable if translation.relaxation is not None else None)
                 if line is not None:
                     log.write(line)
             # Diagnostic: PARSEC_PROFILE_IONIC=<file> profiles the ionic loop of the root rank (cProfile, main
@@ -1978,8 +2167,9 @@ def execute(args, cp, comm, MPI, initialization_seconds, initial_affinity=None):
                 profiler.enable()
             try:
                 if translation.molecular_dynamics is not None:
-                    dynamics = run_recorded_molecular_dynamics(translation, system, moves, reporter,
-                                                               log.write, directory=output, restart=dynamics_restart)
+                    dynamics = run_recorded_molecular_dynamics(
+                        translation, system, moves, reporter, log.write, directory=output, restart=dynamics_restart,
+                        **({} if moving_tracker is None else {'after_step': moving_tracker.after_step}))
                     result, forces = dynamics.result, dynamics.forces
                 elif translation.relaxation is not None:
                     # Every structure is solved by the ranks as the first one: the root moves the atoms on all of
@@ -2365,6 +2555,10 @@ def main(argv=None):
     if args.serial_control:
         _keep_former_routes(os.environ)
     import cupy as cp
+    # One compilation of a kernel that the device threads of this rank ask for at once (PARSEC_CUPY_COMPILE_ONCE).
+    from parsec_python.acceleration.backends.cupy_compile import install_compile_once
+
+    install_compile_once()
     import mpi4py
     mpi4py.rc.initialize = False
     mpi4py.rc.finalize = False

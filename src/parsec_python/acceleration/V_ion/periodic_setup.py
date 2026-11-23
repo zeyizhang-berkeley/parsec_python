@@ -366,6 +366,12 @@ def install() -> None:
     _fortran_force_sums.set_local_force_provider(spline_periodic_local_forces)
     # the image sums of the atomic densities (None, the readable sum, for the other grids)
     _ionic.set_atomic_density_provider(_fortran._density_provider)
+    # the short-ranged local potential of a wire or slab, its images on threads (PARSEC_CONFINED_SETUP)
+    from parsec_python.V_ion import wire_slab as _wire_slab
+
+    from .confined_setup import threaded_short_range_local_potential
+
+    _wire_slab.set_short_range_provider(threaded_short_range_local_potential)
 
 
 def uninstall() -> None:
@@ -378,6 +384,9 @@ def uninstall() -> None:
     _force_sums.set_local_force_provider(None)
     _fortran_force_sums.set_local_force_provider(None)
     _ionic.set_atomic_density_provider(None)
+    from parsec_python.V_ion import wire_slab as _wire_slab
+
+    _wire_slab.set_short_range_provider(None)
 
 
 __all__ = ["fast_splitting", "fft_local_ionic_potential", "grid_ball", "install", "uninstall"]

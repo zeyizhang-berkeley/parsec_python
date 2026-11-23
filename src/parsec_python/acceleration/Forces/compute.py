@@ -485,7 +485,14 @@ def compute_forces(
         residual,
         xc_potential,
     )
-    if system.backend_info.selected == "cupy":
+    from parsec_python.Pseudopotential.radial_derivatives import linear_slope_setting
+
+    # PARSEC_LINEAR_TABLE_SLOPES=interpolant: the device kernels interpolate the slope tables of pseudo.f90; the
+    # slopes of the linear interpolants of a species without Cubic_Spline are summed by the readable routine
+    host_slopes = linear_slope_setting() == "interpolant" and any(
+        not specifications[atom.symbol].use_spline for atom in atoms
+    )
+    if system.backend_info.selected == "cupy" and not host_slopes:
         from .local_device import (
             cupy_local_forces,
             cupy_wedge_local_forces,
@@ -531,6 +538,13 @@ def compute_forces(
     if corrections:
         clock["corrections"] = perf_counter() - mark
     mark = perf_counter()
+    from parsec_python.Hartree.variational import hartree_tail_forces
+
+    # The atomic tail of the Hartree boundary moves with the atoms (PARSEC_HARTREE_VARIATIONAL).
+    tail_term = hartree_tail_forces(system, result)
+    if tail_term is not None:
+        clock["hartree_boundary"] = perf_counter() - mark
+    mark = perf_counter()
     if not symmetrize:
         operations = None
     elif operations is None:
@@ -545,6 +559,7 @@ def compute_forces(
         **corrections,
         **({} if charged is None else {"point_charge": charged}),
         **({"keep_net_force": True} if embedded else {}),
+        **({} if tail_term is None else {"hartree_boundary": tail_term}),
     )
     clock["symmetrization"] = perf_counter() - mark
     return replace(forces, seconds=perf_counter() - started)

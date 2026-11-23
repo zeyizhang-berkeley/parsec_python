@@ -88,6 +88,11 @@ def require_cupy() -> tuple[Any, Any]:
             ) from exc
         _CUPY = cp
         _CUPYX_SPARSE = cpsparse
+        # One compilation of a kernel that several device threads of this process ask for at once
+        # (PARSEC_CUPY_COMPILE_ONCE; an unknown value stops the run here).
+        from .cupy_compile import install_compile_once
+
+        install_compile_once()
         if os.environ.get("PARSEC_MEMORY_CENSUS"):
             from ..benchmarks import memory_census
 

@@ -71,6 +71,7 @@ from ..SCF.spin_polarized import (
     initchrg_start_needed,
 )
 from ..models import SelfConsistentSOCIteration, SelfConsistentSOCResult
+from ..Hartree.variational import electrostatic_hartree
 
 
 def spinor_spin_densities(
@@ -458,7 +459,7 @@ def run_self_consistent_soc_spin_polarized(
         input_effective_potential=effective_potential_avg,
         output_effective_potential=0.5 * (output_potential_up + output_potential_down),
         next_effective_potential=(input_potential_up, input_potential_down),
-        hartree_potential=hartree_potential,
+        hartree_potential=electrostatic_hartree(system, hartree_potential),
         eigensolver_state=eigval_state,
     )
 

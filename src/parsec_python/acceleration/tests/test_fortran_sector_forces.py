@@ -229,6 +229,43 @@ class FortranRoutingTests(unittest.TestCase):
         self.assertEqual(self.route(FORCES, "off", settings=settings), ("prepared", "off", True))
 
 
+class ForceLineTests(unittest.TestCase):
+    """The parsec.out line of these forces names the operations the total and the moved positions keep where
+    Move_Flag fixes atoms (``operations_preserving`` of the group, as the ionic loop takes them)."""
+
+    def test_the_line_names_the_operations_kept_by_the_fixed_atoms(self) -> None:
+        from types import SimpleNamespace
+
+        from parsec_python.Forces import atom_symmetry_operations
+        from parsec_python.models import Atom
+
+        d = 1.2
+        atoms = (
+            Atom("C", np.zeros(3)),
+            Atom("H", np.array([d, d, d])),
+            Atom("H", np.array([d, -d, -d])),
+            Atom("H", np.array([-d, d, -d])),
+            Atom("H", np.array([-d, -d, d])),
+        )
+        operations = atom_symmetry_operations(atoms)
+        self.assertEqual(len(operations), 24)
+        system = SimpleNamespace(input=SimpleNamespace(periodic_cell=object()), grid=None, atoms=atoms)
+        with mock.patch("parsec_python.Grid.pbc.uses_fortran_routines", return_value=True), mock.patch(
+            "parsec_python.acceleration.Forces.sector_symmetry.sector_symmetry_operations", return_value=operations
+        ), mock.patch("parsec_python.Forces.periodic.periodic_force_operations", return_value=operations):
+            whole = cli_module._fortran_sector_forces_line(system)
+            self.assertIn("their own terms, the total and the moved positions averaged over 24 operations", whole)
+            self.assertEqual(cli_module._fortran_sector_forces_line(system, (True,) * 5), whole)
+            # one hydrogen fixed: the C3v about its bond keeps 6 of the 24, for the total and the moved positions
+            fixed = cli_module._fortran_sector_forces_line(system, (True, False, True, True, True))
+            self.assertIn("the total and the moved positions averaged over the 6 of the 24 operations", fixed)
+            self.assertIn("that map the atoms Move_Flag fixes onto fixed atoms, those of the first structure", fixed)
+            self.assertNotIn("their own terms", fixed)
+            # two fixed: C2v, 4 of them
+            fixed = cli_module._fortran_sector_forces_line(system, (True, False, False, True, True))
+            self.assertIn("averaged over the 4 of the 24 operations", fixed)
+
+
 class OperationGroupTests(unittest.TestCase):
     """The group of the operations of the routines and of the sectors (:func:`fortran_force_operations`)."""
 

@@ -321,7 +321,8 @@ class FhippPotreEnergyTests(unittest.TestCase):
 
 class ObliqueSplitTests(unittest.TestCase):
     """``PARSEC_PERIODIC_OBLIQUE_SPLIT``: the split of the orthorhombic grid on the general grid of the Fortran-derived
-    routines (``fast``; by default, ``auto``, where a species uses ``Cubic_Spline``) or the readable sum.  A linearly
+    routines (``validated``, the default since 2026-11-22: ``Cubic_Spline`` species and POTRE and FHIPP tables; ``auto``
+    where a species uses ``Cubic_Spline``; ``fast`` for every species) or the readable sum.  A linearly
     interpolated species gets the readable potential to round-off; a ``Cubic_Spline`` one loses the spline error of
     ``-2 Z/r`` that the readable sum adds out to its erfc reach; the local forces are the derivative of that
     potential."""
@@ -352,10 +353,80 @@ class ObliqueSplitTests(unittest.TestCase):
         fast = self._potential("fast", False)[3]
         self.assertLess(float(np.max(np.abs(fast - readable))), 1.0e-11)
 
-    def test_the_default_takes_the_split_for_spline_species_only(self) -> None:
+    def test_auto_takes_the_split_for_spline_species_only(self) -> None:
+        # auto: the default from 2026-11-07 to 2026-11-22
         for spline, route in ((True, "fast"), (False, "readable")):
             with self.subTest(spline=spline):
                 np.testing.assert_array_equal(self._potential("auto", spline)[3], self._potential(route, spline)[3])
+
+    def test_the_default_takes_the_split_for_fhipp_tables(self) -> None:
+        for spline in (True, False):
+            with self.subTest(spline=spline):
+                np.testing.assert_array_equal(self._potential("", spline)[3], self._potential("fast", spline)[3])
+
+    def test_the_default_takes_the_validated_formats(self) -> None:
+        # validated (the default since 2026-11-22): the split for Cubic_Spline species and for POTRE (martins_new) and
+        # FHIPP tables; a linear MARTINS_OLD or MARTINS_WANG table keeps the readable sum, alone or beside another
+        import os
+        from types import SimpleNamespace
+        from unittest import mock
+
+        from parsec_python.acceleration.V_ion import periodic_setup_fortran
+
+        grid = self._potential("readable", False)[0]
+        atoms = [Atom("A", (0.1, 0.2, 0.3)), Atom("B", (1.1, 1.2, 1.3))]
+
+        def species(first, second):
+            return {
+                "A": SimpleNamespace(pseudopotential_format=first[0], use_spline=first[1]),
+                "B": SimpleNamespace(pseudopotential_format=second[0], use_spline=second[1]),
+            }
+
+        cases = [
+            # (species A, species B), validated, auto, fast
+            ((("martins_new", False), ("fhipp", False)), True, False, True),
+            ((("martins_old", False), ("martins_old", False)), False, False, True),
+            ((("martins_wang", False), ("martins_wang", False)), False, False, True),
+            ((("martins_new", False), ("martins_wang", False)), False, False, True),
+            ((("martins_wang", True), ("martins_old", False)), True, True, True),
+            ((("fhipp", True), ("fhipp", True)), True, True, True),
+        ]
+        for pair, validated, auto, fast in cases:
+            for value, expected in (("", validated), ("validated", validated), ("auto", auto), ("fast", fast),
+                                    ("readable", False)):
+                with self.subTest(pair=pair, value=value), mock.patch.dict(
+                    os.environ, {"PARSEC_PERIODIC_OBLIQUE_SPLIT": value}
+                ):
+                    self.assertEqual(periodic_setup_fortran.oblique_fast(grid, species(*pair), atoms), expected)
+
+    def test_the_default_keeps_the_readable_sum_of_a_martins_wang_table(self) -> None:
+        import os
+        from unittest import mock
+
+        from parsec_python.V_ion import load_pseudopotentials
+
+        lattice = 8.11 * (np.ones((3, 3)) - 2.0 * np.eye(3)) / 2.0  # primitive bcc
+        grid = build_periodic_grid(
+            PeriodicCell(lattice_vectors=lattice),
+            PeriodicGridSettings(spacing=0.6, expansion_order=6, fortran_routines=True),
+        )
+        specification = {
+            "Na": SpeciesPotential(
+                _DATA / "Na_POTRW.DAT", 1, pseudopotential_format="martins_wang", core_cutoff_radius=3.0
+            )
+        }
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            potentials = load_pseudopotentials(specification)
+        atoms = [Atom("Na", (0.05, -0.03, 0.02))]
+        values = {}
+        for split in ("", "auto", "fast"):
+            with mock.patch.dict(os.environ, {"PARSEC_PERIODIC_OBLIQUE_SPLIT": split}):
+                values[split] = ewald_local_ionic_potential(grid, atoms, potentials, specification, lattice)
+        np.testing.assert_array_equal(values[""], values["auto"])
+        # the split leaves out the table's noise past its Coulomb tail, which is not a constant for this table
+        difference = values["fast"] - values["auto"]
+        self.assertGreater(float(np.max(difference) - np.min(difference)), 1.0e-9)
 
     def test_spline_species_lose_the_spline_tail(self) -> None:
         difference = self._potential("fast", True)[3] - self._potential("readable", True)[3]
@@ -405,7 +476,8 @@ class ObliqueSplitTests(unittest.TestCase):
 
         from parsec_python.acceleration.V_ion import periodic_setup_fortran
 
-        self.assertEqual(periodic_setup_fortran.oblique_split(), "auto")
+        with mock.patch.dict(os.environ, {"PARSEC_PERIODIC_OBLIQUE_SPLIT": ""}):
+            self.assertEqual(periodic_setup_fortran.oblique_split(), "validated")
         with mock.patch.dict(os.environ, {"PARSEC_PERIODIC_OBLIQUE_SPLIT": "fastest"}):
             with self.assertRaises(ValueError):
                 periodic_setup_fortran.oblique_split()

@@ -8,7 +8,10 @@ sums are formed on the device for a large structure.
 One CUDA thread handles one atom and one chunk of consecutive grid points and
 adds the three force terms of that chunk; the chunk sums of an atom are then
 added in grid order.  The radial rules are those of the readable routine:
-points closer than the first radial sample contribute nothing, the potential
+points closer than the first radial sample contribute nothing (under
+``PARSEC_SPLINE_FORCE_CENTER=auto`` the points within ``2 rs(2)``
+take the slopes of the smooth behaviour of the potential and the core
+density instead, ``s(c) d/c`` with ``s(c)`` from the host), the potential
 slope is the Coulomb one from ``rs(npoint-6)`` outwards where the density
 slopes are zero, and in between the tables of ``pseudo.f90`` are interpolated
 linearly (``r**2 * dV/dr`` for the potential).  For a species with
@@ -56,7 +59,13 @@ import numpy as np
 from parsec_python.Forces import LocalForceTerms, species_force_tables
 from parsec_python.Grid import RealSpaceGrid
 from parsec_python.Pseudopotential import ParsecPseudopotential, ParsecRadialSpline
-from parsec_python.Pseudopotential.radial_derivatives import tail_start_radius
+from parsec_python.Pseudopotential.radial_derivatives import (
+    evaluate_density_derivative,
+    evaluate_local_potential_derivative,
+    smooth_center_radius,
+    spline_force_center_setting,
+    tail_start_radius,
+)
 from parsec_python.models import Atom, SpeciesPotential
 
 from ..backends.cupy import require_cupy
@@ -104,13 +113,17 @@ void local_force_chunks(
     const double* c_table = core_table + table_offsets[kind];
     const double* c_second = core_second + table_offsets[kind];
     const int samples = table_counts[kind];
-    const double scale_a = parameters[7 * kind + 0];
-    const double scale_b = parameters[7 * kind + 1];
-    const double inner = parameters[7 * kind + 2];
-    const double tail = parameters[7 * kind + 3];
-    const double two_z = parameters[7 * kind + 4];
-    const bool has_core = parameters[7 * kind + 5] != 0.0;
-    const bool splined = parameters[7 * kind + 6] != 0.0;
+    const double scale_a = parameters[10 * kind + 0];
+    const double scale_b = parameters[10 * kind + 1];
+    const double inner = parameters[10 * kind + 2];
+    const double tail = parameters[10 * kind + 3];
+    const double two_z = parameters[10 * kind + 4];
+    const bool has_core = parameters[10 * kind + 5] != 0.0;
+    const bool splined = parameters[10 * kind + 6] != 0.0;
+    // PARSEC_SPLINE_FORCE_CENTER=auto: within smooth (0: none) the slopes over r of the smooth behaviour
+    const double smooth = parameters[10 * kind + 7];
+    const double smooth_local = parameters[10 * kind + 8];
+    const double smooth_core = parameters[10 * kind + 9];
     const double ax = positions[3 * atom + 0];
     const double ay = positions[3 * atom + 1];
     const double az = positions[3 * atom + 2];
@@ -124,11 +137,14 @@ void local_force_chunks(
         const double dy = coordinates[3 * point + 1] - ay;
         const double dz = coordinates[3 * point + 2] - az;
         const double r = sqrt(dx * dx + dy * dy + dz * dz);
-        if (!(r >= inner)) continue;
-        double potential_slope;
+        const bool near = r < smooth && r > 0.0;
+        if (!(r >= inner) && !near) continue;
+        double potential_slope = 0.0;
         double valence_slope = 0.0;
         double core_slope = 0.0;
-        if (r >= tail) {
+        if (!(r >= inner)) {
+            // closer than the first sample: only the smooth slopes below
+        } else if (r >= tail) {
             potential_slope = two_z / (r * r);
         } else {
             long long index = (long long)(log1p(r / scale_a) / scale_b) - 1;
@@ -160,6 +176,10 @@ void local_force_chunks(
                 }
             }
         }
+        if (near) {
+            potential_slope = smooth_local * r;
+            if (has_core) core_slope = smooth_core * r;
+        }
         const double inverse = 1.0 / r;
         const double ionic = potential_slope * density[point] * inverse;
         const double correction = valence_slope * residual[point] * inverse;
@@ -184,7 +204,7 @@ _COMPILED_DIRECT: dict[int, object] = {}
 
 
 def _direct_kernel_source() -> str:
-    """``local_force_chunks`` with a per-species flag ``parameters[8*kind+7]``.
+    """``local_force_chunks`` with a per-species flag ``parameters[11*kind+10]``.
 
     A flagged species (``Old_Interpolation_Format`` without cubic spline)
     takes the potential slope from the linear interpolation of ``dV/dr``
@@ -196,9 +216,9 @@ def _direct_kernel_source() -> str:
     replacements = (
         ("void local_force_chunks(", "void local_force_chunks_direct("),
         (
-            "    const bool splined = parameters[7 * kind + 6] != 0.0;\n",
-            "    const bool splined = parameters[7 * kind + 6] != 0.0;\n"
-            "    const bool direct = parameters[7 * kind + 7] != 0.0;\n",
+            "    const bool splined = parameters[10 * kind + 6] != 0.0;\n",
+            "    const bool splined = parameters[10 * kind + 6] != 0.0;\n"
+            "    const bool direct = parameters[10 * kind + 10] != 0.0;\n",
         ),
         (
             "                potential_slope = (l_table[index]\n"
@@ -213,8 +233,8 @@ def _direct_kernel_source() -> str:
         if source.count(old) != 1:
             raise RuntimeError(f"the local force kernel source changed near {old!r}")
         source = source.replace(old, new)
-    # Eight parameters per species.
-    return source.replace("parameters[7 * kind + ", "parameters[8 * kind + ")
+    # Eleven parameters per species.
+    return source.replace("parameters[10 * kind + ", "parameters[11 * kind + ")
 
 
 def _kernel(cp, direct: bool = False):
@@ -275,6 +295,7 @@ def cupy_local_forces(
     local_table, local_second, core_table, core_second = [], [], [], []
     # One flag per species: Old_Interpolation_Format without cubic spline.
     direct: list[float] = []
+    center_setting = spline_force_center_setting()
     cursor = 0
     for symbol in symbols:
         potential = potentials[symbol]
@@ -321,6 +342,34 @@ def cupy_local_forces(
             local_second.append(zeros)
             core_table.append(tables.core_density_derivative if has_core else zeros)
             core_second.append(zeros)
+        # within 2 rs(2) the slopes over r of the smooth behaviour, those of the readable routine at
+        # that radius (PARSEC_SPLINE_FORCE_CENTER=auto); 0: none
+        smooth = smooth_center_radius(potential, center_setting)
+        smooth_local = smooth_core = 0.0
+        if smooth:
+            at = np.array([smooth])
+            smooth_local = float(
+                evaluate_local_potential_derivative(
+                    potential,
+                    at,
+                    specification.local_angular_momentum,
+                    table=tables.local_potential_derivative,
+                    use_spline=specification.use_spline,
+                    spline_padding_width=half_width,
+                    direct=bool(getattr(specification, "old_interpolation", False)),
+                )[0]
+            ) / smooth
+            if has_core:
+                smooth_core = float(
+                    evaluate_density_derivative(
+                        potential,
+                        at,
+                        potential.core_density,
+                        table=tables.core_density_derivative,
+                        use_spline=specification.use_spline,
+                        spline_padding_width=half_width,
+                    )[0]
+                ) / smooth
         parameters.append(
             [
                 potential.radial_parameter_a,
@@ -330,6 +379,9 @@ def cupy_local_forces(
                 2.0 * potential.ionic_charge,
                 1.0 if has_core else 0.0,
                 1.0 if specification.use_spline else 0.0,
+                smooth,
+                smooth_local,
+                smooth_core,
             ]
         )
     use_direct = any(direct)

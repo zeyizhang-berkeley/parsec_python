@@ -18,9 +18,73 @@ are in electrons/bohr^3 and all energies and potentials are in Rydberg.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 
 import numpy as np
+
+
+CA_CONTINUITY_ENV = "PARSEC_CA_CONTINUITY"
+CA_CONTINUITY_DEFAULT = "off"
+
+# The coefficients C and D of the high-density form ``A ln r_s + B + C r_s ln r_s + D r_s`` of the Perdew-Zunger
+# correlation energy per electron, in Rydberg, as exc.f90 (corca_nspn, corlsd_ca) of PARSEC 1.5 has them: ``c3 = 2 C``,
+# ``c4 = -2 D`` and ``c5 = c4 - c3`` of the unpolarized gas, ``cs = 2 C`` and ``ds = 2 D`` of the fully polarized gas.
+_PARSEC_HIGH_DENSITY = (0.004, 0.0232, 0.0192, 0.0014, -0.0096)
+
+
+def ca_continuity_setting() -> str:
+    """``PARSEC_CA_CONTINUITY``: the high-density coefficients of the Perdew-Zunger correlation of CA-LDA.
+
+    ``off`` (default): those of PARSEC 1.5, the four digits of Perdew and Zunger's paper.  With them the correlation
+    energy per electron of the two forms that meet at ``r_s = 1`` (the density ``3/(4 pi)`` e/bohr^3) differs by
+    6.41e-5 Ry for the unpolarized gas and 2.5e-6 Ry for the fully polarized one, and the potential by 5.5e-5 Ry.
+    Whenever the density of a grid point crosses ``3/(4 pi)`` (between two structures of a relaxation, or two
+    displacements of a finite-difference check), the total energy then steps by ``(3/(4 pi)) 6.41e-5 h^3`` Ry, 6.6e-7
+    to 1.9e-6 Ry for grid spacings of 0.35 to 0.5 bohr, and by a multiple of it where symmetry-equivalent points cross
+    together.  The forces are the slope of the energy between the steps.
+
+    ``on``: ``C`` and ``D`` from the continuity of the energy per electron and of its slope at ``r_s = 1`` (the
+    values of libxc's modified Perdew-Zunger correlation, ``LDA_C_PZ_MOD``), so that energy and potential are
+    continuous functions of the density and the energy a continuous function of the positions.  It moves energies
+    away from those of PARSEC 1.5 by the change of the correlation where ``r_s < 1``.
+    """
+
+    value = os.environ.get(CA_CONTINUITY_ENV, CA_CONTINUITY_DEFAULT).strip().lower() or CA_CONTINUITY_DEFAULT
+    if value not in ("off", "on"):
+        raise ValueError(f"{CA_CONTINUITY_ENV} must be off or on, not {value!r}")
+    return value
+
+
+def _continuous_high_density() -> tuple[float, float, float, float, float]:
+    """``(c3, c4, c5, cs, ds)`` that join the high-density form to the low-density one at ``r_s = 1``.
+
+    With ``e_low(r) = g/(1 + b1 sqrt(r) + b2 r)`` and ``e_high(r) = A ln r + B + C r ln r + D r``, equal values and
+    slopes at ``r = 1`` give ``D = e_low(1) - B`` and ``C = e_low'(1) - A - D``, with
+    ``e_low'(1) = -g (b1/2 + b2)/(1 + b1 + b2)**2``; ``A``, ``B``, ``g``, ``b1``, ``b2`` are PARSEC's.
+    """
+
+    def join(a, b, g, b1, b2):
+        denominator = 1.0 + b1 + b2
+        d = g / denominator - b
+        c = -g * (0.5 * b1 + b2) / (denominator * denominator) - a - d
+        return c, d
+
+    c, d = join(0.0622, -0.096, -0.2846, 1.0529, 0.3334)
+    cs, ds = join(0.0311, -0.0538, -0.1686, 1.3981, 0.2611)
+    return (c, -d, -d - c, cs, ds)
+
+
+def ca_high_density_coefficients(setting: str | None = None) -> tuple[float, float, float, float, float]:
+    """``(c3, c4, c5, cs, ds)`` of the high-density Perdew-Zunger forms under ``PARSEC_CA_CONTINUITY``.
+
+    ``off``: PARSEC 1.5's ``(0.004, 0.0232, 0.0192, 0.0014, -0.0096)``; ``on``: ``(0.00403830388, 0.0232641328,
+    0.0192258289, 0.00139510243, -0.00960252708)`` (:func:`ca_continuity_setting`).
+    """
+
+    if (setting or ca_continuity_setting()) == "on":
+        return _continuous_high_density()
+    return _PARSEC_HIGH_DENSITY
 
 
 @dataclass(frozen=True)
@@ -147,7 +211,9 @@ def ca_lda(
         if np.any(high_density):
             r = rs[high_density]
             log_r = np.log(r)
-            c1, c2, c3, c4, c5 = 0.0622, 0.096, 0.004, 0.0232, 0.0192
+            # c3, c4, c5 of PARSEC_CA_CONTINUITY (PARSEC's 0.004, 0.0232, 0.0192 by default).
+            c1, c2 = 0.0622, 0.096
+            c3, c4, c5 = ca_high_density_coefficients()[:3]
             ec = c1 * log_r - c2 + (c3 * log_r - c4) * r
             vc = ec - (c1 + (c3 * log_r - c5) * r) / 3.0
             correlation_epsilon[high_density] = ec
@@ -251,9 +317,11 @@ def ca_lda_spin_polarized(
 
         # Perdew-Zunger correlation: unpolarized ("u") and fully polarized
         # ("s", zeta=1) branches, each with their own high/low-density forms.
-        c1, c2, c3, c4 = 0.0622, 0.0960, 0.0040, 0.0232
+        # c3, c4, cs, ds of PARSEC_CA_CONTINUITY (PARSEC's by default).
+        c3, c4, _c5, cs, ds = ca_high_density_coefficients()
+        c1, c2 = 0.0622, 0.0960
         g, b1, b2 = -0.2846, 1.0529, 0.3334
-        as_, bs, cs, ds = 0.0311, -0.0538, 0.0014, -0.0096
+        as_, bs = 0.0311, -0.0538
         gs, b1s, b2s = -0.1686, 1.3981, 0.2611
 
         eu = np.empty_like(rs)
@@ -309,4 +377,12 @@ def ca_lda_spin_polarized(
     )
 
 
-__all__ = ["XCResult", "SpinPolarizedXCResult", "ca_lda", "ca_lda_spin_polarized"]
+__all__ = [
+    "CA_CONTINUITY_ENV",
+    "XCResult",
+    "SpinPolarizedXCResult",
+    "ca_continuity_setting",
+    "ca_high_density_coefficients",
+    "ca_lda",
+    "ca_lda_spin_polarized",
+]

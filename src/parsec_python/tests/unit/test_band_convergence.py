@@ -110,6 +110,89 @@ class SwitchTests(unittest.TestCase):
                     self.assertEqual("residual_scope" in archive.files, scope is not None)
                 self.assertEqual(load_band_structure_archive(path).residual_scope, scope)
 
+    def test_the_band_buffer(self) -> None:
+        from parsec_python.SCF.bands import (
+            BAND_BUFFER_FRACTION,
+            BAND_BUFFER_SWITCH,
+            affordable_band_buffer,
+            band_buffer_setting,
+            band_working_buffer,
+            validate_band_settings,
+        )
+
+        converged = converged_band_settings(_settings(3), True)
+        fixed = _settings(3)
+        self.assertEqual(int(converged.safety_buffer), int(fixed.safety_buffer))
+        base = int(converged.safety_buffer)
+        with mock.patch.dict(os.environ, {BAND_BUFFER_SWITCH: ""}):
+            self.assertEqual(band_buffer_setting(), BAND_BUFFER_FRACTION)
+            # in proportion to the states, never below Subspace_Buffer_Size; fixed cycles keep the buffer of PARSEC 1.5
+            self.assertEqual(band_working_buffer(converged, 160), max(base, int(np.ceil(BAND_BUFFER_FRACTION * 160))))
+            self.assertEqual(band_working_buffer(converged, 2), base)
+            self.assertEqual(band_working_buffer(fixed, 160), base)
+            self.assertEqual(band_working_buffer(converged, 160, host_chebdav=True), base)
+        with mock.patch.dict(os.environ, {BAND_BUFFER_SWITCH: "off"}):
+            self.assertIsNone(band_buffer_setting())
+            self.assertEqual(band_working_buffer(converged, 160), base)
+        with mock.patch.dict(os.environ, {BAND_BUFFER_SWITCH: "0.25"}):
+            self.assertEqual(band_working_buffer(converged, 160), max(base, 40))
+        for value in ("on", "0", "-1", "3", "nan"):
+            with mock.patch.dict(os.environ, {BAND_BUFFER_SWITCH: value}):
+                with self.assertRaisesRegex(ValueError, BAND_BUFFER_SWITCH):
+                    band_buffer_setting()
+                with self.assertRaisesRegex(ValueError, BAND_BUFFER_SWITCH):
+                    validate_band_settings()
+        # within half the memory for three complex bases, never below the buffer of before
+        self.assertEqual(affordable_band_buffer(96, 6, 160, 110592, 80.0e9), 96)
+        self.assertEqual(affordable_band_buffer(96, 6, 160, 110592, None), 96)
+        rows = 729000
+        fits = int(0.5 * 80.0e9 // (3 * 16 * rows)) - 2006
+        self.assertEqual(affordable_band_buffer(1204, 6, 2006, rows, 80.0e9), max(6, fits))
+        self.assertEqual(affordable_band_buffer(1204, 6, 2006, rows, 1.0e9), 6)
+        self.assertEqual(affordable_band_buffer(6, 6, 2006, rows, 1.0), 6)
+
+    def test_unconverged_band_levels_are_named_in_a_warning(self) -> None:
+        from parsec_python.Output.parsec_output import ParsecTextReporter
+        from parsec_python.SCF.bands import unconverged_band_points
+        from parsec_python.models import BandStructureResult
+
+        levels = np.asarray([[[-0.5, 0.2, 2.4], [-0.4, 0.3, 2.0]]])
+        # the test of a converged first solve: residual <= relative * max|e| of the k-point
+        residuals = np.asarray([[2.0e-10, 9.1e-3]])
+        np.testing.assert_array_equal(unconverged_band_points(residuals, levels, 1.0e-10), [[False, True]])
+        np.testing.assert_array_equal(unconverged_band_points(residuals, levels, None), [[False, False]])
+        np.testing.assert_array_equal(unconverged_band_points([[np.nan, 1.0e-12]], levels, 1.0e-10), [[False, False]])
+        # a k-point whose solve did not apply the test (the host CHEBDAV) is not counted
+        np.testing.assert_array_equal(
+            unconverged_band_points(residuals, levels, 1.0e-10, [[True, False]]), [[False, False]]
+        )
+
+        def report(norms, test):
+            written = []
+            reporter = ParsecTextReporter.__new__(ParsecTextReporter)
+            reporter.write = written.append
+            reporter.problem = mock.Mock()
+            reporter.problem.eigensolver.method = "chebff"
+            reporter.band_structure(
+                BandStructureResult(
+                    mode="scalar", channels=("all",), segment_names=("G-X",), segment_counts=np.asarray([2]),
+                    k_points=np.asarray([[0.0, 0.0, 0.0], [0.1, 0.0, 0.0]]), eigenvalues=levels,
+                    residual_norms=np.asarray(norms), fermi_level=0.0, residual_test=test,
+                )
+            )
+            return [row for row in written[0].splitlines() if "WARNING" in row]
+
+        # below the fixed 1e-2 Ry of before, and unconverged: named
+        warning = report(residuals, 1.0e-10)
+        self.assertEqual(len(warning), 1)
+        self.assertIn("1 of 2 k-point(s) did not converge", warning[0])
+        self.assertIn("9.100E-03 Ry", warning[0])
+        # converged: no warning
+        self.assertEqual(report([[2.0e-10, 1.0e-10]], 1.0e-10), [])
+        # fixed cycles (no test): the warning of before, above 1e-2 Ry only
+        self.assertEqual(report(residuals, None), [])
+        self.assertEqual(len(report([[2.0e-10, 0.1]], None)), 1)
+
     def test_settings_of_the_band_k_points(self) -> None:
         chebff = _settings(3)
         with mock.patch.dict(os.environ, {BAND_CONVERGENCE_SWITCH: "auto"}):

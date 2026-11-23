@@ -668,6 +668,33 @@ SCF iterations; the density within 2e-9, the SCF path). The eigenvalues and the 
 Outputs written before the change print the earlier eigenvalues, and a `parsec.dat` written before it holds a
 potential with the earlier constants.
 
+### Total energies of a periodic cell against PARSEC 1.5
+
+Two choices of this code give a periodic cell another total energy than PARSEC 1.5 on the same grid (the same
+spacing and `Grid_Shift`, the same state). Neither is an error of either code; both differences shrink as the grid is
+refined. Measured on A100 against a 1.5 build (bcc Mn2, a 5.40 bohr, and bcc Fe2, a 5.42 bohr, at the Gamma
+point; O2 in a 10 bohr cell; diamond Si8, a 10.26 bohr; POTRE pseudopotentials without core correction; 1.5
+restarted from this code's `parsec.dat` so that both converge in the same state):
+
+- **The local potential.** The default builds it in real space (the Ewald split above), 1.5 in G space up to the
+  grid's frequencies. At h 0.22 bohr the totals differ by 1.4 mRy (FM Mn2), 15 mRy (FM Fe2, 1000 K) and, at
+  h 0.30, 7 mRy (O2); at h 0.15 the Fe2 difference is 0.17 mRy. `Periodic_Local_Potential: g_space` and
+  `Periodic_Alpha_Term: fortran` take 1.5's construction: with the LDA (CA) the totals then agree within 7e-6 Ry
+  (Si8; non-magnetic and FM Mn2, the same tables labelled for CA).
+- **The PBE potential.** This code's PBE potential is the derivative of its discrete energy
+  (`V_xc/pbe.py`, `V_xc/pbe_spin.py`); 1.5's `Correlation_Type: pbe` evaluates the continuum formula, whose SCF
+  fixed point is not the minimum of that energy, so this code ends lower. With the G-space options above:
+  Si8 1.9e-5 Ry, non-magnetic Mn2 0.16 mRy, O2 0.19 mRy, FM Fe2 0.10 mRy, and 3.3 mRy for FM Mn2
+  (11 of its 14 valence electrons in one channel) at h 0.22, 1.6 mRy at h 0.18. 1.5's `Correlation_Type: wb`,
+  the variational potential, gives this code's results without spin (Si8 within 4.8e-6 Ry, non-magnetic Mn2
+  6.6e-6); its spin-polarized `wb` does not converge on these cells.
+
+A spin-polarized cell of 1.5 also removes the average of `V_xc` from each channel (its `potshift`; here
+`Zero_Average_Vxc: .true.`, off by default for spin), which moves the channels against each other: from the
+ferromagnetic start of Mn2 (+0.5 on both atoms) 1.5 ends in a state of moment 2 (-56.6097 Ry) instead of the state
+of moment 8 (-57.0084 Ry) that it keeps when restarted there, and this code with `Zero_Average_Vxc: .true.` does
+the same.
+
 ## SCF of large bulk cells
 
 A bulk cell takes `Smart_Subspace: .true.` by default (since 8 November 2026; `Subspace_Lower_Bound: monotone`
@@ -789,7 +816,8 @@ on 2 and 3 ranks (the device code on the host) against the single-process solver
 GPUs or on more than one node. Because no rank holds whole orbitals, `--mpi` refuses (input error) LDA+U,
 `Eigensolver: arpack`/`diagla`, forces, relaxation and molecular dynamics of periodic runs at the Gamma point
 alone, with spin, with spinors or with a hybrid functional, the Ylm-projected DOS and `Output_GW`; a
-non-collinear cluster's `parsec.dat` is written without wavefunction records. The forces of the scalar k-point
+non-collinear cluster's `parsec.dat` is written without wavefunction records, and so is that of a k-point run
+(with a NOTE; without `--mpi` it holds the selected states of every k-point). The forces of the scalar k-point
 SCF (a cell sampled beyond the Gamma point) run with `--mpi` since 2026-11-17: the nonlocal force is a sum over
 the states, so every rank of a k-point pool adds the terms of its columns (of the sectors of its k-points, made
 whole on its GPU 32 states at a time) and the parts are summed over the ranks; relaxations and molecular dynamics
@@ -807,7 +835,9 @@ does (1.5's own default is 100). `Bands_FF_MaxIter` (PARSEC 1.5) sets the CHEBFF
 the band k-points (default `FF_MaxIter`); since 2026-11-21 a k-point whose bands have not reached
 CHEBDAV's residual test with `Diag_Tolerance` after them takes more cycles until they do, at most
 `PARSEC_KPOINT_EXTRA_CYCLES` (24) more (`PARSEC_BAND_CONVERGENCE=auto`; `off` keeps PARSEC 1.5's
-fixed cycles):
+fixed cycles). A k-point solved on the whole grid then carries a working buffer of 60 % of its states, so that its top
+levels converge within those cycles (`PARSEC_BAND_BUFFER`; `off` and the host CHEBDAV keep `Subspace_Buffer_Size`),
+and a k-point that still misses the test is named in a WARNING with its largest residual:
 
 ```
 begin bandstruc
@@ -1088,7 +1118,8 @@ keep (a shift other than 0 or 1/2) keep its time-reversal pairs. Molecular dynam
 moving atoms whose `Move_Flag` no operation but the identity respects (since 2026-11-21 a relaxation of scalar or
 collinear-spin orbitals, not a hybrid's, whose flags break the group takes the wedge of the operations that map the
 fixed atoms onto fixed atoms and the grid's finite-difference operators onto themselves,
-`PARSEC_MOVE_FLAG_SPACE_GROUP`) run the full mesh as its pairs `k`, `-k`
+`PARSEC_MOVE_FLAG_SPACE_GROUP`, and since 2026-11-22 so does one of the spinors of non-magnetic spin-orbit coupling,
+`PARSEC_SPINOR_MOVE_FLAG_SUBGROUP`) run the full mesh as its pairs `k`, `-k`
 (`PARSEC_KPOINT_TIME_REVERSAL`); non-collinear magnetism and spin-polarized spin-orbit coupling keep the full mesh of
 equal weights (time reversal flips their moments, and the group found from the atoms ignores them), as every input
 with `.false.` did before 8 November 2026. Without `Use_Fortran_Routines` a shifted mesh still selects the
@@ -1192,6 +1223,20 @@ cell it changes no grid point (the symmetry is still switched off). Other sides,
 accelerated driver keeps that grid and solves a cluster in the sectors of the operations that map its domain of
 whole blocks onto itself (the permutations of the axes the atoms allow; `PARSEC_FOLDBLOCK_SYMMETRY=off`: no group,
 as before).
+
+The default shift is not PARSEC 1.5's. Both codes put the points half a step off the origin, and on it with
+`Ignore_Symmetry` (`usrinputfile.F90:1363-1367`; the same rule here, clusters and cells alike). PARSEC 1.5 sets
+`Ignore_Symmetry` by default (`usrinputfile.F90:810`), so its grid has no shift unless the input says otherwise;
+this code keeps `Ignore_Symmetry: .false.` by default (its symmetry sectors) and so the half-step shift. An input
+without the line therefore runs on different grids in the two codes. On the same grid the totals agree: CA, linear
+tables, h 0.4 bohr, A100 against a 1.5 build on 8 MPI ranks, CH4, H2, H2O and NH4 to every printed digit with
+either shift (CH4 and NH4 also at h 0.3), Si5H12 likewise with `Hartree_Boundary_Tolerance: off` (with the default
+boundary plan of this code, whose atomic tail engages there, within 3.4e-5 Ry). The default grids give, this code
+minus 1.5 at h 0.4: CH4 -11.2 mRy, H2 +5.0, H2O +65.6, NH4 +49.0, Si5H12 +31.1 mRy; at h 0.3 CH4 -1.8 and NH4
++1.1 mRy (the egg-box term of the grid, which shrinks with h). The point counts differ too (a sphere of 8 bohr at
+h 0.4: 33,552 points with the shift, 33,377 without). To compare with a 1.5 result of an input without the line,
+write `Ignore_Symmetry: .true.` (the full grid) or a `Grid_Shift` block of zeros (the same grid, with the symmetry
+sectors) here, or a `Grid_Shift` block of 0.5 in the 1.5 input.
 
 ## Modular Python API
 

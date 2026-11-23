@@ -27,6 +27,8 @@ import os
 import numpy as np
 
 LEVELS_SWITCH = "PARSEC_KPOINT_SUPERCELL_LEVELS"
+#: The switch of the levels per k-point that the supercell solves beyond the cell's states (kpoint_supercell.py).
+STATES_HINT = "PARSEC_KPOINT_SUPERCELL_STATES"
 #: Levels within this many Ry of their neighbour form one cluster (degenerate partners, possibly of several
 #: k-points of a star, which a solver may mix).
 CLUSTER_TOLERANCE = 1.0e-6
@@ -223,6 +225,9 @@ def _partner_bits(solved_bits, weights, eigenvalues, axes, operations) -> np.nda
 
     weights = np.asarray(weights, dtype=np.int64)
     solved_bits = np.asarray(solved_bits, dtype=np.int64)
+    # a solved state of weight 0 (a share of a level that the states before it list) lists no state
+    kept = weights > 0
+    weights, solved_bits = weights[kept], solved_bits[kept]
     starts = np.concatenate([[0], np.cumsum(weights)[:-1]])
     listed = np.zeros(int(weights.sum()), dtype=np.int64)
     for state in range(weights.size):
@@ -280,6 +285,10 @@ def _weighted_bits(orbitals, eigenvalues, weights, rows, axes, operations, most:
     characters = np.array(
         [[-1.0 if bin(point & element).count("1") % 2 else 1.0 for element in range(count)] for point in range(count)]
     )
+    # (solved states of weight 0 list no state: their columns are left out)
+    weights = np.asarray(weights, dtype=np.int64)
+    kept = np.flatnonzero(weights > 0)
+    weights = weights[kept]
     starts = np.concatenate([[0], np.cumsum(weights)[:-1]]).astype(np.int64)
     solved_values = np.asarray(eigenvalues, dtype=np.float64)[starts]
     stars: list[tuple[int, ...]] = [()] * weights.size
@@ -287,7 +296,7 @@ def _weighted_bits(orbitals, eigenvalues, weights, rows, axes, operations, most:
     order = np.argsort(solved_values, kind="stable")
     for begin in range(0, order.size, most):
         batch = order[begin : begin + most]
-        vectors = _sector_columns(orbitals, batch)
+        vectors = _sector_columns(orbitals, kept[batch])
         xp = _array_module(vectors)
         if device_maps is None:
             device_maps = [xp.asarray(item) for item in maps] if xp is not np else maps
@@ -374,7 +383,14 @@ def state_mesh_points(result, cell_counts, repeats) -> tuple[np.ndarray | None, 
             if np.any(weights > 1):
                 # weighted sectors without the translations: the k-points of the star of every solved state
                 return to_points(_weighted_bits(orbitals, eigenvalues, weights, rows, axes, operations, chunk)), None
-            solved_bits = _dense_bits(lambda columns: _sector_columns(orbitals, columns), eigenvalues, rows, most=chunk)
+            # (states of weight 0 list nothing: the listed states are the solved states of weight 1)
+            solved_of_listed = np.repeat(np.arange(weights.size, dtype=np.int64), weights)
+            solved_bits = _dense_bits(
+                lambda columns: _sector_columns(orbitals, solved_of_listed[np.asarray(columns, dtype=np.int64)]),
+                eigenvalues,
+                rows,
+                most=chunk,
+            )
         except (MemoryError, RuntimeError) as error:
             return None, f"the orbitals could not be formed on the full grid ({error})"
         return to_points(solved_bits), None
@@ -469,6 +485,25 @@ def _remember(result, eigenvalue_source, found: CellLevels) -> None:
         pass
 
 
+def _whole_levels_view(result):
+    """The levels, occupations and orbitals of ``result`` with every partner of the states of a level that shares the
+    states left of ``States_Num`` (``CuPySymmetryOrbitals.whole_levels``, PARSEC_WEIGHTED_STATE_COUNT): each k-point
+    of the star of such a level gets its partner, as the k-point route lists it; ``result`` itself otherwise."""
+
+    orbitals = getattr(result, "wavefunctions", None)
+    whole = getattr(orbitals, "whole_levels", None)
+    if whole is None:
+        return result
+    from types import SimpleNamespace
+
+    levels, occupations, weights = whole
+    return SimpleNamespace(
+        eigenvalues=levels,
+        occupations=occupations,
+        wavefunctions=replace(orbitals, state_weights=weights, state_occupations=None, whole_levels=None),
+    )
+
+
 def cell_levels(result, cell_problem, repeats) -> CellLevels:
     """The levels of the k-points of the cell of ``cell_problem`` from the supercell's ``result``.
 
@@ -483,7 +518,7 @@ def cell_levels(result, cell_problem, repeats) -> CellLevels:
 
     from parsec_python.Grid.pbc import build_periodic_grid
 
-    from .kpoint_supercell import mesh_kpoints
+    from .kpoint_supercell import kpoint_supercell_extra_states, mesh_kpoints
 
     eigenvalue_source = getattr(result, "eigenvalues", None)
     cached = _cached(result, eigenvalue_source)
@@ -491,12 +526,18 @@ def cell_levels(result, cell_problem, repeats) -> CellLevels:
         return cached
     repeats = tuple(int(value) for value in repeats)
     count = int(np.prod(repeats))
-    eigenvalues = np.asarray(_host(result.eigenvalues), dtype=np.float64).reshape(-1)
-    occupations = np.asarray(_host(result.occupations), dtype=np.float64).reshape(-1)
+    # (every partner of the states of a shared level, PARSEC_WEIGHTED_STATE_COUNT: _whole_levels_view)
+    source = _whole_levels_view(result)
+    eigenvalues = np.asarray(_host(source.eigenvalues), dtype=np.float64).reshape(-1)
+    occupations = np.asarray(_host(source.occupations), dtype=np.float64).reshape(-1)
+    # the states of a k-point of the cell: the supercell's over the k-points of the mesh, less the levels per k-point
+    # it solves beyond them (PARSEC_KPOINT_SUPERCELL_STATES)
+    extra = kpoint_supercell_extra_states()
+    cell_states = eigenvalues.size // count - extra
     points, note = None, None
     if supercell_levels_setting() == "auto":
         cell_grid = build_periodic_grid(cell_problem.periodic_cell, cell_problem.grid)
-        points, reason = state_mesh_points(result, cell_grid.points_per_axis, repeats)
+        points, reason = state_mesh_points(source, cell_grid.points_per_axis, repeats)
         if points is None:
             note = (
                 "the levels of parsec.dat and of the result archive are those of the supercell dealt to the k-points "
@@ -505,19 +546,22 @@ def cell_levels(result, cell_problem, repeats) -> CellLevels:
     # (off: no note, the output of before)
     if points is None:
         dealt = dealt_levels(eigenvalues, count)
+        if extra:
+            # (the cell's states of each k-point's dealt block)
+            dealt = dealt.reshape(count, -1)[:, :cell_states].reshape(-1)
         levels = CellLevels(
             k_points=mesh_kpoints(cell_problem, repeats),
             weights=np.full(count, 1.0 / count),
             eigenvalues=eigenvalues[dealt],
             occupations=occupations[dealt],
-            per_k=eigenvalues.size // count,
+            per_k=dealt.size // count,
             note=note,
-            states=eigenvalues.size // count,
+            states=cell_states,
         )
     else:
         k_points, weights, wedge = _wedge_points(cell_problem, repeats)
         held = np.bincount(points, minlength=count)
-        per_k = int(held.min())
+        per_k = int(held.min()) if extra == 0 else min(int(held.min()), cell_states)
         blocks_values, blocks_occupations = [], []
         for point in wedge:
             members = np.flatnonzero(points == point)
@@ -530,15 +574,16 @@ def cell_levels(result, cell_problem, repeats) -> CellLevels:
             eigenvalues=np.concatenate(blocks_values) if blocks_values else np.zeros(0),
             occupations=np.concatenate(blocks_occupations) if blocks_occupations else np.zeros(0),
             per_k=per_k,
-            states=eigenvalues.size // count,
+            states=cell_states,
             note=(
                 None
-                if per_k >= eigenvalues.size // count
+                if per_k >= cell_states
                 else (
                     f"each k-point keeps the {per_k} lowest levels its Bloch phases give it, of the "
-                    f"{eigenvalues.size // count} states of a k-point (the supercell's {eigenvalues.size} levels "
+                    f"{cell_states} states of a k-point (the supercell's {eigenvalues.size} levels "
                     f"hold {int(held.min())} to {int(held.max())} per k-point); a Fix_Number_Eigenvalues restart from "
                     f"this file needs States_Num {per_k} or fewer"
+                    + ("" if extra else f", or a file written with a few more levels per k-point ({STATES_HINT})")
                 )
             ),
         )

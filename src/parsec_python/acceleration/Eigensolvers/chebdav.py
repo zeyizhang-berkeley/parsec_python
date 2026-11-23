@@ -189,8 +189,8 @@ def _orthonormalize_appended(
     existing_columns: int,
     appended_columns: int,
     generator: LapackRandom,
-) -> None:
-    """Run PARSEC ``orth_normal`` only on a newly appended device block."""
+):
+    """Run PARSEC ``orth_normal`` only on a newly appended device block; returns its result."""
 
     stop = existing_columns + appended_columns
     use_block = chebdav_block_orth_requested(
@@ -208,14 +208,76 @@ def _orthonormalize_appended(
             stats.initial_block_orth_calls += 1
             if result.algorithm != "block_cgs2_device_mgs2":
                 stats.initial_block_orth_fallbacks += 1
-        return
-    orthonormalize(
+        return result
+    return orthonormalize(
         basis[:, :stop],
         existing_columns=existing_columns,
         existing_are_orthonormal=True,
         rng=generator,
         copy=False,
     )
+
+
+def _filter_in_unit(operator: Any, block: Any):
+    """A CHEBDAV filtered block projected onto the representations of a unit (``PARSEC_ORBITAL_IRREPS``), in place.
+
+    The block itself for a sector solved whole (no ``irrep_projection``: the route of before, untouched).  The
+    random start and the random candidates of a unit hold every representation of its sector, and the filter
+    amplifies the low levels of all of them; the projection after the filter keeps those of the unit, as after
+    every CHEBFF and SUBSPACE filter (:func:`.irrep_projection.project_filtered`).
+    """
+
+    from .irrep_projection import project_filtered
+
+    return project_filtered(operator, block)
+
+
+def _orthonormalize_appended_in_unit(
+    operator: Any,
+    basis: Any,
+    existing_columns: int,
+    appended_columns: int,
+    generator: LapackRandom,
+    result: Any,
+    orthonormalize_again=None,
+) -> None:
+    """Keep an appended and orthonormalized block of a unit in the range of its projector.
+
+    Nothing for a sector solved whole.  For a unit (``irrep_projection``), as
+    :func:`.irrep_projection.orthonormal_in_unit` does for a whole basis: where the orthonormalization drew a random
+    column for a dependent one, or the share of the block outside the range exceeds
+    :data:`.irrep_projection.UNIT_BASIS_TOLERANCE` (one combination of its columns), the block is projected and
+    orthonormalized again against the columns before it (which lie in the range), at most three times, by
+    ``orthonormalize_again()`` (the orthonormalization that gave ``result``; :func:`_orthonormalize_appended`
+    without it).
+    """
+
+    projection = getattr(operator, "irrep_projection", None)
+    if projection is None or appended_columns < 1:
+        return
+    from .irrep_projection import UNIT_BASIS_TOLERANCE, unit_basis_share
+
+    if orthonormalize_again is None:
+        def orthonormalize_again():
+            return _orthonormalize_appended(operator, basis, existing_columns, appended_columns, generator)
+
+    stop = existing_columns + appended_columns
+    drawn = int(getattr(result, "random_replacements", 0) or 0)
+    for _ in range(3):
+        block = basis[:, existing_columns:stop]
+        share = unit_basis_share(projection, block)
+        if share is None or (share <= UNIT_BASIS_TOLERANCE and not drawn):
+            return
+        projection.apply(block, filtered=False)
+        projection.record(repair=True)
+        result = orthonormalize_again()
+        drawn = int(getattr(result, "random_replacements", 0) or 0)
+    share = unit_basis_share(projection, basis[:, existing_columns:stop])
+    if share is not None and (share > UNIT_BASIS_TOLERANCE or drawn):
+        raise RuntimeError(
+            f"the CHEBDAV block of unit {projection.representation} stays outside the range of its projector "
+            f"({share:.2e}; PARSEC_ORBITAL_IRREPS=off solves the sectors of before)"
+        )
 
 
 def _insert_locked_pair(
@@ -335,20 +397,27 @@ def _final_approximate_subspace(
         # operation.  Route that wide suffix through the large-subspace path;
         # the ordinary Davidson loop continues to use its exact six-column
         # PARSEC block orthogonalization above.
-        orthonormalize_complete_appended_subspace(
-            basis[:, :target_columns],
-            existing_columns=locked_count,
-            active_columns=target_columns,
-            rng=generator,
-        )
+        def orthonormalize_cleanup():
+            return orthonormalize_complete_appended_subspace(
+                basis[:, :target_columns],
+                existing_columns=locked_count,
+                active_columns=target_columns,
+                rng=generator,
+            )
     else:
-        _orthonormalize_appended(
-            operator,
-            basis,
-            locked_count,
-            active_count,
-            generator,
-        )
+        def orthonormalize_cleanup():
+            return _orthonormalize_appended(
+                operator,
+                basis,
+                locked_count,
+                active_count,
+                generator,
+            )
+    # (a unit of irreducible representations keeps the suffix in the range of its projector)
+    _orthonormalize_appended_in_unit(
+        operator, basis, locked_count, active_count, generator, orthonormalize_cleanup(),
+        orthonormalize_again=orthonormalize_cleanup,
+    )
     active_values, active_vectors, active_residuals = _rayleigh_ritz_upper(
         operator,
         basis[:, locked_count:target_columns],
@@ -459,18 +528,19 @@ def run_chebdav(
     )
     initial = cp.asarray(initial_host, dtype=cp.float64, order="F")
     with device_stage(operator, "initial_filter_seconds"):
-        basis[:, :block_size] = chebyshev_filter(
+        basis[:, :block_size] = _filter_in_unit(operator, chebyshev_filter(
             operator,
             initial,
             degree=settings.polynomial_degree,
             lower_bound=lower_bound,
         upper_bound=upper_bound,
         reference_eigenvalue=lower_bound,
-        )
+        ))
     del initial_host, initial
     with device_stage(operator, "initial_orthogonalization_seconds"):
-        _orthonormalize_appended(
-            operator, basis, 0, block_size, basis_generator
+        _orthonormalize_appended_in_unit(
+            operator, basis, 0, block_size, basis_generator,
+            _orthonormalize_appended(operator, basis, 0, block_size, basis_generator),
         )
 
     matrix_vector_products = bound.steps + settings.polynomial_degree * block_size
@@ -730,22 +800,25 @@ def run_chebdav(
         if append_stop > maximum_subspace_dimension:
             break
         with device_stage(operator, "initial_filter_seconds"):
-            basis[:, append_start:append_stop] = chebyshev_filter(
+            basis[:, append_start:append_stop] = _filter_in_unit(operator, chebyshev_filter(
                 operator,
                 candidates,
                 degree=settings.polynomial_degree,
                 lower_bound=lower_bound,
             upper_bound=upper_bound,
             reference_eigenvalue=lower_bound,
-            )
+            ))
         matrix_vector_products += settings.polynomial_degree * block_size
         with device_stage(operator, "initial_orthogonalization_seconds"):
-            _orthonormalize_appended(
-                operator,
-                basis,
-                append_start,
-                block_size,
-                basis_generator,
+            _orthonormalize_appended_in_unit(
+                operator, basis, append_start, block_size, basis_generator,
+                _orthonormalize_appended(
+                    operator,
+                    basis,
+                    append_start,
+                    block_size,
+                    basis_generator,
+                ),
             )
 
         records.append(

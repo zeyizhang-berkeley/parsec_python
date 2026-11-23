@@ -1199,8 +1199,9 @@ def periodic_grid_symmetry(grid, group: SpaceGroup) -> PeriodicGridSymmetry:
     for a grid of at least :data:`_IMAGE_ROWS_POINTS` points whose averages run on two threads or more (the periodic
     setup's, ``PARSEC_PERIODIC_SETUP_THREADS`` / ``OMP_NUM_THREADS``); a smaller grid (a table of at most 24 MiB for 48
     operations) and a run on one thread keep the table, whose gathers are faster there; ``on`` takes the rows at
-    every size and thread count (the least memory); ``off`` builds the table of operations x points as before.  The
-    rows are the same integers.
+    every size and thread count and keeps no row of an oblique operation either (the least memory, since
+    2026-11-22: :class:`_ObliqueFactor`); ``off`` builds the table of operations x points as before.  The rows are
+    the same integers.  A slab whose points fill a box takes them as well (:func:`confined_grid_symmetry`).
     """
 
     rows_setting = periodic_image_rows_setting()
@@ -1224,7 +1225,7 @@ def periodic_grid_symmetry(grid, group: SpaceGroup) -> PeriodicGridSymmetry:
         # no table: the rows (M i + c) mod n of every operation are formed where they are read, the same integers
         return PeriodicGridSymmetry(
             matrices=group.rotation_matrices.astype(np.float64),
-            images=AffineImageRows(maps, counts, index_type),
+            images=AffineImageRows(maps, counts, index_type, lean=rows_setting == "on"),
             affine_maps=tuple(maps),
             counts=tuple(int(value) for value in counts),
         )
@@ -1454,7 +1455,10 @@ def periodic_image_rows_setting() -> str:
     rows are formed where they are read, the density average gathers the field at the images by broadcast index
     vectors, or from the row of an oblique operation, by slabs on threads; the same integers and the same sums bit
     for bit); a smaller grid or a run on one thread keeps its table; ``on`` takes the rows at every size and thread
-    count; ``off`` builds the table of operations x points (int32) at the preparation for every grid, as before."""
+    count and holds no row of an oblique operation (its gathers form the indices of a few planes at a time,
+    :class:`_ObliqueFactor`, since 2026-11-22); ``off`` builds the table of operations x points (int32) at the
+    preparation for every grid, as before.  Slabs whose points fill a box follow the same rule since 2026-11-22
+    (:func:`confined_grid_symmetry`); wires keep their table."""
 
     import os
 
@@ -1462,6 +1466,72 @@ def periodic_image_rows_setting() -> str:
     if value not in {"auto", "on", "off"}:
         raise ValueError(f"{_IMAGE_ROWS_SWITCH} must be auto, on or off, not {value!r}")
     return value
+
+
+_FACTOR_BLOCK_POINTS = 1 << 16
+"""Points of the planes whose indices :meth:`_ObliqueFactor.gather` forms at a time (a few hundred KiB of integers)."""
+
+
+class _ObliqueFactor:
+    """The gather indices of an oblique operation ``i -> (M i + c) mod n`` of a row-major grid, formed a few planes of
+    the first axis at a time instead of held as a row (``lean`` of :class:`AffineImageRows`).
+
+    The component ``a`` of the image of ``(i0, i1, i2)`` is ``(P_a[i1, i2] + (M_a0 i0 mod n_a)) mod n_a`` with the
+    plane ``P_a = (M_a1 i1 + M_a2 i2 + c_a) mod n_a`` (values in ``[0, n_a)``), so the flat index of a plane is the
+    sum over ``a`` of ``L_a[P_a + t_a]`` with the table ``L_a[v] = (v mod n_a) * stride_a`` of ``2 n_a`` entries and
+    the scalar ``t_a = M_a0 i0 mod n_a``: the integers of the row, from three planes of the components (int32 below
+    2^31 points).
+    """
+
+    __slots__ = ("counts", "planes", "steps", "tables", "dtype")
+
+    def __init__(self, matrix, constant, counts, index_type) -> None:
+        n = [int(value) for value in counts]
+        self.counts = tuple(n)
+        self.dtype = np.dtype(index_type)
+        strides = (n[1] * n[2], n[2], 1)
+        first = np.arange(n[1], dtype=np.int64).reshape(n[1], 1)
+        second = np.arange(n[2], dtype=np.int64).reshape(1, n[2])
+        planes, steps, tables = [], [], []
+        for row in range(3):
+            plane = np.full((1, 1), int(constant[row]), dtype=np.int64)
+            if int(matrix[row][1]):
+                plane = plane + int(matrix[row][1]) * first
+            if int(matrix[row][2]):
+                plane = plane + int(matrix[row][2]) * second
+            planes.append(np.ascontiguousarray(plane % n[row]).astype(self.dtype)[None])
+            steps.append(int(matrix[row][0]))
+            values = np.arange(2 * n[row], dtype=np.int64)
+            tables.append(((values % n[row]) * strides[row]).astype(self.dtype))
+        self.planes, self.steps, self.tables = tuple(planes), tuple(steps), tuple(tables)
+
+    @property
+    def nbytes(self) -> int:
+        return sum(int(part.nbytes) for part in self.planes) + sum(int(part.nbytes) for part in self.tables)
+
+    def indices(self, first: int, last: int) -> np.ndarray:
+        """The flat image indices of the points of the planes ``first:last`` of the first axis, ``(last - first, n1,
+        n2)``, the integers of the row of the table there."""
+
+        n0, n1, n2 = self.counts
+        planes = np.arange(first, last, dtype=np.int64).reshape(-1, 1, 1)
+        result = np.zeros((last - first, n1, n2), dtype=self.dtype)
+        for row in range(3):
+            shift = (self.steps[row] * planes) % self.counts[row]
+            np.add(result, self.tables[row][self.planes[row] + shift.astype(self.dtype)], out=result)
+        return result
+
+    def gather(self, source: np.ndarray, first: int, last: int) -> np.ndarray:
+        """``source[row[planes first:last]]``: the field at the images of those planes' points, row-major, formed a
+        block of planes at a time (:data:`_FACTOR_BLOCK_POINTS`)."""
+
+        plane = self.counts[1] * self.counts[2]
+        result = np.empty((last - first) * plane, dtype=source.dtype)
+        block = max(1, _FACTOR_BLOCK_POINTS // max(1, plane))
+        for start in range(first, last, block):
+            stop = min(last, start + block)
+            result[(start - first) * plane:(stop - first) * plane] = source[self.indices(start, stop).reshape(-1)]
+        return result
 
 
 class AffineImageRows:
@@ -1479,39 +1549,48 @@ class AffineImageRows:
     cells) its broadcast index vectors, lengths of an axis or planes, kilobytes; for an oblique one (:meth:`oblique`:
     a row of ``M`` that reads all three axes, as the mirrors of a cubic crystal in the primitive fcc cell, rows such
     as ``(1, 1, 1)``), whose index vector would be an int64 array of every point, the row of the table itself (int32,
-    4 bytes a point).  Diamond in the primitive fcc cell keeps 36 rows of its 48.
+    4 bytes a point).  Diamond in the primitive fcc cell keeps 36 rows of its 48.  With ``lean`` (``on`` of
+    ``PARSEC_PERIODIC_IMAGE_ROWS``, since 2026-11-22) an oblique operation keeps no row either: its gathers form the
+    indices of a few planes at a time from one plane of each index component (:class:`_ObliqueFactor`), the same
+    integers and values.
     """
 
-    __slots__ = ("maps", "counts", "dtype", "_held")
+    __slots__ = ("maps", "counts", "dtype", "lean", "_held")
 
     ndim = 2
 
-    def __init__(self, maps, counts, index_type) -> None:
+    def __init__(self, maps, counts, index_type, *, lean: bool = False) -> None:
         self.maps = tuple(
             (np.asarray(matrix, dtype=np.int64).reshape(3, 3), np.asarray(constant, dtype=np.int64).reshape(3))
             for matrix, constant in maps
         )
         self.counts = tuple(int(value) for value in counts)
         self.dtype = np.dtype(index_type)
+        self.lean = bool(lean)
         # what each operation's gathers read, once formed: its broadcast index vectors (a tuple of three arrays), or,
-        # where those would hold more than the row of every point (an oblique operation), that row (a 1-D array)
+        # where those would hold more than the row of every point (an oblique operation), that row (a 1-D array), or
+        # under ``lean`` the planes of its index components (an _ObliqueFactor)
         self._held = {}
 
     def __getstate__(self):
-        return {"maps": self.maps, "counts": self.counts, "dtype": self.dtype}
+        return {"maps": self.maps, "counts": self.counts, "dtype": self.dtype, "lean": self.lean}
 
     def __setstate__(self, state) -> None:
         for name in ("maps", "counts", "dtype"):
             object.__setattr__(self, name, state[name])
+        object.__setattr__(self, "lean", bool(state.get("lean", False)))
         object.__setattr__(self, "_held", {})
 
     @property
     def held_bytes(self) -> int:
-        """The bytes this object keeps now: the index vectors and rows formed by the averages so far."""
+        """The bytes this object keeps now: the index vectors, rows and planes formed by the averages so far."""
 
         total = 0
         for held in self._held.values():
-            total += int(held.nbytes) if isinstance(held, np.ndarray) else sum(int(part.nbytes) for part in held)
+            if isinstance(held, (np.ndarray, _ObliqueFactor)):
+                total += int(held.nbytes)
+            else:
+                total += sum(int(part.nbytes) for part in held)
         return total
 
     def oblique(self, operation: int) -> bool:
@@ -1590,7 +1669,9 @@ class AffineImageRows:
         found = self._held.get(index)
         if found is None:
             matrix, constant = self.maps[index]
-            if self.oblique(index):
+            if self.oblique(index) and self.lean:
+                found = _ObliqueFactor(matrix, constant, self.counts, self.dtype)
+            elif self.oblique(index):
                 found = affine_grid_images(matrix, constant, self.counts, self.dtype)
                 found.flags.writeable = False
             else:
@@ -1606,6 +1687,8 @@ class AffineImageRows:
         if isinstance(held, np.ndarray):
             plane = self.counts[1] * self.counts[2]
             return held[first * plane:last * plane]
+        if isinstance(held, _ObliqueFactor):
+            return (held, first, last)
         return tuple(index[first:last] if index.shape[0] > 1 else index for index in held)
 
     def _gathered_slab(self, source: np.ndarray, piece):
@@ -1614,6 +1697,8 @@ class AffineImageRows:
 
         if isinstance(piece, np.ndarray):
             return source[piece]
+        if isinstance(piece[0], _ObliqueFactor):
+            return piece[0].gather(source, piece[1], piece[2])
         return source.reshape(self.counts)[piece]
 
     def _run(self, work) -> None:
@@ -2011,6 +2096,64 @@ def sheet_preserving_operations(group: SpaceGroup, sheets, alatt, *, tolerance: 
     )
 
 
+def _confined_affine_maps(grid, group: SpaceGroup, points, counts, shift):
+    """``(maps, box)`` of the operations of ``group`` on a slab grid as integer affine maps of a row-major box, or
+    ``None`` (a wire, a slab whose points do not fill a box in that order, an operation without such a map).
+
+    The points of a slab (``Grid.confined``) are those of the whole surface cell on a range of planes, numbered with
+    ``i``, then ``j``, then ``k`` from their largest to their smallest value: point ``p`` has the reversed indices
+    ``r = hi - x = unravel(p, box)``, ``box = hi - lo + 1``.  An operation maps ``x`` to ``M x + c`` (the map of
+    :func:`grid_affine_map` on the index box, folded along the periodic directions), so ``r`` goes to
+    ``(M r + hi - M hi - c) mod box``; along the confined direction ``M`` must keep the axis (``+-1`` on it alone)
+    and map the range of planes onto itself, where no folding happens.  The rows are those of
+    :func:`confined_grid_symmetry`'s table, the same integers.
+    """
+
+    periodicity = int(getattr(grid, "periodicity", 3))
+    if periodicity != 2 or points.ndim != 2 or points.shape[0] == 0:
+        return None
+    lowest = points.min(axis=0)
+    highest = points.max(axis=0)
+    index_min = np.asarray(getattr(grid, "index_min", lowest), dtype=np.int64)
+    index_max = np.asarray(getattr(grid, "index_max", highest), dtype=np.int64)
+    box = highest - lowest + 1
+    if int(np.prod(box)) != points.shape[0]:
+        return None
+    for axis in range(periodicity):
+        if lowest[axis] != index_min[axis] or highest[axis] != index_max[axis] or box[axis] != counts[axis]:
+            return None
+    # the order of the points: row-major in the reversed indices (by blocks, without arrays of every point)
+    planes = int(box[1]) * int(box[2])
+    for first in range(0, points.shape[0], _ROW_MAJOR_BLOCK):
+        last = min(points.shape[0], first + _ROW_MAJOR_BLOCK)
+        order = np.arange(first, last, dtype=np.int64)
+        if not (
+            np.array_equal(points[first:last, 0], highest[0] - order // planes)
+            and np.array_equal(points[first:last, 1], highest[1] - (order // int(box[2])) % int(box[1]))
+            and np.array_equal(points[first:last, 2], highest[2] - order % int(box[2]))
+        ):
+            return None
+    maps = []
+    for matrix, translation in zip(group.rotation_matrices, group.translation_vectors):
+        found = grid_affine_map(matrix, translation, counts, shift)
+        if found is None:
+            return None
+        integer, constant = found
+        for row in range(periodicity, 3):
+            # the confined direction: kept (no mixing with the periodic ones), its planes onto themselves
+            if any(integer[row, column] != 0 for column in range(3) if column != row) or any(
+                integer[column, row] != 0 for column in range(3) if column != row
+            ):
+                return None
+        reversed_constant = highest - integer @ highest - constant
+        for row in range(periodicity, 3):
+            ends = [int(integer[row, row]) * end + int(reversed_constant[row]) for end in (0, int(box[row]) - 1)]
+            if min(ends) < 0 or max(ends) >= int(box[row]):
+                return None
+        maps.append((integer, reversed_constant.astype(np.int64)))
+    return maps, tuple(int(value) for value in box)
+
+
 def confined_grid_symmetry(grid, group: SpaceGroup) -> PeriodicGridSymmetry:
     """The operations of ``group`` as permutations of a wire or slab grid.
 
@@ -2020,6 +2163,13 @@ def confined_grid_symmetry(grid, group: SpaceGroup) -> PeriodicGridSymmetry:
     direction into the index box; here only the periodic ones are folded,
     and a point mapped outside the cylinder or slab is an error (the
     operations of :func:`grid_preserving_operations` never do that).
+
+    A slab under ``PARSEC_PERIODIC_IMAGE_ROWS`` (``auto``: from
+    :data:`_IMAGE_ROWS_POINTS` points averaged on two threads or more, as a
+    bulk cell, since 2026-11-22; ``on``: always) holds no table: its points
+    fill a box, and :class:`AffineImageRows` forms the rows where they are
+    read (:func:`_confined_affine_maps`, the same integers).  ``off``, a
+    wire (a cylinder of points) and a smaller slab keep the table.
     """
 
     points = np.asarray(grid.integer_coordinates, dtype=np.int64)
@@ -2032,8 +2182,21 @@ def confined_grid_symmetry(grid, group: SpaceGroup) -> PeriodicGridSymmetry:
             "the grid spacing commensurate with the fractional translations, which "
             "this grid is not"
         )
-    fractional = (points.astype(np.float64) + shift) / counts
     index_type = np.int32 if points.shape[0] < 2**31 - 1 else np.int64
+    # PARSEC_PERIODIC_IMAGE_ROWS: a slab whose points fill a box (every point of the surface cell, a range of planes)
+    # numbered in row-major order of their reversed indices takes the rows formed where they are read, as a bulk
+    # cell does (the same integers); a wire (a cylinder of points) keeps its table
+    affine = _confined_affine_maps(grid, group, points, counts, shift)
+    rows_setting = periodic_image_rows_setting()
+    if affine is not None and _image_rows_taken(rows_setting, points.shape[0]):
+        maps, box = affine
+        return PeriodicGridSymmetry(
+            matrices=group.rotation_matrices.astype(np.float64),
+            images=AffineImageRows(maps, box, index_type, lean=rows_setting == "on"),
+            affine_maps=tuple(maps),
+            counts=tuple(int(value) for value in box),
+        )
+    fractional = (points.astype(np.float64) + shift) / counts
     images = np.empty((group.order, points.shape[0]), dtype=index_type)
     for index, (matrix, translation) in enumerate(
         zip(group.rotation_matrices, group.translation_vectors)

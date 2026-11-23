@@ -161,9 +161,10 @@ class SerialKPointSolver:
         """Start the tasks from the Ritz states ``states`` (by task) of an earlier loop."""
         self.states.update(states)
 
-    def vectors(self, task: int) -> np.ndarray:
-        """The final eigenvectors of one task."""
-        return self._vectors[task]
+    def vectors(self, task: int, columns: int | None = None) -> np.ndarray:
+        """The final eigenvectors of one task (its first ``columns`` ones where given)."""
+        vectors = self._vectors[task]
+        return vectors if columns is None else vectors[:, : int(columns)]
 
     def close(self) -> None:
         pass
@@ -295,6 +296,11 @@ def parallel_backend_report() -> list[str]:
             " Device            = CPU (serial solver, no parallel backend installed)",
         ]
     return list(_describe())
+
+
+def parallel_backend_installed() -> bool:
+    """Whether a parallel backend (the accelerated k-point solvers and task mapper) is installed."""
+    return _parallel_mapper is not None
 
 
 def parallel_backend_uses_device() -> bool:

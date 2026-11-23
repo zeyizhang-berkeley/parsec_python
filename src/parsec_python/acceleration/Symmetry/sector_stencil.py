@@ -168,6 +168,21 @@ def axis_stencil_values(grid) -> tuple[float, tuple[tuple[float, ...], ...]]:
         raise SectorStencilUnavailable(str(error)) from None
 
 
+def _require_axis_stencil(grid) -> None:
+    """Refuse (:class:`SectorStencilUnavailable`, the CSR route) a grid whose stencil is not the ``1 + 6 M`` points
+    along its axes that the builders of this module write: a wire or slab (its stencil wraps along its periodic axes
+    only, with one step per axis) and a grid whose axes are not the Cartesian axes (the extra directions of an oblique
+    stencil, the general grid of the Fortran-derived routines: :func:`.oblique_frame.needs_index_frame`)."""
+
+    from .axis_reflection import confined_grid
+    from .oblique_frame import needs_index_frame
+
+    if confined_grid(grid):
+        raise SectorStencilUnavailable("a wire or slab: its stencil wraps along its periodic axes only")
+    if needs_index_frame(grid):
+        raise SectorStencilUnavailable("a grid whose axes are not the Cartesian axes: its stencil has extra directions")
+
+
 def _sector_rows(
     decomposition: ReflectionRepresentationDecomposition,
     representation: int,
@@ -294,6 +309,7 @@ def _padded_lookup(grid: RealSpaceGrid, width: int, wrap: bool = False) -> np.nd
     faces instead, the columns of the wrapped matrix.
     """
 
+    _require_axis_stencil(grid)
     lookup = np.asarray(grid.lookup)
     if lookup.ndim != 3:
         raise ValueError("lookup must be a three-dimensional array")
@@ -350,6 +366,7 @@ def _stencil_columns(grid: RealSpaceGrid, width: int, padded: np.ndarray | None)
     the 62 M points of a 22^3 diamond cell); a row that is not its own row-major index is refused.
     """
 
+    _require_axis_stencil(grid)
     coordinates = np.asarray(grid.integer_coordinates)
     index_min = np.asarray(getattr(grid, "index_min", np.zeros(3)), dtype=np.int64)
     shells = [shell for shell in range(-width, width + 1) if shell]
@@ -652,6 +669,7 @@ def build_sector_stencils(
         raise ValueError("implementation must be auto, native, or numpy")
     if decomposition.full_size != grid.size:
         raise ValueError("grid does not match the representation decomposition")
+    _require_axis_stencil(grid)
     wanted = decomposition._selected_representations(representations)
     if wrap and implementation == "native":
         raise ValueError("the native kernel builds no wrapped stencil")

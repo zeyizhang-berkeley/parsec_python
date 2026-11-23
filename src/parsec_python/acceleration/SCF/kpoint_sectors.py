@@ -63,8 +63,19 @@ same densities.  With ``PARSEC_KPOINT_TRIM_REAL=auto`` (the default, :mod:`.kpoi
 (:class:`SectorKPointSolver`: the partner takes its levels, its occupations go onto the columns of the sector solved,
 its orbitals are ``e^{-iG.r} conj(u)``, its nonlocal forces those of ``u``).
 
+The operations of ``G_k`` beyond ``H_k`` that normalize it carry the sector of a character ``chi`` into that of
+``chi(g^-1 h g)``, and so does the antiunitary ``P_g K`` of an operation with ``R k = -k`` (``K H_k K = H_{-k}``):
+the two sectors have one spectrum.  With ``PARSEC_KPOINT_SECTOR_CLASSES=auto`` (:func:`sector_classes`; operations the
+density is symmetrized over, so that the sector Hamiltonians are images of each other at every step) one sector of
+each class is solved, the others take its levels and the images ``P_g u`` of its orbitals (:class:`ClassMember`, a
+signed permutation of the sector rows), its occupations go onto the columns of the sector solved and the density of
+the class is the mean of the images of its density (the weighted sectors of a cluster, :mod:`..Symmetry.orbital_groups`,
+on the real characters of ``H_k``).  A sector that such an antiunitary maps onto itself with ``A^2 = 1`` has a real
+structure, and with ``PARSEC_KPOINT_SECTOR_REAL=auto`` it is solved on real blocks (:mod:`.kpoint_real_forms`).
+
 The k-point SCF of a bulk orthorhombic cell takes it, scalar or spin-polarized, with the exchange of a hybrid, forces
-and kept orbitals, without meta-GGA, LDA+U or the fixed occupations of ``occup.in`` (the driver then gives the job its
+and kept orbitals, and LDA+U of unpolarized orbitals under ``PARSEC_KPOINT_SECTOR_LDAU=on`` (opt-in), without
+meta-GGA or the fixed occupations of ``occup.in`` (the driver then gives the job its
 ``geometry``); ``PARSEC_KPOINT_SECTORS=off`` keeps one task per k-point, bit for bit as before, and
 ``PARSEC_HYBRID_KPOINT_SECTORS=on`` (opt-in) splits the k-points of the loops of a hybrid's Fock loop at any size
 (:func:`hybrid_kpoint_sectors_setting`, :data:`ANY_SIZE_KEY`).  The loop with refined
@@ -140,6 +151,7 @@ _REFIT_SWITCH = "PARSEC_KPOINT_SECTOR_REFIT"
 _LEVELS_SWITCH = "PARSEC_KPOINT_SECTOR_LEVELS"
 _FOCK_GUARD_SWITCH = "PARSEC_KPOINT_SECTOR_GUARD_FOCK"
 _HYBRID_SWITCH = "PARSEC_HYBRID_KPOINT_SECTORS"
+_CLASSES_SWITCH = "PARSEC_KPOINT_SECTOR_CLASSES"
 # the key of a structure's cache (the projector cache the SCF loops of one Fock loop share) under which every k-point
 # with sectors is split, whatever the size of its basis and the work the sectors save (PARSEC_HYBRID_KPOINT_SECTORS=on)
 ANY_SIZE_KEY = "kpoint_sectors_any_size"
@@ -260,6 +272,98 @@ def sector_refit_setting() -> str:
     if value not in {"auto", "off"}:
         raise ValueError(f"{_REFIT_SWITCH} must be auto or off, not {value!r}")
     return value
+
+
+def sector_classes_setting() -> str:
+    """``PARSEC_KPOINT_SECTOR_CLASSES``: ``auto`` (default, since 2026-11-22) solves one sector of each class of
+    sectors that the operations of the little group beyond ``H_k`` carry into each other (those that normalize
+    ``H_k``, and the antiunitary ``P_g K`` of the operations with ``R k = -k``), among the operations the density is
+    symmetrized over, and takes the orbitals of the others as images of those solved (:func:`sector_classes`);
+    ``off`` solves every sector of a k-point, bit for bit as before."""
+
+    value = os.environ.get(_CLASSES_SWITCH, "auto").strip().lower() or "auto"
+    if value not in {"off", "auto"}:
+        raise ValueError(f"{_CLASSES_SWITCH} must be off or auto, not {value!r}")
+    return value
+
+
+_LDAU_SWITCH = "PARSEC_KPOINT_SECTOR_LDAU"
+
+
+def kpoint_sector_ldau_setting() -> str:
+    """``PARSEC_KPOINT_SECTOR_LDAU``: the k-point loops with LDA+U in the sectors of their little groups.
+
+    * ``off`` (default): one task per k-point, as before.
+    * ``on`` (opt-in): the loops of unpolarized orbitals take the sectors.  The term ``P_k D P_k^H`` of a k-point
+      reduces to a sector as ``(U^H P_k) D (U^H P_k)^H`` (:meth:`KPointSectors.hamiltonian`; the blocks between two
+      sectors are dropped, the average of the term over the operations of the sectors, as the local potential takes
+      its orbit means), and the occupation matrices of a sector are formed from its states with the same reduced
+      projectors, ``<phi|U v> = (U^H phi)^H v`` (:meth:`SectorKPointSolver._accumulate`).
+    * ``spin`` (opt-in): the loops of collinear spin as well, with the symmetry guard of the spin loops
+      (``PARSEC_KPOINT_SECTOR_GUARD``); a magnetic order that the term holds on some atoms only is averaged over the
+      sectors' operations (the Gamma route's ``PARSEC_LDAU_SPIN_SECTORS`` stays off for that reason).
+
+    ``on`` gives the energies and occupation matrices of one task per k-point (A100: Ag 32, 108, Cu 32 and SrTiO3 40
+    atoms, 2 x 2 x 2 meshes, within the SCF criterion) in fewer steps and on one GPU in about half the time, but not
+    by default: on four GPUs of one process the 32- and 40-atom cells took 1.3-1.4 times as long as one task per
+    k-point.  The sector loop of such cells does not scale with the GPUs of a process (SrTiO3 40 in sectors without
+    U 43.2 s on one GPU and 43.7 s on four, with U 105.9 and 115.0 s; the summed solve time of the workers grows about
+    four times), while one task per k-point divides its four k-points over them; the complex arithmetic that the term
+    asks of the real sectors costs about 8 %.  Any other value is refused before the first solve."""
+
+    value = os.environ.get(_LDAU_SWITCH, "off").strip().lower() or "off"
+    if value not in {"off", "on", "spin"}:
+        raise ValueError(f"{_LDAU_SWITCH} must be off, on or spin, not {value!r}")
+    return value
+
+
+_WARM_GROWTH_SWITCH = "PARSEC_KPOINT_SECTOR_WARM_GROWTH"
+
+
+def kpoint_sector_warm_growth_setting() -> str:
+    """``PARSEC_KPOINT_SECTOR_WARM_GROWTH``: the start of a k-point sector that grows during the SCF
+    (:meth:`SectorKPointSolver._grow`, ``resize_tasks`` of the device solvers of one process and of the MPI pools).
+
+    * ``off`` (default): every growth from random vectors, as before.
+    * ``chebff`` (opt-in): a CHEBFF first solve starts from the Ritz vectors the sector had, where a SUBSPACE step has
+      refined them, and as many columns of the usual random start as it gains (the rule of the Gamma sectors,
+      ``PARSEC_CUPY_SECTOR_WARM_GROWTH``).  The vectors wait on the host between the growth and the solve.
+    * ``all`` (opt-in): also the first solve of ``Eigensolver: chebdav`` on the device (CHEBFF cycles to CHEBDAV's
+      residual test, ``PARSEC_KPOINT_FIRST_SOLVE=refine``).
+
+    Not the default: the first solve of a grown sector makes all its cycles from either start, and with a sector of
+    occupied states forced to grow the SCF took as many steps or one more (A100: Al 108, Cu 32, NaCl 64 and Si 216
+    atoms, 2 x 2 x 2 meshes); no sector grew in their SCF without forcing.  Any other value is refused before the first
+    solve."""
+
+    value = os.environ.get(_WARM_GROWTH_SWITCH, "off").strip().lower() or "off"
+    if value not in {"off", "chebff", "all"}:
+        raise ValueError(f"{_WARM_GROWTH_SWITCH} must be off, chebff or all, not {value!r}")
+    return value
+
+
+def warm_growth_takes(settings) -> bool:
+    """Whether the first solve of ``settings`` (an ``EigvalSettings``) of a grown sector starts from its saved vectors
+    (:func:`kpoint_sector_warm_growth_setting`): CHEBFF under ``chebff`` and ``all``, the device CHEBDAV under ``all``."""
+
+    value = kpoint_sector_warm_growth_setting()
+    method = str(getattr(settings, "initial_method", ""))
+    if value == "off":
+        return False
+    return method == "chebff" or (value == "all" and method == "chebdav")
+
+
+def refined_state(state) -> bool:
+    """Whether a device Ritz state (one device or the columns of a pool) has had a SUBSPACE step after its first
+    solve, so that its vectors are worth keeping when its sector grows (the vectors of a first solve alone are not:
+    the rule of the Gamma sectors)."""
+
+    return (
+        state is not None
+        and getattr(state, "vectors", None) is not None
+        and int(getattr(state, "filters_completed", 0) or 0) >= 1
+        and getattr(state, "cursor", None) is None
+    )
 
 
 def kpoint_force_orbits_setting() -> str:
@@ -608,6 +712,235 @@ def little_group_reduction(cell: CellGroup, elements: list[int], generators: lis
     )
 
 
+@dataclass(frozen=True)
+class ClassMember:
+    """A sector of a k-point that is not solved (``PARSEC_KPOINT_SECTOR_CLASSES``, :func:`sector_classes`): its
+    orbitals are ``P_g u`` of the orbitals ``u`` of the sector ``source`` (``P_g conj(u)`` where ``antiunitary``),
+    ``g`` the operation ``operation`` of the cell group, with the levels of ``source``.  In the coefficients of the
+    sectors, row ``j`` of ``source`` goes to row ``rows[j]`` of this sector with the sign ``signs[j]``."""
+
+    source: int
+    operation: int
+    antiunitary: bool
+    rows: np.ndarray
+    signs: np.ndarray
+
+
+def _inverse_elements(table: np.ndarray) -> np.ndarray:
+    """``inverse[g]``: the index of the inverse of operation ``g`` of a group table (the identity is 0)."""
+
+    rows, columns = np.nonzero(np.asarray(table) == 0)
+    inverse = np.empty(table.shape[0], dtype=np.int64)
+    inverse[rows] = columns
+    return inverse
+
+
+def exact_operation_test(cell) -> Callable[[int], bool]:
+    """Whether an operation of ``cell`` carries every atom within
+    :data:`..Symmetry.axis_reflection.EXACT_ORBIT_TOLERANCE` (1e-6 bohr) onto an atom of its species, the rule of the
+    projectors of one atom per orbit (:func:`..Symmetry.axis_reflection.sector_orbits_exact`) for the operations whose
+    images the classes and the real forms of the sectors take: a group built at a looser
+    ``PARSEC_SYMMETRY_ATOM_TOLERANCE`` would copy the offset of the atoms into the images.  Every operation passes under
+    ``PARSEC_SECTOR_ORBITS_EXACT=off`` or at a tolerance of at most 1e-6 bohr (none is then checked)."""
+
+    from ..Symmetry.axis_reflection import (
+        EXACT_ORBIT_TOLERANCE,
+        atom_image_table,
+        sector_orbits_exact_setting,
+        symmetry_atom_tolerance,
+    )
+
+    if (
+        sector_orbits_exact_setting() == "off"
+        or float(symmetry_atom_tolerance()) <= EXACT_ORBIT_TOLERANCE
+        or not cell.atoms
+    ):
+        return lambda index: True
+    found: dict[int, bool] = {}
+
+    def holds(index: int) -> bool:
+        index = int(index)
+        if index not in found:
+            found[index] = atom_image_table(
+                tuple(cell.atoms), [cell.matrices[index]], [cell.shifts[index]], cell.grid, EXACT_ORBIT_TOLERANCE,
+                within_tolerance=True,
+            ) is not None
+        return found[index]
+
+    return holds
+
+
+def sector_classes(cell: CellGroup, members, elements, decomposition, k_point, invariance) -> dict[int, ClassMember] | None:
+    """The sectors of a k-point that need not be solved: ``{sector: ClassMember}``, ``None`` where every sector is.
+
+    An operation ``g`` of the little group (``R k = k``) that normalizes ``H_k`` (``elements``, the commuting
+    involutions of the sectors) carries an orbital ``u`` of the sector of character ``chi`` (``P_h u = chi(h) u``) into
+    one of the sector of ``chi^g(h) = chi(g^-1 h g)``: ``P_h P_g u = P_g P_{g^-1 h g} u``.  ``P_g`` commutes with
+    ``H_k`` where the potential is invariant under ``g`` (module text), so the two sectors have one spectrum, and the
+    orbitals of the second are ``P_g u``.  The antiunitary ``P_g K`` (``K`` complex conjugation) of an operation with
+    ``R k = -k`` commutes with ``H_k`` as well (``K H_k K = H_{-k}`` of the real potential and the real stencils and
+    projectors of the u gauge) and carries ``chi`` into ``chi^g`` in the same way (the characters are real).  The
+    operations taken are those the density is symmetrized over (:meth:`PotentialInvariance.in_density_group`): the
+    potential of every iteration is invariant under them, as is its average over the orbits of ``H_k``, so the
+    sector Hamiltonians are images of each other at every step, not only at self-consistency.  ``members`` are the
+    operations of the little group the sectors admit (indices of ``cell``).
+
+    The sectors fall into the orbits of their characters under these operations (with ``H_k`` they form a group); the
+    sector of the lowest index of each orbit is solved, the others are its images.  In the coefficients of the sectors
+    ``P_g U_s e_w = chi_t(h_0) U_t e_w'`` for the orbit ``w'`` of ``g r_w`` (``r_w`` the representative of orbit ``w``,
+    ``g r_w = h_0 r_w'``), with ``chi_t(h_0)`` the phase of the row ``g r_w`` in sector ``t``: a signed permutation of
+    the rows (:class:`ClassMember`).
+    """
+
+    table = cell.table
+    # the characters as rows of signs, or of exponents modulo ``modulus`` for complex characters
+    # (PARSEC_KPOINT_SECTOR_CHARACTERS=complex, ..Symmetry.complex_sectors: P_g K takes chi to conj(chi^g))
+    complex_characters = bool(getattr(decomposition, "is_complex", False))
+    modulus = int(getattr(decomposition, "modulus", 2))
+    if complex_characters:
+        characters = np.ascontiguousarray(decomposition.exponents, dtype=np.int64)
+    else:
+        characters = np.ascontiguousarray(decomposition.characters, dtype=np.int8)
+    order = int(characters.shape[0])
+    if table is None or order < 2:
+        return None
+    inverse = _inverse_elements(table)
+    position = {int(element): index for index, element in enumerate(elements)}
+    by_character = {characters[sector].tobytes(): sector for sector in range(order)}
+    k = np.asarray(k_point, dtype=np.float64).reshape(3)
+    tolerance = 1.0e-10 * max(1.0, float(np.max(np.abs(k))))
+    # operations that hold the atoms only to a looser PARSEC_SYMMETRY_ATOM_TOLERANCE than 1e-6 bohr give no images
+    keeps_atoms = exact_operation_test(cell)
+
+    def permutation(g: int) -> np.ndarray | None:
+        # the element of H_k at the place of g^-1 h g for every h of H_k (None: g does not normalize H_k)
+        found = np.empty(len(elements), dtype=np.int64)
+        for index, h in enumerate(elements):
+            image = position.get(int(table[table[inverse[g], int(h)], g]))
+            if image is None:
+                return None
+            found[index] = image
+        return found
+
+    candidates: list[tuple[int, bool, np.ndarray]] = []
+    for g in members:
+        g = int(g)
+        if g in position or not invariance.in_density_group(g) or not keeps_atoms(g):
+            continue
+        found = permutation(g)
+        if found is not None:
+            candidates.append((g, False, found))
+    if np.any(k != 0.0):  # at the Gamma point the antiunitary operations are the unitary ones with K
+        for g in range(cell.order):
+            matrix = np.asarray(cell.matrices[g], dtype=np.float64)
+            if float(np.max(np.abs(matrix @ k + k))) > tolerance or not invariance.in_density_group(g):
+                continue
+            if not keeps_atoms(g):
+                continue
+            found = permutation(g)
+            if found is not None:
+                candidates.append((g, True, found))
+    images: list[tuple[int, bool, np.ndarray]] = []
+    for g, antiunitary, found in candidates:
+        target = np.empty(order, dtype=np.int64)
+        for sector in range(order):
+            label = characters[sector, found]
+            if complex_characters and antiunitary:
+                label = np.mod(-label, modulus)
+            image = by_character.get(np.ascontiguousarray(label).tobytes())
+            if image is None:
+                break
+            target[sector] = image
+        else:
+            images.append((g, antiunitary, target))
+    if not images:
+        return None
+    parent = list(range(order))
+
+    def root(sector: int) -> int:
+        while parent[sector] != sector:
+            parent[sector] = parent[parent[sector]]
+            sector = parent[sector]
+        return sector
+
+    for _, _, target in images:
+        for sector in range(order):
+            a, b = root(sector), root(int(target[sector]))
+            if a != b:
+                parent[max(a, b)] = min(a, b)
+    orbits: dict[int, list[int]] = {}
+    for sector in range(order):
+        orbits.setdefault(root(sector), []).append(sector)
+    sizes = decomposition.sector_sizes
+    to_wedge = np.asarray(decomposition.reduction.full_to_wedge, dtype=np.int64)
+    representatives = np.asarray(decomposition.reduction.representative_rows, dtype=np.int64)
+    found_members: dict[int, ClassMember] = {}
+    for orbit in orbits.values():
+        if len(orbit) < 2:
+            continue
+        source = min(orbit)
+        rows_of_source = representatives[decomposition.sector_orbit_indices(source)]
+        for sector in orbit:
+            if sector == source or sizes[sector] != sizes[source]:
+                continue
+            # a unitary operation where one carries the source there, else an antiunitary one
+            choices = [entry for entry in images if int(entry[2][source]) == sector]
+            choices.sort(key=lambda entry: (entry[1], entry[0]))
+            for g, antiunitary, _ in choices:
+                image = cell.row_map(g, rows=rows_of_source)
+                if image is None:
+                    continue
+                image = np.asarray(image, dtype=np.int64)
+                rows = np.asarray(decomposition.orbit_to_sector[sector][to_wedge[image]], dtype=np.int64)
+                if complex_characters:
+                    signs = np.conj(np.asarray(decomposition.phases[sector][image], dtype=np.complex128))
+                else:
+                    signs = np.asarray(decomposition.phases[sector][image], dtype=np.int8)
+                if (
+                    np.any(rows < 0)
+                    or np.any(signs == 0)
+                    or np.unique(rows).size != rows.size
+                    or rows.size != sizes[sector]
+                ):
+                    continue
+                rows.setflags(write=False)
+                signs.setflags(write=False)
+                found_members[sector] = ClassMember(source, int(g), bool(antiunitary), rows, signs)
+                break
+    return found_members or None
+
+
+def _complex_candidate(cell: CellGroup, elements):
+    """The decomposition of the complex characters of the abelian group ``elements`` of ``cell``
+    (:func:`..Symmetry.complex_sectors.complex_decomposition`), its atom orbits dropped where the atoms keep the group
+    only to more than 1e-6 bohr (the rule of :func:`..Symmetry.axis_reflection.sector_orbits_exact`); ``None`` where
+    it cannot be built."""
+
+    from ..Symmetry.axis_reflection import (
+        EXACT_ORBIT_TOLERANCE,
+        atom_image_table,
+        sector_orbits_exact_setting,
+        symmetry_atom_tolerance,
+    )
+    from ..Symmetry.complex_sectors import complex_decomposition
+
+    decomposition = complex_decomposition(cell, list(elements))
+    if decomposition is None:
+        return None
+    reduction = decomposition.reduction
+    if (
+        reduction.atom_representatives is not None
+        and sector_orbits_exact_setting() == "auto"
+        and float(symmetry_atom_tolerance()) > EXACT_ORBIT_TOLERANCE
+        and atom_image_table(
+            tuple(cell.atoms), list(reduction.operations), list(reduction.translations), cell.grid,
+            EXACT_ORBIT_TOLERANCE, within_tolerance=True,
+        ) is None
+    ):
+        decomposition.reduction = dataclasses.replace(reduction, atom_representatives=None, atom_orbit_sizes=None)
+    return decomposition
+
+
 def _image_row(symmetry, operation: int) -> np.ndarray:
     """``images[operation]`` of a density group: through ``image_row`` where it has one (a
     :class:`parsec_python.Grid.space_group.PeriodicGridSymmetry`, which may hold no table), else of its table."""
@@ -922,6 +1255,8 @@ class KPointSectors:
         self._static: dict[int, tuple] = {}
         self._potential: tuple[Any, np.ndarray | None] = (None, None)
         self._exchange: dict[int, tuple] = {}  # by sector: (exchange term of the whole grid, its reduction)
+        # by sector: (LDA+U projectors of the whole grid, U^H P), shared by the channels of the k-point (twin)
+        self._hubbard: dict[int, tuple] = {}
         self._gathers: dict[int, sp.csr_matrix] = {}  # by sector: U^H (shared by the tasks of the k-point)
         self._expanders: dict[tuple, tuple] = {}  # by (sector, device): the rows and factors of U on a device
         # whether the sectors assume an invariance the density is not symmetrized over, and the operations of the
@@ -939,10 +1274,96 @@ class KPointSectors:
         # (PARSEC_KPOINT_TRIM_REAL, .kpoint_real.trim_partners; set by plan_sectors): the sector of the lower index of
         # each pair is solved, its partner's orbitals are ``e^{-iG.r} conj(u)`` (``G = 2k``)
         self.partners: np.ndarray | None = None
+        # the sectors not solved because an operation of the little group carries a sector solved into them
+        # (PARSEC_KPOINT_SECTOR_CLASSES, sector_classes; set by plan_sectors), None where every sector is solved
+        self.classes: dict[int, ClassMember] | None = None
+        self._member_maps: dict[tuple, tuple] = {}  # by (sector, device): the rows and signs of its ClassMember there
+        # the sectors solved on real blocks through an antiunitary P_g K (PARSEC_KPOINT_SECTOR_REAL,
+        # .kpoint_real_forms; set by plan_sectors), None where every sector is complex; their static real parts
+        self.real_forms: dict | None = None
+        self._real_static: dict[int, tuple] = {}
 
     @property
     def order(self) -> int:
         return self.decomposition.representation_count
+
+    def _phase_row(self, sector: int) -> np.ndarray:
+        """The phase of every grid row in ``sector``: the signs of the real characters as float64, the complex phases
+        of a decomposition of complex characters (:mod:`..Symmetry.complex_sectors`)."""
+
+        phases = self.decomposition.phases[sector]
+        return phases.astype(np.float64) if not np.iscomplexobj(phases) else np.asarray(phases)
+
+    def class_of(self, sector: int) -> list[int]:
+        """The sectors of the class of ``sector`` (:attr:`classes`): the sector solved first, then its images."""
+
+        if not self.classes:
+            return [int(sector)]
+        source = self.classes[sector].source if sector in self.classes else int(sector)
+        return [source] + sorted(member for member, entry in self.classes.items() if entry.source == source)
+
+    def coefficients(self, sector: int, block, xp=np):
+        """The coefficients of ``sector`` of the vectors of its solve ``block``: ``T x`` of the real coordinates of a
+        sector in its real form (:attr:`real_forms`), ``block`` itself otherwise."""
+
+        form = None if not self.real_forms else self.real_forms.get(int(sector))
+        return block if form is None else form.to_complex(block, xp)
+
+    def _real_parts(self, sector: int, kinetic, projectors):
+        """The static parts of the real form of ``sector`` (made once): the paired stencil table or the real kinetic
+        CSR, and the real projector parts (``None`` without projectors)."""
+
+        found = self._real_static.get(sector)
+        if found is None:
+            from ..Hamiltonian.sector_pair_stencil import PairStencilTable
+            from .kpoint_real_forms import real_kinetic_matrix, real_projector_parts
+
+            form = self.real_forms[sector]
+            table = PairStencilTable(kinetic, form) if getattr(kinetic, "sector_stencil", False) else None
+            matrix = None if table is not None else real_kinetic_matrix(kinetic, form)
+            parts = None
+            if projectors is not None and int(projectors.projectors.shape[1]):
+                parts = real_projector_parts(projectors.projectors, projectors.signs, form)
+            found = self._real_static[sector] = (table, matrix, parts)
+        return found
+
+    def member_block(self, sector: int, block, xp=np):
+        """The coefficients in ``sector`` (a :class:`ClassMember`) of the images ``P_g u`` (``P_g conj(u)``) of the
+        orbitals whose coefficients in its source are the columns of ``block`` (host or device)."""
+
+        member = self.classes[sector]
+        values = member.signs if np.iscomplexobj(member.signs) else member.signs.astype(np.float64)
+        if xp is np or isinstance(block, np.ndarray):
+            rows, signs = member.rows, values
+        else:
+            device = int(block.device.id)
+            found = self._member_maps.get((sector, device))
+            if found is None:
+                with xp.cuda.Device(device):
+                    found = (xp.asarray(member.rows), xp.asarray(values))
+                self._member_maps[(sector, device)] = found
+            rows, signs = found
+        source = xp.conj(block) if member.antiunitary else block
+        out = xp.empty_like(source)
+        out[rows] = signs[:, None] * source
+        return out
+
+    def class_density(self, source: int, members, sums: np.ndarray) -> np.ndarray:
+        """The density of the class of ``source`` from ``q = sum_n f_n |v_n|^2`` on its rows, ``f`` the occupations
+        of all the sectors of the class summed onto those of ``source``: the mean over the class of ``|U_t (S v)|^2``
+        (``S`` the signed permutation of :class:`ClassMember`) times its size, the sum of the densities of the class
+        where its sectors hold equal occupations (their levels are equal; the mean over the class otherwise)."""
+
+        decomposition = self.decomposition
+        sums = np.asarray(sums, dtype=np.float64)
+        wedge = np.zeros(decomposition.wedge_size, dtype=np.float64)
+        for sector in [int(source)] + [int(member) for member in members]:
+            orbits = decomposition.sector_orbit_indices(sector)
+            if sector != source:
+                orbits = orbits[self.classes[sector].rows]
+            wedge[orbits] += sums / self._multiplicities[orbits]
+        wedge /= float(1 + len(members))
+        return wedge[decomposition.reduction.full_to_wedge]
 
     def force_orbits(self, geometry):
         """``(representatives, images, matrices)`` for the nonlocal forces of one atom per orbit of the little group,
@@ -1012,7 +1433,8 @@ class KPointSectors:
         if found is None:
             decomposition = self.decomposition
             rows = decomposition.reduction.full_to_wedge.shape[0]
-            phases = decomposition.phases[sector].astype(np.float64)
+            # (the conjugate phases of a sector of complex characters, PARSEC_KPOINT_SECTOR_CHARACTERS=complex)
+            phases = np.conj(self._phase_row(sector))
             gather = sp.csr_matrix(
                 (phases, (np.asarray(decomposition.reduction.full_to_wedge, dtype=np.int64), np.arange(rows))),
                 shape=(decomposition.wedge_size, rows),
@@ -1033,8 +1455,11 @@ class KPointSectors:
             import cupy as cp
             import cupyx.scipy.sparse as csp
 
+            from ..Hamiltonian.complex_csr_device import ordered_device_matrix
+
             with cp.cuda.Device(int(block.device.id)):
-                device = csp.csr_matrix(gather)
+                # (PARSEC_ORDERED_SUMS=auto: in a fixed order of summation)
+                device = ordered_device_matrix(csp.csr_matrix(gather))
                 source = block[:, None] if block.ndim == 1 else block
                 return cp.asfortranarray(device @ cp.ascontiguousarray(source, dtype=cp.complex128))
         block = np.asarray(block, dtype=np.complex128)
@@ -1060,6 +1485,25 @@ class KPointSectors:
         )
         self._exchange[sector] = (exchange, reduced)
         return reduced
+
+    def _reduced_hubbard(self, sector: int, projectors):
+        """The LDA+U projectors of the whole grid on the rows of ``sector``: ``U^H P`` (made once per set of projectors
+        and sector; the caller holds the lock)."""
+
+        cached = self._hubbard.get(sector)
+        if cached is not None and cached[0] is projectors:
+            return cached[1]
+        matrix = (self._gather(sector) @ sp.csc_matrix(projectors.projectors, dtype=np.complex128)).tocsc()
+        reduced = dataclasses.replace(projectors, projectors=matrix)
+        self._hubbard[sector] = (projectors, reduced)
+        return reduced
+
+    def reduced_hubbard(self, sector: int, projectors):
+        """The LDA+U projectors ``projectors`` of the whole grid reduced to the rows of ``sector``
+        (:meth:`_reduced_hubbard`, shared with its Hamiltonians)."""
+
+        with self._lock:
+            return self._reduced_hubbard(sector, projectors)
 
     def _stencil_parts(self, full):
         """``(shape, half width, centre, weights)`` of the kinetic term of this k-point as an axial stencil
@@ -1158,17 +1602,32 @@ class KPointSectors:
         if exchange is not None and getattr(full, "base", None) is not None:
             from parsec_python.Hamiltonian.kpoint_operator import KPointExchangeHamiltonian
 
+            if self.real_forms and sector in self.real_forms:
+                raise RuntimeError("the real form of a sector does not take the exchange of a hybrid")
             base = self.hamiltonian(sector, full.base, wanted)
             with self._lock:
                 reduced = self._reduced_exchange(sector, exchange)
             return KPointExchangeHamiltonian(base, reduced)
+        term = getattr(full, "hubbard", None)
+        if term is not None and getattr(full, "base", None) is not None:
+            # LDA+U (PARSEC_KPOINT_SECTOR_LDAU): (U^H P) D (U^H P)^H on the rows of the sector
+            from parsec_python.Hamiltonian.hubbard import HubbardOperator
+            from parsec_python.SCF.kpoint_hubbard import BlochHubbardHamiltonian
+
+            base = self.hamiltonian(sector, full.base, wanted)
+            with self._lock:
+                reduced = self._reduced_hubbard(sector, term.projectors)
+            return BlochHubbardHamiltonian(base, HubbardOperator(reduced, term.potentials))
         with self._lock:
             if sector not in self._static:
                 self._build_static(full, range(self.order) if wanted is None else set(wanted) | {sector})
             kinetic, projectors, empty = self._static[sector]
             means = self._orbit_means(full.effective_potential)
+            real = None
+            if self.real_forms and sector in self.real_forms:
+                real = self._real_parts(sector, kinetic, projectors)
         orbits = self.decomposition.sector_orbit_indices(sector)
-        return SectorBlochHamiltonian(
+        hamiltonian = SectorBlochHamiltonian(
             empty,
             (empty,) * 3,
             np.ascontiguousarray(means[orbits]),
@@ -1176,6 +1635,11 @@ class KPointSectors:
             self.k_point,
             bloch_laplacian=kinetic,
         )
+        if real is None:
+            return hamiltonian
+        from .kpoint_real_forms import RealFormHamiltonian
+
+        return RealFormHamiltonian(hamiltonian, self.real_forms[sector], real)
 
     def density(self, sector: int, sums: np.ndarray) -> np.ndarray:
         """``|U v|^2`` on the whole grid from ``q = sum_n f_n |v_n|^2`` on the rows of ``sector``."""
@@ -1201,7 +1665,7 @@ class KPointSectors:
             place[orbits] = np.arange(orbits.size, dtype=np.int64)
             to_wedge = np.asarray(decomposition.reduction.full_to_wedge, dtype=np.int64)
             rows = place[to_wedge]
-            factor = decomposition.phases[sector].astype(np.float64) / np.sqrt(self._multiplicities[to_wedge])
+            factor = self._phase_row(sector) / np.sqrt(self._multiplicities[to_wedge])
             factor[rows < 0] = 0.0
             rows[rows < 0] = 0
             with xp.cuda.Device(device):
@@ -1225,7 +1689,7 @@ class KPointSectors:
         orbits = decomposition.sector_orbit_indices(sector)
         wedge = np.zeros((decomposition.wedge_size, block.shape[1]), dtype=np.complex128)
         wedge[orbits] = block / np.sqrt(self._multiplicities[orbits])[:, None]
-        phases = decomposition.phases[sector].astype(np.float64)
+        phases = self._phase_row(sector)
         return phases[:, None] * wedge[decomposition.reduction.full_to_wedge]
 
 
@@ -1268,8 +1732,9 @@ def check_kpoint_sector_switches() -> None:
     ``PARSEC_KPOINT_SECTORS``, ``PARSEC_KPOINT_SECTOR_TOLERANCE``, ``PARSEC_SYMMETRY_ATOM_TOLERANCE``,
     ``PARSEC_PERIODIC_TRANSLATIONS``, ``PARSEC_PERIODIC_TRIVIAL_ORIGIN``, ``PARSEC_PERIODIC_SYMMETRY_CENTRE``,
     ``PARSEC_PERIODIC_DEFECT_CENTRE``, ``PARSEC_HYBRID_KPOINT_SECTORS``, ``PARSEC_PERIODIC_IMAGE_ROWS`` (the
-    density group of the k-point wedge) and the real arithmetic of the Gamma point (``PARSEC_KPOINT_REAL_GAMMA``,
-    :mod:`.kpoint_real`).  Reading them changes nothing else."""
+    density group of the k-point wedge), ``PARSEC_KPOINT_SECTOR_CLASSES``, ``PARSEC_KPOINT_SECTOR_REAL``, the real
+    arithmetic of the Gamma point (``PARSEC_KPOINT_REAL_GAMMA``, :mod:`.kpoint_real`),
+    ``PARSEC_KPOINT_SECTOR_WARM_GROWTH`` and ``PARSEC_KPOINT_SECTOR_LDAU``.  Reading them changes nothing else."""
 
     from parsec_python.Grid.space_group import periodic_image_rows_setting
 
@@ -1291,7 +1756,15 @@ def check_kpoint_sector_switches() -> None:
     periodic_centre_setting()
     periodic_defect_centre_setting()
     hybrid_kpoint_sectors_setting()
+    sector_classes_setting()
+    from .kpoint_real_forms import sector_real_setting
+    from ..Symmetry.complex_sectors import sector_characters_setting
+
+    sector_real_setting()
+    sector_characters_setting()
     check_real_switches()
+    kpoint_sector_warm_growth_setting()
+    kpoint_sector_ldau_setting()
 
 
 def _cell_group_text(cell: "CellGroup", tolerance: float) -> str:
@@ -1360,9 +1833,43 @@ def plan_sectors(job: KPointJob, notes: list | None = None) -> list[KPointSector
         and geometry.get("invariance") is None
     )
     bloch = tuple(bool(pairs and bloch_form_at(grid, k_point)) for k_point in k_points)
+    # the classes of sectors carried into each other by the operations of the little group beyond H_k
+    # (PARSEC_KPOINT_SECTOR_CLASSES, sector_classes): loops without the exchange of a hybrid (whose operator is made
+    # from the orbitals of every k-point), both spin channels, the band k-points of a Gamma cell (their potential is
+    # invariant under its group), at the points without the pairs above
+    # (the start loop of a Fock loop too: its states go to the loops with the exchange, which keep every sector)
+    from parsec_python.SCF.hybrid_periodic import FOCK_LOOP_KEY
+
+    fock_loop = isinstance(cache, dict) and bool(cache.get(FOCK_LOOP_KEY))
+    # (and not with the Hubbard term of LDA+U in the sectors, a geometry with "hubbard_part": the occupation matrices
+    # are summed from the orbitals of the sectors solved, and the images of a class would add theirs only where the
+    # occupation matrices are symmetrized over a group that holds the operations of the classes)
+    hubbard = geometry.get("hubbard_part") is not None or geometry.get("hubbard_projectors") is not None
+    classes_wanted = (
+        sector_classes_setting() == "auto"
+        and geometry.get("exchange_cross_scale") is None
+        and not fock_loop
+        and not hubbard
+    )
+    # the real forms of the sectors kept by an antiunitary P_g K (PARSEC_KPOINT_SECTOR_REAL, .kpoint_real_forms): loops
+    # without the exchange of a hybrid, not the band k-points, at the points without the pairs above
+    from .kpoint_real_forms import sector_real_forms, sector_real_setting
+
+    from ..Symmetry.complex_sectors import largest_abelian_subgroup, sector_characters_setting
+
+    complex_wanted = sector_characters_setting() == "complex" and not hubbard
+    real_wanted = (
+        sector_real_setting() == "auto"
+        and geometry.get("exchange_cross_scale") is None
+        and geometry.get("invariance") is None
+        and not fock_loop
+        and not hubbard
+    )
     signature = (
         int(job.n_tasks), states, rows, margin, _EXTRA_STATES, tuple(int(value) for value in k_of_task),
         tuple(np.round(k_points, 12).ravel().tolist()), tolerance, any_size, bloch,
+    ) + ((("classes",) if classes_wanted else ())) + ((("real",) if real_wanted else ())) + (
+        (("complex",) if complex_wanted else ())
     )
     # The plans the loops before kept for this structure (the cache of its projectors), before the group is searched
     # again: they were made from the same atoms and grid.
@@ -1393,33 +1900,55 @@ def plan_sectors(job: KPointJob, notes: list | None = None) -> list[KPointSector
     for index, k_point in enumerate(k_points):
         members = generated_subgroup(cell.table, cell.little_group(k_point, invariance))
         elements, generators = largest_commuting_involutions(cell.table, members)
-        if len(elements) < 2:
+        # the groups whose sectors may serve the k-point: the commuting involutions, and under
+        # PARSEC_KPOINT_SECTOR_CHARACTERS=complex a largest abelian subgroup with complex characters (not at Gamma, not
+        # with the pairs of a time-reversal invariant point in the Bloch form); the one of the least work is taken
+        candidates: list[tuple] = []
+        if len(elements) >= 2:
+            key = tuple(elements)
+            if key not in decompositions:
+                decomposition = None
+                reduction = little_group_reduction(cell, elements, generators)
+                if reduction is not None and not sector_orbits_exact(reduction, cell.atoms, grid):
+                    # atoms off the group by more than 1e-6 bohr (a loose PARSEC_SYMMETRY_ATOM_TOLERANCE): the
+                    # projectors of every atom, since one atom per orbit would copy the offset of its representative
+                    # (PARSEC_SECTOR_ORBITS_EXACT)
+                    reduction = dataclasses.replace(reduction, atom_representatives=None, atom_orbit_sizes=None)
+                if reduction is not None:
+                    try:
+                        decomposition = ReflectionRepresentationDecomposition.build(grid, reduction)
+                    except RuntimeError:  # a character that no orbit admits (a grid too small for the group)
+                        decomposition = None
+                decompositions[key] = decomposition
+            if decompositions[key] is not None:
+                candidates.append((elements, generators, decompositions[key]))
+        if complex_wanted and not bloch[index] and np.any(np.asarray(k_point) != 0.0):
+            abelian = largest_abelian_subgroup(cell.table, members)
+            if len(abelian) >= 2 and sorted(abelian) != sorted(int(e) for e in elements):
+                key = ("complex",) + tuple(abelian)
+                if key not in decompositions:
+                    decompositions[key] = _complex_candidate(cell, abelian)
+                if decompositions[key] is not None:
+                    candidates.append((abelian, None, decompositions[key]))
+        best = None
+        for elements_of, generators_of, decomposition in candidates:
+            sizes = decomposition.sector_sizes
+            counts = [min(size, math.ceil(margin * states * size / rows) + _EXTRA_STATES) for size in sizes]
+            partners = trim_partners(cell, elements_of, generators_of, k_point) if bloch[index] else None
+            classes = (
+                sector_classes(cell, members, elements_of, decomposition, k_point, invariance)
+                if classes_wanted and partners is None
+                else None
+            )
+            solved = range(len(sizes)) if classes is None else [s for s in range(len(sizes)) if s not in classes]
+            work = sum(sizes[s] * counts[s] * counts[s] for s in solved)
+            if best is None or work < best[0]:
+                best = (work, elements_of, generators_of, decomposition, sizes, counts, partners, classes, solved)
+        if best is None:
             plans.append(None)
             continue
-        key = tuple(elements)
-        if key not in decompositions:
-            decomposition = None
-            reduction = little_group_reduction(cell, elements, generators)
-            if reduction is not None and not sector_orbits_exact(reduction, cell.atoms, grid):
-                # atoms off the group by more than 1e-6 bohr (a loose PARSEC_SYMMETRY_ATOM_TOLERANCE): the projectors
-                # of every atom, since one atom per orbit would copy the offset of its representative
-                # (PARSEC_SECTOR_ORBITS_EXACT)
-                reduction = dataclasses.replace(reduction, atom_representatives=None, atom_orbit_sizes=None)
-            if reduction is not None:
-                try:
-                    decomposition = ReflectionRepresentationDecomposition.build(grid, reduction)
-                except RuntimeError:  # a character that no orbit admits (a grid too small for the group)
-                    decomposition = None
-            decompositions[key] = decomposition
-        decomposition = decompositions[key]
-        if decomposition is None:
-            plans.append(None)
-            continue
-        sizes = decomposition.sector_sizes
-        counts = [min(size, math.ceil(margin * states * size / rows) + _EXTRA_STATES) for size in sizes]
-        if not any_size and (
-            sum(size * count * count for size, count in zip(sizes, counts)) > _WORK_FRACTION * rows * states * states
-        ):
+        work, elements, generators, decomposition, sizes, counts, partners, classes, solved = best
+        if not any_size and work > _WORK_FRACTION * rows * states * states:
             plans.append(None)
             continue
         plan = KPointSectors(index, k_point, decomposition, counts)
@@ -1427,7 +1956,10 @@ def plan_sectors(job: KPointJob, notes: list | None = None) -> list[KPointSector
         # of the potential under them (the symmetry guard, SectorKPointSolver.start_spectrum_report)
         plan.assumed = any(not invariance.in_density_group(element) for element in elements[1:])
         if bloch[index]:
-            plan.partners = trim_partners(cell, elements, generators, k_point)
+            plan.partners = partners
+        plan.classes = classes
+        if real_wanted and partners is None:
+            plan.real_forms = sector_real_forms(cell, elements, decomposition, k_point, invariance, solved)
         plans.append(plan)
     if not any(plan is not None for plan in plans):
         return said(
@@ -1439,6 +1971,18 @@ def plan_sectors(job: KPointJob, notes: list | None = None) -> list[KPointSector
         f"{group_text}; {len(split)} of {k_points.shape[0]} k-point(s) split into the sectors of commuting "
         f"involutions of their little groups (the largest of {max(plan.order for plan in split)} operations)"
     )
+    complex_points = sum(1 for plan in split if getattr(plan.decomposition, "is_complex", False))
+    if complex_points:
+        detection += (
+            f"; {complex_points} of them in the complex characters of an abelian subgroup "
+            "(PARSEC_KPOINT_SECTOR_CHARACTERS=complex)"
+        )
+    images = sum(len(plan.classes) for plan in split if plan.classes)
+    if images:
+        detection += (
+            f"; {images} sector(s) not solved, images P_g u of sectors solved under operations of the little groups "
+            f"beyond them ({_CLASSES_SWITCH}=auto)"
+        )
     said(detection)
     from .spin_sectors import spin_guard_cell_group_setting
 
@@ -1506,15 +2050,31 @@ class SectorKPointSolver:
         # PARSEC_KPOINT_TRIM_REAL): the item of the higher sector of a pair is not solved, it takes the levels of its
         # partner (``_source``: its position -> the partner's).  ``_solved``: the positions the inner solver solves, in
         # order (all of them without pairs: the inner tasks are the items, as before).
+        # The sectors of a class (KPointSectors.classes, PARSEC_KPOINT_SECTOR_CLASSES) that are not solved join
+        # ``_source`` as well: they take the levels of the sector solved of their class, their orbitals are its images
+        # (``_images``: the positions of such items; ``_class_members``: the position of each sector solved -> the
+        # sectors of its class that are not).
         self._source: dict[int, int] = {}
+        self._images: set[int] = set()
+        self._class_members: dict[int, list[int]] = {}
         for position, (k_index, sector) in enumerate(self._items):
             plan = plans[k_index]
-            partners = None if plan is None or sector is None else plan.partners
+            if plan is None or sector is None:
+                continue
+            if plan.classes and sector in plan.classes:
+                source = self._position[(k_index, plan.classes[sector].source)]
+                self._source[position] = source
+                self._images.add(position)
+                self._class_members.setdefault(source, []).append(sector)
+                continue
+            partners = plan.partners
             if partners is None:
                 continue
             other = int(partners[sector])
             if other < sector and plan.sizes[other] == plan.sizes[sector]:
                 self._source[position] = self._position[(k_index, other)]
+        for members in self._class_members.values():
+            members.sort()
         self._solved = [position for position in range(len(self._items)) if position not in self._source]
         self._task_of = {position: task for task, position in enumerate(self._solved)}
         self._kept: dict[int, tuple[np.ndarray, np.ndarray] | None] = {}
@@ -1529,6 +2089,8 @@ class SectorKPointSolver:
         self._refit_states = 0  # the states the refit took off all sectors
         # PARSEC_KPOINT_FORCE_ORBITS (read here, before the first solve: a bad value stops the run before its loop)
         self._force_orbits = kpoint_force_orbits_setting() == "auto"
+        # PARSEC_KPOINT_SECTOR_WARM_GROWTH (read here for the same reason; the inner solvers apply it in resize_tasks)
+        kpoint_sector_warm_growth_setting()
         self._inner = None
         self._inner = self._new_inner()
 
@@ -1597,12 +2159,26 @@ class SectorKPointSolver:
         k_index, sector = self._items[self._solved[task]]
         if sector is None:
             return self.job.accumulate(k_index, vectors, occupations, xp=xp)
+        # (the coefficients of a sector in its real form, PARSEC_KPOINT_SECTOR_REAL: T x of its real coordinates)
+        vectors = self._plans[k_index].coefficients(sector, vectors, xp)
         sums = _host(weighted_square_sum(vectors, occupations, xp))
-        whole = self._plans[k_index].density(sector, sums)
+        members = self._class_members.get(self._solved[task])
+        if members:
+            # the occupations of the class are summed onto this sector (accumulate): the density of the class
+            whole = self._plans[k_index].class_density(sector, members, sums)
+        else:
+            whole = self._plans[k_index].density(sector, sums)
         # the job's own density of the k-point (its weight and normalization) from one column |U v|; a job that sums
         # more (the exchange energy of a hybrid) gives its density part apart
         geometry = self.job.geometry
         parts = geometry.get("density_part", self.job.accumulate)(k_index, np.sqrt(whole)[:, None], np.ones(1))
+        hubbard_part = geometry.get("hubbard_part")
+        if hubbard_part is not None:
+            # LDA+U (PARSEC_KPOINT_SECTOR_LDAU): the occupation matrices of the sector's states, <phi|U v> with the
+            # projectors of the k-point reduced to its rows (those its Hamiltonians take)
+            reduced = self._plans[k_index].reduced_hubbard(sector, geometry["hubbard_projectors"](k_index))
+            parts = dict(parts)
+            parts.update(hubbard_part(k_index, reduced, vectors, occupations, xp))
         scale = geometry.get("exchange_cross_scale")
         if scale is not None:
             parts = dict(parts)
@@ -1705,6 +2281,12 @@ class SectorKPointSolver:
             if plan.partners is not None and self._source:
                 # a conjugate pair holds as many as the member that holds more (the cut may split a degenerate pair)
                 held = np.maximum(held, held[np.asarray(plan.partners, dtype=np.int64)])
+            if plan.classes:
+                # so does a class (PARSEC_KPOINT_SECTOR_CLASSES): its sectors hold copies of the same levels
+                for member, entry in plan.classes.items():
+                    if member < len(held):
+                        members = plan.class_of(entry.source)
+                        held[members] = int(np.max(held[members]))
             for sector in range(plan.order):
                 count = refitted_count(int(held[sector]), plan.sizes[sector], plan.counts[sector])
                 if count < plan.counts[sector]:
@@ -1951,22 +2533,39 @@ class SectorKPointSolver:
             result.append(float(np.max(finite)) if finite.size else float("nan"))
         return result
 
-    def vectors(self, task: int) -> np.ndarray:
-        """The kept orbitals of k-point ``task`` on the whole grid (an empty block where a rank holds none)."""
+    def vectors(self, task: int, columns: int | None = None) -> np.ndarray:
+        """The kept orbitals of k-point ``task`` on the whole grid (an empty block where a rank holds none); its
+        lowest ``columns`` ones where given."""
 
         plan = self._plans[task]
         if plan is None:
-            return self._inner.vectors(self._inner_task(self._position[(task, None)]))
+            inner_task = self._inner_task(self._position[(task, None)])
+            if columns is None:
+                return self._inner.vectors(inner_task)
+            return self._inner.vectors(inner_task, columns=int(columns))
         owners, indices = self._kept[task]
+        limited = columns is not None
+        if limited:
+            owners, indices = owners[: int(columns)], indices[: int(columns)]
         columns = np.zeros((self._grid_size, owners.size), dtype=np.complex128)
         for sector in range(plan.order):
             mask = owners == sector
             if not np.any(mask):
                 continue
             position = self._position[(task, sector)]
-            block = _host(self._inner.vectors(self._inner_task(position)))
+            block = _host(
+                self._inner.vectors(self._inner_task(position), columns=int(np.max(indices[mask])) + 1)
+                if limited
+                else self._inner.vectors(self._inner_task(position))
+            )
             if block.ndim != 2 or block.shape[1] == 0:
                 return np.zeros((0, 0), dtype=np.complex128)
+            # the coefficients of the sector solved (T x of a sector in its real form, PARSEC_KPOINT_SECTOR_REAL)
+            block = plan.coefficients(self._items[self._source.get(position, position)][1], block)
+            if position in self._images:
+                # a sector of a class not solved: the images P_g u (P_g conj(u)) of the orbitals of its source
+                columns[:, mask] = plan.orbitals(sector, plan.member_block(sector, block[:, indices[mask]]))
+                continue
             if position in self._source:
                 # the partner of a conjugate pair: A u = e^{-iG.r} conj(u) of the orbitals of the sector solved
                 solved = self._items[self._source[position]][1]
@@ -2004,6 +2603,8 @@ class SectorKPointSolver:
         columns = np.arange(count, dtype=np.int64) if columns is None else np.asarray(columns, dtype=np.int64)
         if sector is None:
             return self.job.extras(k_index, vectors, xp=xp, columns=columns)
+        if position in self._class_members:
+            return self._class_extras(position, vectors, xp, columns)
         owners, indices = self._kept[k_index]
         keep_parts, place_parts = [], []
         held = [sector] + [self._items[other][1] for other, source in self._source.items() if source == position]
@@ -2025,7 +2626,7 @@ class SectorKPointSolver:
         total = None
         for c0 in range(0, int(keep.size), _FORCE_COLUMNS):
             chosen = keep[c0 : c0 + _FORCE_COLUMNS]
-            block = vectors[:, chosen if xp is np else xp.asarray(chosen)]
+            block = plan.coefficients(sector, vectors[:, chosen if xp is np else xp.asarray(chosen)], xp)
             piece = np.asarray(
                 _host(
                     self.job.extras(
@@ -2036,6 +2637,46 @@ class SectorKPointSolver:
                 dtype=np.float64,
             )
             total = piece if total is None else total + piece
+        if total is None:
+            total = np.zeros((len(self.job.geometry["atoms"]), 3), dtype=np.float64)
+        elif orbits is not None:
+            total = plan.complete_orbit_forces(total, orbits)
+        return total
+
+    def _class_extras(self, position: int, vectors, xp, columns):
+        """:meth:`_inner_extras` of a sector solved for the sectors of its class (``PARSEC_KPOINT_SECTOR_CLASSES``):
+        the states of each sector of the class at their places among the levels of the k-point, those of a sector not
+        solved as the images of the states solved (:meth:`KPointSectors.member_block`), expanded in that sector."""
+
+        k_index, sector = self._items[position]
+        owners, indices = self._kept[k_index]
+        plan = self._plans[k_index]
+        orbits = plan.force_orbits(self.job.geometry) if self._force_orbits else None
+        options = {} if orbits is None else {"atoms": orbits[0]}
+        total = None
+        for member in [sector] + self._class_members[position]:
+            mine = np.flatnonzero(owners == member)
+            size = int(max(int(indices[mine].max()) + 1 if mine.size else 0, int(columns.max()) + 1 if columns.size else 0))
+            place = np.full(max(size, 1), -1, dtype=np.int64)
+            place[indices[mine]] = mine
+            wanted = place[columns] if columns.size else np.zeros(0, dtype=np.int64)
+            keep = np.flatnonzero(wanted >= 0)
+            places = wanted[keep]
+            for c0 in range(0, int(keep.size), _FORCE_COLUMNS):
+                chosen = keep[c0 : c0 + _FORCE_COLUMNS]
+                block = plan.coefficients(sector, vectors[:, chosen if xp is np else xp.asarray(chosen)], xp)
+                if member != sector:
+                    block = plan.member_block(member, block, xp)
+                piece = np.asarray(
+                    _host(
+                        self.job.extras(
+                            k_index, plan.expand(member, block, xp), xp=xp, columns=places[c0 : c0 + _FORCE_COLUMNS],
+                            **options,
+                        )
+                    ),
+                    dtype=np.float64,
+                )
+                total = piece if total is None else total + piece
         if total is None:
             total = np.zeros((len(self.job.geometry["atoms"]), 3), dtype=np.float64)
         elif orbits is not None:
@@ -2222,6 +2863,12 @@ class SectorKPointSolver:
         layout = [(int(k), -1 if sector is None else int(sector), self._rows((k, sector))) for k, sector in self._items]
         if self._source:  # the conjugate pairs (PARSEC_KPOINT_TRIM_REAL): which items their partners solve
             layout = [entry + (self._source.get(position, position),) for position, entry in enumerate(layout)]
+        if any(plan is not None and plan.real_forms for plan in self._plans):
+            # the sectors in their real forms (PARSEC_KPOINT_SECTOR_REAL): their states are real coordinates
+            layout = [
+                entry + (int(sector is not None and bool(self._plans[k].real_forms) and sector in self._plans[k].real_forms),)
+                for entry, (k, sector) in zip(layout, self._items)
+            ]
         return layout
 
     def export_states(self) -> dict:
@@ -2275,8 +2922,18 @@ class SectorKPointSolver:
                 "kpoint_sector_refit_sectors": float(len(self._trimmed)),
             }
         )
-        if self._source:  # the sectors of conjugate pairs not solved (PARSEC_KPOINT_TRIM_REAL)
-            stats["kpoint_sector_pairs"] = float(len(self._source))
+        pairs = len(self._source) - len(self._images)
+        if pairs:  # the sectors of conjugate pairs not solved (PARSEC_KPOINT_TRIM_REAL)
+            stats["kpoint_sector_pairs"] = float(pairs)
+        if self._images:  # the sectors of classes not solved (PARSEC_KPOINT_SECTOR_CLASSES)
+            stats["kpoint_sector_images"] = float(len(self._images))
+        real = sum(
+            1 for position in self._solved
+            if self._items[position][1] is not None and self._plans[self._items[position][0]].real_forms
+            and self._items[position][1] in self._plans[self._items[position][0]].real_forms
+        )
+        if real:  # the sectors solved in their real forms (PARSEC_KPOINT_SECTOR_REAL)
+            stats["kpoint_sector_real_forms"] = float(real)
         return stats
 
     def describe_sectors(self) -> str:
@@ -2319,9 +2976,10 @@ def sector_solver(job: KPointJob, make_solver: Callable[..., Any], *, notes: lis
     # (in the order of before: a reason found first leaves the switches after it unread)
     if getattr(job, "geometry", None) is None:
         refusal = (
-            "skipped: this k-point loop takes no sectors (the spinors of a spin-orbit or non-collinear run, LDA+U, "
-            "a meta-GGA, fixed occupations, refined levels under PARSEC_KPOINT_SECTOR_LEVELS=off, or the loop after "
-            "the symmetry guard left the sectors)"
+            "skipped: this k-point loop takes no sectors (the spinors of a spin-orbit or non-collinear run, LDA+U "
+            "without PARSEC_KPOINT_SECTOR_LDAU=on or spin, a meta-GGA, fixed "
+            "occupations, refined levels under PARSEC_KPOINT_SECTOR_LEVELS=off, or the loop after the symmetry guard "
+            "left the sectors)"
         )
     elif job.extras is not None and not job.extras_by_columns:
         refusal = "skipped: the extras of this k-point job (spinor or non-collinear forces) need whole k-points"
@@ -2343,6 +3001,10 @@ def sector_solver(job: KPointJob, make_solver: Callable[..., Any], *, notes: lis
     for plan in plans:
         if plan is not None:
             plan.device_operators = device
+            if not device:
+                # the real forms are solved by the device code (PARSEC_KPOINT_SECTOR_REAL): the CPU route keeps the
+                # complex sectors
+                plan.real_forms = None
     return SectorKPointSolver(job, plans, make_solver, options)
 
 
@@ -2367,6 +3029,8 @@ __all__ = [
     "SectorGuardGroup",
     "SectorKPointSolver",
     "check_kpoint_sector_switches",
+    "kpoint_sector_warm_growth_setting",
+    "kpoint_sector_ldau_setting",
     "kpoint_sector_atom_tolerance",
     "kpoint_sector_tolerance_setting",
     "kpoint_sectors_setting",

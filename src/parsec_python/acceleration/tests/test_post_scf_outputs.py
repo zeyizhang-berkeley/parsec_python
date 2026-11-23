@@ -125,10 +125,23 @@ class RoutingTests(unittest.TestCase):
             with self.subTest(extra=extra):
                 self.assertIn(feature, _features(template, extra))
 
-    def test_mpi_keeps_both_on_the_reference_solver(self) -> None:
+    def test_mpi_keeps_the_dos_on_the_reference_solver(self) -> None:
         with mock.patch.dict(os.environ, {"PARSEC_MPI": "1"}):
-            self.assertIn(BANDS_FEATURE, _features(CELL, BANDS))
             self.assertIn(DOS_FEATURE, _features(CLUSTER, "Create_DOS: .true.\n"))
+
+    def test_mpi_bands_follow_their_switch(self) -> None:
+        # PARSEC_MPI_ACCELERATED_BANDS: auto (default) keeps the bands of a Gamma cell on the accelerated path under
+        # --mpi, off sends the input to the reference solver as before; another value is refused
+        from parsec_python.acceleration.Output.post_scf import mpi_accelerated_bands_setting
+
+        with mock.patch.dict(os.environ, {"PARSEC_MPI": "1"}):
+            os.environ.pop("PARSEC_MPI_ACCELERATED_BANDS", None)
+            self.assertNotIn(BANDS_FEATURE, _features(CELL, BANDS))
+            with mock.patch.dict(os.environ, {"PARSEC_MPI_ACCELERATED_BANDS": "off"}):
+                self.assertIn(BANDS_FEATURE, _features(CELL, BANDS))
+            with mock.patch.dict(os.environ, {"PARSEC_MPI_ACCELERATED_BANDS": "on"}):
+                with self.assertRaises(ValueError):
+                    mpi_accelerated_bands_setting()
 
     def test_rule_of_the_band_structure(self) -> None:
         from parsec_python.acceleration.Output.post_scf import (

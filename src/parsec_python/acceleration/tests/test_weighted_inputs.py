@@ -125,6 +125,334 @@ class SwitchTests(unittest.TestCase):
             self.assertIsNotNone(refusal(_problem_namespace(spin_polarized=True, is_hybrid=True), True, None))
 
 
+class StateCountTests(unittest.TestCase):
+    def test_the_level_at_the_end_of_the_window_shares_the_states_left(self) -> None:
+        # PARSEC_WEIGHTED_STATE_COUNT: the weights of the returned states add up to the requested count under auto,
+        # the level that the window ends in (its solved states within weighted_level_width, selected or not) sharing
+        # what is left by weight; off, occup.in and spin channels keep every partner of the last state, as before
+        from ..Eigensolvers.symmetry import CuPySymmetrySCFEigensolver, weighted_state_count_setting
+
+        def stand_in(**extra):
+            # (partners not known: every state within the width joins)
+            return SimpleNamespace(_weighted=True, _sector_weight_array=np.array([1, 3, 3, 1], dtype=np.int64),
+                                   _level_partners=lambda sector: None, **extra)
+
+        select = CuPySymmetrySCFEigensolver._weighted_selection
+        representations = np.array([0, 1, 2, 3, 1, 2, 0], dtype=np.int32)  # weights 1 3 3 1 3 3 1
+        # a level of weight 3 alone at the end: 12 requested, 13 counted -> 1 + 3 + 3 + 1 + 3 + (3 -> 1)
+        alone = np.array([-1.0, -0.8, -0.6, -0.4, -0.2, 0.1, 0.3])
+        # one level held by two solved states of weight 3 (positions 4 and 5, 4e-11 Ry apart): 12 requested, leading 6
+        # (sum 14): the pair shares the 4 left, 2 each
+        pair = np.array([-1.0, -0.8, -0.6, -0.4, 0.1, 0.1 + 4.0e-11, 0.3])
+        # the same level 5e-5 Ry apart, as the filters of the later SCF steps leave it at the default tolerance 1e-4
+        split = np.array([-1.0, -0.8, -0.6, -0.4, 0.1, 0.1 + 5.0e-5, 0.3])
+        cases = (
+            ("auto", alone, 12, 6, [1, 3, 3, 1, 3, 1]),
+            ("auto", alone, 14, 6, [1, 3, 3, 1, 3, 3]),
+            ("auto", alone, 13, 6, [1, 3, 3, 1, 3, 2]),
+            ("off", alone, 12, 6, [1, 3, 3, 1, 3, 3]),
+            ("", alone, 12, 6, [1, 3, 3, 1, 3, 1]),
+            # the partner of the last selected state beyond it joins the level: 9 requested, leading 5 (sum 11)
+            ("auto", pair, 9, 5, [1, 3, 3, 1, 0.5, 0.5]),
+            ("auto", pair, 10, 5, [1, 3, 3, 1, 1, 1]),
+            ("auto", pair, 12, 6, [1, 3, 3, 1, 2, 2]),
+            ("off", pair, 9, 5, [1, 3, 3, 1, 3]),
+            # a window whose weights add up exactly but ends inside the level: 11 requested, leading 5 (sum 11)
+            ("auto", pair, 11, 5, [1, 3, 3, 1, 1.5, 1.5]),
+            ("off", pair, 11, 5, [1, 3, 3, 1, 3]),
+            ("auto", split, 12, 6, [1, 3, 3, 1, 2, 2]),
+            ("auto", split, 11, 5, [1, 3, 3, 1, 1.5, 1.5]),
+            # a window that ends between levels
+            ("auto", split, 8, 4, [1, 3, 3, 1]),
+            ("auto", split, 14, 6, [1, 3, 3, 1, 3, 3]),
+        )
+        for value, values, requested, leading, expected in cases:
+            environment = {"PARSEC_WEIGHTED_STATE_COUNT": value}
+            with self.subTest(value=value, requested=requested, values=values[5]), mock.patch.dict(os.environ, environment):
+                count, weights = select(stand_in(), values, representations, leading, requested)
+                self.assertEqual(count, len(expected))
+                np.testing.assert_allclose(weights, np.asarray(expected, dtype=float), rtol=0, atol=1e-14)
+                self.assertEqual(weights.dtype, np.float64)
+        with mock.patch.dict(os.environ, {"PARSEC_WEIGHTED_STATE_COUNT": "auto"}):
+            # the width follows the eigensolver tolerance of the run (Diag_Tolerance), at least 1e-4 Ry: two states
+            # 5e-4 Ry apart are one level at Diag_Tolerance 1e-3 only
+            wide = split.copy()
+            wide[5] = 0.1 + 5.0e-4
+            for tolerance, values, expected in ((1.0e-8, split, [1, 3, 3, 1, 2, 2]), (None, split, [1, 3, 3, 1, 2, 2]),
+                                                (1.0e-4, wide, [1, 3, 3, 1, 3, 1]), (1.0e-3, wide, [1, 3, 3, 1, 2, 2])):
+                count, weights = select(stand_in(level_tolerance=tolerance), values, representations, 6, 12)
+                np.testing.assert_allclose(weights, expected, rtol=0, atol=1e-14)
+            # occup.in and the spin channels keep the whole level, and so do the sectors without weights
+            for solver in (stand_in(fermi_occupations=False), stand_in(_spin_channels=(0, 1))):
+                count, weights = select(solver, alone, representations, 6, 12)
+                self.assertEqual(count, 6)
+                np.testing.assert_array_equal(weights, [1, 3, 3, 1, 3, 3])
+                self.assertEqual(select(solver, pair, representations, 5, 11)[0], 5)
+            self.assertEqual(select(SimpleNamespace(_weighted=False), alone, representations, 6, 12), (6, None))
+        with mock.patch.dict(os.environ, {"PARSEC_WEIGHTED_STATE_COUNT": "on"}):
+            with self.assertRaises(ValueError):
+                weighted_state_count_setting()
+
+    def test_only_partners_join_the_level_beyond_rounding(self) -> None:
+        # States 5e-5 Ry apart join the level of the last state only where they can be its partners: states of sectors
+        # of one weight, of two sectors whose partner masks share a bit or are both empty; other states join within
+        # 1e-8 Ry only (a distinct level of weight 1, whose sector's mask is not empty, 1.75e-5 Ry above a t level of
+        # weight 3 in an Oh cluster keeps its place)
+        from ..Eigensolvers.symmetry import CuPySymmetrySCFEigensolver
+
+        select = CuPySymmetrySCFEigensolver._weighted_selection
+        sector_weights = np.array([1, 3, 3, 1], dtype=np.int64)
+
+        def stand_in(masks):
+            decomposition = SimpleNamespace(sector_partner_masks=masks)
+            partners = SimpleNamespace(decomposition=decomposition, _sector_weight_array=sector_weights)
+            return SimpleNamespace(_weighted=True, _sector_weight_array=sector_weights, decomposition=decomposition,
+                                   _level_partners=lambda sector: CuPySymmetrySCFEigensolver._level_partners(
+                                       partners, sector))
+
+        split = np.array([-1.0, -0.8, -0.6, -0.4, 0.1, 0.1 + 5.0e-5, 0.3])
+        pair = np.array([-1.0, -0.8, -0.6, -0.4, 0.1, 0.1 + 4.0e-11, 0.3])
+        alike = np.array([0, 1, 2, 3, 1, 2, 0], dtype=np.int32)  # the level in sectors 1 and 2, weight 3 each
+        unlike = np.array([0, 1, 2, 3, 3, 1, 0], dtype=np.int32)  # weight 1 (sector 3), then weight 3 (sector 1)
+        above = np.array([0, 1, 2, 3, 1, 3, 0], dtype=np.int32)  # weight 3, then weight 1
+        cases = (
+            ((0, 0, 0, 0), split, alike, 12, 6, [1, 3, 3, 1, 2, 2]),
+            ((0, 0, 0, 2), split, unlike, 10, 6, [1, 3, 3, 1, 1, 1]),
+            ((0, 0, 0, 0), split, unlike, 10, 6, [1, 3, 3, 1, 0.5, 1.5]),
+            ((0, 2, 0, 2), split, unlike, 10, 6, [1, 3, 3, 1, 0.5, 1.5]),
+            ((0, 2, 0, 4), split, unlike, 10, 6, [1, 3, 3, 1, 1, 1]),
+            # a distinct level just above the last state: the window ends between levels
+            ((0, 0, 0, 2), split, above, 11, 5, [1, 3, 3, 1, 3]),
+            ((0, 0, 0, 0), split, above, 11, 5, [1, 3, 3, 1, 2.25, 0.75]),
+            # within 1e-8 Ry every state joins, as before, and so does every state within the width without masks
+            ((0, 0, 0, 2), pair, unlike, 10, 6, [1, 3, 3, 1, 0.5, 1.5]),
+            (None, split, unlike, 10, 6, [1, 3, 3, 1, 0.5, 1.5]),
+        )
+        with mock.patch.dict(os.environ, {"PARSEC_WEIGHTED_STATE_COUNT": "auto"}):
+            for masks, values, representations, requested, leading, expected in cases:
+                with self.subTest(masks=masks, requested=requested, sectors=tuple(representations[4:6])):
+                    count, weights = select(stand_in(masks), values, representations, leading, requested)
+                    self.assertEqual(count, len(expected))
+                    np.testing.assert_allclose(weights, expected, rtol=0, atol=1e-14)
+            # a distinct level between the last state and its partner above takes no state
+            values = np.array([-1.0, -0.8, -0.6, -0.4, 0.1, 0.1 + 2.0e-5, 0.1 + 4.0e-5, 0.3])
+            representations = np.array([0, 1, 2, 3, 1, 3, 2, 0], dtype=np.int32)
+            count, weights = select(stand_in((0, 0, 0, 2)), values, representations, 5, 10)
+            self.assertEqual(count, 7)
+            np.testing.assert_allclose(weights, [1, 3, 3, 1, 1, 0, 1], rtol=0, atol=1e-14)
+
+    def test_the_width_of_a_level(self) -> None:
+        from ..Eigensolvers.symmetry import WEIGHTED_LEVEL_WIDTH_BOUNDS, weighted_level_width
+
+        floor, cap = WEIGHTED_LEVEL_WIDTH_BOUNDS
+        self.assertEqual(weighted_level_width(1.0e-4, 0.2), 1.0e-4)
+        self.assertEqual(weighted_level_width(None, -0.3), 1.0e-4)
+        self.assertEqual(weighted_level_width(1.0e-4, -2.0), 2.0e-4)
+        self.assertEqual(weighted_level_width(0.1, 0.2), cap)
+        self.assertEqual(weighted_level_width(1.0e-12, 0.2), floor)
+
+    def test_the_public_lists_hold_the_states_of_the_shares(self) -> None:
+        # a shared level lists the whole states of its shares, States_Num in all, with the occupation of the shares
+        # under each of them; the orbitals list the same partners and keep the occupations of the solved states
+        from dataclasses import dataclass
+
+        from parsec_python.SCF.single_point import _public_states, _state_repeats
+
+        @dataclass(frozen=True)
+        class Orbitals:
+            state_weights: object = None
+            state_occupations: object = None
+
+        # weights 3 and two shares of 0.5 (1 state left for a level of two states of weight 1), f = 0.2 per partner
+        values, occupations, representations, orbitals = _public_states(
+            np.array([-1.0, 0.5, 0.5]), np.array([3.0, 0.1, 0.1]), np.array([2, 3, 0]), Orbitals(),
+            np.array([3.0, 0.5, 0.5]))
+        np.testing.assert_array_equal(values, [-1.0, -1.0, -1.0, 0.5])
+        np.testing.assert_allclose(occupations, [1.0, 1.0, 1.0, 0.2], rtol=0, atol=1e-15)
+        np.testing.assert_array_equal(representations, [2, 2, 2, 3])
+        np.testing.assert_array_equal(orbitals.state_weights, [3, 1, 0])
+        np.testing.assert_array_equal(orbitals.state_occupations, [3.0, 0.1, 0.1])
+        # 1.5 + 1.5 after a state of weight 1, f = 0.4 and 0.3 (3 states left): the occupations of the listed states
+        # follow the shares on one axis and add up to those of the loop
+        values, occupations, _, orbitals = _public_states(
+            np.array([-1.0, 0.2, 0.2001]), np.array([1.0, 0.6, 0.45]), np.array([0, 1, 1]), Orbitals(),
+            np.array([1.0, 1.5, 1.5]))
+        np.testing.assert_array_equal(values, [-1.0, 0.2, 0.2, 0.2001])
+        np.testing.assert_allclose(occupations, [1.0, 0.4, 0.35, 0.3], rtol=0, atol=1e-15)
+        self.assertAlmostEqual(float(np.sum(occupations)), 2.05, places=14)
+        np.testing.assert_array_equal(orbitals.state_weights, [1, 2, 1])
+        # whole weights (a share of 2 + 2 included) list themselves, as before; orbitals without the weights of
+        # their sectors cannot tell such a share and keep no occupations (test_the_whole_levels_of_a_shared_level)
+        values, occupations, _, orbitals = _public_states(
+            np.array([-1.0, 0.5, 0.5]), np.array([3.0, 0.4, 0.4]), np.array([2, 3, 3]), Orbitals(),
+            np.array([3.0, 3.0 * (4.0 / 6.0), 3.0 * (4.0 / 6.0)]))
+        np.testing.assert_array_equal(values, [-1.0] * 3 + [0.5] * 4)
+        np.testing.assert_array_equal(occupations, [1.0] * 3 + [0.2] * 4)
+        self.assertIsNone(orbitals.state_occupations)
+        np.testing.assert_array_equal(_state_repeats([1.0, 2.5, 2.5, 3.0]), [1, 3, 2, 3])
+
+    def test_states_that_list_nothing(self) -> None:
+        # a share of 0.25 of four states of weight 3 lists one state from the second (the last lists none), and a
+        # distinct level of weight 0 between partners lists none either: the k-points of the listed states (the TRIM
+        # supercell route) skip them, and the orbitals keep the occupations of the solved states for LDA+U
+        from dataclasses import dataclass
+
+        from parsec_python.SCF.single_point import _public_states, _state_repeats
+        from parsec_python.SCF.supercell_levels import _partner_bits
+
+        repeats = _state_repeats([1.0, 3.0, 3.0, 3.0, 3.0, 0.25, 0.25, 0.25, 0.25])
+        np.testing.assert_array_equal(repeats, [1, 3, 3, 3, 3, 0, 1, 0, 0])
+        listed = np.repeat(np.arange(repeats.size, dtype=np.float64), repeats)
+        bits = _partner_bits(np.arange(repeats.size), repeats, listed, [0, 1, 2], np.eye(3, dtype=np.int64)[None])
+        np.testing.assert_array_equal(bits, [0, 1, 1, 1, 2, 2, 2, 3, 3, 3, 4, 4, 4, 6])
+
+        @dataclass(frozen=True)
+        class Orbitals:
+            state_weights: object = None
+            state_occupations: object = None
+
+        weights = np.array([1.0, 3.0, 3.0, 2.0, 0.0, 2.0])
+        occupations = np.array([1.0, 3.0, 3.0, 1.0, 0.0, 1.0])
+        _, listed, _, orbitals = _public_states(np.arange(6.0), occupations, np.arange(6), Orbitals(), weights)
+        np.testing.assert_array_equal(orbitals.state_weights, [1, 3, 3, 2, 0, 2])
+        np.testing.assert_array_equal(orbitals.state_occupations, occupations)
+        self.assertAlmostEqual(float(np.sum(listed)), float(np.sum(occupations)), places=14)
+
+    def test_the_whole_levels_of_a_shared_level(self) -> None:
+        # the orbitals of a result with a shared level keep every partner of each state of a share (none for a share
+        # of 0), each with its part of the occupation of its solved state (s f / w, as the density spreads it), which
+        # the levels of the k-points of the TRIM supercell route read: the lists add up to the electrons
+        from dataclasses import dataclass
+
+        from parsec_python.SCF.single_point import _public_states
+        from parsec_python.SCF.supercell_levels import _whole_levels_view
+
+        @dataclass(frozen=True)
+        class Orbitals:
+            representations: object = None
+            point_group: object = None
+            state_weights: object = None
+            state_occupations: object = None
+            whole_levels: object = None
+
+        group = SimpleNamespace(sector_weights=np.array([1, 3, 3, 1]))
+        orbitals = Orbitals(representations=np.array([0, 1, 2, 1, 3]), point_group=group)
+        # weights 1, 3, then a level of two states of weight 3 sharing 2 (1 each) and a distinct level of weight 0
+        weights = np.array([1.0, 3.0, 1.0, 1.0, 0.0])
+        occupations = np.array([1.0, 3.0, 0.4, 0.4, 0.0])
+        values = np.array([-1.0, -0.5, 0.1, 0.1 + 1.0e-5, 0.1 + 2.0e-5])
+        listed, _, _, kept = _public_states(values, occupations, np.arange(5), orbitals, weights)
+        self.assertEqual(listed.size, 6)
+        levels, per_partner, whole = kept.whole_levels
+        np.testing.assert_array_equal(whole, [1, 3, 3, 3, 0])
+        np.testing.assert_array_equal(levels, [-1.0] + [-0.5] * 3 + [0.1] * 3 + [0.1 + 1.0e-5] * 3)
+        np.testing.assert_allclose(per_partner, [1.0, 1.0, 1.0, 1.0] + [0.4 / 3.0] * 6, rtol=0, atol=1e-15)
+        self.assertAlmostEqual(float(np.sum(per_partner)), float(np.sum(occupations)), places=14)
+        view =_whole_levels_view(SimpleNamespace(eigenvalues=listed, occupations=None, wavefunctions=kept))
+        np.testing.assert_array_equal(view.eigenvalues, levels)
+        np.testing.assert_array_equal(view.wavefunctions.state_weights, whole)
+        self.assertIsNone(view.wavefunctions.whole_levels)
+        # whole shares below the weights of their sectors (2 + 2 of a level of two states of weight 3, 4 states left)
+        # are shared as well: the orbitals keep the occupations of the solved states and every partner
+        _, listed22, _, kept22 = _public_states(
+            values[:3], np.array([1.0, 0.8, 0.8]), np.arange(3),
+            Orbitals(representations=np.array([0, 1, 1]), point_group=group), np.array([1.0, 2.0, 2.0]))
+        np.testing.assert_allclose(listed22, [1.0] + [0.4] * 4, rtol=0, atol=1e-15)
+        np.testing.assert_array_equal(kept22.state_weights, [1, 2, 2])
+        np.testing.assert_array_equal(kept22.state_occupations, [1.0, 0.8, 0.8])
+        np.testing.assert_array_equal(kept22.whole_levels[2], [1, 3, 3])
+        np.testing.assert_allclose(kept22.whole_levels[1], [1.0] + [0.8 / 3.0] * 6, rtol=0, atol=1e-15)
+        # whole weights keep no such lists, and the view is the result itself
+        _, _, _, plain = _public_states(values[:2], occupations[:2], np.arange(2), Orbitals(
+            representations=np.array([0, 1]), point_group=group), np.array([1.0, 3.0]))
+        self.assertIsNone(plain.whole_levels)
+        result = SimpleNamespace(eigenvalues=values, wavefunctions=plain)
+        self.assertIs(_whole_levels_view(result), result)
+
+    def test_parsec_dat_holds_every_partner_of_a_shared_level(self) -> None:
+        # the result lists States_Num whole states; parsec.dat takes every partner of the solved states of a shared
+        # level with its occupation per partner, whose orbitals give the density of the run
+        from dataclasses import dataclass
+
+        from parsec_python.Output.parsec_dat import result_channels
+
+        from ..SCF.single_point import whole_partner_states
+
+        basis, _ = np.linalg.qr(np.random.default_rng(7).standard_normal((40, 8)))
+
+        @dataclass(frozen=True)
+        class Orbitals:
+            state_weights: object = None
+            state_occupations: object = None
+            whole_levels: object = None
+
+            def to_full_host(self):
+                # (the partners of every state in turn: as many columns as the weights add up to)
+                return basis[:, : int(np.sum(self.state_weights))].copy()
+
+        # a state of weight 1 and a level of two states of weight 3 sharing 2 states (1 each) at a Fermi occupation
+        # f = 0.4: the loop gives the solved states 1 and 0.4 (share times f), and its density spreads 0.4 over the
+        # 3 partners of each state (whole_levels: 0.4 / 3 each)
+        levels = np.array([-1.0] + [0.1] * 3 + [0.1 + 1.0e-5] * 3)
+        per_partner = np.array([1.0] + [0.4 / 3.0] * 6)
+        orbitals = Orbitals(
+            state_weights=np.array([1, 1, 1]),
+            state_occupations=np.array([1.0, 0.4, 0.4]),
+            whole_levels=(levels, per_partner, np.array([1, 3, 3])),
+        )
+        whole = whole_partner_states(orbitals)
+        np.testing.assert_array_equal(whole[0], levels)
+        np.testing.assert_allclose(whole[1], per_partner, rtol=0, atol=1e-16)
+        self.assertAlmostEqual(float(np.sum(whole[1])), 1.8, places=14)
+        self.assertEqual(whole[2].shape, (40, 7))
+        density = 2.0 * np.sum(per_partner[None, :] * whole[2] ** 2, axis=1)
+        listed = SimpleNamespace(
+            eigenvalues=np.array([-1.0, 0.1, 0.1 + 1.0e-5]), occupations=np.array([1.0, 0.4, 0.4]),
+            next_effective_potential=np.zeros(40), density=density, wavefunctions=basis[:, :3].copy(),
+        )
+        plain = result_channels(listed)
+        self.assertEqual(plain.wavefunctions[0].shape[1], 3)
+        rebuilt = 2.0 * np.sum(plain.occupations[0][None, :] * plain.wavefunctions[0] ** 2, axis=1)
+        self.assertGreater(float(np.max(np.abs(rebuilt - density))), 1.0e-3)
+        listed.parsec_dat_states = whole
+        channels = result_channels(listed)
+        np.testing.assert_array_equal(channels.eigenvalues[0], levels)
+        self.assertEqual(channels.wavefunctions[0].shape[1], 7)
+        rebuilt = 2.0 * np.sum(channels.occupations[0][None, :] * channels.wavefunctions[0] ** 2, axis=1)
+        np.testing.assert_allclose(rebuilt, channels.densities[0], rtol=0, atol=1e-14)
+        # orbitals without whole levels give nothing to replace
+        self.assertIsNone(whole_partner_states(Orbitals(state_weights=np.array([1, 3]))))
+
+    def test_the_partners_of_a_share_that_lists_no_state(self) -> None:
+        # a state of weight 0 (a share the states before it list) gives no column of the full-grid orbitals
+        from ..Symmetry.axis_reflection import PointGroupReduction
+
+        vectors = np.arange(12.0).reshape(4, 3)
+        np.testing.assert_array_equal(
+            PointGroupReduction.partner_states(SimpleNamespace(), vectors, np.array([1, 0, 1])), vectors[:, [0, 2]])
+
+    def test_lda_u_reads_the_occupations_of_the_solved_states(self) -> None:
+        # LDA+U forces read the orbitals of a result with its listed occupations: with a shared level the orbitals
+        # keep the occupations of the solved states, which replace the sums over the listed partners
+        from ..Eigensolvers.symmetry import CuPySymmetryOrbitals
+        from ..Hamiltonian.hubbard_device import DeviceHubbard
+
+        orbitals = object.__new__(CuPySymmetryOrbitals)
+        for name, value in dict(
+            state_weights=np.array([1, 1, 0]), state_occupations=np.array([1.0, 0.25, 0.25]),
+            sector_vectors=(np.zeros((5, 1)), np.zeros((5, 2))), representation_columns=np.array([0, 0, 1]),
+            representations=np.array([0, 1, 1]), sector_expansions=None, sector_handovers=None,
+        ).items():
+            object.__setattr__(orbitals, name, value)
+        blocks = list(DeviceHubbard._channel_blocks(None, orbitals, np.array([1.0, 0.5])))
+        np.testing.assert_array_equal(blocks[0][2], [1.0])
+        np.testing.assert_array_equal(blocks[1][2], [0.25, 0.25])
+        object.__setattr__(orbitals, "state_occupations", None)
+        object.__setattr__(orbitals, "state_weights", np.array([1, 2, 1]))
+        blocks = list(DeviceHubbard._channel_blocks(None, orbitals, np.array([1.0, 0.3, 0.3, 0.2])))
+        np.testing.assert_allclose(blocks[1][2], [0.6, 0.2], rtol=0, atol=1e-15)
+
+
 class OccupationTests(unittest.TestCase):
     def test_partners_take_consecutive_entries(self) -> None:
         levels = np.array([-1.0, -0.5, -0.2, 0.1])
@@ -883,6 +1211,71 @@ class GammaCellTests(unittest.TestCase):
         self.assertFalse(abelian_kept)
         self.assertEqual(notes, [])
         self.assertAlmostEqual(weighted.energies.total, abelian.energies.total, delta=1e-8)
+
+
+@unittest.skipUnless(_device_available(), "CUDA runtime and native extension are unavailable")
+class WindowEndTests(unittest.TestCase):
+    """Conventional bcc Na 2x2x2: States_Num 17 ends inside a 6-fold level that two weighted states of weight 3 of one
+    sector hold, whose states carry electrons.  The weighted sectors give that level the states left of States_Num
+    and the energy of the full grid (A100: 2e-7 Ry at 1000 K and 1e-10 Ry); with PARSEC_WEIGHTED_STATE_COUNT=off all
+    its partners count (19 states) and the energy differs by 2.6e-4 Ry.  At the default eigensolver tolerance the two
+    states of that level stay up to 4e-5 Ry apart and still share it (3000 K, criterion 1e-6); States_Num 16 ends
+    exactly after the first of them and 14 inside the next level."""
+
+    @staticmethod
+    def _run(states, temperature, environment, tight=True):
+        from parsec_python.Input import parse_parsec_input
+        from parsec_python.acceleration import driver
+
+        side, data = 8.0, Path(__file__).resolve().parents[2] / "tests" / "data"
+        positions = [side * (np.array(basis) + (i, j, k)) for i in range(2) for j in range(2) for k in range(2)
+                     for basis in ((0.0, 0.0, 0.0), (0.5, 0.5, 0.5))]
+        solver = (["Convergence_Criterion: 1.0e-9", "Diag_Tolerance: 1.0e-9", "Max_Iter: 150", "Eigensolver: chebdav"]
+                  if tight else ["Convergence_Criterion: 1.0e-6"])
+        lines = ["Boundary_Conditions: bulk", "Periodic_System: .true.", "begin Cell_Shape", "  16.0 0.0 0.0",
+                 "  0.0 16.0 0.0", "  0.0 0.0 16.0", "end Cell_Shape", "Grid_Spacing: 0.5", "Expansion_Order: 12",
+                 f"States_Num: {states}", *solver, f"Fermi_Temp: {temperature}", "Correlation_Type: ca",
+                 "Coordinate_Unit: Cartesian_Bohr", "Lattice_Vector_Scale: 1.0 bohr", "Atom_Types_Num: 1",
+                 "Atom_Type: Na", "Local_Component: s",
+                 "begin Atom_Coord", *(f"  {x:.10f} {y:.10f} {z:.10f}" for x, y, z in positions), "end Atom_Coord"]
+        with tempfile.TemporaryDirectory() as directory:
+            (Path(directory) / "parsec.in").write_text("\n".join(lines) + "\n")
+            (Path(directory) / "Na_POTRE.DAT").write_bytes((data / "Na_POTRE.DAT").read_bytes())
+            problem = parse_parsec_input(Path(directory) / "parsec.in").problem
+            with mock.patch.dict(os.environ, environment):
+                system = driver.prepare_single_point(problem)
+                system.materialize_final_wavefunctions = False
+                result = driver.run_scf(system)
+        sectors = getattr(system.backend, "symmetry_eigensolver", None) is not None
+        return result, sectors
+
+    def test_the_states_of_the_full_grid(self) -> None:
+        energies = {}
+        for label, environment in (("full", {"PARSEC_PERIODIC_SYMMETRY": "off"}), ("weighted", {}),
+                                   ("whole", {"PARSEC_WEIGHTED_STATE_COUNT": "off"})):
+            result, sectors = self._run(17, 1000.0, environment)
+            self.assertTrue(result.converged, label)
+            energies[label] = float(result.energies.total)
+            if label != "full":
+                self.assertTrue(sectors, label)
+                self.assertEqual(len(result.eigenvalues), 17 if label == "weighted" else 19, label)
+            self.assertAlmostEqual(2.0 * float(np.sum(result.occupations)), 16.0, delta=1.0e-8)
+        self.assertAlmostEqual(energies["weighted"], energies["full"], delta=1.0e-6, msg=str(energies))
+        self.assertGreater(abs(energies["whole"] - energies["full"]), 1.0e-4, msg=str(energies))
+
+    def test_other_window_ends_and_the_default_tolerance(self) -> None:
+        for states, temperature, tight, delta in ((17, 3000.0, False, 5.0e-5), (16, 1000.0, True, 1.0e-6),
+                                                  (14, 1000.0, True, 1.0e-6)):
+            full, _ = self._run(states, temperature, {"PARSEC_PERIODIC_SYMMETRY": "off"}, tight)
+            weighted, sectors = self._run(states, temperature, {}, tight)
+            with self.subTest(states=states, temperature=temperature, tight=tight):
+                self.assertTrue(full.converged and weighted.converged)
+                self.assertTrue(sectors)
+                # the full grid's Max_Iter (50 by default; 150 at 1e-9) and its number of steps at most
+                self.assertLessEqual(len(weighted.history), len(full.history))
+                self.assertEqual(len(weighted.eigenvalues), states)
+                self.assertAlmostEqual(2.0 * float(np.sum(weighted.occupations)), 16.0, delta=1.0e-8)
+                self.assertAlmostEqual(float(weighted.energies.total), float(full.energies.total), delta=delta)
 
 
 if __name__ == "__main__":

@@ -319,9 +319,9 @@ def _periodic_reference(system):
     """The prepared reference system of a periodic cell, or ``None`` (an isolated system).
 
     ``system`` is an accelerated system (its ``reference``), a reference
-    system, or what only names a grid (the exchange service of an MPI rank,
-    ``SCF/hybrid_mpi.py``, which has no input: always a cluster, since a
-    periodic cell with an MPI context is refused by the driver).
+    system, or what only names a grid (the exchange service of an MPI rank
+    of a cluster, ``SCF/hybrid_mpi.py``, which has no input; the service of a
+    periodic cell passes its reference system since 2026-11-22).
     """
 
     reference = getattr(system, "reference", system)

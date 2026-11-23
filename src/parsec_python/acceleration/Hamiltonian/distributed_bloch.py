@@ -187,7 +187,11 @@ class DistributedBlochConverter(DeviceBlochConverter):
             entry = self._plans[key] = (laplacian, plan)
         return entry[1]
 
-    def _derivative_parts(self, hamiltonian):
+    def _derivative_parts(self, hamiltonian, real: bool = False):
+        # ``real``: as the converter of one device takes it (DeviceBlochConverter._scalar_parts passes it); a row block
+        # with halo exchanges is never a real operator (_takes_real refuses operators with extras)
+        if real:
+            raise NotImplementedError("the row-distributed MPI k-point solver has no real operators")
         backend = self.backend
         plan = self._halo_plan(hamiltonian)
         self._plan = plan

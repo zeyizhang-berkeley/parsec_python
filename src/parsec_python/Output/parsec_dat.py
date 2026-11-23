@@ -35,6 +35,14 @@ position ``i * h``; the file takes the periodic image in Fortran's range
 works on the full grid, so it writes one symmetry operation (the identity)
 and ``nwedge = ndim``; a file of a symmetry-reduced Fortran run is unfolded
 onto the full grid with its own operations (:func:`grid_rows_of_file`).
+
+PARSEC's wavefunctions are complex (``stype(2) = 1``) where the input has
+k-points (``nkpt > 0``: any Monkhorst-Pack grid, also 1x1x1, or a list) and
+real otherwise.  A k-point run writes the selected states of every spin
+channel and k-point (``PARSEC_KPOINT_WAVEFUNCTIONS``), the Bloch factors
+``u_nk`` its loop keeps; an input without k-points that runs as the 1x1x1
+mesh (a spin-polarized cell on the k-point loop) writes the real file of the
+Gamma point (``PARSEC_GAMMA_PARSEC_DAT``, :func:`real_gamma_orbitals`).
 """
 
 from __future__ import annotations
@@ -53,6 +61,49 @@ BOUNDARY_CODES = {0: 0, 1: 2, 2: 3, 3: 1}
 #: ``KP_MANUAL`` and ``MONKHORST_PACK`` of ``const.f90``.
 KPOINT_MANUAL = 1
 KPOINT_MONKHORST_PACK = 2
+#: ``kptmethod`` of a run without k-points (``usrinputfile.F90`` sets -1 and ``Kpoint_Method: none`` keeps it).
+KPOINT_NONE = -1
+#: ``auto`` (default): a k-point run keeps the orbitals of every k-point that ``parsec.dat`` selects and writes them,
+#: one block per spin channel and k-point as ``wfnsave.F90`` does; ``off``: a k-point run writes none (only the spin
+#: ionic loop of one k-point writes its kept orbitals), as before.
+KPOINT_WAVEFUNCTIONS_SWITCH = "PARSEC_KPOINT_WAVEFUNCTIONS"
+#: ``auto`` (default): an input without k-points (PARSEC's ``nkpt = 0``, real wavefunctions) that runs as the 1x1x1
+#: k-point mesh writes the file of a Gamma-point run: ``stype(2) = 0``, the k-point records of a run without
+#: k-points and real wavefunctions (:func:`real_gamma_orbitals`); the ``kptmethod`` of every periodic file without
+#: k-points is PARSEC's -1 (:data:`KPOINT_NONE`).  ``off``: the file of a k-point run (complex) for those, and
+#: ``kptmethod`` 0 without k-points, as before.
+GAMMA_PARSEC_DAT_SWITCH = "PARSEC_GAMMA_PARSEC_DAT"
+#: Neighbouring levels within this many Ry are made real together (:func:`real_gamma_orbitals`): the partners of
+#: a multiplet, which a complex solver may mix.  Levels further apart that it groups are separated again.
+GAMMA_CLUSTER_TOLERANCE = 1.0e-4
+
+
+def _auto_or_off(name: str) -> str:
+    import os
+
+    value = os.environ.get(name, "auto").strip().lower() or "auto"
+    if value not in ("auto", "off"):
+        raise ValueError(f"{name} must be auto or off, not {value!r}")
+    return value
+
+
+def kpoint_wavefunctions_setting() -> str:
+    """``PARSEC_KPOINT_WAVEFUNCTIONS``: ``auto`` (default) or ``off`` (:data:`KPOINT_WAVEFUNCTIONS_SWITCH`)."""
+
+    return _auto_or_off(KPOINT_WAVEFUNCTIONS_SWITCH)
+
+
+def gamma_parsec_dat_setting() -> str:
+    """``PARSEC_GAMMA_PARSEC_DAT``: ``auto`` (default) or ``off`` (:data:`GAMMA_PARSEC_DAT_SWITCH`)."""
+
+    return _auto_or_off(GAMMA_PARSEC_DAT_SWITCH)
+
+
+def validate_settings() -> None:
+    """Read the switches of ``parsec.dat`` (an unknown value stops the run before its SCF)."""
+
+    kpoint_wavefunctions_setting()
+    gamma_parsec_dat_setting()
 
 
 def fortran_date_label(now: datetime | None = None) -> str:
@@ -223,13 +274,25 @@ class ParsecDatWavefunctions:
 
     ``state_numbers`` are the 1-based ``indxsave``; column ``n`` of
     ``vectors`` is the wavefunction of state ``state_numbers[n]`` on the
-    ``points`` of the block (``nwedge * mxwd`` rows for spinors).
+    ``points`` of the block (``nwedge * mxwd`` rows for spinors).  With
+    ``columns`` (a writer's block) that wavefunction is
+    ``vectors[:, columns[n]]`` instead, which :func:`write_parsec_dat` reads
+    in place (no copy of the selected columns).
     """
 
     symmetry: ParsecDatSymmetry
     points: np.ndarray
     state_numbers: np.ndarray
     vectors: np.ndarray
+    columns: np.ndarray | None = None
+
+    @property
+    def selected_vectors(self) -> np.ndarray:
+        """The wavefunctions of ``state_numbers``, one column each."""
+
+        if self.columns is None:
+            return self.vectors
+        return np.asarray(self.vectors)[:, np.asarray(self.columns, dtype=np.int64)]
 
 
 @dataclass(frozen=True)
@@ -419,13 +482,20 @@ def write_parsec_dat(path: str | Path, data: ParsecDat) -> Path:
                 if numbers.size:
                     write_record(stream, numbers)
                 vectors = np.asarray(block.vectors)
-                if vectors.shape != (rows, numbers.size):
+                columns = (
+                    np.arange(numbers.size)
+                    if block.columns is None
+                    else np.asarray(block.columns, dtype=np.int64)
+                )
+                if vectors.ndim != 2 or vectors.shape[0] != rows or columns.size != numbers.size or (
+                    block.columns is None and vectors.shape[1] != numbers.size
+                ):
                     raise ValueError(
                         f"parsec.dat wavefunctions need shape {(rows, numbers.size)}, "
                         f"got {vectors.shape}"
                     )
-                for column in range(numbers.size):
-                    write_record(stream, np.ascontiguousarray(vectors[:, column], dtype=dtype))
+                for column in columns:
+                    write_record(stream, np.ascontiguousarray(vectors[:, int(column)], dtype=dtype))
     return output
 
 
@@ -811,6 +881,12 @@ class ResultChannels:
     # stype(2) of a spinor result (2 spin-orbit, 3 non-collinear, 4 both):
     # one set of levels and spinor wavefunctions, two potentials and densities.
     wavefunction_kind: int | None = None
+    # A k-point result under PARSEC_KPOINT_WAVEFUNCTIONS=auto: per channel, the full-grid host orbitals of every
+    # k-point in the order of its k-points (columns follow that k-point's levels, all of them or its lowest ones),
+    # or None where the result keeps none; ``wavefunctions`` is then None.  None (the field) for every other result.
+    kpoint_wavefunctions: tuple[tuple[np.ndarray, ...] | None, ...] | None = None
+    # With ``kpoint_wavefunctions``: per channel, why its orbitals are missing (None where they are there).
+    kpoint_missing: tuple[str | None, ...] = ()
 
 
 def _single_kpoint_orbitals(kept, spin: int, k_points, rows: int, host_orbitals):
@@ -832,6 +908,44 @@ def _single_kpoint_orbitals(kept, spin: int, k_points, rows: int, host_orbitals)
     if vectors is None or vectors.shape[0] != int(rows):
         return None
     return vectors
+
+
+#: Why the orbitals of a k-point result are not in ``parsec.dat`` (:func:`_kpoint_orbitals`).
+_NOT_KEPT = "its k-point loop kept no orbitals"
+_NOT_GATHERED = "its k-point solver holds no orbitals in this process (the MPI-distributed solvers gather none)"
+_NOT_WHOLE = "its k-point solver holds the orbitals as blocks of grid rows, not on the whole grid"
+
+
+def _kpoint_orbitals(kept, k_points, rows: int) -> tuple[tuple[np.ndarray, ...] | None, str | None]:
+    """The kept Bloch orbitals of one channel of a k-point loop (``k_wavefunctions`` of the unpolarized loop, or
+    ``k_wavefunctions[spin]``), one host array per k-point, and ``None``; else ``None`` and why.
+
+    Every k-point needs full-grid columns (``rows`` points: not a sector or row block of an MPI solver); device
+    arrays are copied to the host.
+    """
+
+    count = int(np.asarray(k_points).reshape(-1, 3).shape[0])
+    if kept is None:
+        return None, _NOT_KEPT
+    try:
+        blocks = tuple(kept)
+    except TypeError:
+        return None, _NOT_KEPT
+    if len(blocks) != count:
+        return None, _NOT_KEPT
+    found = []
+    for vectors in blocks:
+        if vectors is None:
+            return None, _NOT_GATHERED
+        if not isinstance(vectors, np.ndarray) and hasattr(vectors, "get"):
+            vectors = vectors.get()
+        vectors = np.asarray(vectors)
+        if vectors.ndim != 2 or vectors.shape[1] == 0:
+            return None, _NOT_GATHERED
+        if vectors.shape[0] != int(rows):
+            return None, _NOT_WHOLE
+        found.append(vectors)
+    return tuple(found), None
 
 
 def result_channels(result) -> ResultChannels:
@@ -886,10 +1000,18 @@ def result_channels(result) -> ResultChannels:
     if channels is not None:
         for channel in channels:
             require(channel, ("eigenvalues", "occupations", "next_effective_potential", "density"))
+        # every partner of a level shared at the end of the window where a channel has one (parsec_dat_channel_states)
+        whole = getattr(result, "parsec_dat_channel_states", None) or (None,) * len(channels)
         return ResultChannels(
-            eigenvalues=tuple(np.asarray(c.eigenvalues, dtype=float) for c in channels),
-            occupations=tuple(np.asarray(c.occupations, dtype=float) for c in channels),
-            wavefunctions=tuple(host_orbitals(c.wavefunctions) for c in channels),
+            eigenvalues=tuple(
+                np.asarray(c.eigenvalues if w is None else w[0], dtype=float) for c, w in zip(channels, whole)
+            ),
+            occupations=tuple(
+                np.asarray(c.occupations if w is None else w[1], dtype=float) for c, w in zip(channels, whole)
+            ),
+            wavefunctions=tuple(
+                host_orbitals(c.wavefunctions if w is None else w[2]) for c, w in zip(channels, whole)
+            ),
             potentials=tuple(np.asarray(c.next_effective_potential, dtype=float) for c in channels),
             densities=tuple(np.asarray(c.density, dtype=float) for c in channels),
         )
@@ -905,8 +1027,20 @@ def result_channels(result) -> ResultChannels:
             )
         k_points = getattr(result, "k_points", None)
         has_k = k_points is not None
-        if has_k:
-            # A k-point loop that kept its Bloch orbitals (keep_wavefunctions:
+        by_kpoint = None
+        missing = ()
+        if has_k and kpoint_wavefunctions_setting() == "auto":
+            # A k-point loop that kept its Bloch orbitals (keep_wavefunctions: the forces of the Fortran-derived
+            # routines, the ionic loops of a spin cell at the Gamma point, a run whose parsec.dat selects
+            # wavefunctions) writes those of every k-point, as wfnsave.F90.
+            kept = getattr(result, "k_wavefunctions", None)
+            rows = np.asarray(result.density_up).size
+            found = [_kpoint_orbitals(None if kept is None else kept[spin], k_points, rows) for spin in range(2)]
+            by_kpoint = tuple(item[0] for item in found)
+            missing = tuple(item[1] for item in found)
+            orbitals = (None, None)
+        elif has_k:
+            # (PARSEC_KPOINT_WAVEFUNCTIONS=off) A k-point loop that kept its Bloch orbitals (keep_wavefunctions:
             # the forces of the Fortran-derived routines, the ionic loops of a
             # spin cell at the Gamma point) writes those of a single k-point
             # (the columns follow the states of the first k-point).
@@ -944,15 +1078,103 @@ def result_channels(result) -> ResultChannels:
                     "SCF iteration (this driver keeps no mixed potential)",
                 )
             ),
+            kpoint_wavefunctions=by_kpoint,
+            kpoint_missing=missing,
         )
     require(result, ("eigenvalues", "occupations", "next_effective_potential", "density"))
-    has_k = getattr(result, "k_points", None) is not None
+    k_points = getattr(result, "k_points", None)
+    has_k = k_points is not None
+    by_kpoint = None
+    missing = ()
+    if has_k and kpoint_wavefunctions_setting() == "auto":
+        # the Bloch orbitals of every k-point where the loop kept them (k_wavefunctions)
+        orbitals_k, reason = _kpoint_orbitals(
+            getattr(result, "k_wavefunctions", None), k_points, np.asarray(result.density).size
+        )
+        by_kpoint, missing = (orbitals_k,), (reason,)
+    # A level shared at the end of the window (PARSEC_WEIGHTED_STATE_COUNT=auto): the result lists States_Num whole
+    # states, the file every partner of its solved states with its occupation per partner, whose orbitals give the
+    # density of the file (acceleration.SCF.single_point.whole_partner_states).
+    whole = None if has_k else getattr(result, "parsec_dat_states", None)
+    if whole is not None:
+        return ResultChannels(
+            eigenvalues=(np.asarray(whole[0], dtype=float),),
+            occupations=(np.asarray(whole[1], dtype=float),),
+            wavefunctions=(host_orbitals(whole[2]),),
+            potentials=(np.asarray(result.next_effective_potential, dtype=float),),
+            densities=(np.asarray(result.density, dtype=float),),
+            kpoint_wavefunctions=by_kpoint,
+            kpoint_missing=missing,
+        )
     return ResultChannels(
         eigenvalues=(np.asarray(result.eigenvalues, dtype=float),),
         occupations=(np.asarray(result.occupations, dtype=float),),
         wavefunctions=(None if has_k else host_orbitals(getattr(result, "wavefunctions", None)),),
         potentials=(np.asarray(result.next_effective_potential, dtype=float),),
         densities=(np.asarray(result.density, dtype=float),),
+        kpoint_wavefunctions=by_kpoint,
+        kpoint_missing=missing,
+    )
+
+
+def real_gamma_orbitals(vectors, eigenvalues, columns=None) -> tuple[np.ndarray, float]:
+    """Real orthonormal orbitals of the complex Bloch orbitals ``vectors`` of ``k = 0`` (columns, the levels
+    ``eigenvalues`` ascending), and the largest norm of a column's part outside their real span, over the columns
+    ``columns`` (indices in the order of ``eigenvalues``; all of them by default): parsec.dat names those of the
+    states it writes, not of empty states above them that the number of states cuts.
+
+    The Hamiltonian of ``k = 0`` without spin-orbit coupling is real, so the span of each multiplet is closed
+    under complex conjugation and has a real orthonormal basis of eigenvectors, which is what PARSEC's real
+    solver of a run without k-points (``nkpt = 0``) stores.  The levels are taken in runs whose neighbours lie
+    within :data:`GAMMA_CLUSTER_TOLERANCE` Ry; the real basis of a run spans the real and imaginary parts of its
+    columns (their largest singular directions), and the levels of the run, given in that basis by the spectral
+    form ``sum_n e_n |u_n><u_n|``, are diagonalized there again, which separates the distinct levels a run holds.
+    The returned columns keep the order of ``eigenvalues``.  The norm is zero up to round-off where every run is
+    closed under conjugation; a multiplet that the number of states cuts leaves a part outside.
+    """
+
+    vectors = np.asarray(vectors)
+    values = np.asarray(eigenvalues, dtype=np.float64).reshape(-1)
+    if not np.iscomplexobj(vectors):
+        return np.asarray(vectors, dtype=np.float64), 0.0
+    count = values.size
+    if vectors.ndim != 2 or vectors.shape[1] != count:
+        raise ValueError("real_gamma_orbitals needs one column per level")
+    real = np.empty(vectors.shape, dtype=np.float64)
+    outside = np.zeros(count, dtype=np.float64)
+    start = 0
+    while start < count:
+        stop = start + 1
+        while stop < count and values[stop] - values[stop - 1] <= GAMMA_CLUSTER_TOLERANCE:
+            stop += 1
+        block = vectors[:, start:stop]
+        size = stop - start
+        stacked = np.concatenate([block.real, block.imag], axis=1)
+        weights, directions = np.linalg.eigh(stacked.T @ stacked)
+        top = weights[-size:]
+        basis = stacked @ (directions[:, -size:] / np.sqrt(np.maximum(top, np.finfo(np.float64).tiny)))
+        # (an exactly closed span gives top = 1 and an orthonormal basis; QR makes it so in any case)
+        basis, _ = np.linalg.qr(basis)
+        overlap = basis.T @ block
+        norms = np.maximum(np.linalg.norm(block, axis=0), np.finfo(np.float64).tiny)
+        captured = np.linalg.norm(overlap, axis=0) / norms
+        outside[start:stop] = np.sqrt(np.maximum(1.0 - captured**2, 0.0))
+        hamiltonian = (overlap * values[start:stop][None, :]) @ overlap.conj().T
+        hamiltonian = 0.5 * (hamiltonian + hamiltonian.conj().T).real
+        _, rotation = np.linalg.eigh(hamiltonian)
+        real[:, start:stop] = basis @ rotation
+        start = stop
+    named = outside if columns is None else outside[np.asarray(columns, dtype=np.int64)]
+    return real, float(np.max(named)) if named.size else 0.0
+
+
+def gamma_point_input(problem) -> bool:
+    """Whether ``problem`` is a periodic input without k-points (PARSEC's ``nkpt = 0``: real wavefunctions)."""
+
+    return (
+        problem is not None
+        and getattr(problem, "periodic_cell", None) is not None
+        and not bool(getattr(problem, "has_kpoint_sampling", True))
     )
 
 
@@ -967,12 +1189,18 @@ def parsec_dat_from_result(
     monkhorst_pack_grid: Sequence[int] | None = None,
     date_label: str | None = None,
     monkhorst_pack_shift: Sequence[float] | None = None,
+    gamma_point: bool = False,
 ) -> tuple[ParsecDat, tuple[str, ...]]:
     """Build the contents of ``parsec.dat`` from a Python result on ``grid``.
 
     Returns the data and notes for the run log (wavefunctions that the
     result does not keep).  The file has one symmetry operation (the
     identity), ``nwedge = ndim`` and representation 1 for every state.
+
+    ``gamma_point``: the input has no k-points (:func:`gamma_point_input`).  A result of the k-point loop at
+    ``k = 0`` alone (the 1x1x1 mesh that runs such an input) is then written as the Gamma point of PARSEC's run
+    without k-points under ``PARSEC_GAMMA_PARSEC_DAT=auto``: ``stype(2) = 0``, the k-point records of a run without
+    k-points and real wavefunctions (:func:`real_gamma_orbitals`).
     """
 
     channels = result_channels(result)
@@ -981,10 +1209,18 @@ def parsec_dat_from_result(
     k_points = getattr(result, "k_points", None) if k_points is None else k_points
     k_weights = getattr(result, "k_weights", None) if k_weights is None else k_weights
     kpoint_count = 1 if k_points is None else int(np.asarray(k_points).shape[0])
+    real_gamma = bool(
+        gamma_point
+        and k_points is not None
+        and kpoint_count == 1
+        and not np.any(np.asarray(k_points, dtype=float))
+        and channels.wavefunction_kind is None
+        and gamma_parsec_dat_setting() == "auto"
+    )
     complex_kind = (
         channels.wavefunction_kind
         if channels.wavefunction_kind is not None
-        else (1 if k_points is not None else 0)
+        else (1 if k_points is not None and not real_gamma else 0)
     )
     # One set of levels per spin channel, one for the spinors (nspin/mxwd).
     level_channels = len(channels.eigenvalues)
@@ -1031,18 +1267,64 @@ def parsec_dat_from_result(
         levels.append(tuple(blocks))
         numbers = selected_states(selection, occupations_by_k, per_k)
         orbitals = channels.wavefunctions[spin]
+        by_kpoint = None if channels.kpoint_wavefunctions is None else channels.kpoint_wavefunctions[spin]
         spin_blocks = []
         for k in range(kpoint_count):
             chosen = numbers
-            if chosen.size and orbitals is None:
-                notes.append(
-                    f"the wavefunctions of {chosen.size} state(s) are not in parsec.dat: "
-                    "this calculation does not keep them"
-                    + (" (k-point drivers keep no orbitals)" if k_points is not None else "")
-                )
-                chosen = np.zeros(0, dtype=np.int32)
-            if chosen.size:
+            if channels.kpoint_wavefunctions is not None:
+                # (PARSEC_KPOINT_WAVEFUNCTIONS=auto) the orbitals of this k-point, its columns following its levels:
+                # all of them, or its lowest ones (a Save_Wfn_Bands list keeps those up to its highest state)
+                part = slice(k * per_k, (k + 1) * per_k)
+                order = np.argsort(eigenvalues[part], kind="stable")
+                orbitals = None
+                reason = (
+                    channels.kpoint_missing[spin] if spin < len(channels.kpoint_missing) else None
+                ) or _NOT_KEPT
+                if by_kpoint is not None:
+                    held = int(by_kpoint[k].shape[1])
+                    needed = order[chosen - 1] if chosen.size else np.zeros(0, dtype=np.int64)
+                    if held > per_k or (needed.size and int(np.max(needed)) >= held) or (real_gamma and held != per_k):
+                        reason = "the orbitals it kept do not hold the selected states"
+                    else:
+                        orbitals = by_kpoint[k]
+                if chosen.size and orbitals is None:
+                    notes.append(
+                        f"the wavefunctions of {chosen.size} state(s) are not in parsec.dat: this calculation "
+                        f"does not keep them ({reason})"
+                    )
+            else:
                 order = np.argsort(eigenvalues[:per_k], kind="stable")
+                if chosen.size and orbitals is None:
+                    notes.append(
+                        f"the wavefunctions of {chosen.size} state(s) are not in parsec.dat: "
+                        "this calculation does not keep them"
+                        + (" (k-point drivers keep no orbitals)" if k_points is not None else "")
+                    )
+            if chosen.size and orbitals is None:
+                chosen = np.zeros(0, dtype=np.int32)
+            if chosen.size and real_gamma:
+                # the real eigenvectors of k = 0, as PARSEC's solver of a run without k-points gives them (all the
+                # states: a multiplet is made real as a whole)
+                ordered, outside = real_gamma_orbitals(
+                    np.asarray(orbitals)[:, order], eigenvalues[k * per_k : (k + 1) * per_k][order],
+                    # (the part outside is that of the written states)
+                    columns=chosen - 1,
+                )
+                if outside > 1.0e-4:
+                    notes.append(
+                        "the real wavefunctions of parsec.dat span the complex orbitals of k = 0 up to a "
+                        f"part of norm {outside:.1e} (a multiplet the number of states cuts)"
+                    )
+                vectors = np.ascontiguousarray(ordered[:, chosen - 1], dtype=np.float64)
+            elif chosen.size and np.asarray(orbitals).dtype == (np.complex128 if complex_kind else np.float64):
+                # the columns are written in place from the orbitals (no copy of the selection)
+                spin_blocks.append(
+                    ParsecDatWavefunctions(
+                        symmetry, points, chosen.astype(np.int32), np.asarray(orbitals), columns=order[chosen - 1]
+                    )
+                )
+                continue
+            elif chosen.size:
                 columns = np.asarray(orbitals)[:, order[chosen - 1]]
                 vectors = np.asarray(columns, dtype=np.complex128 if complex_kind else np.float64)
             else:
@@ -1055,8 +1337,10 @@ def parsec_dat_from_result(
     cell = None
     if periodic:
         lattice = np.asarray((periodic_cell or grid.cell).lattice_vectors, dtype=float)
-        if k_points is None:
-            cell_k, cell_w, method = np.zeros((1, 3)), np.ones(1), 0
+        if k_points is None or real_gamma:
+            # (a run without k-points: kpnum = 1, k = 0, weight 1, and PARSEC's kptmethod -1)
+            cell_k, cell_w = np.zeros((1, 3)), np.ones(1)
+            method = KPOINT_NONE if gamma_parsec_dat_setting() == "auto" else 0
         else:
             cell_k = np.asarray(k_points, dtype=float)
             cell_w = (
@@ -1137,8 +1421,12 @@ def iter_records(path: str | Path) -> Iterator[bytes]:
 __all__ = [
     "BOUNDARY_CODES",
     "GridMapping",
+    "GAMMA_CLUSTER_TOLERANCE",
+    "GAMMA_PARSEC_DAT_SWITCH",
     "KPOINT_MANUAL",
     "KPOINT_MONKHORST_PACK",
+    "KPOINT_NONE",
+    "KPOINT_WAVEFUNCTIONS_SWITCH",
     "ParsecDat",
     "ParsecDatLevels",
     "ParsecDatPeriodic",
@@ -1148,18 +1436,23 @@ __all__ = [
     "cluster_alatt",
     "fortran_date_label",
     "fortran_integer_coordinates",
+    "gamma_parsec_dat_setting",
+    "gamma_point_input",
     "grid_rmax",
     "grid_rows_of_file",
     "grid_shift",
     "grid_steps",
     "highest_occupied",
     "iter_records",
+    "kpoint_wavefunctions_setting",
     "parsec_dat_from_result",
     "read_parsec_dat",
     "read_record",
+    "real_gamma_orbitals",
     "result_channels",
     "selected_states",
     "system_type",
+    "validate_settings",
     "wavefunction_bytes",
     "write_parsec_dat",
     "write_record",

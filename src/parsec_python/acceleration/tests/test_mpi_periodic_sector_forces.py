@@ -337,12 +337,21 @@ class RunnerDecisionTests(unittest.TestCase):
                          replace(fortran, restart_run=True, relaxation=bfgs, movable=(True,) * atoms)):
                 with self.assertRaisesRegex(ValueError, "Fortran-derived routines.*Restart_Run.*no parsec.dat.*main.py"):
                     refuse(case)
+            fixed = replace(fortran, relaxation=bfgs, movable=(False,) + (True,) * (atoms - 1))
+            # a relaxation with fixed atoms keeps the sectors of their subgroup (PARSEC_RUNNER_FORTRAN_FIXED_SECTORS=auto,
+            # since 2026-11-22); off refuses it by name, as before, and so does PARSEC_MOVING_SECTORS=off
+            refuse(fixed)
+            for environment in ({"PARSEC_RUNNER_FORTRAN_FIXED_SECTORS": "off"}, {"PARSEC_MOVING_SECTORS": "off"}):
+                with self.subTest(environment=environment), mock.patch.dict(os.environ, environment):
+                    with self.assertRaisesRegex(ValueError, "keep the full grid.*Move_Flag fixes atoms"):
+                        refuse(fixed)
+            with mock.patch.dict(os.environ, {"PARSEC_RUNNER_FORTRAN_FIXED_SECTORS": "sometimes"}):
+                with self.assertRaisesRegex(ValueError, "PARSEC_RUNNER_FORTRAN_FIXED_SECTORS"):
+                    refuse(fixed)
             for case, reason in ((replace(fortran, molecular_dynamics=object()),
                                   "molecular dynamics: molecular dynamics uses no symmetry"),
                                  (replace(fortran, relaxation=SimpleNamespace(method="manual")),
-                                  "manual movements use no symmetry"),
-                                 (replace(fortran, relaxation=bfgs, movable=(False,) + (True,) * (atoms - 1)),
-                                  "Move_Flag fixes atoms")):
+                                  "manual movements use no symmetry")):
                 with self.subTest(reason=reason), self.assertRaisesRegex(ValueError, f"keep the full grid.*{reason}"):
                     refuse(case)
                 with self.assertRaises(ValueError) as caught:

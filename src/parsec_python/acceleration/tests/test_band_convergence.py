@@ -52,7 +52,9 @@ def _settings(solver: str) -> dict:
     }
 
 
-def _bands(directory: Path, solver: str, convergence: str, sectors: str, reported: str = "auto"):
+def _bands(
+    directory: Path, solver: str, convergence: str, sectors: str, reported: str = "auto", environment: dict = None
+):
     import parsec_python.acceleration.cli as cli_module
     from parsec_python.acceleration.SCF import kpoint_sectors
 
@@ -77,6 +79,7 @@ def _bands(directory: Path, solver: str, convergence: str, sectors: str, reporte
         "PARSEC_BAND_KPOINT_SECTORS": sectors,
         "PARSEC_BAND_REPORTED_RESIDUALS": reported,
         "PARSEC_PERIODIC_SECTOR_BANDS": "auto",
+        **(environment or {}),
     }
     with mock.patch.dict(os.environ, variables), mock.patch.object(kpoint_sectors, "_MINIMUM_ENTRIES", 0), \
             redirect_stdout(StringIO()), redirect_stderr(errors):
@@ -159,6 +162,67 @@ class ConvergedBandTests(unittest.TestCase):
                 np.asarray(reported["eigenvalues_ry"])[:, -2:], np.asarray(every["eigenvalues_ry"])[:, -2:],
                 rtol=0, atol=1.0e-12,
             )
+
+    def test_the_band_buffer_on_the_whole_grid(self) -> None:
+        # PARSEC_BAND_BUFFER: the whole-grid k-points take a buffer in proportion to their states; off keeps
+        # Subspace_Buffer_Size.  With no extra CHEBFF cycles the one filter cycle cannot pass Diag_Tolerance 1e-7: the
+        # WARNING names the residual.
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as name:
+            root = Path(name)
+            status, larger, errors = _bands(
+                root / "auto", "chebff", "auto", "off", environment={"PARSEC_BAND_BUFFER": "auto"}
+            )
+            self.assertEqual(status, 0, errors[-4000:])
+            self.assertNotIn("did not converge", errors)
+            status, former, errors = _bands(
+                root / "off", "chebff", "auto", "off", environment={"PARSEC_BAND_BUFFER": "off"}
+            )
+            self.assertEqual(status, 0, errors[-4000:])
+            scale = float(np.max(np.abs(larger["eigenvalues_ry"])))
+            self.assertLess(float(np.max(larger["residual_norms"])), 1.0e-7 * scale)
+            np.testing.assert_allclose(larger["eigenvalues_ry"], former["eigenvalues_ry"], rtol=0, atol=1.0e-6)
+            status, capped, errors = _bands(
+                root / "capped", "chebff", "auto", "off", environment={"PARSEC_KPOINT_EXTRA_CYCLES": "0"}
+            )
+            self.assertEqual(status, 0, errors[-4000:])
+            self.assertIn("did not converge: largest residual", errors)
+
+    def test_unsplit_k_points_take_the_whole_route_with_the_buffer(self) -> None:
+        # k-points that do not split (here the last two of the path, kept whole by hand) are solved on the whole grid
+        # with the buffer of PARSEC_BAND_BUFFER; under off they stay in the solver of the sectors, as before
+        from parsec_python.acceleration.Hamiltonian.device_bloch import DeviceBlochConverter
+        from parsec_python.acceleration.SCF import kpoint_sectors
+
+        original = kpoint_sectors.plan_sectors
+        real_eigensolve = DeviceBlochConverter.eigensolve
+
+        def plans(job, notes=None):
+            found = original(job, notes)
+            if found is not None and len(found) > 2:
+                found[-2:] = [None, None]
+            return found
+
+        for value in ("auto", "off"):
+            buffers: list[int] = []
+
+            def recording(converter, hamiltonian, number_of_states, settings, attempt=0):
+                buffers.append(int(settings.safety_buffer))
+                return real_eigensolve(converter, hamiltonian, number_of_states, settings, attempt)
+
+            with self.subTest(buffer=value), tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as name, \
+                    mock.patch.object(kpoint_sectors, "plan_sectors", plans), \
+                    mock.patch.object(DeviceBlochConverter, "eigensolve", recording):
+                status, bands, errors = _bands(
+                    Path(name), "chebff", "auto", "auto", environment={"PARSEC_BAND_BUFFER": value}
+                )
+                self.assertEqual(status, 0, errors[-4000:])
+                self.assertNotIn("did not converge", errors)
+                if value == "auto":
+                    self.assertEqual(len(buffers), 2)
+                    self.assertEqual(len(set(buffers)), 1)
+                    self.assertGreater(buffers[0], 6)
+                else:
+                    self.assertEqual(buffers, [])
 
     def test_a_short_device_keeps_the_subspaces_on_the_host_or_the_former_test(self) -> None:
         from parsec_python.acceleration.SCF import kpoint_parallel

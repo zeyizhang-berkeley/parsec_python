@@ -585,6 +585,44 @@ class SwitchTests(unittest.TestCase):
         with mock.patch.object(soc_sectors, "MINIMUM_ENTRIES", whole_grid_spinor_entries(system)):
             self.assertEqual(resolve_soc_sectors("auto", system), ("kramers", ""))
 
+    def test_the_opt_in_takes_the_fourfold_split_from_its_floor_on(self) -> None:
+        # PARSEC_SOC_AUTO_FOURFOLD=auto (opt-in since 2026-11-22): fourfold from FOURFOLD_MINIMUM_ENTRIES on, also
+        # under --symmetry on; off (the default) keeps kramers at every size; a value it does not know is refused
+        from parsec_python.acceleration.SCF import soc_sectors
+
+        system, _ = _prepared([Atom("Au", [0.0, 0.0, 0.0])], iterations=1)
+        entries = whole_grid_spinor_entries(system)
+        self.assertEqual(soc_sectors.FOURFOLD_MINIMUM_ENTRIES, 1 << 26)
+        self.assertLess(entries, soc_sectors.FOURFOLD_MINIMUM_ENTRIES)
+        with mock.patch.dict(os.environ):
+            os.environ.pop(soc_sectors.FOURFOLD_SWITCH, None)
+            self.assertEqual(soc_sectors.soc_auto_fourfold_setting(), "off")
+            with mock.patch.object(soc_sectors, "MINIMUM_ENTRIES", entries // 2), mock.patch.object(
+                soc_sectors, "FOURFOLD_MINIMUM_ENTRIES", entries
+            ):
+                # the default keeps kramers above the fourfold floor too
+                self.assertEqual(resolve_soc_sectors("auto", system), ("kramers", ""))
+                self.assertEqual(resolve_soc_sectors("auto", system, forced=True), ("kramers", ""))
+        with mock.patch.dict(os.environ, {soc_sectors.FOURFOLD_SWITCH: "auto"}):
+            self.assertEqual(soc_sectors.soc_auto_fourfold_setting(), "auto")
+            with mock.patch.object(soc_sectors, "MINIMUM_ENTRIES", entries // 2):
+                self.assertEqual(resolve_soc_sectors("auto", system), ("kramers", ""))
+                with mock.patch.object(soc_sectors, "FOURFOLD_MINIMUM_ENTRIES", entries):
+                    self.assertEqual(resolve_soc_sectors("auto", system), ("fourfold", ""))
+                    self.assertEqual(resolve_soc_sectors("auto", system, forced=True), ("fourfold", ""))
+                    # explicit values stay their own routes
+                    for setting in ("off", "kramers", "on", "fourfold"):
+                        self.assertEqual(resolve_soc_sectors(setting, system), (setting, ""))
+                    with mock.patch.dict(os.environ, {soc_sectors.FOURFOLD_SWITCH: " OFF "}):
+                        self.assertEqual(resolve_soc_sectors("auto", system), ("kramers", ""))
+                        self.assertEqual(resolve_soc_sectors("auto", system, forced=True), ("kramers", ""))
+            with mock.patch.object(soc_sectors, "FOURFOLD_MINIMUM_ENTRIES", entries):
+                # the fourfold floor above the kramers floor in practice; below the kramers floor it decides alone
+                self.assertEqual(resolve_soc_sectors("auto", system), ("fourfold", ""))
+        with mock.patch.dict(os.environ, {soc_sectors.FOURFOLD_SWITCH: "kramers"}):
+            with self.assertRaisesRegex(ValueError, "auto or off"):
+                soc_sectors.soc_auto_fourfold_setting()
+
     def test_auto_below_the_floor_is_the_whole_grid(self) -> None:
         from parsec_python.acceleration.SCF import soc_sectors
 

@@ -26,6 +26,37 @@ _FLOAT_RE = re.compile(
 )
 _BARE_EXPONENT_RE = re.compile(r"(?<=[\d.])([-+]\d{3})$")
 
+PROJECTOR_TAIL_ENV = "PARSEC_PROJECTOR_TAIL"
+PROJECTOR_TAIL_DEFAULT = "off"
+
+
+def projector_tail_setting() -> str:
+    """``PARSEC_PROJECTOR_TAIL``: what a ``MARTINS_NEW`` table's projectors hold beyond its channel cutoffs.
+
+    ``off`` (default): the tabulated ``V_l - V_local`` at every radius, as ``pseudo.f90`` forms it.  ``nonloc.F90``
+    keeps the grid points up to ``rcore``, the first radial sample beyond the largest cutoff ``rc`` of the file's
+    pseudo-wavefunction headers, and drops the rest.  A table whose projector is not zero at ``rcore`` makes the
+    nonlocal energy jump whenever a grid point crosses that sphere: the energy is then not a continuous function of
+    the positions, and a force cannot follow its slope.  The tables converted from UPF files carry such a value (the
+    interpolation of ``V_l`` and ``V_local`` onto the denser PARSEC grid overshoots at ``rc``, where the UPF holds
+    ``V_l - V_local = 0`` exactly from ``rc`` on): 943 of the 1921 distinct tables of the package with projectors,
+    up to 5.7e-4 of the projector's maximum, among them the carbon table of the diamond examples (projector 1.6e-4 at
+    ``rcore``, 2e-5 of its maximum) and the PBE Cr table (2.1e-4).  At steps of 1e-3 bohr the energy slope then misses the force by 7.4e-5 Ry/bohr (diamond cell of eight
+    atoms, h 0.37) and 6.7e-4 Ry/bohr (Cr2, h 0.3), both with ``Cubic_Spline``.
+
+    ``auto``: ``V_l - V_local = 0`` beyond the largest channel cutoff of the file, as the norm-conserving construction
+    (and the UPF the table came from) has it, so that every projector is zero at ``rcore`` and the energy is
+    continuous.  Tables without channel cutoffs (FHI, ``MARTINS_OLD``) and tables whose difference is zero there
+    already are not changed (same bits).
+    """
+
+    import os
+
+    value = os.environ.get(PROJECTOR_TAIL_ENV, PROJECTOR_TAIL_DEFAULT).strip().lower() or PROJECTOR_TAIL_DEFAULT
+    if value not in ("auto", "off"):
+        raise ValueError(f"{PROJECTOR_TAIL_ENV} must be auto or off, not {value!r}")
+    return value
+
 
 def _numbers(text: str) -> list[float]:
     values = []
@@ -143,6 +174,31 @@ class ParsecPseudopotential:
             return float(self.radii[-1])
         return float(self.radii[-2])
 
+    @property
+    def projector_tail_radius(self) -> float | None:
+        """The largest channel cutoff ``rc`` of the pseudo-wavefunction headers of a ``MARTINS_NEW`` table, beyond
+        which ``PARSEC_PROJECTOR_TAIL=auto`` sets ``V_l - V_local`` to zero; ``None`` for a table without one cutoff
+        per channel or with ``Core_Cutoff_Radius`` (``MARTINS_OLD``)."""
+
+        if self.core_radius is not None or not self.channel_cutoffs:
+            return None
+        if not set(self.channel_potentials) <= set(self.channel_cutoffs):
+            return None
+        return float(max(self.channel_cutoffs.values()))
+
+    def potential_difference(self, potential: np.ndarray, local_l: int) -> np.ndarray:
+        """``potential - V_local``, the radial factor of a Kleinman-Bylander projector, with the tail rule of
+        :func:`projector_tail_setting`: under ``auto`` zero at every sample beyond :attr:`projector_tail_radius`."""
+
+        difference = np.asarray(potential, dtype=float) - self.channel_potentials[local_l]
+        radius = self.projector_tail_radius
+        if radius is None or projector_tail_setting() == "off":
+            return difference
+        beyond = self.radii > radius * (1.0 + 1.0e-9)
+        if not np.any(difference[beyond] != 0.0):
+            return difference
+        return np.where(beyond, 0.0, difference)
+
     def validate_local_channel(self, local_l: int) -> None:
         if local_l not in self.channel_potentials:
             available = ", ".join(str(value) for value in sorted(self.channel_potentials))
@@ -227,6 +283,12 @@ class ParsecPseudopotential:
             result[outside] = -2.0 * self.ionic_charge / radius[outside]
         return result
 
+    def density_spline(self, spline_padding_width: int, *, core: bool = False) -> ParsecRadialSpline:
+        """The cubic spline :meth:`interpolate_density` evaluates with ``use_spline`` (built from the table each time;
+        a caller that evaluates many batches passes it as ``spline``)."""
+        values = self.core_density if core else self.valence_density
+        return ParsecRadialSpline.from_positive_grid(self.radii, values, spline_padding_width)
+
     def interpolate_density(
         self,
         distances: np.ndarray,
@@ -234,11 +296,14 @@ class ParsecPseudopotential:
         core: bool = False,
         use_spline: bool = False,
         spline_padding_width: int | None = None,
+        spline: ParsecRadialSpline | None = None,
     ) -> np.ndarray:
         """Interpolate a stored atomic volume density and set its tail to zero.
 
         The optional spline uses PARSEC's origin padding, whose width is the
-        finite-difference stencil half-width ``Expansion_Order/2``.
+        finite-difference stencil half-width ``Expansion_Order/2``.  ``spline``,
+        if given, is that spline already built (:meth:`density_spline` of the
+        same table and width): the same values without rebuilding it.
         """
         radius = np.asarray(distances, dtype=float)
         values = self.core_density if core else self.valence_density
@@ -254,11 +319,12 @@ class ParsecPseudopotential:
             return result
         sample = radius[inside]
         if use_spline:
-            spline = ParsecRadialSpline.from_positive_grid(
-                self.radii,
-                values,
-                spline_padding_width,
-            )
+            if spline is None:
+                spline = ParsecRadialSpline.from_positive_grid(
+                    self.radii,
+                    values,
+                    spline_padding_width,
+                )
             result[inside] = spline(sample)
         else:
             result[inside] = np.interp(sample, self.radii, values, left=values[0])
@@ -280,9 +346,8 @@ class ParsecPseudopotential:
         if angular_momentum not in self.channel_potentials:
             raise ValueError(f"no potential channel for l={angular_momentum}")
 
-        delta_v = (
-            self.channel_potentials[angular_momentum]
-            - self.channel_potentials[local_l]
+        delta_v = self.potential_difference(
+            self.channel_potentials[angular_momentum], local_l
         )
         radial_wave = self.radial_wavefunctions[angular_momentum]
         denominator = parsec_radial_integral(
@@ -358,14 +423,13 @@ class ParsecPseudopotential:
 
         channel_v = self.channel_potentials[angular_momentum]
         so_raw = self.spin_orbit_channel_potentials[angular_momentum]
-        local_v = self.channel_potentials[local_l]
         radial_wave = self.radial_wavefunctions[angular_momentum]
 
         v_plus = channel_v + 0.5 * angular_momentum * so_raw
         v_minus = channel_v - 0.5 * (angular_momentum + 1) * so_raw
 
         def _normalize(v_j: np.ndarray) -> tuple[np.ndarray, float]:
-            delta_v = v_j - local_v
+            delta_v = self.potential_difference(v_j, local_l)
             denominator = parsec_radial_integral(
                 self.radii, radial_wave * radial_wave * delta_v
             )

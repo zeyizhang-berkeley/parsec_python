@@ -35,7 +35,10 @@ def _device_matrix(xp, matrix):
     import scipy.sparse as sp
     from cupyx.scipy import sparse as cpsparse
 
-    device = cpsparse.csr_matrix(sp.csr_matrix(matrix, dtype=np.float64))
+    from .complex_csr_device import ordered_device_matrix
+
+    # (PARSEC_ORDERED_SUMS=auto: products in a fixed order of summation)
+    device = ordered_device_matrix(cpsparse.csr_matrix(sp.csr_matrix(matrix, dtype=np.float64)))
     with _LOCK:
         _UPLOADS.insert(0, (device_id, matrix, device))
         del _UPLOADS[_KEPT:]

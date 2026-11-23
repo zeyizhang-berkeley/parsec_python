@@ -40,10 +40,24 @@ remaining structures as constraints) or on the full grid, from the potential and
 structure with a first filter (the subspace of other sectors does not carry over); a cell, and a second re-planning,
 take the full grid.  A NOTE in ``parsec.out`` says so.
 
-Not taken (the full grid as before): two spin channels, spinors, ``Ignore_Symmetry``, ``--symmetry off``, a run
-that switches the symmetry off for another reason too (point charges, a field, FDET with ``AFM_Scan``, fold
-blocks), ``Restart_From_Wfndat``, MPI, wires, slabs and k-points.  The MPI full-SCF runner keeps the full grid for
-these runs.
+Two spin channels take the sectors under ``PARSEC_MOVING_SPIN_SECTORS=auto`` (the default since 2026-11-22) as an
+unpolarized run does (the plan, the checks and the averages above, both channels in the sectors of the group of the
+labels), but for a start whose labels carry ``Initial_Spin_Polarization`` of both signs (an antiferromagnetic or
+broken-symmetry start), which keeps both channels on the full grid with a NOTE: the sectors of its labels can hold a
+symmetric state that two channels on the full grid leave (Fe2 and Co2 from ``+-0.8`` and ``+-0.7``: 10-28 mRy higher,
+forces up to 0.125 Ry/bohr apart, no guard fired); ``on`` takes those too.  The spin guard of every SCF loop leaves the
+sectors where it fires, as in a single point: weighted sectors go on to the abelian sectors of the group, or straight
+to the full grid where those would stop the same levels (``PARSEC_WEIGHTED_GUARD_SHORTCUT``), and abelian sectors to
+the full grid; the system is prepared again in place and the later structures keep what it holds.  A re-planned
+structure starts from the potentials of both channels.  ``off`` keeps both channels on the full grid, as before
+2026-11-22.
+Not taken (the full grid as before): spinors, ``Ignore_Symmetry``, ``--symmetry off``, a run that switches the
+symmetry off for another reason too (point charges, a field, FDET with ``AFM_Scan``, fold blocks),
+``Restart_From_Wfndat``, ``main.py --mpi``, wires, slabs and k-points.  The MPI full-SCF runner takes the same plan
+since 2026-11-22 on the layouts that hold one sector of the identity (``benchmarks/mpi_full_scf._moving_plan``): it
+prepares a structure that leaves the group again on every rank, in the sectors of the group the structure keeps or as
+that sector (``MPISectorContext.reprepare``); it kept that sector for every such run before, and keeps it for two spin
+channels (both channels as that sector, its basis shared by the ranks).
 Units bohr, Ry and atomic units of time.
 """
 
@@ -81,6 +95,50 @@ def moving_sectors_setting() -> str:
     if value not in {"auto", "on", "off"}:
         raise ValueError(f"{SWITCH} must be auto, on or off, not {value!r}")
     return value
+
+
+SPIN_SWITCH = "PARSEC_MOVING_SPIN_SECTORS"
+#: The value of ``PARSEC_MOVING_SPIN_SECTORS`` where none is named: ``auto`` (one A100 node, first runs, eleven structures
+#: of a breathing restart, the full grid of both channels -> the sectors: O2 triplet on 0.18 bohr, 1.9e7 points x states,
+#: 170.6 -> 60.1 s, 3.4e-9 Ry and 6.6e-7 Ry/bohr from the full grid; Si28H36 with two channels, 2.9e7, 51.8 -> 40.2 s,
+#: 3.2e-7 Ry (its criterion 1e-6) and 4.9e-7 Ry/bohr; the cation whose guard leaves the sectors at its first structure
+#: 53.1 -> 54.8 s with the trajectory of the full grid; the polarized XPS atoms and ions the same energies, 21-24 ->
+#: 18-19 s).  Antiferromagnetic labels keep the full grid under it (:data:`ANTIFERROMAGNETIC_REASON`).
+SPIN_DEFAULT = "auto"
+#: Why ``auto`` keeps a start whose labels carry ``Initial_Spin_Polarization`` of both signs on the full grid.  One A100
+#: node, a single point of ``Minimization: manual`` with forces (``Movement_Num: 0``), PBE, a sphere of 14 bohr at
+#: 0.25 bohr, both channels in the 8 sectors of C4v against the full grid: Fe2 at 3.8 bohr from ``+-0.8`` -78.62964813
+#: Ry converged against -78.64828958 (the full grid with the flip, converged) and -78.65719336 (unconverged), forces
+#: 0.125 Ry/bohr apart; Co2 at 3.9 bohr from ``+-0.7`` -105.79380344 against -105.80443025 (unconverged); the guard and
+#: the stability test of the flip saw neither.  (Cr2 at 3.6 bohr from ``+-0.8`` agreed: 98.2 -> 48.1 s for eleven
+#: structures on 0.25 bohr, energies within 1.1e-7 Ry, forces 4.5e-6 Ry/bohr; ``on`` takes such starts.)
+ANTIFERROMAGNETIC_REASON = (
+    "antiferromagnetic labels (Initial_Spin_Polarization of both signs: the sectors of the labels can hold a symmetric "
+    f"state that two channels on the full grid leave; {SPIN_SWITCH}=on takes them)"
+)
+
+
+def moving_spin_sectors_setting() -> str:
+    """``PARSEC_MOVING_SPIN_SECTORS``: ``auto`` (the default since 2026-11-22: the molecular dynamics and manual movements
+    of two spin channels take the sectors as an unpolarized run does under ``PARSEC_MOVING_SECTORS``, both channels in
+    the sectors of the group with the spin guard of every SCF loop, but for antiferromagnetic labels, which keep the full
+    grid: :data:`ANTIFERROMAGNETIC_REASON`), ``on`` (antiferromagnetic labels too) or ``off`` (both channels on the full
+    grid, as before 2026-11-22)."""
+
+    value = os.environ.get(SPIN_SWITCH, SPIN_DEFAULT).strip().lower() or SPIN_DEFAULT
+    if value not in {"auto", "on", "off"}:
+        raise ValueError(f"{SPIN_SWITCH} must be auto, on or off, not {value!r}")
+    return value
+
+
+def antiferromagnetic_labels(problem) -> bool:
+    """Whether the labels of the atoms of ``problem`` carry ``Initial_Spin_Polarization`` of both signs."""
+
+    species = getattr(problem, "pseudopotentials", {}) or {}
+    values = [
+        float(getattr(species.get(atom.symbol), "initial_spin_polarization", 0.0) or 0.0) for atom in problem.atoms
+    ]
+    return bool(values) and min(values) < 0.0 < max(values)
 
 
 #: Points of the full grid of a cluster times its states from which ``PARSEC_MOVING_SECTORS=auto`` takes the sectors,
@@ -299,6 +357,37 @@ def fortran_fixed_atoms_lifted(translation, *, mpi_requested: bool = False, symm
     return cell_below_floor(problem) is None
 
 
+RUNNER_FORTRAN_FIXED_SWITCH = "PARSEC_RUNNER_FORTRAN_FIXED_SECTORS"
+
+
+def runner_fortran_fixed_setting() -> str:
+    """``PARSEC_RUNNER_FORTRAN_FIXED_SECTORS``: ``auto`` (default, since 2026-11-22) or ``off``.
+
+    ``auto``: the full-SCF runner (``acceleration/benchmarks/mpi_full_scf.py``) takes a relaxation (``bfgs``,
+    ``simple``) of a periodic cell on the Fortran-derived routines with atoms fixed by ``Move_Flag``
+    (:func:`fortran_fixed_relaxation`) in the sectors of the subgroup that maps the fixed atoms onto fixed atoms, as
+    it takes those of the default routines, the ranks dividing the sectors, whatever their number (main.py in one
+    process keeps such a relaxation on the full grid below the floor of the sectors and for fewer than
+    :data:`MOVING_CELL_MINIMUM_ORDER` operations, :func:`fortran_fixed_atoms_lifted`; the runner has no full grid to
+    fall back to); not under ``PARSEC_MOVING_SECTORS=off``.  ``off``: refused by name, as before (main.py runs it)."""
+
+    value = os.environ.get(RUNNER_FORTRAN_FIXED_SWITCH, "auto").strip().lower() or "auto"
+    if value not in {"auto", "off"}:
+        raise ValueError(f"{RUNNER_FORTRAN_FIXED_SWITCH} must be auto or off, not {value!r}")
+    return value
+
+
+def runner_fortran_fixed_atoms(translation) -> bool:
+    """Whether the full-SCF runner takes ``translation`` in the sectors of the subgroup of its fixed atoms
+    (:func:`runner_fortran_fixed_setting`): a relaxation of :func:`fortran_fixed_relaxation` under ``auto``, with
+    ``PARSEC_MOVING_SECTORS`` other than ``off``.  The same answer on every rank (the input and the switches)."""
+
+    setting = runner_fortran_fixed_setting()
+    if setting == "off" or moving_sectors_setting() == "off":
+        return False
+    return fortran_fixed_relaxation(translation)
+
+
 def fortran_fixed_relaxation(translation) -> bool:
     """Whether ``translation`` is the relaxation (``bfgs``, ``simple``) of a periodic cell on the Fortran-derived
     routines with atoms fixed by ``Move_Flag``, the run :func:`fortran_fixed_atoms_lifted` is about."""
@@ -351,6 +440,8 @@ def plan_moving_sectors(
     """
 
     setting = moving_sectors_setting()
+    # (read in every run, so that a value it does not know is refused)
+    spin_setting = moving_spin_sectors_setting()
     kind = _kind(translation)
     if kind is None or setting == "off":
         return None, None
@@ -358,6 +449,14 @@ def plan_moving_sectors(
     scf = problem.scf
     reasons = set(getattr(translation, "symmetry_off_reasons", ()) or ())
     others = sorted(reasons - {kind if kind == "molecular_dynamics" else "manual"})
+    # Two spin channels that the driver keeps on the full grid in one process (Spin_Symmetry_Sectors: off,
+    # PARSEC_CUPY_DISTRIBUTED_FILTER=1, ...: driver._spin_sector_refusal) plan the full grid here as well, so that
+    # parsec.out does not announce sectors that the preparation then drops (the same route and bits either way).
+    spin_full_grid = None
+    if bool(getattr(scf, "spin_polarized", False)) and spin_setting != "off" and not mpi_requested:
+        from ..driver import _spin_sector_refusal
+
+        spin_full_grid = _spin_sector_refusal(problem)
     for condition, reason in (
         (symmetry_argument == "off", "--symmetry off"),
         (bool(getattr(translation, "ignore_symmetry", False)), "Ignore_Symmetry"),
@@ -369,7 +468,16 @@ def plan_moving_sectors(
         ),
         (bool(getattr(problem, "point_charges", ())), "point charges"),
         (getattr(translation, "polarizability_field", None) is not None, "Polarizability"),
-        (bool(getattr(scf, "spin_polarized", False)), "two spin channels"),
+        # (PARSEC_MOVING_SPIN_SECTORS=auto takes them as the unpolarized runs)
+        (bool(getattr(scf, "spin_polarized", False)) and spin_setting == "off", "two spin channels"),
+        (
+            bool(getattr(scf, "spin_polarized", False)) and spin_setting == "auto" and antiferromagnetic_labels(problem),
+            ANTIFERROMAGNETIC_REASON,
+        ),
+        (
+            spin_full_grid is not None,
+            f"two spin channels whose SCF keeps the full grid ({spin_full_grid})",
+        ),
         (
             bool(getattr(scf, "self_consistent_spin_orbit", False) or getattr(scf, "noncollinear", False)),
             "spinors",
@@ -709,10 +817,23 @@ class MovingSectors:
 
             # parsec.F90 after domove (the last mixed potential with the ionic potential exchanged, the last Hartree
             # potential), without the subspace of the sectors of before: a first filter
+            new = np.asarray(system.ionic_potential, dtype=np.float64)
+            channels = getattr(previous_result, "spin", None)
+            if channels is not None:
+                # two spin channels (PARSEC_MOVING_SPIN_SECTORS=auto): the potential of each, no subspace of either
+                start = SCFWarmStart(
+                    input_potential=tuple(
+                        np.asarray(channel.next_effective_potential, dtype=np.float64) - old + new
+                        for channel in channels
+                    ),
+                    hartree_potential=np.asarray(previous_result.hartree_potential, dtype=np.float64),
+                    eigensolver_state=(None, None),
+                )
+                return meta_gga_warm_start(start, previous_result)
             start = SCFWarmStart(
                 input_potential=np.asarray(previous_result.next_effective_potential, dtype=np.float64)
                 - old
-                + np.asarray(system.ionic_potential, dtype=np.float64),
+                + new,
                 hartree_potential=np.asarray(previous_result.hartree_potential, dtype=np.float64),
                 eigensolver_state=None,
             )
@@ -785,9 +906,14 @@ class MovingSectors:
 __all__ = [
     "MOVING_CELL_MINIMUM_ORDER",
     "MOVING_SECTOR_WORK",
+    "ANTIFERROMAGNETIC_REASON",
+    "SPIN_SWITCH",
+    "antiferromagnetic_labels",
+    "moving_spin_sectors_setting",
     "MovingPlan",
     "MovingSectors",
     "PSEUDO_ATOM_OFFSET",
+    "RUNNER_FORTRAN_FIXED_SWITCH",
     "SWITCH",
     "cell_below_floor",
     "check_structure",
@@ -799,6 +925,8 @@ __all__ = [
     "keeping_operations",
     "moving_sectors_setting",
     "plan_moving_sectors",
+    "runner_fortran_fixed_atoms",
+    "runner_fortran_fixed_setting",
     "sector_reduction",
     "structure_operations",
     "vector_constraints",

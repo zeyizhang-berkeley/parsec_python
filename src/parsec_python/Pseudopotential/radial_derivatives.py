@@ -58,6 +58,120 @@ _LOCAL_DERIVATIVE_NOISE_RADIUS = 3.0e-4
 #: this index of the positive radial samples (a table of at least seven).
 _TAIL_START_INDEX = -7
 
+#: The switch of the radial slopes of the forces for tables the energy interpolates linearly
+#: (:func:`linear_slope_setting`).
+LINEAR_SLOPES_ENV = "PARSEC_LINEAR_TABLE_SLOPES"
+LINEAR_SLOPES = ("tabulated", "interpolant")
+
+
+def linear_slope_setting() -> str:
+    """``PARSEC_LINEAR_TABLE_SLOPES``: how forces differentiate a radial table that the energy interpolates linearly.
+
+    A species without ``Cubic_Spline`` (PARSEC's default) samples its local potential (``r V``), its core density
+    and its projectors by linear interpolation between the radial samples, so the energy is piecewise smooth in the
+    atom positions.
+
+    * ``tabulated`` (default): the slope tables of ``pseudo.f90`` (a central difference of eighteenth order on the
+      logarithmic grid), interpolated linearly, as ``forcloc.f90`` and ``forcnloc.F90`` use them: the forces of
+      PARSEC 1.5 to round-off, but not the derivative of the energy the run evaluates.
+    * ``interpolant``: the slope of the linear interpolant the energy samples (the exact derivative of the computed
+      energy, except within 3e-3 bohr of a grid point, where ``PARSEC_PROJECTOR_CENTER=auto`` takes the projector
+      gradient at that distance: there the nonlocal term misses the derivative by up to 2.6e-2 Ry/bohr on an Ag
+      table; exact under ``tip``), the radial slopes the Fortran-derived routines of a cell take already
+      (``PARSEC_PERIODIC_FORCE_SLOPES``).  The local forces of a cluster are then summed by the readable routine on
+      the host instead of the device kernel (``acceleration/Forces/compute.py``): a molecular dynamics run takes about
+      twice the wall time.
+
+    It applies to the local potential and the atomic densities of clusters, wires and slabs, to the core density of
+    the default routines of a cell, and to the projectors of clusters, wires, slabs, the double grid and of the
+    default routines of a cell (Gamma point, k-point meshes, the scalar part of spin-orbit runs).  ``Cubic_Spline``
+    species are not affected (their slopes are the spline derivatives), nor are the periodic local potentials of the
+    default routines (always the spline) or the Fortran-derived routines of a cell (``PARSEC_PERIODIC_FORCE_SLOPES``).
+    """
+
+    import os
+
+    value = os.environ.get(LINEAR_SLOPES_ENV, "tabulated").strip().lower() or "tabulated"
+    if value not in LINEAR_SLOPES:
+        raise ValueError(f"{LINEAR_SLOPES_ENV} must be one of " + ", ".join(LINEAR_SLOPES) + f", not {value!r}")
+    return value
+
+
+def interpolant_slope(points: np.ndarray, knots: np.ndarray, values: np.ndarray) -> np.ndarray:
+    """Derivative of ``np.interp(points, knots, values)`` (constant outside).
+
+    The slope of the segment ``[knots[j], knots[j+1])`` that contains each
+    point, the segment ``np.interp`` itself uses; zero below the first and
+    from the last knot on, where ``np.interp`` continues the end values.
+    """
+
+    x = np.asarray(points, dtype=float)
+    knots = np.asarray(knots, dtype=float)
+    values = np.asarray(values, dtype=float)
+    segment = np.searchsorted(knots, x, side="right") - 1
+    valid = (segment >= 0) & (segment < knots.size - 1)
+    slope = np.zeros_like(x)
+    if np.any(valid):
+        lower = segment[valid]
+        slope[valid] = (values[lower + 1] - values[lower]) / (knots[lower + 1] - knots[lower])
+    return slope
+
+
+def linear_projector_slope(
+    distances: np.ndarray,
+    radii: np.ndarray,
+    projector: np.ndarray,
+    tabulated: np.ndarray,
+    slopes: str,
+) -> np.ndarray:
+    """Radial slope of a projector the energy samples as ``np.interp(distances, radii, projector, right=0.0)``.
+
+    ``slopes="tabulated"``: ``dvw`` of ``pseudo.f90`` (``tabulated``) interpolated linearly, as ``nonloc.F90``;
+    ``"interpolant"``: the slope of the interpolant itself (zero below the first and beyond the last sample).
+    """
+
+    if slopes == "interpolant":
+        return interpolant_slope(distances, radii, projector)
+    return np.interp(distances, radii, tabulated, right=0.0)
+
+
+def linear_local_potential_slope(
+    potential: ParsecPseudopotential,
+    distances: np.ndarray,
+    local_l: int,
+    *,
+    direct: bool = False,
+) -> np.ndarray:
+    """``dV/dr`` of the linear branches of :meth:`ParsecPseudopotential.local_potential`.
+
+    With ``p`` the linear interpolant of ``r V``, ``V = p/r`` and the slope is ``(p'(r) - p(r)/r)/r``; ``direct``
+    (``Old_Interpolation_Format``) interpolates ``V`` itself.  Zero at and below the first sample, where the value
+    is constant, and the Coulomb slope ``2Z/r^2`` from ``rs(ns-1)`` on, where the potential is ``-2Z/r``.
+    """
+
+    radius = np.asarray(distances, dtype=float)
+    values = potential.channel_potentials[local_l]
+    radii = potential.radii
+    result = np.zeros_like(radius)
+    inside = radius < potential.interpolation_cutoff
+    outside = ~inside
+    result[outside] = 2.0 * potential.ionic_charge / (radius[outside] * radius[outside])
+    if not np.any(inside):
+        return result
+    sample = radius[inside]
+    if direct:
+        result[inside] = interpolant_slope(sample, radii, values)
+        return result
+    slope = np.zeros_like(sample)
+    beyond = sample > radii[0]
+    if np.any(beyond):
+        r = sample[beyond]
+        weighted = radii * values
+        interpolated = np.interp(r, radii, weighted)
+        slope[beyond] = (interpolant_slope(r, radii, weighted) - interpolated / r) / r
+    result[inside] = slope
+    return result
+
 
 def _stencil_range(count: int) -> tuple[int, int]:
     """First and one-past-last file sample with a complete PARSEC stencil.
@@ -192,9 +306,8 @@ def radial_projector_with_derivative(
             )
         return projector, np.array(slopes[angular_momentum], dtype=float), sign
     projector, sign = potential.radial_projector(angular_momentum, local_l)
-    delta_v = (
-        potential.channel_potentials[angular_momentum]
-        - potential.channel_potentials[local_l]
+    delta_v = potential.potential_difference(
+        potential.channel_potentials[angular_momentum], local_l
     )
     radial_wave = potential.radial_wavefunctions[angular_momentum]
     denominator = parsec_radial_integral(
@@ -250,6 +363,113 @@ def spline_derivative(spline: ParsecRadialSpline, points: np.ndarray) -> np.ndar
     )
 
 
+#: The switch of the radial slopes of the local potential and the core density next to an atom
+#: (:func:`spline_force_center_setting`).
+SPLINE_FORCE_CENTER_ENV = "PARSEC_SPLINE_FORCE_CENTER"
+
+#: Bohr: under ``PARSEC_SPLINE_FORCE_CENTER=auto`` a table whose first radial sample ``rs(2)`` lies below this distance
+#: gives the grid points closer to its atom than ``c = 2 rs(2)`` the slope of the smooth behaviour
+#: (:func:`smooth_center_radius`).  At or beyond it (the H and He FHI tables, first sample 6.25e-3 bohr, and coarse
+#: test tables) steps of 1e-3 and 2e-3 bohr resolve the padded first interval ``[0, rs(2)]``: the energy follows the
+#: spline there, and the table keeps the slopes of its route.  H FHI at fixed density, an atom 1e-11 to 1.4e-2 bohr
+#: from a grid point (CPU): with the rule (``c`` = 1.25e-2 bohr) the local term was up to 3.4e-5 Ry/bohr off the
+#: central differences of the local energy at steps of 1e-3 and 2e-3 bohr, against 2.3e-5 with the spline slope
+#: (Fortran-derived routines of a cell); the ``forcloc.f90`` skip of clusters is 4.3e-5 off at 6e-3 bohr.  The limit
+#: of the projector rule (``V_ion.ionic_potential.PROJECTOR_GRADIENT_FLOOR``).
+SMOOTH_CENTER_TABLE_LIMIT = 3.0e-3
+
+
+def spline_force_center_setting() -> str:
+    """``PARSEC_SPLINE_FORCE_CENTER``: the radial slopes of the local potential and of the core density in the local
+    forces at grid points next to an atom, on every route (clusters, wires, slabs and both routine sets of a cell).
+
+    The energy samples the local potential and the core density at the grid points.  Below its first radial sample
+    ``rs(2)`` a table has no data: the padded cubic spline of a ``Cubic_Spline`` table continues the first value to the
+    origin, takes a slope of its own there (carbon POTRE 3.6e-3 Ry/bohr, first radial sample 1.3e-5 bohr; FHI tables
+    Si 0.035 (4.5e-4 bohr), Mg 3.4e-3, O 0.73, C 0.42 (1.04e-3 bohr)) and relaxes to the table over the first
+    intervals.  Over a step of 1e-3 bohr the energy averages that interval out when it is narrower than the step (the
+    FHI tables, whose first samples lie at 4.5e-4 to 1.25e-3 bohr) and follows the smooth behaviour ``V(0) + a r^2``,
+    whose slope ``2 a d`` is neither the slope of the spline at the point nor the zero of ``forcloc.f90``'s skip.
+
+    * ``auto`` (default since 2026-11-22): every grid point closer to its atom than ``c = 2 rs(2)``
+      (:func:`smooth_center_radius`) takes the slope of the smooth behaviour, ``s(c) d/c`` with ``s`` the slope the
+      route takes at ``c`` (the derivative of the spline or of the linear interpolant, or the interpolated slope table
+      of ``pseudo.f90``), so ``s/d`` is the constant ``s(c)/c`` there and joins the slope of the route continuously at
+      ``c``.  Farther points keep the slope of their route, bit for bit, so a table sampled down to the origin (POTRE:
+      ``rs(2)`` 4e-7 to 8e-5 bohr) keeps its own slope beyond ``2 rs(2)``.  Tables whose first sample lies at or beyond
+      3e-3 bohr keep ``tip`` (:data:`SMOOTH_CENTER_TABLE_LIMIT`).  A deliberate departure from PARSEC 1.5
+      (``forcloc.f90`` leaves the points closer than ``rs(2)`` out); the energies do not change.
+    * ``tip``: the forces as of 2026-11-21: on the Fortran-derived routines of a cell the spline slopes at every
+      point farther than ``min(rs(2), 1e-6 bohr)`` (the exact derivative of the energy at the point, cone included),
+      on the default routines of a cell, clusters, wires and slabs the rule of ``forcloc.f90`` (the points closer
+      than ``rs(2)`` left out).  Between 1e-6 bohr and ``rs(2)`` the Fortran-derived forces are then off the slope of
+      the energy over realistic steps by about ``V'(0+)`` times the density at the point (8-9e-4 Ry/bohr for carbon
+      FHI at 1e-6 to 5e-4 bohr from a grid point), and the ``forcloc.f90`` rule by ``2 a d`` times it.
+    * ``fortran``: the rule of ``forcloc.f90`` on the Fortran-derived routines as well (as ``tip`` elsewhere).
+    * ``off``: the spline slope at every positive distance on the Fortran-derived routines, as before 2026-11-21 (an
+      atom within round-off of a grid point took the slope of the cone in a random direction); as ``tip`` elsewhere.
+    """
+
+    import os
+
+    value = os.environ.get(SPLINE_FORCE_CENTER_ENV, "auto").strip().lower() or "auto"
+    if value not in ("auto", "tip", "fortran", "off"):
+        raise ValueError(f"{SPLINE_FORCE_CENTER_ENV} must be auto, tip, fortran or off, not {value!r}")
+    return value
+
+
+def smooth_center_radius(potential: ParsecPseudopotential, setting: str) -> float:
+    """``c`` of the rule of ``PARSEC_SPLINE_FORCE_CENTER=auto`` for ``potential``, ``0.0`` where it does not apply.
+
+    ``2 rs(2)`` under ``auto`` for a table whose first radial sample ``rs(2)`` lies below
+    :data:`SMOOTH_CENTER_TABLE_LIMIT`; ``0.0`` (no rule) under the other values and for coarser tables.  The rule
+    reaches the padded first interval of the table and as far again, where the spline still relaxes from its padding.
+
+    The radius was chosen at fixed density between ``2 rs(2)`` and ``max(2 rs(2), 1.5e-3 bohr)`` (they differ for the
+    Si and Mg FHI tables and the POTRE tables): the local term of an atom 1e-11 to 3e-3 bohr from a grid point against
+    the central differences of the local energy at steps of 1e-3 and 2e-3 bohr, C, O, N, B, Si, Mg FHI and C, Ge, Au
+    POTRE tables, clusters and the Fortran-derived routines of a cell (CPU, 234 positions).  The two steps disagree
+    wherever ``V'(r)/r`` changes between 1e-3 and 2e-3 bohr (carbon POTRE: -813 to -796 Ry/bohr^2, 2.4e-5 Ry/bohr;
+    oxygen FHI up to 1.5e-4).  The wider radius sits between the two steps and is closer to the worse of them
+    (summed 5.50e-3 against 5.69e-3 Ry/bohr; ``tip`` 9.59e-2), ``2 rs(2)`` is closer to their extrapolation to zero step
+    ``(4 F(1e-3) - F(2e-3))/3`` (4.22e-3 against 4.32e-3; ``tip`` 9.10e-2), and only ``2 rs(2)`` keeps the own slope
+    of the tables sampled to the origin beyond their first intervals (carbon POTRE 5e-4 bohr from a grid point: 3.0e-6
+    off that extrapolation with its own slope, 1.6e-5 with the wider radius).  The core terms (B, Mg FHI, Ge POTRE) are
+    within 5e-7 Ry/bohr of the central differences with either radius.
+    """
+
+    if setting != "auto":
+        return 0.0
+    first = float(potential.radii[0])
+    if first >= SMOOTH_CENTER_TABLE_LIMIT:
+        return 0.0
+    return 2.0 * first
+
+
+def with_smooth_center(slope_of, distances: np.ndarray, radius: float) -> np.ndarray:
+    """``slope_of(distances)`` with the values of the distances below ``radius`` replaced by ``slope_of(radius) d/radius``.
+
+    ``slope_of`` maps an array of distances to the slopes of a route; ``radius`` is :func:`smooth_center_radius`
+    (``0.0``: ``slope_of(distances)`` itself).
+    """
+
+    distance = np.asarray(distances, dtype=float)
+    slope = slope_of(distance)
+    if radius <= 0.0 or not np.any(distance < radius):
+        return slope
+    return apply_smooth_center(slope, distance, radius, slope_of(np.array([float(radius)])))
+
+
+def apply_smooth_center(slope: np.ndarray, distances: np.ndarray, radius: float, slope_at_radius) -> np.ndarray:
+    """:func:`with_smooth_center` for a caller that has the slopes and the slope at ``radius`` already."""
+
+    if radius <= 0.0:
+        return slope
+    distance = np.asarray(distances, dtype=float)
+    at_radius = float(np.asarray(slope_at_radius, dtype=float).reshape(-1)[0])
+    return np.where(distance < radius, (at_radius / radius) * distance, slope)
+
+
 def evaluate_local_potential_derivative(
     potential: ParsecPseudopotential,
     distances: np.ndarray,
@@ -259,6 +479,8 @@ def evaluate_local_potential_derivative(
     use_spline: bool = False,
     spline_padding_width: int | None = None,
     direct: bool = False,
+    center: float = 0.0,
+    slopes: str = "tabulated",
 ) -> np.ndarray:
     """dV_local/dr at ``distances`` with the rules of ``forcloc.f90``.
 
@@ -269,11 +491,38 @@ def evaluate_local_potential_derivative(
     interpolates ``dV/dr`` itself (``Old_Interpolation_Format``,
     ``forcloc.f90:201-203``); with ``use_spline`` it is the derivative of
     the padded cubic spline of the potential, whichever of the two is set.
+    ``center`` (:func:`smooth_center_radius`, ``PARSEC_SPLINE_FORCE_CENTER=auto``): the distances below it take the
+    slope of the smooth behaviour, ``s(center) d/center`` (:func:`with_smooth_center`).
+
+    ``slopes="interpolant"`` (:func:`linear_slope_setting`) replaces the two
+    linear branches by the slope of the potential the energy samples
+    (:func:`linear_local_potential_slope`, with its Coulomb tail from
+    ``rs(ns-1)``); points closer than the first sample still return zero.
+    A linear table under ``slopes="interpolant"`` keeps that exact slope next to the atom too: ``center`` is not
+    applied to it (the smooth behaviour of ``PARSEC_SPLINE_FORCE_CENTER`` replaces the slopes of a route; the
+    interpolant is the derivative of the energy itself).
     """
 
+    if center > 0.0 and not (slopes == "interpolant" and not use_spline):
+        return with_smooth_center(
+            lambda points: evaluate_local_potential_derivative(
+                potential,
+                points,
+                local_l,
+                table=table,
+                use_spline=use_spline,
+                spline_padding_width=spline_padding_width,
+                direct=direct,
+                slopes=slopes,
+            ),
+            distances,
+            center,
+        )
     radius = np.asarray(distances, dtype=float)
     radii = potential.radii
     result = np.zeros_like(radius)
+    if slopes == "interpolant" and not use_spline:
+        return linear_local_potential_slope(potential, radius, local_l, direct=direct)
     # forcloc.f90:180-188: a point closer than rs(2) is skipped before the
     # tail test (which matters only where the tail starts inside rs(2)).
     tail = (radius >= tail_start_radius(potential)) & (radius >= radii[0])
@@ -307,17 +556,45 @@ def evaluate_density_derivative(
     table: np.ndarray | None = None,
     use_spline: bool = False,
     spline_padding_width: int | None = None,
+    center: float = 0.0,
+    slopes: str = "tabulated",
 ) -> np.ndarray:
     """d(rho_atom)/dr at ``distances`` with the rules of ``forcloc.f90``.
 
     Zero closer than the first radial sample and from ``rs(npoint-6)``
     outwards; linear interpolation of the derivative table in between, or
-    the derivative of the padded cubic spline of ``density``.
+    the derivative of the padded cubic spline of ``density``.  ``center`` as in
+    :func:`evaluate_local_potential_derivative` (the core density; the valence density of the self-consistency term
+    is called without it), not applied under ``slopes="interpolant"`` without a spline.
+
+    ``slopes="interpolant"`` (:func:`linear_slope_setting`, no spline): the
+    slope of the linear interpolant of ``density`` that
+    :func:`parsec_python.V_ion.superpose_atomic_density` samples, zero below
+    the first sample and from ``rs(ns-1)`` on, where the density is dropped.
     """
 
+    if center > 0.0 and not (slopes == "interpolant" and not use_spline):
+        return with_smooth_center(
+            lambda points: evaluate_density_derivative(
+                potential,
+                points,
+                density,
+                table=table,
+                use_spline=use_spline,
+                spline_padding_width=spline_padding_width,
+                slopes=slopes,
+            ),
+            distances,
+            center,
+        )
     radius = np.asarray(distances, dtype=float)
     radii = potential.radii
     result = np.zeros_like(radius)
+    if slopes == "interpolant" and not use_spline:
+        inside = (radius >= radii[0]) & (radius < potential.interpolation_cutoff)
+        if np.any(inside):
+            result[inside] = interpolant_slope(radius[inside], radii, np.asarray(density, dtype=float))
+        return result
     inner = (radius >= radii[0]) & (radius < tail_start_radius(potential))
     if not np.any(inner):
         return result
@@ -339,13 +616,25 @@ def evaluate_density_derivative(
 __all__ = [
     "DERIVATIVE_HALF_WIDTH",
     "FIRST_DERIVATIVE_WEIGHTS",
+    "SMOOTH_CENTER_TABLE_LIMIT",
+    "SPLINE_FORCE_CENTER_ENV",
+    "apply_smooth_center",
     "density_derivative_table",
     "evaluate_density_derivative",
     "evaluate_local_potential_derivative",
+    "interpolant_slope",
+    "LINEAR_SLOPES",
+    "LINEAR_SLOPES_ENV",
+    "linear_local_potential_slope",
+    "linear_projector_slope",
+    "linear_slope_setting",
     "local_potential_derivative_table",
     "log_grid_derivative",
     "radial_projector_with_derivative",
+    "smooth_center_radius",
     "spline_derivative",
+    "spline_force_center_setting",
     "tail_start_radius",
     "valence_density_table",
+    "with_smooth_center",
 ]

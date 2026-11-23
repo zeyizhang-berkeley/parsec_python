@@ -13,7 +13,9 @@ converges in 14-15 iterations (A100: 7.7 s against 25 s for the 200), and so do 
 the cut level holds nothing.  PARSEC 1.5 has no such test.
 
 :func:`truncated_states_note` writes the note that ``parsec.out`` prints after ``Maximum SCF iterations reached
-without convergence.``; it changes nothing in the calculation.
+without convergence.``; it changes nothing in the calculation, under every value of ``PARSEC_STATES_CLOSE_MULTIPLET``,
+whose opt-in ``auto`` lets a loop on the full grid that stalls so take the levels of the eigensolver's buffer
+(:mod:`parsec_python.SCF.state_extension`).
 """
 
 from __future__ import annotations

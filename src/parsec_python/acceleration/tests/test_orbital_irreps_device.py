@@ -5,8 +5,9 @@ group about the origin (Td) and with its translations (Fd-3m modulo the cube, 19
 ``split``): the SCF energies, the occupied levels and the forces of the units equal those of the weighted sectors of
 before (``off``), also on a coarse grid with a high first-filter degree, whose rounding takes the states off the
 range of the projectors.  The projector of a unit applied on the device equals the host tables; states that round
-off the range, and orthonormalized bases with columns drawn for dependent ones, are projected back; a first solve
-that the units cannot take (CHEBDAV) is refused before the SCF.
+off the range, and orthonormalized bases with columns drawn for dependent ones, are projected back; CHEBDAV first
+solves give the energies of the sectors of before, and a first solve that the units cannot take (ARPACK) is refused
+before the SCF.
 """
 
 from __future__ import annotations
@@ -230,6 +231,53 @@ class DeviceProjectionTests(unittest.TestCase):
         self.assertIs(orthonormal_in_unit(SimpleNamespace(), drawn, None), drawn.basis)
         self.assertEqual(projection.applications, 0)
 
+    def test_chebdav_keeps_a_unit_in_its_range(self) -> None:
+        # H = A (x) J+ + B (x) J- commutes with the projector onto pairs of equal entries (J+ on each pair); the
+        # levels of B, outside the unit, lie below those of A, so the filter amplifies them most in every random
+        # start and candidate block.  CHEBDAV on the unit finds the lowest levels of A with vectors in the range;
+        # the operator without a projector, the route of a sector solved whole, those of the whole matrix.
+        import cupy as cp
+        import cupyx.scipy.sparse as device_sparse
+        import scipy.sparse as sp
+
+        from parsec_python.Eigensolvers import ChebDavSettings
+        from parsec_python.acceleration.Eigensolvers.chebdav import run_chebdav
+
+        pairs = 300
+        projection, partner = _pair_projection(2 * pairs)
+        rng = np.random.default_rng(4)
+        laplacian = sp.diags([-1.0, 2.0, -1.0], [-1, 0, 1], shape=(pairs, pairs))
+        inside = laplacian + sp.diags(rng.uniform(0.0, 0.5, pairs))
+        outside = laplacian + sp.diags(rng.uniform(-1.0, -0.5, pairs))
+        matrix = (sp.kron(inside, 0.5 * np.array([[1.0, 1.0], [1.0, 1.0]]))
+                  + sp.kron(outside, 0.5 * np.array([[1.0, -1.0], [-1.0, 1.0]]))).tocsr()
+
+        class Operator:
+            dtype = np.float64
+
+            def __init__(self, unit_projection) -> None:
+                self.matrix = device_sparse.csr_matrix(matrix)
+                self.shape = matrix.shape
+                self.irrep_projection = unit_projection
+
+            def __matmul__(self, vectors):
+                return self.matrix @ vectors
+
+        wanted = 20
+        settings = ChebDavSettings(polynomial_degree=20, convergence_tolerance=1.0e-10)
+        solved = run_chebdav(Operator(projection), wanted, settings=settings)
+        vectors = cp.asnumpy(solved.vectors)
+        # (the highest states that CHEBDAV does not lock come from its approximate cleanup, to about 1e-6)
+        exact = np.linalg.eigvalsh(inside.toarray())[:wanted]
+        np.testing.assert_allclose(cp.asnumpy(solved.eigenvalues)[:15], exact[:15], rtol=0, atol=1e-8)
+        np.testing.assert_allclose(cp.asnumpy(solved.eigenvalues), exact, rtol=0, atol=2e-6)
+        np.testing.assert_allclose(vectors[partner], vectors, rtol=0, atol=1e-10)
+        np.testing.assert_allclose(vectors.T @ vectors, np.eye(wanted), rtol=0, atol=1e-10)
+        self.assertGreater(projection.applications, 1)
+        whole = run_chebdav(Operator(None), wanted, settings=settings)
+        np.testing.assert_allclose(cp.asnumpy(whole.eigenvalues), np.linalg.eigvalsh(matrix.toarray())[:wanted],
+                                   rtol=0, atol=2e-6)
+
 
 @unittest.skipUnless(_available(), "CUDA runtime or native extension is unavailable")
 class UnitSCFTests(unittest.TestCase):
@@ -312,14 +360,41 @@ class UnitSCFTests(unittest.TestCase):
         np.testing.assert_allclose(units[1].total, before[1].total, rtol=0, atol=1.0e-8)
         self.assert_same(units, reference, "Ge5 coarse once, degree 90 against 30")
 
-    def test_chebdav_is_refused_before_the_scf(self) -> None:
+    def test_chebdav_first_solves(self) -> None:
+        # CHEBDAV (the input default) projects every block it filters, the random start and candidates included, and
+        # keeps each appended block in the range after its orthonormalization: the units on the rows of their sectors
+        # and on partner rows give the energies, levels and forces of the sectors of before with the same solver.
         from parsec_python.acceleration import driver
 
         problem = replace(self.ge5, eigensolver=replace(self.ge5.eigensolver, method="chebdav"))
+        before = _run(problem, {"PARSEC_ORBITAL_IRREPS": "off"})
+        for mode, rows in (("once", "sector"), ("split", "sector"), ("once", "partner")):
+            with self.subTest(mode=mode, rows=rows):
+                units = _run(problem, {"PARSEC_ORBITAL_IRREPS": mode, "PARSEC_ORBITAL_IRREP_ROWS": rows})
+                solver = units[2]
+                projected = [index for index in solver.decomposition.projected_sectors
+                             if index not in solver._partner_units]
+                self.assertTrue(projected)
+                self.assertEqual(len(solver._partner_units), 2 if rows == "partner" else 0)
+                for index in projected:
+                    self.assertEqual(solver._solvers[index].settings.initial_method, "chebdav")
+                    self.assertGreater(solver._operators[index].irrep_projection.applications, 0)
+                # (the sum of the levels follows the potential of the last step: 1.6e-7 Ry apart on A100, the total
+                # energy within 2e-8 Ry)
+                self.assert_same(units, before, f"Ge5 chebdav {mode} {rows}", level=5.0e-7)
+        # a coarse grid with a high degree: the states that rounding takes off the range are projected back
+        with tempfile.TemporaryDirectory() as directory:
+            coarse = _ge5(Path(directory), radius=9.5, states=24, spacing=0.7, first_filter_degree=90)
+            coarse = replace(coarse, eigensolver=replace(coarse.eigensolver, method="chebdav"))
+            self.assert_same(_run(coarse, {"PARSEC_ORBITAL_IRREPS": "once", "PARSEC_ORBITAL_IRREP_ROWS": "sector"}),
+                             _run(coarse, {"PARSEC_ORBITAL_IRREPS": "off"}), "Ge5 coarse chebdav once",
+                             energy=1.0e-7, level=1.0e-7, force=1.0e-6)
+        # ARPACK filters nothing: refused before the SCF
+        arpack = replace(self.ge5, eigensolver=replace(self.ge5.eigensolver, method="arpack"))
         with mock.patch.dict(os.environ, {"PARSEC_ORBITAL_IRREPS": "once"}), warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            with self.assertRaisesRegex(ValueError, "Eigensolver: chebff"):
-                driver.prepare_single_point(problem)
+            with self.assertRaisesRegex(ValueError, "Eigensolver: chebff or chebdav"):
+                driver.prepare_single_point(arpack)
 
     def test_silicon_cells(self) -> None:
         from parsec_python.acceleration.tests.test_periodic_point_group import silicon

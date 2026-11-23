@@ -5,17 +5,17 @@ the carbon POTRE table): the potential is a cone at the atom.  Up to 2026-11-20 
 atom took that slope along the direction of the round-off in the local forces of the Fortran-derived routines of a
 cell (the readable sums of :func:`parsec_python.Forces.periodic.periodic_local_forces` and the ball sums of
 :mod:`parsec_python.acceleration.Forces.periodic_spline`), so an atom moved by 1e-11 bohr off a grid point changed its
-force by the slope at the tip.  Under ``auto`` (the default) the points within ``min(rs(2), 1e-6 bohr)`` of the atom
-are left out of the spline slopes (the symmetric value at the tip); ``fortran`` leaves out every point closer than the
+force by the slope at the tip.  Under ``tip`` (the default of 2026-11-21) the points within ``min(rs(2), 1e-6 bohr)`` of
+the atom are left out of the spline slopes (the symmetric value at the tip); ``fortran`` leaves out every point closer than the
 first radial sample, the rule of ``forcloc.f90``.  Checked here (CPU):
 
 * the switch and its values, also through ``validate_local_force_settings``;
-* an atom on a grid point and the same atom 1e-11 bohr off it get the same local forces under ``auto``, different
-  ones under ``off`` (the artifact), on both routes; both routes agree with each other under ``auto``;
+* an atom on a grid point and the same atom 1e-11 bohr off it get the same local forces under ``tip``, different
+  ones under ``off`` (the artifact), on both routes; both routes agree with each other under ``tip``;
 * the force of the atom on the grid point is the central difference of the local energy of the fast potential;
-* with no grid point within the first radial sample of an atom the forces of ``auto`` are those of ``off`` bit for
+* with no grid point within the first radial sample of an atom the forces of ``tip`` are those of ``off`` bit for
   bit, and a species without ``Cubic_Spline`` is not touched;
-* an atom between 1e-6 bohr and ``rs(2)`` from a grid point keeps the exact slope under ``auto`` (the bits of
+* an atom between 1e-6 bohr and ``rs(2)`` from a grid point keeps the exact slope under ``tip`` (the bits of
   ``off``), and loses it under ``fortran``.
 """
 
@@ -85,11 +85,11 @@ class SwitchTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {}, clear=False):
             os.environ.pop(_ENV, None)
             self.assertEqual(force_sums.spline_force_center_setting(), "auto")
-        for value, expected in (("auto", "auto"), (" OFF ", "off"), ("", "auto"), ("Fortran", "fortran")):
+        for value, expected in (("auto", "auto"), (" OFF ", "off"), ("", "auto"), ("Fortran", "fortran"), ("Tip", "tip")):
             with mock.patch.dict(os.environ, {_ENV: value}):
                 self.assertEqual(force_sums.spline_force_center_setting(), expected)
         with mock.patch.dict(os.environ, {_ENV: "rs2"}):
-            with self.assertRaisesRegex(ValueError, "PARSEC_SPLINE_FORCE_CENTER must be auto, fortran or off"):
+            with self.assertRaisesRegex(ValueError, "PARSEC_SPLINE_FORCE_CENTER must be auto, tip, fortran or off"):
                 force_sums.spline_force_center_setting()
             from parsec_python.acceleration.Forces.periodic_local import validate_local_force_settings
 
@@ -104,10 +104,11 @@ class SwitchTests(unittest.TestCase):
         slope = force_sums.local_potential_slope(potential, distances, 1, use_spline=True, spline_padding_width=3)
         # the cone of the padded spline: a slope of its own at r = 0+
         self.assertGreater(abs(slope[0]), 1.0e-3)
+        self.assertEqual(force_sums.spline_center_radius(potential, "tip"), force_sums.ROUND_OFF_DISTANCE)
         self.assertEqual(force_sums.spline_center_radius(potential, "auto"), force_sums.ROUND_OFF_DISTANCE)
         self.assertEqual(force_sums.spline_center_radius(potential, "fortran"), first)
         self.assertEqual(force_sums.spline_center_radius(potential, "off"), 0.0)
-        kept = force_sums.without_spline_center(slope, distances, potential, "auto")
+        kept = force_sums.without_spline_center(slope, distances, potential, "tip")
         np.testing.assert_array_equal(kept, [0.0, 0.0, slope[2], slope[3], slope[4]])
         kept = force_sums.without_spline_center(slope, distances, potential, "fortran")
         np.testing.assert_array_equal(kept, [0.0, 0.0, 0.0, slope[3], slope[4]])
@@ -126,27 +127,27 @@ class CenterTests(unittest.TestCase):
     def test_an_atom_on_a_grid_point_takes_no_slope_of_the_tip(self) -> None:
         results = {}
         for name, provider in self.routes.items():
-            for setting in ("auto", "off"):
+            for setting in ("tip", "off"):
                 results[name, setting] = (
                     _forces(provider, self.on, setting).total,
                     _forces(provider, self.near, setting).total,
                 )
         for name in self.routes:
             with self.subTest(route=name):
-                on, near = results[name, "auto"]
+                on, near = results[name, "tip"]
                 np.testing.assert_allclose(near, on, rtol=0.0, atol=1.0e-10)
                 old_on, old_near = results[name, "off"]
                 # the former sums: the slope of the cone along the direction of the 1e-11 bohr
                 self.assertGreater(float(np.max(np.abs(old_near[0] - old_on[0]))), 1.0e-6)
                 # the other atom is not near a grid point: its force is the same
                 np.testing.assert_allclose(on[1], old_on[1], rtol=0.0, atol=1.0e-12)
-        # the two routes under auto (the readable sum adds the spline error of -2Z/r out to its longer reach)
-        np.testing.assert_allclose(results["fast", "auto"][0], results["readable", "auto"][0], rtol=0.0, atol=2.0e-6)
+        # the two routes under tip (the readable sum adds the spline error of -2Z/r out to its longer reach)
+        np.testing.assert_allclose(results["fast", "tip"][0], results["readable", "tip"][0], rtol=0.0, atol=2.0e-6)
 
     def test_the_force_is_the_central_difference_of_the_energy(self) -> None:
         # the atom 1e-11 bohr off the grid point: the difference over +-2e-4 bohr sees the cone symmetrically
         grid, atoms, potentials, specifications, density, _, _ = self.near
-        forces = _forces(self.routes["fast"], self.near, "auto").ionic
+        forces = _forces(self.routes["fast"], self.near, "tip").ionic
         former = _forces(self.routes["fast"], self.near, "off").ionic
         step = 2.0e-4
         for axis in range(3):
@@ -164,12 +165,13 @@ class CenterTests(unittest.TestCase):
                 self.assertGreater(abs(former[0, axis] + derivative), 1.0e-6)
 
     def test_between_round_off_and_the_first_sample(self) -> None:
-        # the atom 5e-6 bohr off the grid point (round-off radius 1e-6, first sample 1.3e-5): auto keeps the slope
-        # of the spline, the derivative of the energy, bit for bit as off; fortran (forcloc.f90) leaves it out
+        # the atom 5e-6 bohr off the grid point (round-off radius 1e-6, first sample 1.3e-5): tip keeps the slope
+        # of the spline, the derivative of the energy, bit for bit as off; fortran (forcloc.f90) leaves it out (tip:
+        # the default of 2026-11-21)
         case = _case(offset=(3.0e-6, -2.5e-6, 3.0e-6))
         for name, provider in self.routes.items():
             with self.subTest(route=name):
-                auto = _forces(provider, case, "auto")
+                auto = _forces(provider, case, "tip")
                 off = _forces(provider, case, "off")
                 fortran = _forces(provider, case, "fortran")
                 for term in ("ionic", "self_consistency", "core_correction"):
@@ -180,7 +182,7 @@ class CenterTests(unittest.TestCase):
         cases = {"off the grid": _case(on_grid=False), "linear table": _case(spline=False)}
         for label, case in cases.items():
             for name, provider in self.routes.items():
-                for value in ("auto", "fortran"):
+                for value in ("tip", "fortran"):
                     with self.subTest(case=label, route=name, value=value):
                         changed = _forces(provider, case, value)
                         off = _forces(provider, case, "off")

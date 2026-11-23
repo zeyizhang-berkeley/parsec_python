@@ -155,6 +155,16 @@ def force_report_lines(forces, output_level: int = 1, *, periodic: bool = False)
                 " =================================",
                 *_table(positions, dispersion),
             ]
+        # Python addition: the atomic tail of the Hartree boundary moves with
+        # the atoms (PARSEC_HARTREE_VARIATIONAL); PARSEC has no tail.
+        boundary = getattr(forces, "hartree_boundary", None)
+        if boundary is not None:
+            lines += [
+                "",
+                " Reporting Hartree boundary force components",
+                " ===========================================",
+                *_table(positions, boundary),
+            ]
     lines += ["", " Coordinates, forces, torque", " ============================", ""]
     if forces.symmetry_operations > 1:
         if output_level == 1:

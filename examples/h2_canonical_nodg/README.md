@@ -24,7 +24,7 @@ python src\parsec_python\main.py examples\h2_canonical_nodg\parsec.in --no-archi
 
 The calculation writes a PARSEC-style text report to `parsec.out` in
 this directory. The retained `parsec_python.out` is this command with
-`--log parsec_python.out`, run with the code of 20 November 2026 on one
+`--log parsec_python.out`, run with the code of 22 November 2026 on one
 NVIDIA A100 (paths shortened to repository paths). H2 on the z axis has the
 point group D4h on the grid (16 signed permutations); since 18 November 2026
 (`PARSEC_ORBITAL_GROUP_MAX_COST=0.75`) the orbitals use the six weighted
@@ -41,10 +41,11 @@ energy):
 | Plain SRE | 0.0031773149 |
 | Charge-weighted SRE | 0.0000777048 |
 
-The eigenvalue table lists 17 levels for `States_Num: 16`: a weighted sector
-reports every partner of its last multiplet, here the second partner of the
-degenerate pair 16-17. `PARSEC_ORBITAL_GROUP_MAX_COST=0.5` gives the D2h
-route of before (16 levels).
+The eigenvalue table lists 16 levels for `States_Num: 16`, as the full grid
+does: the weighted state that holds the degenerate pair 16-17 counts for the
+one state left (`PARSEC_WEIGHTED_STATE_COUNT`; under `off` it reports both
+partners, 17 levels, with the same energy).
+`PARSEC_ORBITAL_GROUP_MAX_COST=0.5` gives the D2h route of before (16 levels).
 
 The report follows PARSEC's organization and labels for the grid, atoms,
 pseudopotential, eigenstates, SCF iterations, energy decomposition, and SRE

@@ -1,11 +1,13 @@
 """Units of irreducible representations on partner rows in complete GPU calculations (PARSEC_ORBITAL_IRREP_ROWS).
 
-The A1 and A2 units of a Td Ge5 cluster are the sectors A1 and A2 of Td itself: on ``partner`` (opt-in; ``sector`` is the default) they are
-solved on the orbits of Td with stencils and projectors of their own and no projector after the filters, three times
-fewer rows than the sector of D2d.  The SCF energies, the occupied levels, the forces and the exported orbitals
-(the occupied subspace on the full grid) equal those of the units on the rows of their sectors (``sector``) and of
-the weighted sectors of before (``PARSEC_ORBITAL_IRREPS=off``), on one GPU and on the GPUs of a node (units placed by
-cost), on a coarse grid with a high first-filter degree, and for the Si8 cube with its 96 and 192 operations.
+The A1 and A2 units of a Td Ge5 cluster are the sectors A1 and A2 of Td itself: on ``partner`` (the default since
+2026-11-22; ``sector`` keeps the rows of before) they are solved on the orbits of Td with stencils and projectors of
+their own and no projector after the filters, three times fewer rows than the sector of D2d.  The SCF energies, the
+occupied levels, the forces and the exported orbitals (the occupied subspace on the full grid) equal those of the units
+on the rows of their sectors (``sector``) and of the weighted sectors of before (``PARSEC_ORBITAL_IRREPS=off``), on one
+GPU and on the GPUs of a node (units placed by cost), on a coarse grid with a high first-filter degree, and for the Si8
+cube with its 96 and 192 operations.  LDA+U, which reads the sector orbitals on the rows of their sectors, keeps those
+rows under the default (a Td Ag4 cluster with U, CHEBFF and CHEBDAV).
 """
 
 from __future__ import annotations
@@ -23,6 +25,25 @@ from parsec_python.acceleration.tests.test_orbital_irreps_device import _availab
 
 _PARTNER = {"PARSEC_ORBITAL_IRREP_ROWS": "partner"}
 _SECTOR = {"PARSEC_ORBITAL_IRREP_ROWS": "sector"}
+
+
+def _ag4u(directory: Path, method: str = "chebff"):
+    """A Td Ag4 cluster with LDA+U (U = 4 eV on Ag), the weighted sectors of PARSEC_LDAU_WEIGHTED_SECTORS."""
+
+    from parsec_python.Input import parse_parsec_input
+
+    data = Path(__file__).resolve().parents[2] / "tests" / "data"
+    corners = 2.75 * np.array([(1, 1, 1), (1, -1, -1), (-1, 1, -1), (-1, -1, 1)], dtype=float)
+    lines = [
+        "Boundary_Conditions: cluster", "Boundary_Sphere_Radius: 9.0", "Grid_Spacing: 0.7",
+        "Coordinate_Unit: Cartesian_Bohr", "States_Num: 34", "Correlation_Type: ca", "Convergence_Criterion: 1.0e-8",
+        "Max_Iter: 200", f"Eigensolver: {method}", "Mixing_Param: 0.2", "Fermi_Temp: 1000", "Atom_Types_Num: 1",
+        "Atom_Type: Ag", "Local_Component: s", "ldaplusu_u 4.0 eV", "begin Atom_Coord",
+        *(f"  {x:.10f} {y:.10f} {z:.10f}" for x, y, z in corners), "end Atom_Coord",
+    ]
+    (directory / "parsec.in").write_text("\n".join(lines) + "\n")
+    (directory / "Ag_POTRE.DAT").write_bytes((data / "Ag_POTRE.DAT").read_bytes())
+    return parse_parsec_input(directory / "parsec.in").problem
 
 
 def _occupied_overlap(left, right) -> np.ndarray:
@@ -97,6 +118,32 @@ class PartnerRowSCFTests(unittest.TestCase):
         node = _run(self.ge5, dict(_PARTNER, PARSEC_ORBITAL_IRREPS="once"))
         self.check_partner_sectors(node, 2)
         self.assert_same(node, before, "Ge5 once partner, the GPUs of the node")
+
+    def test_lda_u_keeps_the_rows_of_the_sectors(self) -> None:
+        # LDA+U forms its occupation matrices from the sector orbitals on the rows of their sectors: under the partner
+        # default the units keep those rows (driver._prepare_single_point, a NOTE in the details) and give the energies,
+        # levels and forces of the weighted sectors of before; until 2026-11-22 this run stopped in the first LDA+U
+        # occupation matrices (hubbard_device: units on partner rows are not supported)
+        one = {"PARSEC_CUPY_DEVICES": "current", "PARSEC_ORBITAL_IRREP_ROWS": ""}
+        for method in ("chebff", "chebdav"):
+            with self.subTest(method=method), tempfile.TemporaryDirectory() as directory:
+                problem = _ag4u(Path(directory), method)
+                before = _run(problem, dict(one, PARSEC_ORBITAL_IRREPS="off"))
+                units = _run(problem, dict(one, PARSEC_ORBITAL_IRREPS="once"))
+                decomposition = units[2].decomposition
+                self.assertTrue(decomposition.projected_sectors)
+                self.assertTrue(decomposition.reduction.sector_partner_cosets)
+                self.assertEqual(decomposition.partner_units, ())
+                self.assertEqual(decomposition.sector_rows_kept, "LDA+U")
+                self.assertEqual(units[2]._partner_units, ())
+                notes = [value for key, value in units[0].backend.details if key == "symmetry_full_grid_note"]
+                self.assertTrue(any("LDA+U keeps the units" in note for note in notes), notes)
+                self.assertNotIn("on the orbits of larger subgroups", units[3]["symmetry_detection"])
+                # the total energy within 1e-7 Ry at the criterion of 1e-8 Ry; its Hartree and exchange-correlation
+                # terms, which the criterion leaves free to first order, within 5e-7 Ry (1.05e-7 apart on A100)
+                self.assertAlmostEqual(units[0].energies.total, before[0].energies.total, delta=1.0e-7)
+                self.assert_same(units, before, f"Ag4+U {method} once against off", energy=5.0e-7, level=1.0e-6,
+                                 force=1.0e-5)
 
     def test_the_exported_orbitals(self) -> None:
         one = {"PARSEC_CUPY_DEVICES": "current", "PARSEC_ORBITAL_IRREPS": "once"}

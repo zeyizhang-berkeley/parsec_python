@@ -779,6 +779,9 @@ class MPIPoolKPointSolver:
             self._release_cached()
             self._resident(state)
             state = self._carried(state, requested, settings, operator)
+            # a task that grew starts its first solve from the columns of its former basis
+            # (PARSEC_KPOINT_SECTOR_WARM_GROWTH; the same decision on every rank of the pool)
+            grown = self._growth_start(task, state, settings, operator, None if gauge is None else "psi")
             start = time.perf_counter()
             result = solve_column_eigval(
                 operator,
@@ -790,8 +793,9 @@ class MPIPoolKPointSolver:
                 sync=backend.synchronize,
                 converge_first=first_solve_converges(settings),
                 route=self.route,
+                start=grown,
             )
-            del state
+            del state, grown
             self._tick("solve", start)
             for name, value in result.stats.items():
                 self._stats[name] = self._stats.get(name, 0.0) + value
@@ -836,11 +840,70 @@ class MPIPoolKPointSolver:
             if not bool(self.context.bcast(fits, root=0)):
                 return False
         self.job = job
-        for task in counts:
-            self.states.pop(task, None)
+        from .kpoint_sectors import kpoint_sector_warm_growth_setting, refined_state
+
+        warm = kpoint_sector_warm_growth_setting() != "off" and self.group is not None
+        starts = getattr(self, "_growth_starts", None)
+        if starts is None:
+            starts = self._growth_starts = {}
+        for task in sorted(counts):
+            state = self.states.pop(task, None)
+            starts.pop(task, None)
             if getattr(self, "_kept", None) == task:
                 self._kept = None
+            if not warm or task not in self.tasks:
+                continue
+            # PARSEC_KPOINT_SECTOR_WARM_GROWTH: the columns of a refined state wait on the host for the first solve of
+            # the new count; the ranks of the pool (the same tasks, in this order) agree that every one of them has
+            # its columns, or all start from random vectors
+            saved = self._stage_growth(state) if refined_state(state) and state.layout is not None else None
+            agreed = saved is not None
+            if self.group.size > 1:
+                agreed = all(self._pool_comm.allgather(saved is not None))
+            if agreed:
+                starts[task] = (state.layout, saved, getattr(state, "gauge", None))
+            del state, saved
         return True
+
+    def _stage_growth(self, state):
+        """This rank's columns of ``state`` on the host (a spilled subspace as it is), or ``None`` where the host has
+        no room for them or the copy fails."""
+        from ..Eigensolvers.sector_growth import host_room
+
+        vectors = state.vectors
+        if isinstance(vectors, np.ndarray):
+            return vectors
+        with host_room(int(vectors.nbytes)) as fits:
+            if not fits:
+                self._stats["kpoint_warm_growth_no_room"] = self._stats.get("kpoint_warm_growth_no_room", 0.0) + 1.0
+                return None
+            try:
+                return _download(self.backend, vectors)
+            except Exception:  # noqa: BLE001 - any failure of the copy falls back to random vectors
+                self._stats["kpoint_warm_growth_failed"] = self._stats.get("kpoint_warm_growth_failed", 0.0) + 1.0
+                return None
+
+    def _growth_start(self, task: int, state, settings, operator, gauge):
+        """``(layout, columns)`` of the former basis of ``task`` (:meth:`resize_tasks`) for its first solve, or
+        ``None``; every rank of the pool decides alike (the same state, settings, gauge and operator)."""
+        from .kpoint_sectors import warm_growth_takes
+
+        starts = getattr(self, "_growth_starts", None) or {}
+        saved = starts.pop(task, None)
+        if saved is None:
+            return None
+        layout, columns, saved_gauge = saved
+        real = bool(getattr(operator, "real_arithmetic", False))
+        if (
+            state is not None
+            or not warm_growth_takes(settings)
+            or saved_gauge != gauge
+            or int(columns.shape[0]) != int(operator.shape[0])
+            or (real and np.iscomplexobj(columns))
+        ):
+            return None
+        self._stats["kpoint_warm_growths"] = self._stats.get("kpoint_warm_growths", 0.0) + 1.0
+        return layout, columns
 
     def trim_tasks(self, counts: dict) -> bool:
         """Fewer states for the tasks of ``counts`` (task -> states, each at most its present count), collective.
@@ -1176,8 +1239,8 @@ class MPIPoolKPointSolver:
         stacked = flat.reshape(stacked.shape)
         return [stacked[task] for task in range(self.job.n_tasks)]
 
-    def vectors(self, task: int) -> np.ndarray:
-        """Orbitals are not gathered: an empty block of the right number of rows."""
+    def vectors(self, task: int, columns: int | None = None) -> np.ndarray:
+        """Orbitals are not gathered: an empty block of the right number of rows (``columns`` changes nothing)."""
         return np.empty((self.problem_size, 0), dtype=np.complex128)
 
     def export_states(self) -> dict[int, Any]:

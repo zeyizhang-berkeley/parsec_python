@@ -1087,7 +1087,10 @@ class AfterStartTests(unittest.TestCase):
         engine.projector_cache["projectors of the pairs"] = object()
         engine.after_start(self.system, self.start([1.0, 1.0, 0.0]))
         self.assertIsNotNone(engine.stars)
-        self.assertEqual(set(engine.projector_cache), {ANY_SIZE_KEY})
+        # (and the mark of the loops of a Fock loop, which keeps their k-point sectors solved and complex)
+        from parsec_python.SCF.hybrid_periodic import FOCK_LOOP_KEY
+
+        self.assertEqual(set(engine.projector_cache), {ANY_SIZE_KEY, FOCK_LOOP_KEY})
         self.assertIn("irreducible wedge", engine.description)
         self.assertIn("PARSEC_HYBRID_KPOINT_SECTORS=on", engine.description)
         # off (the default): no key, the description as before

@@ -65,8 +65,10 @@ from ..Hartree import (
     solve_hartree,
     valence_point_charges,
 )
+from ..Hartree.variational import electrostatic_hartree, tail_charges, variational_hartree_for
 from ..Laplacian import build_negative_laplacian
 from ..Mixer import make_mixer, potential_residual_metrics, preconditioned_mixer
+from .state_extension import MultipletCloser, working_levels
 from ..Occupations import (
     check_fixed_occupations,
     check_spin_fixed_occupations,
@@ -157,6 +159,11 @@ class PreparedSinglePointSystem:
     its potential is part of ``ionic_potential``, and the point charges then
     enter the ion-ion energy only (``parsec.F90:1022-1028``); ``None``
     without FDET.
+
+    ``hartree_variational`` (:class:`parsec_python.Hartree.variational.VariationalHartree`)
+    makes the potential of :meth:`solve_hartree` the derivative of the
+    Hartree energy, where ``PARSEC_HARTREE_VARIATIONAL`` asks for it; ``None``
+    keeps the potential of the Poisson solve.
     """
 
     input: SinglePointInput
@@ -180,6 +187,7 @@ class PreparedSinglePointSystem:
     density_symmetry: GridPointGroup | None = None
     hubbard: HubbardProjectors | None = None
     embedding: object | None = None
+    hartree_variational: object | None = None
 
     @property
     def hartree_boundary_tail_maximum(self) -> float | None:
@@ -270,7 +278,7 @@ class PreparedSinglePointSystem:
                 "the Hartree boundary of this system includes the atomic "
                 "tail, which was not built with it"
             )
-        return solve_hartree(
+        result = solve_hartree(
             density,
             self.grid,
             self.negative_laplacian,
@@ -279,6 +287,9 @@ class PreparedSinglePointSystem:
             raise_on_nonconvergence=raise_on_nonconvergence,
             boundary_tail=self.hartree_boundary_tail,
         )
+        if self.hartree_variational is None:
+            return result
+        return self.hartree_variational.potential(density, result, tail_charges(self), self.atoms)
 
     def evaluate_xc(
         self, density: np.ndarray, tau: np.ndarray | None = None, density_gradient: np.ndarray | None = None
@@ -1318,6 +1329,10 @@ def prepare_single_point(
     density_symmetry = (
         density_point_group(grid, atoms) if problem.scf.symmetrize_density else None
     )
+    # PARSEC_HARTREE_VARIATIONAL: the potential of the Hartree energy (None: that of the Poisson solve).
+    hartree_variational = variational_hartree_for(
+        problem, grid, negative_laplacian, pseudopotentials=pseudopotentials
+    )
     preparation_timings = PreparationTimings(
         pseudopotential_loading_seconds=pseudopotential_loading_seconds,
         grid_seconds=grid_seconds,
@@ -1343,6 +1358,7 @@ def prepare_single_point(
         density_symmetry=density_symmetry,
         hubbard=hubbard,
         embedding=embedding,
+        hartree_variational=hartree_variational,
     )
 
 
@@ -2302,6 +2318,13 @@ def run_scf(
         raise ValueError(
             "Eigensolver: none is PARSEC's TEST mode: setup only, no SCF"
         )
+    # PARSEC_STATES_CLOSE_MULTIPLET: more states where States_Num cuts an occupied multiplet (full-grid loops).
+    closer = MultipletCloser.for_loop(
+        system,
+        adapter=scalar_field_adapter,
+        exchange=exchange_term is not None,
+        criterion=settings.convergence_criterion,
+    )
     # DIAGLA smooths its residuals over the six grid neighbours (fdo5scl).
     neighbors = preconditioner_neighbors(system, eigensolver_settings)
     # Dynamic_Diag_Tol: 0.1 for the first iteration of every SCF loop
@@ -2390,6 +2413,9 @@ def run_scf(
                     np.array(warm_start.hxc_reference, dtype=np.float64)
                 )
             )
+    if closer is not None:
+        # (a loop that continues one whose States_Num was raised keeps that count)
+        number_of_states = closer.carried(number_of_states, (eigval_state,))
     # Mixing_Preconditioner: kerker wraps the mixer (Mixer.preconditioner);
     # at its default "none" the mixer is the one built here.
     mixer = warm_start_mixer(
@@ -2607,6 +2633,22 @@ def run_scf(
         if state_weights is not None:
             occupations = occupations * np.asarray(state_weights, dtype=np.float64)
         fermi_level = occupation_result.fermi_level
+        state_count_change = None
+        if closer is not None and state_weights is None and not refining:
+            # PARSEC_STATES_CLOSE_MULTIPLET (SCF/state_extension.py): a loop that stalls with its highest state
+            # occupied takes the levels of the eigensolver's buffer from the next iteration on.
+            state_count_change = closer.check(
+                iteration,
+                number_of_states,
+                (("", eigenvalues, occupations, working_levels(eigensolution)),),
+                [step.plain_residual if settings.use_plain_residual else step.weighted_residual for step in history],
+                fermi_level,
+            )
+            if state_count_change is not None:
+                number_of_states = state_count_change.states
+                reset = getattr(mixer, "reset", None)
+                if callable(reset):
+                    reset()
         density = build_orbital_density(
             wavefunctions, occupations, system.grid.volume_element
         )
@@ -2823,6 +2865,7 @@ def run_scf(
             total_seconds=iteration_seconds,
             density_symmetrization=symmetrization,
             **({"level_refinement": True} if refining else {}),
+            **({} if state_count_change is None else {"state_count_note": state_count_change.lines()}),
             **hubbard_iteration_record(hubbard_state),
             **iteration_eigensolver_fields(
                 (getattr(eigensolution, "iterative_counts", None),),
@@ -2893,7 +2936,8 @@ def run_scf(
         density=to_public_scalar(density),
         core_density=system.core_density,
         ionic_potential=system.ionic_potential,
-        hartree_potential=to_public_scalar(hartree_potential),
+        # V_H of the Poisson solve, also where the loop ran with V' (PARSEC_HARTREE_VARIATIONAL)
+        hartree_potential=to_public_scalar(electrostatic_hartree(system, hartree_potential)),
         xc_potential=to_public_scalar(xc_potential),
         input_effective_potential=to_public_scalar(last_input_potential),
         output_effective_potential=to_public_scalar(
@@ -2914,7 +2958,7 @@ def run_scf(
         sector_states=(
             None
             if state_weights is None
-            else (np.asarray(representations), np.asarray(occupations), np.asarray(state_weights, dtype=np.int64))
+            else (np.asarray(representations), np.asarray(occupations), _state_repeats(state_weights))
         ),
         atomic_reference_correction=system.atomic_reference_correction,
         eigensolver_state=eigval_state,
@@ -2925,26 +2969,137 @@ def run_scf(
     )
 
 
+def _state_repeats(state_weights) -> np.ndarray:
+    """The partners listed for every weighted state: its weight, or its part of the states a shared level lists.
+
+    A level at the end of the window may share the states left of it (PARSEC_WEIGHTED_STATE_COUNT): its states
+    then carry shares of their weights that add up to a whole number of states, which the level lists, as the full
+    grid lists ``States_Num`` states.  The listed states follow the shares in order on one axis: the state whose
+    share holds the middle of a listed state lists it (the first of two on a tie), so that a share of 0.5 + 0.5
+    lists one state and 1.5 + 1.5 three (two of the first).  Whole weights list themselves.
+    """
+
+    weights = np.asarray(state_weights, dtype=np.float64)
+    ends = np.floor(np.round(np.cumsum(weights), 9) + 0.5).astype(np.int64)
+    return np.diff(np.concatenate(([0], ends)))
+
+
+def _listed_occupations(occupations, state_weights, repeats) -> np.ndarray:
+    """The occupation of every listed state, in [0, 1], whose sum is that of ``occupations`` (times the weights).
+
+    A state of a whole weight lists its occupation over its weight on every partner, as before.  A listed state of
+    a shared level (:func:`_state_repeats`) takes the occupations per partner of the shares under it on the axis of
+    the shares, so that the level lists its occupation in full.
+    """
+
+    occupations = np.asarray(occupations, dtype=np.float64)
+    weights = np.asarray(state_weights, dtype=np.float64)
+    listed = np.repeat(occupations / np.where(repeats > 0, repeats, 1).astype(np.float64), repeats)
+    shared = np.flatnonzero(np.abs(weights - repeats) > 1.0e-9)
+    if not shared.size:
+        return listed
+    per_partner = occupations / np.where(weights > 0.0, weights, 1.0)
+    upper = np.round(np.cumsum(weights), 9)
+    lower = upper - weights
+    first = int(np.floor(lower[shared[0]] + 1.0e-9))
+    last = int(np.ceil(upper[shared[-1]] - 1.0e-9))
+    for unit in range(first, last):
+        overlap = np.clip(np.minimum(upper, unit + 1.0) - np.maximum(lower, float(unit)), 0.0, None)
+        listed[unit] = float(np.dot(overlap, per_partner))
+    return listed
+
+
+def _whole_levels(eigenvalues, occupations, wavefunctions, state_weights):
+    """``(levels, occupations, weights)`` of every partner of each solved state of a share (its sector's weight;
+    none for a share of 0), or ``None`` where the sector weights are not known.
+
+    Every partner takes its part of the occupation of its solved state, as the density of the run spreads it: a
+    share s of a state of weight w at the Fermi occupation f gives each of its w partners s f / w, so that the lists
+    add up to the electrons.  These are the levels of the k-points of the TRIM supercell route and of ``parsec.dat``
+    (``CuPySymmetryOrbitals.whole_levels``; ``acceleration.SCF.single_point.whole_partner_states``).
+    """
+
+    sector_weights = getattr(getattr(wavefunctions, "point_group", None), "sector_weights", None)
+    sectors = getattr(wavefunctions, "representations", None)
+    if sector_weights is None or sectors is None:
+        return None
+    shares = np.asarray(state_weights, dtype=np.float64)
+    sectors = np.asarray(sectors, dtype=np.int64)
+    if sectors.shape != shares.shape:
+        return None
+    weights = np.where(shares > 1.0e-12, np.asarray(sector_weights, dtype=np.int64)[sectors], 0)
+    per_partner = np.asarray(occupations, dtype=np.float64) / np.where(weights > 0, weights, 1).astype(np.float64)
+    return (
+        np.repeat(np.asarray(eigenvalues, dtype=np.float64), weights),
+        np.repeat(per_partner, weights),
+        weights.astype(np.int64),
+    )
+
+
+def _below_sector_weights(wavefunctions, state_weights) -> bool:
+    """Whether a state of ``wavefunctions`` holds a share above 0 and below the weight of its sector (a level at the
+    end of the window that shares the states left of it, PARSEC_WEIGHTED_STATE_COUNT); ``False`` where the sector
+    weights are not known."""
+
+    sector_weights = getattr(getattr(wavefunctions, "point_group", None), "sector_weights", None)
+    sectors = getattr(wavefunctions, "representations", None)
+    if sector_weights is None or sectors is None:
+        return False
+    shares = np.asarray(state_weights, dtype=np.float64)
+    sectors = np.asarray(sectors, dtype=np.int64)
+    if sectors.shape != shares.shape:
+        return False
+    full = np.asarray(sector_weights, dtype=np.float64)[sectors]
+    return bool(np.any((shares > 1.0e-12) & (shares < full - 1.0e-9)))
+
+
 def _public_states(eigenvalues, occupations, representations, wavefunctions, state_weights):
     """The lists of a result: every partner of a weighted state, as the full grid lists them.
 
     ``occupations`` are those of the SCF loop (times the weights where there are weights); the returned ones
-    are per partner, in [0, 1].  The orbitals carry the weights so that their full-grid form holds every
-    partner (``CuPySymmetryOrbitals.to_full_host``).  Without weights the lists are returned as they are.
+    are per partner, in [0, 1].  The orbitals carry the listed partners of every state so that their full-grid form
+    holds those partners (``CuPySymmetryOrbitals.to_full_host``).  Without weights the lists are returned as they are.
     """
 
     if state_weights is None:
         return eigenvalues, occupations, representations, wavefunctions
-    repeats = np.asarray(state_weights, dtype=np.int64)
-    weights = repeats.astype(np.float64)
+    # (a level at the end of the window may share the states left of it with a weight below that of its sector,
+    # PARSEC_WEIGHTED_STATE_COUNT: it lists the whole states of its shares, States_Num in all, with the occupations
+    # of the shares; the orbitals then keep the occupations of the solved states for the sums over their partners)
+    repeats = _state_repeats(state_weights)
+    listed = _listed_occupations(occupations, state_weights, repeats)
+    # (also where a solved state lists no state: a share of 0.5 or less after the others of its level, or a distinct
+    # level of weight 0 between partners; the sums over listed partners then miss it; and where the shares are whole
+    # numbers below the weights of their sectors, as 2 + 2 of a level of two states of weight 3)
+    shared = bool(
+        np.any(np.abs(np.asarray(state_weights, dtype=np.float64) - repeats) > 1.0e-9)
+        or np.any(repeats == 0)
+        or _below_sector_weights(wavefunctions, state_weights)
+    ) and hasattr(wavefunctions, "state_occupations")
+    extra = {}
+    if shared:
+        extra["state_occupations"] = np.asarray(occupations, dtype=np.float64).copy()
+        whole = _whole_levels(eigenvalues, occupations, wavefunctions, state_weights)
+        if whole is not None and hasattr(wavefunctions, "whole_levels"):
+            extra["whole_levels"] = whole
     orbitals = (
-        replace(wavefunctions, state_weights=repeats)
+        replace(
+            wavefunctions,
+            state_weights=repeats,
+            **extra,
+            # the levels, so that the partners of the solved states of one multiplet are orthogonal
+            **(
+                {"state_levels": np.asarray(eigenvalues, dtype=np.float64)}
+                if hasattr(wavefunctions, "state_levels")
+                else {}
+            ),
+        )
         if is_dataclass(wavefunctions) and hasattr(wavefunctions, "state_weights")
         else wavefunctions
     )
     return (
         np.repeat(np.asarray(eigenvalues, dtype=np.float64), repeats),
-        np.repeat(np.asarray(occupations, dtype=np.float64) / weights, repeats),
+        listed,
         np.repeat(np.asarray(representations), repeats),
         orbitals,
     )

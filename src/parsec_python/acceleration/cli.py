@@ -1360,8 +1360,9 @@ def periodic_sector_forces_refusal(
             # loop keeps the operations of that group that respect the flags.  Under PARSEC_MOVING_SECTORS=auto the
             # command line takes such a relaxation of a cell above the floor of the sectors in the sectors of the
             # subgroup of the fixed atoms, where they have 4 operations or more (fortran_fixed_atoms, and the
-            # minimum_sector_order of the preparation); otherwise, with MPI and in the MPI runner, it keeps their full
-            # grid, as before.
+            # minimum_sector_order of the preparation); otherwise, and under MPI (main.py --mpi refuses the forces of a
+            # Gamma cell), it keeps their full grid, as before.  The MPI runner takes it in the sectors of that
+            # subgroup whatever their number (PARSEC_RUNNER_FORTRAN_FIXED_SECTORS=auto, since 2026-11-22).
             return (
                 "Move_Flag fixes atoms of a cell on the Fortran-derived routines (Use_Fortran_Routines), whose forces "
                 f"are symmetrized with their own group (the subgroup sectors of {MOVE_FLAG_SUBGROUP_SWITCH} are "
@@ -1430,12 +1431,16 @@ def _periodic_sector_forces_line(system, operations) -> str | None:
     )
 
 
-def _fortran_sector_forces_line(system) -> str | None:
+def _fortran_sector_forces_line(system, movable=None) -> str | None:
     """The parsec.out line of the forces of a cell of the Fortran-derived routines in sectors, or ``None``.
 
     How many operations their total and the moved positions of a relaxation are averaged over: the group that the
     operations of those routines (:func:`parsec_python.Forces.periodic.periodic_force_operations`) and of the sectors
     generate (:func:`.Forces.sector_symmetry.fortran_force_operations`, ``PARSEC_FORTRAN_SECTOR_FORCES=auto``).
+    ``movable``: the flags of a relaxation whose ``Move_Flag`` fixes atoms; the ionic loop then averages the total
+    force and the moved positions of every structure over the operations of that group, as found for the first
+    structure, that map the fixed atoms onto fixed atoms (:func:`parsec_python.Forces.operations_preserving`), and
+    the line names how many those are (since 2026-11-22).
     """
 
     from parsec_python.Forces.periodic import periodic_force_operations
@@ -1452,6 +1457,17 @@ def _fortran_sector_forces_line(system) -> str | None:
         return None
     routine = periodic_force_operations(system, None)
     combined = fortran_force_operations(routine, sectors)
+    flags = None if movable is None else np.asarray(movable, dtype=bool)
+    if flags is not None and flags.size == len(system.atoms) and not flags.all():
+        from parsec_python.Forces import operations_preserving
+
+        kept = operations_preserving(combined, flags)
+        return (
+            " Forces of the Fortran-derived routines in the sectors: the total and the moved positions averaged over "
+            f"the {len(kept)} of the {len(combined)} operations (the group of their {len(routine)} and of the "
+            f"{len(sectors)} of the sectors) that map the atoms Move_Flag fixes onto fixed atoms, those of the first "
+            "structure for every structure (PARSEC_FORTRAN_SECTOR_FORCES=auto)"
+        )
     return (
         " Forces of the Fortran-derived routines in the sectors: their own terms, the total and the moved positions "
         f"averaged over {len(combined)} operations (the group of their {len(routine)} and of the {len(sectors)} of "
@@ -1824,6 +1840,13 @@ def _run(
         from .SCF.density_symmetry import symmetrized_density_sectors_setting
 
         symmetrized_density_sectors_setting()
+        from .Symmetry.axis_reflection import slab_wire_sectors_setting
+        from .Symmetry.oblique_frame import oblique_sectors_setting
+
+        # PARSEC_SLAB_WIRE_SECTORS and PARSEC_OBLIQUE_SECTORS: refused here too, before an input the reference solver
+        # runs (a cell on the general grid of the Fortran-derived routines) is handed over without reading them
+        slab_wire_sectors_setting()
+        oblique_sectors_setting()
         if _found_supercell is not None:
             # the mesh solved as its supercell: said in parsec.out too
             restart_notes = [*restart_notes, f" {_trim_route.note}"]
@@ -1893,10 +1916,18 @@ def _run(
             arguments, translation, supercell=_found_supercell is not None, notes=gamma_spin_notes
         )
         if accelerated_self_consistent_soc:
-            # PARSEC_SOC_SECTORS: a value it does not know is refused before the SCF.
-            from .SCF.soc_sectors import soc_sectors_setting
+            # PARSEC_SOC_SECTORS and PARSEC_SOC_AUTO_FOURFOLD: a value they do not know is refused before the SCF.
+            from .SCF.soc_sectors import soc_auto_fourfold_setting, soc_sectors_setting
 
             soc_sectors = soc_sectors_setting()
+            soc_auto_fourfold_setting()
+        # PARSEC_ORDERED_SUMS (the device products of the k-point, band and spin-orbit operators) and
+        # PARSEC_MPI_ACCELERATED_BANDS (bandstruc under --mpi), on every route
+        from .Hamiltonian.complex_csr_device import ordered_sums_setting
+        from .Output.post_scf import mpi_accelerated_bands_setting
+
+        ordered_sums_setting()
+        mpi_accelerated_bands_setting()
     except ValueError as error:
         print(f"Input error: {error}", file=sys.stderr)
         return 2
@@ -2164,6 +2195,11 @@ def _run(
         # a cluster: the sectors of the group the plan keeps (with the pseudo-atoms of the state or of the
         # structures of manual.dat, at the preparation below)
         solver_symmetry_mode = "auto"
+    from .SCF.moving_sectors import ANTIFERROMAGNETIC_REASON, SWITCH as _MOVING_SWITCH
+
+    if moving_plan is None and moving_reason is not None and moving_reason.startswith(ANTIFERROMAGNETIC_REASON):
+        # PARSEC_MOVING_SPIN_SECTORS=auto keeps an antiferromagnetic start on the full grid: said in parsec.out
+        restart_notes = [*restart_notes, f"NOTE: {_MOVING_SWITCH}: {moving_reason}"]
     # PARSEC_PERIODIC_SECTOR_FORCES, PARSEC_PERIODIC_SECTOR_BANDS and
     # PARSEC_FORTRAN_SECTOR_FORCES, read in every run so that a value they do
     # not know is refused.
@@ -2185,7 +2221,19 @@ def _run(
         from .SCF.gamma_hybrid_route import gamma_hybrid_sector_forces_setting
 
         gamma_hybrid_sector_forces_setting()
+        # PARSEC_STATES_CLOSE_MULTIPLET: more states where States_Num cuts an occupied multiplet (full-grid loops)
+        from parsec_python.SCF.state_extension import close_multiplet_setting
+
+        close_multiplet_setting()
+        # PARSEC_KPOINT_WAVEFUNCTIONS and PARSEC_GAMMA_PARSEC_DAT (parsec.dat of the k-point loops)
+        from parsec_python.Output.parsec_dat import validate_settings as validate_parsec_dat_settings
+
+        validate_parsec_dat_settings()
         if translation.problem.scf.spin_polarized:
+            # PARSEC_SPIN_FALLBACK_DENSITY: the density of the full grid a spin cluster leaves its sectors for
+            from .SCF.fallback_density import fallback_density_setting
+
+            fallback_density_setting()
             # PARSEC_SPIN_START: the start of the spin loops of the reference solver (a spin cell on its k-point loop)
             from parsec_python.SCF.spin_polarized import spin_start_setting
             from parsec_python.cli import spin_ionic_kpoint_setting
@@ -2444,7 +2492,9 @@ def _run(
     if _found_supercell is not None and _trim_route.cell_files:
         # PARSEC_KPOINT_SUPERCELL=auto: parsec.dat of the cell of the input, as the k-points write it (the
         # potential and density of the first cell, the k-points of the k-point route with the levels of each by their
-        # Bloch phases, PARSEC_KPOINT_SUPERCELL_LEVELS; no orbitals),
+        # Bloch phases, PARSEC_KPOINT_SUPERCELL_LEVELS; no orbitals: the supercell's states are no Bloch states of the
+        # cell; Output_All_States keeps the k-points, which write theirs, and so do the Fortran-derived routines that
+        # a Save_Wfn_Bands block selects),
         # which Restart_Run and nscf_kpoints of that input read on either route
         files.parsec_dat_view = _cell_parsec_dat_view(_mesh_problem, _found_supercell[1])
     taken = {*protected_paths, log_path}
@@ -2632,7 +2682,9 @@ def _run(
                 line = _periodic_sector_forces_line(system, sector_operations)
                 if line is not None:
                     log.write(line)
-                line = _fortran_sector_forces_line(system)
+                line = _fortran_sector_forces_line(
+                    system, translation.movable if translation.relaxation is not None else None
+                )
                 if line is not None:
                     log.write(line)
                 # A Gamma hybrid below the floor of its sectors on the full grid of the default routines
@@ -2693,8 +2745,8 @@ def _run(
             # those of the archive.
             start_output_files(files, translation, system, log)
             if files.parsec_dat_view is not None:
-                # the parsec.dat of the cell holds no orbitals, as that of the k-points: none brought to the host
-                # for it (those of the supercell repeat no cell)
+                # the parsec.dat of the cell holds no orbitals: none brought to the host for it (those of the
+                # supercell repeat no cell and are no Bloch states of the cell's k-points)
                 from parsec_python.Output.output_files import WavefunctionSelection
 
                 files.selection = WavefunctionSelection(mode="list", indices=(), explicit=False)

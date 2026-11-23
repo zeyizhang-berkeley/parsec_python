@@ -108,6 +108,9 @@ from parsec_python.Pseudopotential.radial_derivatives import valence_density_tab
 from parsec_python.V_ion import ewald as _ewald
 from parsec_python.V_ion import ionic_potential as _ionic
 
+from . import confined_setup as _confined
+from . import spline_setup as _spline
+
 _NYQUIST_FRACTION = 0.85  # the reciprocal series ends at this fraction of the grid's Nyquist frequency
 _POINTS_PER_CALL = 1_000_000  # grid points evaluated together (the radial spline is built once per call)
 _STRUCTURE_FACTOR_ELEMENTS = 4_000_000  # complex numbers of one structure-factor block
@@ -121,12 +124,23 @@ DEFAULT_REACH_RULE = "physical"
 
 #: ``PARSEC_PERIODIC_OBLIQUE_SPLIT``: the local potential of the general (oblique) grid of these routines from the
 #: split of the orthorhombic grid (:func:`_oblique_local_ionic_potential`) or from the readable direct sum.
-#: ``auto`` (the default since 2026-11-07): the split where a species uses ``Cubic_Spline`` (the readable sum reaches
-#: the spline error near the end of the table as the cell grows: 0.049 Ry in the potential of a 54-atom fcc silicon
-#: cell), the readable sum otherwise (its potential, to round-off); ``fast``: the split for every species;
-#: ``readable``: the readable sum (the route before 2026-11-07, for comparison).
-OBLIQUE_SPLITS = ("auto", "fast", "readable")
-DEFAULT_OBLIQUE_SPLIT = "auto"
+#: ``validated`` (the default since 2026-11-22): the split where a species uses ``Cubic_Spline`` (as ``auto``) and
+#: where every species is a table of a format whose split was validated (:data:`VALIDATED_SPLIT_FORMATS`); the
+#: readable sum for a cell with a linearly interpolated ``martins_old`` or ``martins_wang`` table.  The readable sum
+#: evaluates every image within its Ewald reach on every grid point (257-810 s of the preparation of a 64- to
+#: 216-atom cell on an A100 node), and it adds the noise of a table's digits past its Coulomb tail
+#: (:func:`parsec_python.V_ion.ionic_potential.coulomb_tail_radius`) out to that reach, which grows with the cell; the
+#: split leaves it out (with ``r V = -2 Z`` exactly past the tail the two agree to 5e-14 Ry).  That noise is
+#: round-off for a POTRE table and a constant (1e-11 to 8e-10 Ry) for a FHIPP table, but it varies over the cell
+#: for the MARTINS_OLD and MARTINS_WANG tables of the tests (spread 2e-8 and 6e-7 Ry): their energies would move by
+#: up to 1.25e-6 Ry per atom.  ``auto`` (the default from 2026-11-07 to 2026-11-22): the split where a species uses
+#: ``Cubic_Spline`` (the readable sum reaches the spline error near the end of the table as the cell grows: 0.049 Ry
+#: in the potential of a 54-atom fcc silicon cell), the readable sum otherwise; ``fast``: the split for every
+#: species; ``readable``: the readable sum (the route before 2026-11-07, for comparison).
+OBLIQUE_SPLITS = ("validated", "auto", "fast", "readable")
+DEFAULT_OBLIQUE_SPLIT = "validated"
+#: The formats whose linearly interpolated tables take the split under ``validated``.
+VALIDATED_SPLIT_FORMATS = frozenset({"martins_new", "fhipp"})
 
 
 def _axis_spacing(grid: PeriodicRealSpaceGrid) -> tuple[np.ndarray, np.ndarray, float]:
@@ -185,7 +199,9 @@ def _plain_orthorhombic(grid) -> bool:
     Fortran's general grid (:class:`parsec_python.Grid.pbc.GeneralPeriodicGrid`: oblique lattice
     vectors, a step per lattice direction) and the wire/slab grid
     (:class:`parsec_python.Grid.confined.ConfinedPeriodicGrid`) are subclasses with other point
-    positions, which the index boxes below do not describe: they keep the readable definitions.
+    positions, which the index boxes below do not describe: the general grid takes the lattice balls of
+    :mod:`.periodic_setup`, the device lattice density and the oblique split, the wire/slab grid the sums of
+    :mod:`.confined_setup` (both bit for bit or to round-off, see there).
     """
     return (
         isinstance(grid, PeriodicRealSpaceGrid)
@@ -211,6 +227,9 @@ def grid_ball(grid, centre: np.ndarray, radius: float):
         from . import periodic_setup as _default
 
         return _default.lattice_ball(grid, centre, radius)
+    if _confined.handles(grid):
+        # the grid of a wire or slab: the index box of the ball (the rows of the dense scan in its order)
+        return _confined.confined_ball(grid, centre, radius)
     if not _plain_orthorhombic(grid):
         return _ionic.dense_support(grid, centre, radius)
     n, _, spacing = _axis_spacing(grid)
@@ -937,7 +956,8 @@ def fft_local_ionic_potential(
 
 
 def oblique_split() -> str:
-    """``PARSEC_PERIODIC_OBLIQUE_SPLIT``: ``auto`` (default), ``fast`` or ``readable`` (see :data:`OBLIQUE_SPLITS`)."""
+    """``PARSEC_PERIODIC_OBLIQUE_SPLIT``: ``validated`` (default), ``auto``, ``fast`` or ``readable`` (see
+    :data:`OBLIQUE_SPLITS`)."""
     value = (
         os.environ.get("PARSEC_PERIODIC_OBLIQUE_SPLIT", DEFAULT_OBLIQUE_SPLIT).strip().lower()
         or DEFAULT_OBLIQUE_SPLIT
@@ -951,8 +971,9 @@ def oblique_split() -> str:
 
 def oblique_fast(grid, specifications, atoms) -> bool:
     """Whether :func:`fft_local_ionic_potential` builds the potential of this general (oblique) grid of the
-    Fortran-derived routines: ``PARSEC_PERIODIC_OBLIQUE_SPLIT`` ``fast``, or ``auto`` with a ``Cubic_Spline`` species
-    among ``atoms``."""
+    Fortran-derived routines: ``PARSEC_PERIODIC_OBLIQUE_SPLIT`` ``validated`` (the default) with a ``Cubic_Spline``
+    species among ``atoms`` or every species of :data:`VALIDATED_SPLIT_FORMATS`, ``auto`` with a ``Cubic_Spline``
+    species, or ``fast``."""
     if not (
         getattr(grid, "is_general_periodic", False)
         and not getattr(grid, "is_confined_periodic", False)
@@ -960,12 +981,17 @@ def oblique_fast(grid, specifications, atoms) -> bool:
     ):
         return False
     split = oblique_split()
-    if split == "auto":
-        return any(
-            getattr(specifications[symbol], "use_spline", False)
-            for symbol in dict.fromkeys(atom.symbol for atom in atoms)
-        )
-    return split == "fast"
+    if split in ("fast", "readable"):
+        return split == "fast"
+    symbols = [specifications[symbol] for symbol in dict.fromkeys(atom.symbol for atom in atoms)]
+    spline = any(getattr(specification, "use_spline", False) for specification in symbols)
+    if split == "auto" or spline:
+        return spline
+    return all(
+        str(getattr(specification, "pseudopotential_format", "martins_new")).strip().lower()
+        in VALIDATED_SPLIT_FORMATS
+        for specification in symbols
+    )
 
 
 def _oblique_local_ionic_potential(grid, atoms, potentials, specifications, lattice_vectors, eta, tolerance):
@@ -980,6 +1006,8 @@ def _oblique_local_ionic_potential(grid, atoms, potentials, specifications, latt
     """
     from . import periodic_setup as _default
 
+    if not atoms:
+        return np.zeros(grid.size, dtype=np.float64)  # the readable sum of no atoms
     lattice = np.asarray(lattice_vectors, dtype=float)
     volume = abs(float(np.linalg.det(lattice)))
     reference_eta, _, _ = _ewald._ewald_cutoffs(volume, eta, tolerance)
@@ -1118,6 +1146,11 @@ def periodic_atomic_density(
     return density
 
 def _density_provider(grid, atoms, potentials, specifications, lattice_vectors, core):
+    # a Cubic_Spline core density: the readable loop with each spline built once, the images on threads (bit for bit;
+    # None for every other density)
+    found = _spline.spline_superposed_density(grid, atoms, potentials, specifications, lattice_vectors, core)
+    if found is not None:
+        return found
     if not uses_fortran_routines(grid):
         # Andrew Grieder's bulk grid of a cell with diagonal lattice vectors: his sum, from the index boxes
         # (the support radius of each species); other grids of his keep his readable sum (None)
@@ -1131,6 +1164,9 @@ def _density_provider(grid, atoms, potentials, specifications, lattice_vectors, 
         return periodic_atomic_density(
             grid, atoms, potentials, specifications, lattice_vectors, core, reaches=reaches
         )
+    if _confined.confined_grid(grid):
+        # a wire or slab: the readable sum on the device, bit for bit (None: the readable sum)
+        return _confined.device_confined_atomic_density(grid, atoms, potentials, specifications, lattice_vectors, core)
     found = periodic_atomic_density(grid, atoms, potentials, specifications, lattice_vectors, core)
     if found is None:
         # Fortran's general (oblique) grid: the same sum on the device where one is usable (round-off equal; the
@@ -1159,6 +1195,7 @@ def uninstall() -> None:
 
 
 __all__ = [
+    "VALIDATED_SPLIT_FORMATS",
     "DEFAULT_OBLIQUE_SPLIT",
     "DEFAULT_REACH_RULE",
     "OBLIQUE_SPLITS",

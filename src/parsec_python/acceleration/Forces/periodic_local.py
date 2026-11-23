@@ -46,7 +46,7 @@ from parsec_python.Forces import LocalForceTerms, species_force_tables
 from parsec_python.Forces.periodic_local import dense_periodic_local_forces as reference_periodic_local_forces
 from parsec_python.models import Atom, SpeciesPotential
 from parsec_python.Pseudopotential import ParsecPseudopotential, ParsecRadialSpline
-from parsec_python.Pseudopotential.radial_derivatives import tail_start_radius
+from parsec_python.Pseudopotential.radial_derivatives import linear_slope_setting, tail_start_radius
 from parsec_python.V_ion import ewald as _ewald
 from parsec_python.V_ion import ionic_potential as _ionic
 
@@ -120,15 +120,20 @@ def validate_local_force_settings() -> None:
     """Read every switch of the local forces of a cell, so that a value they do not know stops a run before its SCF.
 
     ``PARSEC_PERIODIC_FORCE_SERIES``, ``PARSEC_PERIODIC_SECTOR_LOCAL_FORCES``, ``PARSEC_PERIODIC_LOCAL_ORBITS``,
-    ``PARSEC_PERIODIC_LOCAL_BALLS`` and ``PARSEC_SPLINE_FORCE_CENTER`` (since 2026-11-21) are read where the forces are
+    ``PARSEC_PERIODIC_LOCAL_BALLS``, ``PARSEC_SPLINE_FORCE_CENTER`` (since 2026-11-21) and
+    ``PARSEC_WIRE_SLAB_GAUSSIAN_FORCE`` (since 2026-11-22) are read where the forces are
     formed, after the whole first SCF; the preparation of a run (``acceleration.driver.prepare_single_point``, the
     command line and the MPI runner) calls this first (since 2026-11-19).  ``PARSEC_PROJECTOR_CENTER`` (2026-11-21) is
-    read where the projectors are built, before the SCF, and here too.  Nothing else changes: the values are read
-    again where they are used.
+    read where the projectors are built, before the SCF, and here too, as is ``PARSEC_LINEAR_TABLE_SLOPES``.  Nothing
+    else changes: the values are read again where they are used.
     """
 
-    from parsec_python.Forces.periodic import core_force_xc_setting, spline_force_center_setting
-    from parsec_python.Forces.wire_slab import wire_slab_gaussian_setting
+    from parsec_python.Forces.periodic import (
+        core_force_xc_setting,
+        radial_slope_setting,
+        spline_force_center_setting,
+    )
+    from parsec_python.Forces.wire_slab import wire_slab_gaussian_force_setting, wire_slab_gaussian_setting
     from parsec_python.V_ion.ionic_potential import projector_center_setting
 
     periodic_force_series_setting()
@@ -139,6 +144,9 @@ def validate_local_force_settings() -> None:
     projector_center_setting()
     core_force_xc_setting()
     wire_slab_gaussian_setting()
+    wire_slab_gaussian_force_setting()
+    linear_slope_setting()
+    radial_slope_setting()
 
 
 def periodic_local_orbits_setting() -> str:
@@ -167,30 +175,62 @@ def periodic_local_balls_setting() -> str:
     return _auto_off(_BALLS_SWITCH)
 
 
+def smooth_center(potential: ParsecPseudopotential) -> float:
+    """The radius within which the local and core slopes of ``potential`` are those of the smooth behaviour of the
+    table (``PARSEC_SPLINE_FORCE_CENTER=auto``, :func:`parsec_python.Pseudopotential.radial_derivatives.
+    smooth_center_radius`), ``0.0`` under the other values (the rule of ``forcloc.f90``)."""
+
+    from parsec_python.Pseudopotential.radial_derivatives import smooth_center_radius, spline_force_center_setting
+
+    return smooth_center_radius(potential, spline_force_center_setting())
+
+
 class _Slope:
     """The radial slope of one tabulated function with the rules of ``forcloc.f90``, on the arrays of ``xp``.
 
     Zero closer than the first radial sample; between it and ``rs(npoint-6)`` the derivative of the padded cubic spline of
     the table, or the linear interpolation of its derivative table; from there outwards zero, or the Coulomb slope
     ``2 Z/r**2`` for the local potential (``charge``).  The same rules as
-    :func:`parsec_python.Pseudopotential.radial_derivatives.evaluate_local_potential_derivative` and ``evaluate_density_derivative``.
+    :func:`parsec_python.Pseudopotential.radial_derivatives.evaluate_local_potential_derivative` and ``evaluate_density_derivative``,
+    also with ``center`` (:func:`smooth_center`): closer than it the slope ``s(center) d/center``.
     """
 
-    def __init__(self, xp, potential: ParsecPseudopotential, values, *, spline_padding: int | None, table, charge=None):
+    def __init__(
+        self, xp, potential: ParsecPseudopotential, values, *, spline_padding: int | None, table, charge=None,
+        center=0.0, interpolant: bool = False,
+    ):
         self.xp = xp
         self.first = float(potential.radii[0])
         self.tail = tail_start_radius(potential)
         self.charge = charge
+        # PARSEC_SPLINE_FORCE_CENTER=auto: closer than ``smooth`` the slope of the smooth behaviour, ``smooth_slope d``
+        self.smooth = 0.0
+        self.smooth_slope = 0.0
         if spline_padding is not None:
             spline = ParsecRadialSpline.from_positive_grid(potential.radii, values, spline_padding)
             self.knots = xp.asarray(spline.knots)
             self.values = xp.asarray(spline.values)
             self.second = xp.asarray(spline.second_derivatives)
             self.radii = self.table = None
+        elif interpolant and charge is None:
+            # PARSEC_LINEAR_TABLE_SLOPES=interpolant: the slope of the linear interpolant of ``values`` that the
+            # density sampling takes (the spline expressions with zero second derivatives), zero from rs(ns-1) on
+            self.knots = xp.asarray(np.asarray(potential.radii, dtype=float))
+            self.values = xp.asarray(np.asarray(values, dtype=float))
+            self.second = xp.zeros_like(self.knots)
+            self.radii = self.table = None
+            self.tail = float(potential.interpolation_cutoff)
+            # (the exact slope of the interpolant next to the atom too: no smooth centre, as in
+            # radial_derivatives.evaluate_density_derivative)
+            center = 0.0
         else:
             self.knots = self.values = self.second = None
             self.radii = xp.asarray(np.asarray(potential.radii, dtype=float))
             self.table = xp.asarray(np.asarray(table, dtype=float))
+        if center > 0.0:
+            at_center = self(xp.asarray(np.array([float(center)])))
+            self.smooth_slope = float(_to_host(xp, at_center)[0]) / float(center)
+            self.smooth = float(center)
 
     def __call__(self, distances):
         xp = self.xp
@@ -213,6 +253,8 @@ class _Slope:
         if self.charge is not None:
             tail = distances >= self.tail
             result[tail] = 2.0 * self.charge / (distances[tail] * distances[tail])
+        if self.smooth > 0.0:
+            result = xp.where(distances < self.smooth, self.smooth_slope * distances, result)
         return result
 
     def dense(self, distances):
@@ -241,6 +283,8 @@ class _Slope:
             tail = distances >= self.tail
             square = xp.where(tail, distances * distances, 1.0)
             result = xp.where(tail, 2.0 * self.charge / square, result)
+        if self.smooth > 0.0:
+            result = xp.where(distances < self.smooth, self.smooth_slope * distances, result)
         return result
 
 
@@ -571,6 +615,9 @@ if (keep) {
     } else if (coulomb && d >= tail) {
         s = 2.0 * charge / (d * d);
     }
+    if (d < smooth) {
+        s = smooth_slope * d;
+    }
     if (gaussian && d > 1.0e-8) {
         const double a = eta * d;
         s += 2.0 * charge * (2.0 * eta * exp(-(a * a)) / (1.7724538509055159 * d) - erf(a) / (d * d));
@@ -597,7 +644,8 @@ def _fused_kernel(xp):
             "float64 xx, float64 yy, float64 zz, int64 rx, int64 ry, int64 rz, raw float64 field, "
             "raw float64 knots, raw float64 values, raw float64 second, int64 count, raw float64 radii, "
             "raw float64 table, int64 samples, float64 first, float64 tail, int32 spline, int32 coulomb, "
-            "int32 gaussian, float64 charge, float64 eta, float64 radius, int32 strict",
+            "int32 gaussian, float64 charge, float64 eta, float64 smooth, float64 smooth_slope, float64 radius, "
+            "int32 strict",
             "float64 out",
             _FUSED_OPERATION,
             "parsec_periodic_local_ball_terms",
@@ -631,6 +679,8 @@ class _FusedSlope:
             np.int32(0 if eta is None else 1),
             np.float64(charge if slope.charge is None else slope.charge),
             np.float64(0.0 if eta is None else eta),
+            np.float64(slope.smooth),
+            np.float64(slope.smooth_slope),
         )
 
 
@@ -731,7 +781,7 @@ def _batched_local_sums(xp, erf, grid, geometry, atoms, potentials, specificatio
         tables = species_force_tables(potential, specification)
         local = _Slope(
             xp, potential, potential.channel_potentials[specification.local_angular_momentum],
-            spline_padding=half_width, table=None, charge=charge,
+            spline_padding=half_width, table=None, charge=charge, center=smooth_center(potential),
         )
         reach = max(erfc_cutoff, _ionic.coulomb_onset_radius(potential, specification.local_angular_momentum))
 
@@ -746,7 +796,8 @@ def _batched_local_sums(xp, erf, grid, geometry, atoms, potentials, specificatio
             core = _Slope(
                 xp, potential, potential.core_density,
                 spline_padding=half_width if specification.use_spline else None,
-                table=tables.core_density_derivative,
+                table=tables.core_density_derivative, center=smooth_center(potential),
+                interpolant=linear_slope_setting() == "interpolant",
             )
             support = _ionic.atomic_density_support_radius(potential, specification, core=True)
             terms = _FusedSlope(xp, core) if fused else core.dense
@@ -838,14 +889,15 @@ def fast_periodic_local_forces(
             tables[atom.symbol] = species_force_tables(potential, specification)
             local = _Slope(
                 xp, potential, potential.channel_potentials[specification.local_angular_momentum],
-                spline_padding=half_width, table=None, charge=charge,
+                spline_padding=half_width, table=None, charge=charge, center=smooth_center(potential),
             )
             core = None
             if tables[atom.symbol].core_density_derivative is not None:
                 core = _Slope(
                     xp, potential, potential.core_density,
                     spline_padding=half_width if specification.use_spline else None,
-                    table=tables[atom.symbol].core_density_derivative,
+                    table=tables[atom.symbol].core_density_derivative, center=smooth_center(potential),
+                    interpolant=linear_slope_setting() == "interpolant",
                 )
             slopes[atom.symbol] = (local, core)
         local_slope, core_slope = slopes[atom.symbol]

@@ -22,6 +22,10 @@ solve of every k-point on the whole grid, as before.
 
 A converged first solve tests the levels its k-point reports, not the margin states of the sectors above them
 (``PARSEC_BAND_REPORTED_RESIDUALS``, :meth:`.kpoint_sectors.SectorKPointSolver.solve_reported`).
+
+Under ``--mpi`` (``PARSEC_MPI_ACCELERATED_BANDS``) every rank holds the converged potential of the accelerated SCF;
+the chunks of k-points are dealt to the ranks in turn, each solved by the solver of one process on the GPUs of its
+rank, and the levels and residuals are gathered on every rank: the bands of one process, in a share of its time.
 """
 
 from __future__ import annotations
@@ -41,8 +45,9 @@ _LAST_RECORD: dict = {}
 
 def last_band_sector_record() -> dict:
     """What the last :func:`solve_band_sectors` did: ``kpoints``, ``split`` (those solved in sectors), ``largest``
-    (the most sectors of one), ``group`` (the operations of the potential) and ``residuals_of_reported`` (whether every
-    residual is that of the levels its k-point reports); empty where it kept the path whole."""
+    (the most sectors of one), ``group`` (the operations of the potential), ``residuals_of_reported`` (whether every
+    residual is that of the levels its k-point reports) and ``images`` (the sectors not solved, images of others under
+    ``PARSEC_KPOINT_SECTOR_CLASSES=auto``, where there are any); empty where it kept the path whole."""
 
     return dict(_LAST_RECORD)
 
@@ -112,6 +117,10 @@ def band_symmetry_of(system) -> BandSymmetry | None:
     grid = getattr(getattr(system, "reference", system), "grid", None)
     if reduction is None or grid is None:
         return None
+    if getattr(reduction, "index_frame", None) is not None:
+        # sectors of an oblique cell detected in the frame of its grid indices (PARSEC_OBLIQUE_SECTORS): their
+        # operations act on the indices, which the k-point sectors of the bands (Cartesian, CellGroup) do not take
+        return None
     try:
         return BandSymmetry.of_reduction(reduction, grid)
     except (AttributeError, TypeError, ValueError):
@@ -155,20 +164,25 @@ def solve_band_sectors(
     callback=None,
     workers=None,
     backend=None,
+    keep_whole: bool = True,
 ):
-    """Eigenvalues ``(n_k, number_of_states)`` and largest residuals ``(n_k,)`` of the band k-points in sectors (of
-    the reported levels under ``PARSEC_BAND_REPORTED_RESIDUALS=auto``, else of every state of the sectors).
+    """Eigenvalues ``(n_k, number_of_states)``, largest residuals ``(n_k,)`` of the band k-points in sectors (of the
+    reported levels under ``PARSEC_BAND_REPORTED_RESIDUALS=auto``, else of every state of the sectors) and the list of
+    the k-points left to the caller.
 
     ``make_hamiltonian(k_point, potential)`` is the scalar Bloch Hamiltonian of a k-point
     (:func:`parsec_python.SCF.bands.solve_kpoint_bands`), ``eigval_settings`` the settings of its first solve (with
-    ``Bands_FF_MaxIter``).  ``None`` where no k-point of the path splits (the caller keeps its route).
+    ``Bands_FF_MaxIter``).  A k-point that does not split is solved whole by the same solvers with
+    ``eigval_settings`` where ``keep_whole``, else left to the caller (its whole-grid route, with the buffer of
+    ``PARSEC_BAND_BUFFER``): its levels stay zero and its residual NaN.  ``None`` where no k-point of the path splits
+    (the caller keeps its route).
     """
 
     from parsec_python.Eigensolvers.eigval import first_solve_converges
     from parsec_python.SCF.bands import band_reported_residuals_setting
     from parsec_python.SCF.kpoint_solver import KPointJob
 
-    from .kpoint_parallel import _plain_solver, device_worker_count, resolve_backend
+    from .kpoint_parallel import PooledKPointSolver, device_worker_count, resolve_backend
     from .kpoint_sectors import (
         _MINIMUM_ENTRIES,
         KPointSectors,
@@ -238,22 +252,41 @@ def solve_band_sectors(
     _LAST_RECORD.update(
         kpoints=n_k, split=len(split), largest=max(found.order for found in split), group=symmetry.count
     )
+    images = sum(len(found.classes) for found in split if found.classes)
+    if images:  # the sectors not solved, images of others (PARSEC_KPOINT_SECTOR_CLASSES)
+        _LAST_RECORD["images"] = images
     plan = resolve_backend(backend)
-    chunk = n_k if plan is None else max(1, device_worker_count(plan, n_k))
+    # the k-points this route solves (an unsplit one goes to the caller's whole-grid route unless keep_whole)
+    todo = [k for k in range(n_k) if keep_whole or plans[k] is not None]
+    unsplit = [k for k in range(n_k) if k not in set(todo)]
+    chunk = len(todo) if plan is None else max(1, device_worker_count(plan, len(todo)))
     eigenvalues = np.zeros((n_k, int(number_of_states)))
-    residuals = np.zeros(n_k)
+    residuals = np.full(n_k, np.nan)
     degree = int(system.input.eigensolver.filter_degree)
     options = {"problem_size": int(grid.size), "backend": backend, "workers": workers}
     # PARSEC_BAND_REPORTED_RESIDUALS: the residual test of a converged first solve covers the levels the k-point
     # reports, not the margin of its sectors above them
     reported_test = band_reported_residuals_setting() == "auto" and first_solve_converges(eigval_settings)
     of_reported = True  # no k-point of the path has a residual over the margin states of its sectors
-    for start in range(0, n_k, chunk):
-        stop = min(n_k, start + chunk)
-        points = k_points[start:stop]
+    # Several MPI ranks (the accelerated SCF of a Gamma cell under --mpi, PARSEC_MPI_ACCELERATED_BANDS): every rank
+    # holds the converged potential, so the chunks of k-points are dealt to the ranks, each solved by the solver of one
+    # process on the devices of its rank (not by the pools of ranks, whose first solves cannot test the reported
+    # levels; nor with --mpi on one rank), and every rank gets every level.  The ranks agree on one chunk length (the
+    # smallest of theirs: ranks may see different numbers of GPUs), so that they deal the same partition.
+    context = _mpi_context()
+    ranks = 1 if context is None else int(context.size)
+    rank = 0 if context is None else int(context.rank)
+    if ranks > 1:
+        chunk = int(min(int(value) for value in context.comm.allgather(int(chunk))))
+    mine: list[int] = []
+    for number, start in enumerate(range(0, len(todo), chunk)):
+        if number % ranks != rank:
+            continue
+        indices = todo[start : start + chunk]
+        points = k_points[indices]
         job = job_of(points)
         parts = []
-        for offset, k_index in enumerate(range(start, stop)):
+        for offset, k_index in enumerate(indices):
             found = plans[k_index]
             if found is None:
                 parts.append(None)
@@ -261,11 +294,13 @@ def solve_band_sectors(
             fresh = KPointSectors(offset, points[offset], found.decomposition, list(found.counts))
             fresh.assumed = False
             fresh.guard_group = found.guard_group
+            # the sectors that are images of others (PARSEC_KPOINT_SECTOR_CLASSES; None by default)
+            fresh.classes = found.classes
             parts.append(fresh)
         if any(part is not None for part in parts):
-            solver = SectorKPointSolver(job, parts, _plain_solver, options)
+            solver = SectorKPointSolver(job, parts, PooledKPointSolver, options)
         else:
-            solver = _plain_solver(job, **options)
+            solver = PooledKPointSolver(job, **options)
         with solver:
             in_sectors = isinstance(solver, SectorKPointSolver)
             if reported_test and in_sectors and solver.reported_test_available(degree):
@@ -275,14 +310,43 @@ def solve_band_sectors(
                 of_reported = of_reported and not in_sectors
                 values = solver.solve({"V": potential}, degree)
                 norms = solver.residuals()
-        for offset, k_index in enumerate(range(start, stop)):
+        for offset, k_index in enumerate(indices):
             levels = np.asarray(values[offset], dtype=np.float64)[: int(number_of_states)]
             eigenvalues[k_index, : levels.size] = levels
             residuals[k_index] = float(norms[offset]) if math.isfinite(float(norms[offset])) else float("nan")
-            if callback is not None:
+            mine.append(k_index)
+            if callback is not None and ranks == 1:
+                callback(k_index, n_k, eigenvalues[k_index][None, :], residuals[k_index], 1)
+    if ranks > 1:
+        found = {k_index: (eigenvalues[k_index].copy(), float(residuals[k_index])) for k_index in mine}
+        dealt: list[int] = []
+        for part, flag in context.comm.allgather((found, of_reported)):
+            for k_index, (levels, norm) in part.items():
+                eigenvalues[k_index] = levels
+                residuals[k_index] = norm
+                dealt.append(int(k_index))
+            of_reported = of_reported and bool(flag)
+        if sorted(dealt) != sorted(todo):
+            missing = sorted(set(todo) - set(dealt))
+            twice = sorted({k_index for k_index in dealt if dealt.count(k_index) > 1})
+            raise RuntimeError(
+                f"the MPI ranks did not solve every band k-point exactly once (missing {missing}, solved more than "
+                f"once {twice})"
+            )
+        if callback is not None:
+            for k_index in todo:
                 callback(k_index, n_k, eigenvalues[k_index][None, :], residuals[k_index], 1)
     _LAST_RECORD["residuals_of_reported"] = of_reported
-    return eigenvalues, residuals
+    return eigenvalues, residuals, unsplit
+
+
+def _mpi_context():
+    """The MPI context of the run (``None`` in one process)."""
+
+    from ..Parallel import mpi
+
+    context = mpi.context()
+    return None if context is None or int(context.size) < 2 else context
 
 
 __all__ = [

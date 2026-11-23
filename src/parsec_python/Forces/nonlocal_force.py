@@ -13,9 +13,12 @@ where ``grad`` is the gradient with respect to the electron coordinate.  For
 
 ``grad beta = w(|d|)*grad Y + w'(|d|)*Y*d/|d|``.
 
-The radial derivative ``w'`` is the table ``dvw`` of ``pseudo.f90``.  Both
-overlaps are plain sums over the grid because orbitals and projectors carry
-the factor ``sqrt(dV)``.
+The radial derivative ``w'`` is the table ``dvw`` of ``pseudo.f90`` (for a
+species with ``Cubic_Spline`` the derivative of the spline; under
+``PARSEC_LINEAR_TABLE_SLOPES=interpolant`` the slope of the linear
+interpolant of ``w`` that the projectors sample).  Both overlaps are plain
+sums over the grid because orbitals and projectors carry the factor
+``sqrt(dV)``.
 """
 
 from __future__ import annotations
@@ -30,6 +33,8 @@ from ..Grid import RealSpaceGrid
 from ..models import Atom, SpeciesPotential
 from ..Pseudopotential import ParsecPseudopotential, ParsecRadialSpline
 from ..Pseudopotential.radial_derivatives import (
+    linear_projector_slope,
+    linear_slope_setting,
     radial_projector_with_derivative,
     spline_derivative,
 )
@@ -222,6 +227,7 @@ def build_nonlocal_projector_gradients(
             grid, atoms, potentials, specifications, order=order, atom_indices=atom_indices
         )
     center_setting = _ionic.projector_center_setting()
+    slopes = linear_slope_setting()
     rows: list[np.ndarray] = []
     columns: list[np.ndarray] = []
     values: tuple[list[np.ndarray], list[np.ndarray], list[np.ndarray]] = ([], [], [])
@@ -272,7 +278,7 @@ def build_nonlocal_projector_gradients(
                 slope = spline_derivative(spline, clamped)
             else:
                 radial = np.interp(clamped, potential.radii, radial_grid, right=0.0)
-                slope = np.interp(clamped, potential.radii, radial_slope, right=0.0)
+                slope = linear_projector_slope(clamped, potential.radii, radial_grid, radial_slope, slopes)
 
             harmonics, harmonic_gradients = real_harmonics_with_gradients(
                 angular_momentum, unit, inverse
@@ -332,6 +338,7 @@ def double_grid_projector_gradients(
     from ..V_ion.double_grid import double_grid_support
 
     center_setting = _ionic.projector_center_setting()
+    slopes = linear_slope_setting()
     rows: list[np.ndarray] = []
     columns: list[np.ndarray] = []
     values: tuple[list[np.ndarray], list[np.ndarray], list[np.ndarray]] = ([], [], [])
@@ -381,7 +388,7 @@ def double_grid_projector_gradients(
                 slope = spline_derivative(spline, clamped)
             else:
                 radial = np.interp(clamped, potential.radii, radial_grid, right=0.0)
-                slope = np.interp(clamped, potential.radii, radial_slope, right=0.0)
+                slope = linear_projector_slope(clamped, potential.radii, radial_grid, radial_slope, slopes)
             harmonics, harmonic_gradients = real_harmonics_with_gradients(
                 angular_momentum, unit, inverse
             )
@@ -471,6 +478,7 @@ def build_periodic_projector_gradients(
     # point within 3e-3 bohr at that distance, off within 1e-3 bohr; tip as off, with the value nonloc.F90 forms within
     # rs(2)
     center_setting = _ionic.projector_center_setting()
+    slopes = linear_slope_setting()
     value_dtype = complex if complex_valued else float
     k_point = None if k_point is None else np.asarray(k_point, dtype=float)
     lattice_vectors = np.asarray(lattice_vectors, dtype=float)
@@ -552,7 +560,7 @@ def build_periodic_projector_gradients(
                     slope = spline_derivative(spline, clamped)
                 else:
                     radial = np.interp(clamped, potential.radii, radial_grid, right=0.0)
-                    slope = np.interp(clamped, potential.radii, radial_slope, right=0.0)
+                    slope = linear_projector_slope(clamped, potential.radii, radial_grid, radial_slope, slopes)
                 if inside is not None:
                     slope = np.where(inside, 0.0, slope)
                 harmonics, harmonic_gradients = real_harmonics_with_gradients(

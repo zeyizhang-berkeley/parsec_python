@@ -677,12 +677,26 @@ class SlabRecentringTests(unittest.TestCase):
         from parsec_python.SCF.single_point import run_scf
         from parsec_python.SCF.wire_slab import prepare_wire_slab_single_point
 
+        import os
+        from unittest import mock
+
         results = []
+        # Fortran's solve of the Gaussian potential (at the Hartree tolerance of the run) and its form of the force of
+        # the Gaussian charges: PARSEC_WIRE_SLAB_GAUSSIAN_SOLVE=off, PARSEC_WIRE_SLAB_GAUSSIAN_FORCE=gradient
+        fortran = {"PARSEC_WIRE_SLAB_GAUSSIAN_SOLVE": "off", "PARSEC_WIRE_SLAB_GAUSSIAN_FORCE": "gradient"}
         for first, second in (("1.65", "0.25"), ("0.7", "-0.7")):
-            system = prepare_wire_slab_single_point(self.parse(first, second).problem)
-            result = run_scf(system)
-            self.assertTrue(result.converged)
-            results.append((result.energies.total, compute_forces(system, result).total))
+            with mock.patch.dict(os.environ, fortran):
+                system = prepare_wire_slab_single_point(self.parse(first, second).problem)
+                result = run_scf(system)
+                self.assertTrue(result.converged)
+                results.append((result.energies.total, compute_forces(system, result).total))
+        # the defaults: the tight solve moves the energy by the error of Fortran's (6e-8 Ry here), and the analytic slope
+        # of the Gaussians the forces by up to 6.3e-4 Ry/bohr on this coarse grid (h 0.5; closer to the forces of
+        # h 0.15 at h 0.5 to 0.2)
+        system = prepare_wire_slab_single_point(self.parse("1.65", "0.25").problem)
+        default = run_scf(system)
+        self.assertAlmostEqual(default.energies.total, results[0][0], delta=1.0e-6)
+        np.testing.assert_allclose(compute_forces(system, default).total, results[0][1], rtol=0, atol=1.0e-3)
         # Fortran: -2.45542804 Ry for both inputs, forces of atom 1 printed as
         # (0.041473, 0.005703, 0.080488) Ry/bohr after the net force is removed.
         self.assertAlmostEqual(results[0][0], -2.45542804, delta=2.0e-8)
@@ -768,9 +782,14 @@ class SCFTests(unittest.TestCase):
         for setting in ("auto", "off"):
             with mock.patch.dict(os.environ, {"PARSEC_WIRE_SLAB_GAUSSIAN": setting}):
                 forces[setting] = compute_forces(system, result, symmetrize=False)
+        with mock.patch.dict(os.environ, {"PARSEC_WIRE_SLAB_GAUSSIAN_FORCE": "gradient"}):
+            # the finite-difference form of the force of the Gaussian charges, which off keeps
+            forces["gradient"] = compute_forces(system, result, symmetrize=False)
         # the atom away from every grid point: the same bits; the atom on the point: its Gaussian term changes
-        np.testing.assert_array_equal(forces["auto"].local.gaussian[1], forces["off"].local.gaussian[1])
-        self.assertGreater(float(np.max(np.abs(forces["auto"].local.gaussian[0] - forces["off"].local.gaussian[0]))), 1.0e-6)
+        np.testing.assert_array_equal(forces["gradient"].local.gaussian[1], forces["off"].local.gaussian[1])
+        self.assertGreater(
+            float(np.max(np.abs(forces["gradient"].local.gaussian[0] - forces["off"].local.gaussian[0]))), 1.0e-6
+        )
         step = 2.0e-3
         energies = []
         for sign in (1.0, -1.0):

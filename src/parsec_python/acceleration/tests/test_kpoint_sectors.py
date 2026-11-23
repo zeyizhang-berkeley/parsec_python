@@ -324,6 +324,189 @@ class SectorSCFTests(unittest.TestCase):
         self.assertEqual(auto.timings.detail["kpoint_sector_largest_group"], 16.0)
 
 
+class WarmGrowthTests(unittest.TestCase):
+    """``PARSEC_KPOINT_SECTOR_WARM_GROWTH``: a sector that grows after a SUBSPACE step starts its first solve from its
+    Ritz vectors (the device solver of one process, here its code on the host: ``PARSEC_KPOINT_BACKEND=numpy-device``),
+    and the SCF ends at the energy of the growth from random vectors."""
+
+    def test_the_switch(self) -> None:
+        for value, expected in (("", "off"), ("CHEBFF", "chebff"), ("all", "all")):
+            with mock.patch.dict(os.environ, {"PARSEC_KPOINT_SECTOR_WARM_GROWTH": value}):
+                self.assertEqual(sectors.kpoint_sector_warm_growth_setting(), expected)
+        with mock.patch.dict(os.environ, {"PARSEC_KPOINT_SECTOR_WARM_GROWTH": "auto"}):
+            with self.assertRaises(ValueError):
+                sectors.kpoint_sector_warm_growth_setting()
+            with self.assertRaises(ValueError):
+                sectors.check_kpoint_sector_switches()
+        chebff = mock.Mock(initial_method="chebff")
+        chebdav = mock.Mock(initial_method="chebdav")
+        for value, takes in (("chebff", (True, False)), ("all", (True, True)), ("off", (False, False))):
+            with mock.patch.dict(os.environ, {"PARSEC_KPOINT_SECTOR_WARM_GROWTH": value}):
+                self.assertEqual((sectors.warm_growth_takes(chebff), sectors.warm_growth_takes(chebdav)), takes)
+
+    def _run(self, value: str, method: str = "chebff"):
+        """The SCF of two k-points of the silicon cube in sectors, one sector forced to grow at the fourth solve."""
+
+        from parsec_python.SCF.kpoints import run_scf_kpoints
+        from parsec_python.SCF.pbc import prepare_periodic_single_point
+        from parsec_python.acceleration.tests.test_periodic_point_group import silicon
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            base = silicon("pbe", spacing=0.855)
+        problem = replace(
+            base,
+            scf=replace(base.scf, convergence_criterion=1.0e-9, max_iterations=120),
+            eigensolver=replace(base.eigensolver, tolerance=1.0e-10, method=method),
+        )
+        side = float(np.asarray(problem.periodic_cell.lattice_vectors)[0, 0])
+        k_points = np.array([np.zeros(3), np.pi / side * np.array([1.0, 0.0, 0.0])])
+        original = sectors.SectorKPointSolver._short_sectors
+        calls = {"n": 0}
+
+        def forced(solver, values):
+            calls["n"] += 1
+            short = original(solver, values)
+            if calls["n"] == 4 and not short:
+                plan = next(plan for plan in solver._plans if plan is not None)
+                sector = int(np.argmax(np.asarray(plan.sizes) - np.asarray(plan.counts)))
+                short = [(plan.k_index, sector)]
+            return short
+
+        switches = {
+            "PARSEC_KPOINT_SECTORS": "auto",
+            "PARSEC_KPOINT_BACKEND": "numpy-device",
+            "PARSEC_KPOINT_SECTOR_WARM_GROWTH": value,
+        }
+        with mock.patch.dict(os.environ, switches), warnings.catch_warnings(), mock.patch.object(
+            sectors.SectorKPointSolver, "_short_sectors", forced
+        ):
+            warnings.simplefilter("ignore")
+            system = prepare_periodic_single_point(problem)
+            return run_scf_kpoints(system, k_points, np.array([0.5, 0.5]))
+
+    def test_a_grown_sector_starts_from_its_vectors(self) -> None:
+        off = self._run("off")
+        auto = self._run("chebff")
+        for result in (off, auto):
+            self.assertTrue(result.converged)
+            self.assertGreaterEqual(result.timings.detail["kpoint_sector_regrown_tasks"], 1.0)
+        self.assertEqual(off.timings.detail.get("kpoint_warm_growths", 0.0), 0.0)
+        self.assertGreaterEqual(auto.timings.detail.get("kpoint_warm_growths", 0.0), 1.0)
+        self.assertAlmostEqual(auto.energies.total, off.energies.total, delta=1.0e-8)
+
+    def test_chebdav_grows_from_random_vectors_under_chebff(self) -> None:
+        auto = self._run("chebff", method="chebdav")
+        self.assertEqual(auto.timings.detail.get("kpoint_warm_growths", 0.0), 0.0)
+        every = self._run("all", method="chebdav")
+        self.assertGreaterEqual(every.timings.detail.get("kpoint_warm_growths", 0.0), 1.0)
+        self.assertAlmostEqual(every.energies.total, auto.energies.total, delta=1.0e-8)
+
+
+_AG_LDAU = """\
+Periodic_System: .true.
+Boundary_Conditions: bulk
+begin Cell_Shape
+  7.72 7.72 7.72
+end Cell_Shape
+Lattice_Vector_Scale: 1.0 bohr
+Coordinate_Unit: Cartesian_Bohr
+Grid_Spacing: 0.594
+Expansion_Order: 6
+Use_Fortran_Routines: .false.
+States_Num: 32
+Fermi_Temp: 1000.0
+Max_Iter: 120
+Convergence_Criterion: 2.0e-8
+Diag_Tolerance: 1.0e-10
+Eigensolver: {method}
+Mixing_Param: 0.2
+Correlation_Type: ca
+{spin}
+Kpoint_Method: mp
+begin Monkhorst_Pack_Grid
+2 2 2
+end Monkhorst_Pack_Grid
+Atom_Types_Num: 1
+Atom_Type: Ag
+Local_Component: s
+ldaplusu_u {u} eV
+begin Atom_Coord
+  0.0 0.0 0.0
+  0.0 3.86 3.86
+  3.86 0.0 3.86
+  3.86 3.86 0.0
+end Atom_Coord
+"""
+
+
+class LDAUSectorTests(unittest.TestCase):
+    """``PARSEC_KPOINT_SECTOR_LDAU``: LDA+U of an fcc Ag cube on a 2 x 2 x 2 mesh in the sectors of its k-points gives the
+    energy and the LDA+U energy of one task per k-point (the term reduced to each sector, the occupation matrices from
+    the states of the sectors), on the device code (here on the host) and on the host solver."""
+
+    def _run(self, value: str, *, spin: bool = False, backend: str = "numpy-device", method: str = "chebff", u: float = 1.0):
+        from parsec_python.Grid.kpoints import kpoint_sampling
+        from parsec_python.Input.parsec_input import parse_parsec_input
+        from parsec_python.SCF.kpoints import run_scf_kpoints, run_scf_kpoints_spin_polarized
+        from parsec_python.SCF.pbc import prepare_periodic_single_point
+
+        directory = Path(tempfile.mkdtemp(prefix="parsec_ksec_ldau_"))
+        self.addCleanup(lambda: __import__("shutil").rmtree(directory, True))
+        (directory / "Ag_POTRE.DAT").write_bytes((_ROOT / "src/parsec_python/tests/data/Ag_POTRE.DAT").read_bytes())
+        spin_line = "Spin_Polarization: .true." if spin else ""
+        (directory / "parsec.in").write_text(_AG_LDAU.format(method=method, spin=spin_line, u=u))
+        switches = {"PARSEC_KPOINT_SECTORS": "auto", "PARSEC_KPOINT_SECTOR_LDAU": value}
+        if backend:
+            switches["PARSEC_KPOINT_BACKEND"] = backend
+        with mock.patch.dict(os.environ, switches), warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            problem = parse_parsec_input(directory / "parsec.in").problem
+            system = prepare_periodic_single_point(problem)
+            points, shares = kpoint_sampling(problem)
+            run = run_scf_kpoints_spin_polarized if spin else run_scf_kpoints
+            return run(system, points, shares)
+
+    def test_the_switch(self) -> None:
+        for value, expected in (("", "off"), ("SPIN", "spin"), ("on", "on")):
+            with mock.patch.dict(os.environ, {"PARSEC_KPOINT_SECTOR_LDAU": value}):
+                self.assertEqual(sectors.kpoint_sector_ldau_setting(), expected)
+        with mock.patch.dict(os.environ, {"PARSEC_KPOINT_SECTOR_LDAU": "auto"}):
+            with self.assertRaises(ValueError):
+                sectors.check_kpoint_sector_switches()
+
+    def _assert_same(self, off, auto) -> None:
+        self.assertTrue(off.converged and auto.converged)
+        self.assertNotIn("kpoint_sector_tasks", off.timings.detail)
+        self.assertGreater(auto.timings.detail["kpoint_sector_tasks"], float(len(off.k_points)))
+        self.assertAlmostEqual(auto.energies.total, off.energies.total, delta=1.0e-7)
+        self.assertAlmostEqual(auto.energies.hubbard, off.energies.hubbard, delta=1.0e-7)
+        self.assertGreater(abs(off.energies.hubbard), 1.0e-4)
+
+    def test_unpolarized_ldau_in_the_sectors(self) -> None:
+        # the device code on the host, the host solver, and the default (the GPU where CuPy runs)
+        for backend in ("numpy-device", "cpu", ""):
+            with self.subTest(backend=backend):
+                self._assert_same(self._run("off", backend=backend), self._run("on", backend=backend))
+
+    def test_a_strong_term_converges_in_the_sectors(self) -> None:
+        # U = 4 eV: one task per k-point leaves the loop oscillating (residuals near 0.5 after 120 steps, a behaviour
+        # of the route of before); the sectors converge, at mixing 0.2 in about 20 steps
+        auto = self._run("on", u=4.0)
+        self.assertTrue(auto.converged)
+        self.assertGreater(auto.timings.detail["kpoint_sector_tasks"], float(len(auto.k_points)))
+
+    def test_spin_ldau_only_under_spin(self) -> None:
+        # (the symmetry guard of the spin loops sends this metal back to one task per k-point; switched off here, so
+        # that the channels of the sectors are compared with those of the whole k-points)
+        with mock.patch.dict(os.environ, {"PARSEC_KPOINT_SECTOR_GUARD": "off"}):
+            off = self._run("off", spin=True)
+            auto = self._run("on", spin=True)
+            self.assertNotIn("kpoint_sector_tasks", auto.timings.detail)
+            self.assertEqual(auto.energies.total, off.energies.total)
+            self._assert_same(off, self._run("spin", spin=True))
+
+
 class SectorDriverTests(unittest.TestCase):
     """The sectors in the other drivers of k-points: both spin channels, the forces from the orbitals of the sectors,
     the exchange of a hybrid functional reduced to the sectors and the states carried from loop to loop."""
@@ -636,6 +819,212 @@ class DeclineTests(unittest.TestCase):
                 self.assertIsInstance(sectors.sector_solver(marked, plain), sectors.SectorKPointSolver)
                 unmarked = job(number_of_states=states, geometry=dict(geometry, cache={}))
                 self.assertIsNone(sectors.sector_solver(unmarked, plain))
+
+
+class _Admitted:
+    """Every operation admitted and in the density group (the invariance of the classes' checks)."""
+
+    def __call__(self, index) -> bool:
+        return True
+
+    def in_density_group(self, index) -> bool:
+        return True
+
+
+class SectorClassTests(unittest.TestCase):
+    """``PARSEC_KPOINT_SECTOR_CLASSES``: the sectors that the operations of the little group beyond ``H_k`` carry into
+    each other (unitary and antiunitary) have the Hamiltonians ``S H S^T`` (``S conj(H) S^T``) of the sector solved,
+    its levels, and orbitals and densities of its images; the SCF of the benchmark's reduced mesh keeps its energy and
+    forces."""
+
+    def test_the_switch(self) -> None:
+        for value, expected in (("", "auto"), ("OFF", "off"), ("auto", "auto")):
+            with mock.patch.dict(os.environ, {"PARSEC_KPOINT_SECTOR_CLASSES": value}):
+                self.assertEqual(sectors.sector_classes_setting(), expected)
+        with mock.patch.dict(os.environ, {"PARSEC_KPOINT_SECTOR_CLASSES": "on"}):
+            with self.assertRaises(ValueError):
+                sectors.sector_classes_setting()
+            with self.assertRaises(ValueError):
+                sectors.check_kpoint_sector_switches()
+
+    def test_the_sectors_of_a_class_are_images_of_the_sector_solved(self) -> None:
+        problem, system = _silicon_system()
+        cell = sectors.CellGroup(system.grid, system.cell_atoms)
+        side = float(np.asarray(problem.periodic_cell.lattice_vectors)[0, 0])
+        helper = SectorOperatorTests()
+        helper.system, helper.problem = system, problem
+        seen = {False: 0, True: 0}
+        for k_point in (
+            np.zeros(3),
+            2.0 * np.pi / side * np.array([0.0, 0.0, 1.0 / 3.0]),
+            2.0 * np.pi / side * np.array([1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0]),
+            2.0 * np.pi / side * np.array([0.25, 0.25, 0.5]),
+        ):
+            members, elements, decomposition = _decomposition(cell, k_point)
+            # the unitary operations of the little group, then only the antiunitary ones (H_k alone as the members)
+            for chosen in (members, elements):
+                classes = sectors.sector_classes(cell, chosen, elements, decomposition, k_point, _Admitted())
+                if classes is None:
+                    self.assertTrue(chosen is elements and not np.any(k_point), k_point)
+                    continue
+                full = helper._hamiltonian(k_point, "gradient")
+                split = sectors.KPointSectors(0, k_point, decomposition, [8] * decomposition.representation_count)
+                split.classes = classes
+                dense = {s: _dense(split.hamiltonian(s, full)) for s in range(decomposition.representation_count)}
+                for sector, member in classes.items():
+                    seen[member.antiunitary] += 1
+                    source = dense[member.source]
+                    size = source.shape[0]
+                    image = np.zeros((size, size))
+                    image[member.rows, np.arange(size)] = member.signs
+                    expected = image @ (np.conj(source) if member.antiunitary else source) @ image.T
+                    np.testing.assert_allclose(dense[sector], expected, rtol=0, atol=1.0e-11, err_msg=f"{k_point}")
+                    values, vectors = np.linalg.eigh(source)
+                    orbitals = split.orbitals(sector, split.member_block(sector, vectors[:, :3]))
+                    residual = full.apply(orbitals) - orbitals * values[:3]
+                    self.assertLess(float(np.max(np.abs(residual))), 1.0e-10)
+                # the density of a class from the occupations summed onto its sector solved
+                source = min(member.source for member in classes.values())
+                others = [s for s, member in classes.items() if member.source == source]
+                values, vectors = np.linalg.eigh(dense[source])
+                occupations = np.array([2.0, 1.0, 0.5])
+                sums = (np.abs(vectors[:, :3]) ** 2) @ occupations
+                density = split.class_density(source, others, sums * (1 + len(others)))
+                expected = (np.abs(split.orbitals(source, vectors[:, :3])) ** 2) @ occupations
+                for s in others:
+                    expected = expected + (np.abs(split.orbitals(s, split.member_block(s, vectors[:, :3]))) ** 2) @ occupations
+                np.testing.assert_allclose(density, expected, rtol=0, atol=1.0e-15)
+        self.assertGreater(seen[False], 0)
+        self.assertGreater(seen[True], 0)
+
+    def test_operations_that_hold_the_atoms_only_loosely_give_no_images(self) -> None:
+        # one atom of the cube moved by 2.7e-4 bohr, the cell group built at 1e-3 bohr: the operations that hold the
+        # atoms only to that tolerance would copy the offset into the images (the rule of sector_orbits_exact), so the
+        # classes take those that hold them to 1e-6 bohr; PARSEC_SECTOR_ORBITS_EXACT=off takes them all, as the
+        # sectors of H_k then do
+        from parsec_python.SCF.pbc import prepare_periodic_single_point
+        from parsec_python.acceleration.tests.test_periodic_point_group import silicon
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            problem = silicon("pbe", spacing=0.855)
+            atoms = list(problem.atoms)
+            atoms[1] = replace(atoms[1], position=np.asarray(atoms[1].position, dtype=float) + np.array([2.7e-4, 0, 0]))
+            problem = replace(problem, atoms=atoms)
+            system = prepare_periodic_single_point(problem)
+        cell = sectors.CellGroup(system.grid, system.cell_atoms, atom_tolerance=1.0e-3)
+        found = {}
+        for setting in ("auto", "off"):
+            with mock.patch.dict(
+                os.environ, {"PARSEC_SYMMETRY_ATOM_TOLERANCE": "1e-3", "PARSEC_SECTOR_ORBITS_EXACT": setting}
+            ):
+                members, elements, decomposition = _decomposition(cell, np.zeros(3))
+                classes = sectors.sector_classes(cell, members, elements, decomposition, np.zeros(3), _Admitted())
+                found[setting] = {} if classes is None else classes
+        with mock.patch.dict(os.environ, {"PARSEC_SYMMETRY_ATOM_TOLERANCE": "1e-3", "PARSEC_SECTOR_ORBITS_EXACT": "auto"}):
+            holds = sectors.exact_operation_test(cell)
+        self.assertTrue(all(holds(member.operation) for member in found["auto"].values()))
+        self.assertTrue(any(not holds(member.operation) for member in found["off"].values()))
+        self.assertLess(len(found["auto"]), len(found["off"]))
+
+    def test_no_classes_with_the_hubbard_term(self) -> None:
+        # a loop whose sectors sum the occupation matrices of LDA+U from their orbitals ("hubbard_part"): the images
+        # of a class add none, so the classes are not taken
+        problem, system = _silicon_system()
+
+        class Invariance:
+            def __init__(self, *arguments) -> None:
+                pass
+
+            def __call__(self, index) -> bool:
+                return True
+
+            def in_density_group(self, index) -> bool:
+                return True
+
+        geometry = {
+            "grid": system.grid,
+            "atoms": tuple(system.cell_atoms),
+            "k_points": np.zeros((1, 3)),
+            "weights": np.ones(1),
+            "lattice": np.asarray(problem.periodic_cell.lattice_vectors, dtype=float),
+            "density_symmetry": None,
+            "invariance": Invariance,
+        }
+        plain = sectors.plan_sectors(KPointJob(1, 22, None, None, None, geometry=geometry))
+        self.assertTrue(plain[0].classes)
+        marked = dict(geometry, hubbard_part=lambda *arguments, **keywords: {})
+        hubbard = sectors.plan_sectors(KPointJob(1, 22, None, None, None, geometry=marked))
+        self.assertIsNone(hubbard[0].classes)
+
+    def _diamond_mesh(self, *settings):
+        """The benchmark's diamond cube with the reduced 3 x 3 x 3 mesh, SCF to 1e-9 Ry."""
+
+        from parsec_python.Input.parsec_input import parse_parsec_input
+
+        directory = Path(tempfile.mkdtemp(prefix="parsec_kcls_"))
+        self.addCleanup(lambda: __import__("shutil").rmtree(directory, True))
+        command = [sys.executable, str(_DIAMOND / "make_diamond.py"), "1", "1", "1", str(directory / "parsec.in"),
+                   "--kmesh", "3", "3", "3"]
+        for setting in settings:
+            command += ["--set", setting]
+        subprocess.run(command, check=True, capture_output=True)
+        (directory / "C_POTRE.DAT").write_bytes((_DIAMOND / "C_POTRE.DAT").read_bytes())
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            problem = parse_parsec_input(directory / "parsec.in").problem
+        return replace(
+            problem,
+            scf=replace(problem.scf, convergence_criterion=1.0e-9),
+            eigensolver=replace(problem.eigensolver, tolerance=1.0e-10),
+        )
+
+    def _both(self, problem, run):
+        from parsec_python.Grid.kpoints import kpoint_sampling
+        from parsec_python.SCF.pbc import prepare_periodic_single_point
+
+        results = {}
+        for setting in ("off", "auto"):
+            with mock.patch.dict(os.environ, {"PARSEC_KPOINT_SECTOR_CLASSES": setting}), warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                system = prepare_periodic_single_point(problem)
+                points, shares = kpoint_sampling(problem)
+                results[setting] = run(system, points, shares)
+        return results["off"], results["auto"]
+
+    @unittest.skipUnless((_DIAMOND / "make_diamond.py").exists(), "the diamond example is not in this checkout")
+    def test_both_spin_channels_in_classes(self) -> None:
+        from parsec_python.SCF.kpoints import run_scf_kpoints_spin_polarized
+
+        off, auto = self._both(self._diamond_mesh("Spin_Polarization: true"), run_scf_kpoints_spin_polarized)
+        self.assertTrue(off.converged and auto.converged)
+        self.assertAlmostEqual(auto.energies.total, off.energies.total, delta=1.0e-9)
+        self.assertGreater(auto.timings.detail["kpoint_sector_images"], 0.0)
+        np.testing.assert_allclose(auto.eigenvalues_up, off.eigenvalues_up, rtol=0, atol=1.0e-8)
+        np.testing.assert_allclose(auto.eigenvalues_down, off.eigenvalues_down, rtol=0, atol=1.0e-8)
+
+    @unittest.skipUnless((_DIAMOND / "make_diamond.py").exists(), "the diamond example is not in this checkout")
+    def test_the_benchmark_mesh_in_classes(self) -> None:
+        # the reduced 3 x 3 x 3 mesh of diamond with its density symmetrized (Td about an atom and the face-centring
+        # translations): half of the sectors are images, the energy and the nonlocal forces (summed over the wedge,
+        # before the symmetrization over the group) are those of every sector solved
+        from parsec_python.SCF.kpoints import run_scf_kpoints
+
+        off, auto = self._both(
+            self._diamond_mesh(),
+            lambda system, points, shares: run_scf_kpoints(system, points, shares, compute_forces=True),
+        )
+        self.assertTrue(off.converged and auto.converged)
+        self.assertAlmostEqual(auto.energies.total, off.energies.total, delta=1.0e-9)
+        self.assertNotIn("kpoint_sector_images", off.timings.detail)
+        self.assertEqual(auto.timings.detail["kpoint_sector_tasks"], off.timings.detail["kpoint_sector_tasks"])
+        self.assertGreater(auto.timings.detail["kpoint_sector_images"], 0.0)
+        self.assertLess(
+            auto.timings.detail["kpoint_sector_work_fraction"], off.timings.detail["kpoint_sector_work_fraction"]
+        )
+        self.assertGreater(float(np.max(np.abs(off.nonlocal_forces))), 1.0e-3)
+        np.testing.assert_allclose(auto.nonlocal_forces, off.nonlocal_forces, rtol=0.0, atol=1.0e-7)
+        self.assertIn("PARSEC_KPOINT_SECTOR_CLASSES=auto", auto.timings.notes["kpoint_symmetry_detection"])
 
 
 if __name__ == "__main__":

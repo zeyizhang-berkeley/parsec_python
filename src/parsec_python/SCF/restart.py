@@ -186,7 +186,7 @@ def check_restart_file(
         if np.max(np.abs(np.asarray(data.step) - steps)) > RESTART_TOLERANCE:
             raise RestartError(
                 f"the grid spacing of parsec.dat {np.asarray(data.step).tolist()} "
-                f"differs from that of this run {steps.tolist()}",
+                f"differs from that of this run {steps.tolist()}" + _grid_difference(data, grid, steps),
                 364,
             )
         stored = np.asarray(data.periodic.lattice_vectors)
@@ -228,6 +228,52 @@ def check_restart_file(
             368,
         )
     return not same_radius
+
+
+def _grid_difference(data: ParsecDat, grid, steps: np.ndarray) -> str:
+    """Why a periodic restart builds another grid than the file's, and what keeps one grid (error 364).
+
+    The counts of both grids along the lattice vectors, the rule of this run's grid (the Fortran-derived routines,
+    which ``Restart_Run`` selects, with the fractional translations of the space group that ``adjust_step`` makes the
+    counts commensurate with; or this port's default routines) and the spacing that gives this run's counts.
+    """
+
+    lengths = np.linalg.norm(np.asarray(grid.cell.lattice_vectors, dtype=float), axis=1)
+    stored = np.asarray(data.step, dtype=float)
+    stored_counts = [int(round(value)) for value in lengths / np.where(stored > 0.0, stored, np.inf)]
+    counts = [int(value) for value in np.asarray(getattr(grid, "points_per_axis", ()), dtype=np.int64)]
+    settings = getattr(grid, "settings", None)
+    fortran = bool(getattr(settings, "fortran_routines", False))
+    translations = [
+        sorted({round(float(value), 6) for value in direction})
+        for direction in (getattr(settings, "fractional_translations", ()) or ())
+    ]
+    if fortran:
+        rule = (
+            "this run builds the grid of the Fortran-derived routines (adjust_step of inipbc.f90; Restart_Run "
+            "selects these routines)"
+        )
+        if any(translations):
+            rule += (
+                ", whose counts the fractional translations of the space group divide (per lattice direction "
+                f"{translations})"
+            )
+    else:
+        rule = "this run builds the grid of the default routines"
+    if np.allclose(steps, steps[0], rtol=1.0e-9, atol=0.0):
+        # one step along every lattice vector: that spacing gives these counts to either routine set
+        remedy = f"Grid_Spacing {float(steps[0]):.6f} bohr in the run that writes it gives it to both routine sets"
+    else:
+        remedy = (
+            "the run that writes it with the routines of this one (Use_Fortran_Routines: "
+            f"{'.true.' if fortran else '.false.'}) builds it"
+        )
+    return (
+        f": parsec.dat holds {stored_counts} points along the lattice vectors, this run {counts}; {rule}, and the run "
+        "that wrote the file built another one (the other routine set, or a symmetry search that kept the identity "
+        f"alone, whose grid takes no translation). Write the file on this run's grid ({remedy}) or restart with the "
+        "input of the run that wrote it"
+    )
 
 
 def restart_fields(
@@ -300,7 +346,8 @@ def check_fixed_state_count(
         "; a parsec.dat written after a k-point mesh solved as its supercell "
         "(PARSEC_KPOINT_SUPERCELL) holds at each k-point only the levels its "
         f"Bloch phases give it: take States_Num {int(stored_states)} or fewer, or "
-        "write the file with PARSEC_KPOINT_SUPERCELL=off"
+        "write the file with PARSEC_KPOINT_SUPERCELL=off or with a few more levels per k-point "
+        "(PARSEC_KPOINT_SUPERCELL_STATES)"
         if stored_kpoints is not None and int(stored_kpoints) > 1
         else ""
     )

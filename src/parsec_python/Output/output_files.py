@@ -44,10 +44,52 @@ from .eigen_dat import (
     iteration_eigen_channels,
     result_eigen_channels,
 )
-from .parsec_dat import parsec_dat_from_result, wavefunction_bytes, write_parsec_dat
+from .parsec_dat import gamma_point_input, parsec_dat_from_result, wavefunction_bytes, write_parsec_dat
 
 #: Largest wavefunction payload of the default ``parsec.dat`` (bytes).
 DEFAULT_WAVEFUNCTION_LIMIT_BYTES = 512 * 2**20
+
+
+def parsec_dat_kept_vectors(solver, task: int, columns: int | None = None):
+    """The final orbitals of ``task`` of a k-point solver as a host array for ``parsec.dat`` (its lowest ``columns``
+    ones where given), ``None`` where the solver holds none of the whole grid in this process (the MPI-distributed
+    k-point solvers, whose ``vectors`` are empty blocks)."""
+
+    try:
+        if columns is None:
+            vectors = solver.vectors(task)
+        else:
+            try:
+                # (the solvers of this package copy only those columns to the host)
+                vectors = solver.vectors(task, columns=int(columns))
+            except TypeError:
+                vectors = solver.vectors(task)
+    except (NotImplementedError, KeyError):
+        return None
+    if columns is not None and getattr(vectors, "ndim", 0) == 2:
+        vectors = vectors[:, : int(columns)]
+    if not isinstance(vectors, np.ndarray) and hasattr(vectors, "get"):
+        vectors = vectors.get()
+    vectors = np.array(vectors, copy=columns is not None)
+    if vectors.ndim != 2 or vectors.shape[1] == 0:
+        return None
+    return vectors
+
+
+def orbitals_for_file_only(result, kept_for_file: bool):
+    """``result`` of a k-point loop that kept its orbitals only for ``parsec.dat``: the other fields that
+    ``keep_wavefunctions`` adds (the potentials of the forces and of the next ionic step) are dropped, so that the
+    file's potentials and every result of the run are those of the loop without it."""
+
+    if not kept_for_file:
+        return result
+    from dataclasses import replace as _replace
+
+    if hasattr(result, "eigenvalues_up"):
+        return _replace(
+            result, scf_input_potentials=None, next_potentials=None, xc_potentials=None, scf_hartree_potential=None
+        )
+    return _replace(result, scf_input_potential=None)
 
 
 def _fortran_integer(value: int) -> str:
@@ -182,12 +224,14 @@ class RunOutputFiles:
         spin_count: int,
         *,
         complex_values: bool = False,
+        kpoint_count: int = 1,
     ) -> bool:
         """Settle the wavefunctions of ``parsec.dat``; ``True`` if it holds any.
 
         The default selection (the occupied states) gives way to none where
         all states of the run would take more than the limit, a bound the
-        run knows before its SCF loop.
+        run knows before its SCF loop.  ``kpoint_count``: the k-points whose
+        orbitals the file holds (one block each).
         """
 
         selection = self.settings.wavefunctions
@@ -195,7 +239,9 @@ class RunOutputFiles:
             self.selection = replace(selection, mode="list", indices=())
             return False
         if selection.mode == "occupied" and not selection.explicit:
-            size = wavefunction_bytes(grid_size, number_of_states, spin_count, complex_values)
+            size = wavefunction_bytes(grid_size, number_of_states, spin_count, complex_values) * max(
+                int(kpoint_count), 1
+            )
             if size > self.limit:
                 self.selection = WavefunctionSelection(mode="list", indices=(), explicit=False)
                 self._notes.append(
@@ -215,6 +261,29 @@ class RunOutputFiles:
             return bool(selection.indices)
         self.selection = selection
         return True
+
+    def kpoint_keep(self, keep: dict | None = None, *, whole: bool = False) -> dict:
+        """The keywords that make a k-point loop keep its orbitals for ``parsec.dat`` (``PARSEC_KPOINT_WAVEFUNCTIONS=
+        auto`` and a file that selects wavefunctions, which ``wfnsave.F90`` writes for every k-point); ``{}`` where the
+        loop keeps them already (``keep``) or the file takes none.  A ``Save_Wfn_Bands`` list keeps the lowest levels
+        of each k-point up to its highest state (the solvers' columns are in ascending order), unless ``whole`` (the
+        k = 0 orbitals of an input without k-points, which are made real multiplet by multiplet)."""
+
+        if keep or not self.selection_has_states:
+            return {}
+        from functools import partial
+
+        from .parsec_dat import kpoint_wavefunctions_setting
+
+        if kpoint_wavefunctions_setting() != "auto":
+            return {}
+        selection = self.selection
+        columns = (
+            int(max(selection.indices))
+            if not whole and selection.mode == "list" and selection.indices
+            else None
+        )
+        return {"keep_wavefunctions": True, "keep_vectors": partial(parsec_dat_kept_vectors, columns=columns)}
 
     @property
     def selection_has_states(self) -> bool:
@@ -371,6 +440,8 @@ class RunOutputFiles:
             monkhorst_pack_shift=(
                 getattr(problem, "monkhorst_pack_shift", None) if problem is not None else None
             ),
+            # an input without k-points: the 1x1x1 k-point run that solves it writes the file of the Gamma point
+            gamma_point=gamma_point_input(problem),
         )
         path = write_parsec_dat(self.parsec_dat_path, data)
         if report:
@@ -430,6 +501,8 @@ class ReporterWithFiles:
 
 __all__ = [
     "DEFAULT_WAVEFUNCTION_LIMIT_BYTES",
+    "orbitals_for_file_only",
+    "parsec_dat_kept_vectors",
     "ReporterWithFiles",
     "RunOutputFiles",
     "output_header_lines",

@@ -13,7 +13,8 @@ with ``f_a = V_a + 2 Z_a erf(eta r)/r`` over the images within its reach, ``d_T 
 ``dV sum_r V_xc rho_c'`` and the self-consistency term of ``forcloc.f90``
 ``dV sum_r (V_out - V_in) rho_atom'`` are summed over the images within the reach of the
 densities.  The slopes are those of the linear interpolants the fields sample, as in
-:mod:`parsec_python.Forces.periodic`.  The short-ranged sums run in one CUDA kernel (one thread per
+:mod:`parsec_python.Forces.periodic` (within ``2 rs(2)`` of an atom those of the smooth behaviour of the
+local potential and the core density under ``PARSEC_SPLINE_FORCE_CENTER=auto``).  The short-ranged sums run in one CUDA kernel (one thread per
 atom and chunk of grid points, the chunk sums of an atom added in grid order), the long-ranged sum
 as one FFT on the device.
 
@@ -37,6 +38,12 @@ from typing import Mapping, Sequence
 import numpy as np
 
 from parsec_python.Forces import LocalForceTerms
+from parsec_python.Forces.periodic import (
+    _density_slope,
+    local_potential_slope,
+    smooth_center_radius,
+    spline_force_center_setting,
+)
 
 from ..V_ion import periodic_device as _fields
 from ..V_ion import periodic_setup_fortran as _setup
@@ -104,10 +111,12 @@ void periodic_local_force_chunks(
     const double* v_table = valence + offsets[kind];
     const double* c_table = core + offsets[kind];
     const int samples = counts[kind];
-    const double* p = parameters + 10 * kind;
+    const double* p = parameters + 12 * kind;
     const double scale_a = p[0], scale_b = p[1], first_radius = p[2], cutoff = p[3];
     const double ionic_reach = p[4], valence_reach = p[5], core_reach = p[6];
     const double two_z = p[7], eta = p[8];
+    // PARSEC_SPLINE_FORCE_CENTER=auto: within smooth (0: none) the slopes over r of the smooth behaviour
+    const double smooth = p[9], smooth_local = p[10], smooth_core = p[11];
     double reach = ionic_reach;
     if (valence_reach > reach) reach = valence_reach;
     if (core_reach > reach) reach = core_reach;
@@ -143,21 +152,27 @@ void periodic_local_force_chunks(
                     const double r = sqrt(dx * dx + dy * dy + dz * dz);
                     if (!(r > 0.0) || r > reach) continue;
                     const double inverse = 1.0 / r;
+                    const bool near = r < smooth;
                     if (r <= ionic_reach) {
-                        double slope;
-                        if (r >= cutoff) {
-                            slope = two_z / (r * r);
-                        } else if (r <= first_radius) {
-                            slope = 0.0;
+                        double weight;
+                        if (near) {
+                            weight = rho * (smooth_local + erf_slope_over_r(two_z, r, eta));
                         } else {
-                            // d/dr of p(r)/r, p the linear interpolant of r V
-                            const long long j = radial_segment(r, r_table, samples, scale_a, scale_b);
-                            const double value = linear_value(r, r_table, rv_table, j);
-                            const double derivative =
-                                (rv_table[j + 1] - rv_table[j]) / (r_table[j + 1] - r_table[j]);
-                            slope = (derivative - value / r) / r;
+                            double slope;
+                            if (r >= cutoff) {
+                                slope = two_z / (r * r);
+                            } else if (r <= first_radius) {
+                                slope = 0.0;
+                            } else {
+                                // d/dr of p(r)/r, p the linear interpolant of r V
+                                const long long j = radial_segment(r, r_table, samples, scale_a, scale_b);
+                                const double value = linear_value(r, r_table, rv_table, j);
+                                const double derivative =
+                                    (rv_table[j + 1] - rv_table[j]) / (r_table[j + 1] - r_table[j]);
+                                slope = (derivative - value / r) / r;
+                            }
+                            weight = rho * (slope * inverse + erf_slope_over_r(two_z, r, eta));
                         }
-                        const double weight = rho * (slope * inverse + erf_slope_over_r(two_z, r, eta));
                         sums[0] += weight * dx;
                         sums[1] += weight * dy;
                         sums[2] += weight * dz;
@@ -170,8 +185,9 @@ void periodic_local_force_chunks(
                         sums[5] += weight * dz;
                     }
                     if (r < core_reach && r < cutoff) {
-                        const double weight =
-                            vxc * table_slope(r, r_table, c_table, samples, scale_a, scale_b) * inverse;
+                        const double weight = near
+                            ? vxc * smooth_core
+                            : vxc * table_slope(r, r_table, c_table, samples, scale_a, scale_b) * inverse;
                         sums[6] += weight * dx;
                         sums[7] += weight * dy;
                         sums[8] += weight * dz;
@@ -221,6 +237,7 @@ void periodic_lattice_density_force_chunks(
     const int* offsets,
     const int* counts,
     const double* parameters,
+    const double* smooth_slopes,
     double* partial)
 {
     const long long task = (long long)blockIdx.x * blockDim.x + threadIdx.x;
@@ -235,6 +252,8 @@ void periodic_lattice_density_force_chunks(
     const double* p = parameters + 6 * kind;
     const double scale_a = p[0], scale_b = p[1], cutoff = p[2];
     const double valence_reach = p[3], core_reach = p[4];
+    // PARSEC_SPLINE_FORCE_CENTER=auto: within smooth (0: none) the core slope over r of the smooth behaviour
+    const double smooth = p[5], smooth_core = smooth_slopes[kind];
     double reach = valence_reach;
     if (core_reach > reach) reach = core_reach;
     double sums[6] = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
@@ -271,8 +290,9 @@ void periodic_lattice_density_force_chunks(
                             sums[2] += weight * ez;
                         }
                         if (r <= core_reach) {
-                            const double weight =
-                                vxc * lattice_table_slope(r, r_table, c_table, samples, scale_a, scale_b) * inverse_r;
+                            const double weight = r < smooth
+                                ? vxc * smooth_core
+                                : vxc * lattice_table_slope(r, r_table, c_table, samples, scale_a, scale_b) * inverse_r;
                             sums[3] += weight * ex;
                             sums[4] += weight * ey;
                             sums[5] += weight * ez;
@@ -326,7 +346,8 @@ def device_lattice_density_forces(
     residual_present = bool(np.any(residual != 0.0))
     xc_present = bool(np.any(xc != 0.0))
     symbols = list(dict.fromkeys(atom.symbol for atom in atoms))
-    radii, valence, core, offsets, counts, parameters = [], [], [], [], [], []
+    radii, valence, core, offsets, counts, parameters, smooth_slopes = [], [], [], [], [], [], []
+    center = spline_force_center_setting()
     cursor = 0
     for symbol in symbols:
         potential = potentials[symbol]
@@ -341,6 +362,10 @@ def device_lattice_density_forces(
         offsets.append(cursor)
         counts.append(samples.size)
         cursor += samples.size
+        # within 2 rs(2) the slope of the smooth behaviour of the linear core table
+        # (PARSEC_SPLINE_FORCE_CENTER=auto); 0: none
+        smooth = smooth_center_radius(potential, center) if has_core else 0.0
+        smooth_slopes.append(_density_slope(potential, np.array([smooth]), core_table)[0] / smooth if smooth else 0.0)
         parameters.append(
             [
                 potential.radial_parameter_a,
@@ -350,7 +375,7 @@ def device_lattice_density_forces(
                 _fields.density_reach(potential, core_table)
                 if has_core and xc_present and symbol not in host_core
                 else 0.0,
-                0.0,
+                smooth,
             ]
         )
     lattice = np.ascontiguousarray(np.asarray(lattice_vectors, dtype=np.float64))
@@ -376,6 +401,7 @@ def device_lattice_density_forces(
             "offsets": cp.asarray(np.asarray(offsets, dtype=np.int32)),
             "counts": cp.asarray(np.asarray(counts, dtype=np.int32)),
             "parameters": cp.asarray(np.asarray(parameters, dtype=np.float64).reshape(-1)),
+            "smooth": cp.asarray(np.asarray(smooth_slopes, dtype=np.float64)),
         }
         kernel = _lattice_density_force_kernel(cp)
         for start in range(0, count, batch):
@@ -405,6 +431,7 @@ def device_lattice_density_forces(
                     device["offsets"],
                     device["counts"],
                     device["parameters"],
+                    device["smooth"],
                     partial,
                 ),
             )
@@ -576,6 +603,7 @@ def _device_local_forces(
     symbols = list(dict.fromkeys(atom.symbol for atom in atoms))
     residual_present = bool(np.any(fields[1] != 0.0))
     radii, local_rv, valence, core, offsets, counts, parameters = [], [], [], [], [], [], []
+    center = spline_force_center_setting()
     cursor = 0
     for symbol in symbols:
         potential = potentials[symbol]
@@ -594,6 +622,10 @@ def _device_local_forces(
         offsets.append(cursor)
         counts.append(samples.size)
         cursor += samples.size
+        # within 2 rs(2) the slopes over r of the smooth behaviour of the linear tables
+        # (PARSEC_SPLINE_FORCE_CENTER=auto); 0: none
+        smooth = smooth_center_radius(potential, center)
+        at = np.array([smooth])
         parameters.append(
             [
                 potential.radial_parameter_a,
@@ -605,7 +637,9 @@ def _device_local_forces(
                 _fields.density_reach(potential, core_table) if has_core and symbol not in host_core else 0.0,
                 2.0 * float(potential.ionic_charge),
                 split.eta,
-                0.0,
+                smooth,
+                float(local_potential_slope(potential, at, local_l)[0]) / smooth if smooth else 0.0,
+                float(_density_slope(potential, at, core_table)[0]) / smooth if smooth and has_core else 0.0,
             ]
         )
     positions = np.array([np.asarray(atom.position, dtype=np.float64) for atom in atoms])

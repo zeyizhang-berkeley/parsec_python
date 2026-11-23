@@ -525,7 +525,10 @@ class DeviceConfinedHartree:
                 ),
                 shape=(size, max(stencil.size, 1)),
             )
-            self.exterior = _upload_csr(exterior, cpsparse)
+            from ..Hamiltonian.complex_csr_device import ordered_device_matrix
+
+            # (PARSEC_ORDERED_SUMS=auto: the boundary correction in a fixed order of summation)
+            self.exterior = ordered_device_matrix(_upload_csr(exterior, cpsparse))
             boundary = plan.boundary
             if isinstance(boundary, WireBoundaryPlan):
                 self.boundary = DeviceWireBoundary(boundary, cp)

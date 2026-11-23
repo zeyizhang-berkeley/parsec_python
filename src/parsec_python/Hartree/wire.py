@@ -149,6 +149,22 @@ def _bessel_table(function, orders: int, arguments: np.ndarray) -> np.ndarray:
     return np.stack([function(m, arguments) for m in range(orders + 1)], axis=-1)
 
 
+def _scaled_bessel_rows(function, orders: int, wave: float, n: np.ndarray, rho: np.ndarray, sign: float, limit: float):
+    """``_bessel_table(function, orders, k n rho) * exp(sign (k n rho - k n limit))`` for every entry of ``rho``.
+
+    The rows of the points that share a value of ``rho`` (every point of a line along the axis of the wire) are
+    equal: they are evaluated once per distinct value with the same expressions and gathered, so the table is the
+    one of the direct evaluation bit for bit (the Bessel functions are the costly part of the plan: 18 s of the
+    44 s preparation of a 26-atom ribbon on 439k points before 2026-11-22).
+    """
+
+    distinct, inverse = np.unique(rho, return_inverse=True)
+    argument = wave * n[None, :] * distinct[:, None]  # (D, L)
+    scale = np.exp(sign * (argument - wave * n[None, :] * limit))
+    table = _bessel_table(function, orders, argument) * scale[:, :, None]
+    return table[inverse.reshape(-1)]
+
+
 def build_wire_boundary_plan(
     grid,
     exterior_points: np.ndarray,
@@ -180,9 +196,8 @@ def build_wire_boundary_plan(
     source_angular = np.exp(-1j * m[None, :] * theta[:, None])
     source_radial = rho[:, None] ** m[None, :] * source_angular
     source_axial = np.exp(-1j * wave * n[None, :] * coordinates[:, 0][:, None])
-    argument = wave * n[None, :] * rho[:, None]  # (N, L)
-    scale = np.exp(argument - wave * n[None, :] * radius_limit)
-    source_bessel = _bessel_table(ive, order, argument) * scale[:, :, None]
+    # I_m(n k rho) exp(n k rho - n k R), once per distinct rho
+    source_bessel = _scaled_bessel_rows(ive, order, wave, n, rho, 1.0, radius_limit)
     mask = np.ones(grid.size, dtype=np.float64)
     if skip_axis_points:
         mask[rho == 0.0] = 0.0
@@ -196,9 +211,8 @@ def build_wire_boundary_plan(
     boundary_theta = np.arctan2(bz, by)
     boundary_angular = np.exp(1j * m[None, :] * boundary_theta[:, None])
     boundary_axial = np.exp(1j * wave * n[None, :] * exterior[:, 0][:, None])
-    boundary_argument = wave * n[None, :] * boundary_radius[:, None]
-    boundary_scale = np.exp(-(boundary_argument - wave * n[None, :] * radius_limit))
-    boundary_bessel = _bessel_table(kve, order, boundary_argument) * boundary_scale[:, :, None]
+    # K_m(n k rho) exp(-(n k rho - n k R)), once per distinct rho
+    boundary_bessel = _scaled_bessel_rows(kve, order, wave, n, boundary_radius, -1.0, radius_limit)
     return WireBoundaryPlan(
         order=order,
         period=period,

@@ -10,8 +10,9 @@ The saved columns wait on the host while the new basis is formed (:func:`saved_c
 more than it holds for a first solve from random vectors.  They are then written into the leading columns of the
 new basis: a single array here (:func:`place_saved_columns`), the blocks of a basis that devices or MPI ranks share
 in ``fill_leading`` of their groups.  A process stages them only where the host has room for them
-(:func:`host_room`), and the MPI ranks that share a basis start from it only where every one of them staged its
-columns (:func:`staged_on_every_rank`); otherwise the sector grows from random vectors, as before.
+(:func:`host_room`: its share of the room of the node, :func:`host_processes`), and the MPI ranks that share a basis
+start from it only where every one of them staged its columns (:func:`staged_on_every_rank`); otherwise the sector
+grows from random vectors, as before.
 """
 
 from __future__ import annotations
@@ -28,10 +29,14 @@ from ..backends.cupy import require_cupy
 from .spill_buffers import copies_directly, host_available_bytes
 
 _VALUES = {"auto", "off"}
-# The share of the available host memory that the saved columns of a process may take (see host_room).
+# The share of the available host memory that the saved columns of the processes of a node may take (see host_room).
 _HOST_SHARE = 0.5
 _reserved_lock = threading.Lock()
 _reserved_bytes = 0
+HOST_SETTING = "PARSEC_CUPY_SECTOR_WARM_GROWTH_HOST"
+_HOST_VALUES = {"node", "process"}
+# The processes of this run on the host of this one (set_host_processes; 1 until an MPI layer says otherwise).
+_host_processes = 1
 
 
 def sector_warm_growth_setting() -> str:
@@ -49,6 +54,35 @@ def sector_warm_growth_setting() -> str:
     if value not in _VALUES:
         raise ValueError("PARSEC_CUPY_SECTOR_WARM_GROWTH must be auto or off")
     return value
+
+
+def warm_growth_host_setting() -> str:
+    """``PARSEC_CUPY_SECTOR_WARM_GROWTH_HOST``: ``node`` (the default) or ``process``.
+
+    ``node``: the saved columns of all the processes of this run on one host take at most the share of its available
+    memory that one process took before (:func:`host_room`): each process gets that share divided by their number
+    (:func:`set_host_processes`, which the MPI layers call).  Several MPI ranks of one node, one GPU each, check and
+    stage at the same time, and each of them saw the whole room.  ``process`` gives every process the whole share, as
+    before; the two differ only where a staging would take more than its part of the room of the node.
+    """
+
+    value = os.environ.get(HOST_SETTING, "node").strip().lower() or "node"
+    if value not in _HOST_VALUES:
+        raise ValueError(f"{HOST_SETTING} must be node or process, not {value!r}")
+    return value
+
+
+def set_host_processes(count: int) -> None:
+    """Record how many processes of this run share the host of this one (the MPI ranks of its node)."""
+
+    global _host_processes
+    _host_processes = max(int(count), 1)
+
+
+def host_processes() -> int:
+    """The processes among which :func:`host_room` divides the room of the host (1 under ``process``)."""
+
+    return _host_processes if warm_growth_host_setting() == "node" else 1
 
 
 def new_column_scale(rows: int) -> float:
@@ -150,14 +184,15 @@ def host_room(nbytes: int) -> Iterator[bool]:
 
     They fit where they are at most half of the memory that the host reports as available
     (``spill_buffers.host_available_bytes``), less what other sectors of this process are staging at the same
-    time; and where the host reports nothing.
+    time, divided among the processes of this run on the host (:func:`host_processes`: several ranks of a node
+    stage together, and each reads the same available memory); and where the host reports nothing.
     """
 
     global _reserved_bytes
     nbytes = int(nbytes)
     with _reserved_lock:
         available = host_available_bytes() if nbytes else None
-        fits = available is None or nbytes <= _HOST_SHARE * (available - _reserved_bytes)
+        fits = available is None or nbytes <= _HOST_SHARE * (available - _reserved_bytes) / host_processes()
         if fits:
             _reserved_bytes += nbytes
     try:
@@ -198,10 +233,13 @@ def place_saved_columns(vectors: Any, saved: SavedColumns) -> None:
 __all__ = [
     "SavedColumns",
     "host_bytes",
+    "host_processes",
     "host_room",
     "new_column_scale",
     "place_saved_columns",
     "saved_columns",
     "sector_warm_growth_setting",
+    "set_host_processes",
     "staged_on_every_rank",
+    "warm_growth_host_setting",
 ]

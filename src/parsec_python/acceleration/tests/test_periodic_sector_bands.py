@@ -237,7 +237,8 @@ def _run(directory: Path, extra: str, setting: str, *, positions=None, settings=
 
 #: 22 states: the level list of the weighted sectors holds exactly 22 states (no multiplet cut).
 BAND_SETTINGS = {**SILICON_SETTINGS, "States_Num": "22"}
-#: 21 states cut a triplet: the sectors list 22 levels, the full grid 21.
+#: 21 states cut a triplet: the full grid lists 21 levels, the sectors 21 (PARSEC_WEIGHTED_STATE_COUNT=auto, the
+#: triplet sharing the state left) or 22 (off).
 CUT_SETTINGS = {**SILICON_SETTINGS, "States_Num": "21"}
 SECTORS_LINE = "exact group of 96 operations detected"
 
@@ -291,27 +292,35 @@ class SectorBandStructureTests(unittest.TestCase):
 
 @unittest.skipUnless(cupy_available() and native_available(), "CUDA runtime or native extension is unavailable")
 class CutMultipletTests(unittest.TestCase):
-    """States_Num 21 cuts a triplet: the sectors list its 22 partners, the bands still get 21 states per k-point and
-    the Fermi level of the 21 levels of the full grid.  (The full grid, which solves two of the three partners,
-    stalls at a residual of about 2e-8 and ends unconverged after Max_Iter, as before; the sectors converge.)"""
+    """States_Num 21 cuts a triplet: the bands get 21 states per k-point and the Fermi level of the 21 levels of the
+    full grid, whether the sectors list 21 states (PARSEC_WEIGHTED_STATE_COUNT=auto: the triplet shares the state
+    left, and the SCF has the full grid's levels and Fermi level) or its 22 partners (off).  (The full grid, which
+    solves two of the three partners, stalls at a residual of about 2e-8 and ends unconverged after Max_Iter, as
+    before; the sectors converge.)"""
 
     def test_the_bands_get_the_states_and_the_fermi_level_of_the_full_grid(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as name:
             root = Path(name)
             full = _run(root / "full", BANDS, "off", settings=CUT_SETTINGS)
             sectors = _run(root / "sectors", BANDS, "auto", settings=CUT_SETTINGS)
+            with mock.patch.dict(os.environ, {"PARSEC_WEIGHTED_STATE_COUNT": "off"}):
+                whole = _run(root / "sectors_whole_level", BANDS, "auto", settings=CUT_SETTINGS)
         self.assertIn(full[0], (0, 3), f"{full[4]}\n{full[3][-3000:]}")
-        self.assertEqual(sectors[0], 0, f"{sectors[4]}\n{sectors[3][-3000:]}")
-        self.assertIn(SECTORS_LINE, sectors[3])
         self.assertEqual(np.asarray(full[1]["eigenvalues_ry"]).size, 21)
-        self.assertEqual(np.asarray(sectors[1]["eigenvalues_ry"]).size, 22)
         shape = np.asarray(full[2]["eigenvalues_ry"]).shape
         self.assertEqual(shape[-1], 21)
-        self.assertEqual(np.asarray(sectors[2]["eigenvalues_ry"]).shape, shape)
-        np.testing.assert_allclose(sectors[2]["eigenvalues_ry"], full[2]["eigenvalues_ry"], rtol=0, atol=1e-7)
-        # the SCF of the sectors finds another level in the gap (its bisection brackets 22 levels)
-        self.assertGreater(abs(float(sectors[1]["fermi_level_ry"]) - float(full[1]["fermi_level_ry"])), 1e-6)
-        self.assertAlmostEqual(float(sectors[2]["fermi_level_ry"]), float(full[2]["fermi_level_ry"]), delta=1e-7)
+        for label, run, listed in (("auto", sectors, 21), ("off", whole, 22)):
+            with self.subTest(weighted_state_count=label):
+                self.assertEqual(run[0], 0, f"{run[4]}\n{run[3][-3000:]}")
+                self.assertIn(SECTORS_LINE, run[3])
+                self.assertEqual(np.asarray(run[1]["eigenvalues_ry"]).size, listed)
+                self.assertEqual(np.asarray(run[2]["eigenvalues_ry"]).shape, shape)
+                np.testing.assert_allclose(run[2]["eigenvalues_ry"], full[2]["eigenvalues_ry"], rtol=0, atol=1e-7)
+                self.assertAlmostEqual(float(run[2]["fermi_level_ry"]), float(full[2]["fermi_level_ry"]), delta=1e-7)
+        # the SCF of the sectors: under auto the Fermi level of the full grid's 21 levels; under off another level in
+        # the gap (its bisection brackets 22 levels)
+        self.assertAlmostEqual(float(sectors[1]["fermi_level_ry"]), float(full[1]["fermi_level_ry"]), delta=1e-7)
+        self.assertGreater(abs(float(whole[1]["fermi_level_ry"]) - float(full[1]["fermi_level_ry"])), 1e-6)
 
 
 @unittest.skipUnless(cupy_available() and native_available(), "CUDA runtime or native extension is unavailable")

@@ -182,24 +182,38 @@ class KPointHubbard:
             whole_orbitals(vectors, grid_size, "LDA+U")  # refuses a block of grid rows
         return float(weight) * self._device_occupation(k_index, vectors, occupations, xp)
 
-    def _atom_blocks(self, k_index: int):
-        """``(rows, values)`` of every LDA+U atom at k-point ``k_index``: its support rows and the
-        ``(rows, 5)`` values of its five Bloch projectors there."""
+    def occupation_with(self, projectors: HubbardProjectors, vectors, occupations, weight: float, xp=np) -> np.ndarray:
+        """``w_k N`` of orbitals ``vectors`` on the rows of ``projectors`` (complex, host ``(atoms, 5, 5)``): the
+        states of a sector of a k-point with the projectors reduced to its rows
+        (``acceleration/SCF/kpoint_sectors.py``, ``PARSEC_KPOINT_SECTOR_LDAU``), host or device orbitals as
+        :meth:`occupation` takes them."""
 
-        blocks = self._blocks.get(k_index)
-        if blocks is None:
-            matrix = self.projectors(k_index).projectors.tocsc()
-            blocks = []
-            for atom in range(self.template.atom_count):
-                columns = matrix[:, 5 * atom : 5 * atom + 5].tocsr()
-                rows = np.flatnonzero(np.diff(columns.indptr))
-                blocks.append((rows, np.asarray(columns[rows].toarray(), dtype=np.complex128)))
-            self._blocks[k_index] = blocks
+        if xp is np or isinstance(vectors, np.ndarray):
+            return kpoint_occupation_matrix(projectors, np.asarray(vectors), occupations, weight)
+        return float(weight) * self._device_occupation(None, vectors, occupations, xp, projectors=projectors)
+
+    def _atom_blocks(self, k_index, projectors: HubbardProjectors | None = None):
+        """``(rows, values)`` of every LDA+U atom at k-point ``k_index``: its support rows and the
+        ``(rows, 5)`` values of its five Bloch projectors there (of ``projectors`` where given: the rows of a
+        sector, kept with that object)."""
+
+        key = k_index if projectors is None else ("rows", id(projectors))
+        found = self._blocks.get(key)
+        if found is not None and (projectors is None or found[0] is projectors):
+            return found[1]
+        matrix = (self.projectors(k_index) if projectors is None else projectors).projectors.tocsc()
+        blocks = []
+        for atom in range(self.template.atom_count):
+            columns = matrix[:, 5 * atom : 5 * atom + 5].tocsr()
+            rows = np.flatnonzero(np.diff(columns.indptr))
+            blocks.append((rows, np.asarray(columns[rows].toarray(), dtype=np.complex128)))
+        self._blocks[key] = (projectors, blocks)
         return blocks
 
-    def _device_occupation(self, k_index: int, vectors, occupations, xp) -> np.ndarray:
+    def _device_occupation(self, k_index, vectors, occupations, xp, projectors: HubbardProjectors | None = None):
         """``N_k = sum_n f_n <phi|u_n><u_n|phi>`` of device orbitals (index order of
-        :func:`~parsec_python.Hamiltonian.hubbard.occupation_matrices`)."""
+        :func:`~parsec_python.Hamiltonian.hubbard.occupation_matrices`), with the projectors of k-point ``k_index``
+        or ``projectors``."""
 
         occupations = np.asarray(occupations, dtype=np.float64)
         occupied = np.flatnonzero(occupations != 0.0)
@@ -207,14 +221,16 @@ class KPointHubbard:
         if occupied.size == 0:
             return np.zeros((atoms, 5, 5), dtype=np.complex128)
         device = getattr(getattr(vectors, "device", None), "id", None)
-        key = (k_index, device)
-        blocks = self._device_blocks.get(key)
-        if blocks is None:
+        key = (k_index if projectors is None else ("rows", id(projectors)), device)
+        found = self._device_blocks.get(key)
+        if found is not None and (projectors is None or found[0] is projectors):
+            blocks = found[1]
+        else:
             blocks = [
                 (xp.asarray(rows), xp.asarray(values.conj().T))
-                for rows, values in self._atom_blocks(k_index)
+                for rows, values in self._atom_blocks(k_index, projectors)
             ]
-            self._device_blocks[key] = blocks
+            self._device_blocks[key] = (projectors, blocks)
         selected = vectors[:, : int(occupied[-1]) + 1]
         weights = xp.asarray(occupations[: int(occupied[-1]) + 1])
         dots = xp.stack([adjoint @ selected[rows] for rows, adjoint in blocks])

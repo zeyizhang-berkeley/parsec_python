@@ -155,6 +155,41 @@ class SupercellLevelTests(unittest.TestCase):
         found = self._pair("tetragonal", {}, mesh=(2, 2, 1), sides=(10.26, 10.26, 15.39))
         print(f"\n tetragonal 2 x 2 x 1: {self._compare(found):.2e} Ry")
 
+    def test_a_shared_level_whose_last_state_lists_nothing(self) -> None:
+        # Conventional bcc Na 2 x 2 x 2 (16 atoms) with the 2 x 2 x 2 mesh: its supercell (128 atoms, 112 states)
+        # ends inside a 12-fold level of four solved states of weight 3 at 1000 K, which share the one state left,
+        # 0.25 each (PARSEC_WEIGHTED_STATE_COUNT): the second lists it, the last lists none.  The levels of the
+        # k-points take every partner of the four (CuPySymmetryOrbitals.whole_levels) and skip solved states that
+        # list nothing (an IndexError after the SCF when the k-points were read from the list with a last 0).
+        directory = self.folder / "shared_level"
+        directory.mkdir(parents=True, exist_ok=True)
+        side = 8.0
+        positions = [side * (np.array(basis) + (i, j, k)) for i in range(2) for j in range(2) for k in range(2)
+                     for basis in ((0.0, 0.0, 0.0), (0.5, 0.5, 0.5))]
+        lines = ["Periodic_System: .true.", "Boundary_Conditions: bulk", "begin Cell_Shape", "  16.0 0.0 0.0",
+                 "  0.0 16.0 0.0", "  0.0 0.0 16.0", "end Cell_Shape", "Lattice_Vector_Scale: 1.0 bohr",
+                 "Coordinate_Unit: Cartesian_Bohr", "Grid_Spacing: 0.5", "Expansion_Order: 12", "Correlation_Type: ca",
+                 "States_Num: 14", "Fermi_Temp: 1000.0", "Convergence_Criterion: 1.0e-6 Ry", "Max_Iter: 100",
+                 "Kpoint_Method: mp", "begin Monkhorst_Pack_Grid", "  2 2 2", "end Monkhorst_Pack_Grid",
+                 "Atom_Types_Num: 1", "Atom_Type: Na", "Local_Component: s", "begin Atom_Coord",
+                 *(f"  {x:.10f} {y:.10f} {z:.10f}" for x, y, z in positions), "end Atom_Coord"]
+        (directory / "parsec.in").write_text("\n".join(lines) + "\n")
+        data = Path(__file__).resolve().parents[2] / "tests" / "data"
+        shutil.copy(data / "Na_POTRE.DAT", directory / "Na_POTRE.DAT")
+        completed = _run(directory, {})
+        self.assertEqual(completed.returncode, 0, completed.stdout[-3000:] + completed.stderr[-3000:])
+        self.assertIn("supercell of", completed.stdout)
+        out = (directory / "parsec.out").read_text()
+        self.assertIn("convergence achieved", out.lower())
+        self.assertNotIn("dealt to the k-points", out)
+        from parsec_python.Output.parsec_dat import read_parsec_dat
+
+        levels = read_parsec_dat(directory / "parsec.dat", wavefunctions=False).levels[0]
+        self.assertGreater(len(levels), 0)
+        for block in levels:
+            self.assertTrue(np.all(np.isfinite(block.energies)))
+            self.assertTrue(np.all((block.occupations >= 0.0) & (block.occupations <= 2.0 + 1.0e-12)))
+
 
 if __name__ == "__main__":
     unittest.main()

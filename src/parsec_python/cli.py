@@ -288,6 +288,9 @@ def _ionic_payload(forces=None, relaxation=None, dynamics=None) -> dict[str, np.
         spin_orbit = getattr(forces, "spin_orbit", None)
         if spin_orbit is not None:
             payload["forces_spin_orbit"] = np.asarray(spin_orbit)
+        boundary = getattr(forces, "hartree_boundary", None)
+        if boundary is not None:
+            payload["forces_hartree_boundary"] = np.asarray(boundary)
     if relaxation is not None and relaxation.records:
         records = relaxation.records
         payload["relaxation_positions"] = np.asarray([item.positions for item in records])
@@ -950,11 +953,19 @@ def start_output_files(files: RunOutputFiles, translation, system, log, *, k_sam
     spinors = bool(problem.scf.self_consistent_spin_orbit or problem.scf.noncollinear)
     # Spinors (wfnsave.F90 with mxwd = 2) take two complex components per point.
     spin_count = 2 if problem.scf.spin_polarized or spinors else 1
+    from .Output.parsec_dat import kpoint_wavefunctions_setting
+
     files.plan_wavefunctions(
         system.grid.size,
         planned_state_count(problem, system.electron_count),
         spin_count,
         complex_values=k_sampling is not None or spinors,
+        # PARSEC_KPOINT_WAVEFUNCTIONS=auto: a block of orbitals for every k-point of the scalar and collinear loops
+        **(
+            {"kpoint_count": len(k_sampling[0])}
+            if k_sampling is not None and not spinors and kpoint_wavefunctions_setting() == "auto"
+            else {}
+        ),
     )
     # Spinor runs and wires and slabs write
     # parsec.dat as every other run.
@@ -1660,6 +1671,21 @@ def _run_periodic_hybrid(
     return 0 if result.converged else 3
 
 
+def _parsec_dat_keep(files, keep: dict, *, whole: bool = False) -> dict:
+    """The keywords that make a k-point loop keep its orbitals for ``parsec.dat``
+    (:meth:`parsec_python.Output.output_files.RunOutputFiles.kpoint_keep`); ``{}`` without files."""
+
+    return {} if files is None else files.kpoint_keep(keep, whole=whole)
+
+
+def _orbitals_for_file_only(result, kept_for_file: bool):
+    """:func:`parsec_python.Output.output_files.orbitals_for_file_only`."""
+
+    from .Output.output_files import orbitals_for_file_only
+
+    return orbitals_for_file_only(result, kept_for_file)
+
+
 def _run_extended_drivers(
     system,
     translation,
@@ -1872,6 +1898,21 @@ def _run_extended_drivers(
             # A Gamma-only periodic spin run is the 1x1x1 k-point run.  Through the k-point driver
             # it runs on the device; the Gamma driver has no device path.
             k_sampling = (np.zeros((1, 3)), np.ones(1))
+            from .Output.parsec_dat import gamma_parsec_dat_setting, kpoint_wavefunctions_setting
+
+            if (
+                files is not None
+                and kpoint_wavefunctions_setting() == "auto"
+                and gamma_parsec_dat_setting() == "off"
+            ):
+                # parsec.dat then holds the complex orbitals of k = 0 (PARSEC_GAMMA_PARSEC_DAT=off): the limit of
+                # its default wavefunctions counts them so (auto writes them real, as planned)
+                files.plan_wavefunctions(
+                    system.grid.size,
+                    planned_state_count(translation.problem, system.electron_count),
+                    2,
+                    complex_values=True,
+                )
         # Single-point forces of a wire or slab with spin and k-points
         # (parsec_python.Forces.wire_slab) read the orbitals of the loop.
         spin_kpoint_forces = bool(
@@ -1883,14 +1924,21 @@ def _run_extended_drivers(
             keep = {"keep_wavefunctions": True}
         if k_sampling is not None:
             k_points, k_weights = k_sampling
+            # the orbitals of every k-point that parsec.dat selects (PARSEC_KPOINT_WAVEFUNCTIONS; all the states of
+            # k = 0 of an input without k-points, which are made real)
+            file_keep = _parsec_dat_keep(
+                files, keep, whole=not getattr(translation.problem, "has_kpoint_sampling", True)
+            )
             result = run_scf_kpoints_spin_polarized(
                 system,
                 k_points,
                 k_weights,
                 callback=reporter.iteration_spin_polarized,
                 **keep,
+                **file_keep,
                 **state,
             )
+            result = _orbitals_for_file_only(result, bool(file_keep))
         elif getattr(translation, "polarizability_field", None) is not None:
             # polar.f90 around the spin loop of a spin-orbit species (the
             # perturbative correction follows the last loop).
@@ -1958,6 +2006,8 @@ def _run_extended_drivers(
 
     # Scalar (spin-unpolarized, no spin-orbit) k-point sampling.
     k_points, k_weights = k_sampling
+    # the orbitals of every k-point that parsec.dat selects (PARSEC_KPOINT_WAVEFUNCTIONS)
+    file_keep = _parsec_dat_keep(files, keep)
     result = run_scf_kpoints(
         system,
         k_points,
@@ -1965,8 +2015,10 @@ def _run_extended_drivers(
         callback=reporter.iteration,
         **({} if restart is None else {"initial_potential": restart.input_potential}),
         **keep,
+        **file_keep,
         **state,
     )
+    result = _orbitals_for_file_only(result, bool(file_keep))
     scf_elapsed = time.perf_counter() - scf_start
     forces = None
     if translation.compute_forces and getattr(system.grid, "is_confined_periodic", False):
@@ -2363,9 +2415,22 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         try:
             check_kpoint_sector_switches()
+            # PARSEC_KPOINT_WAVEFUNCTIONS and PARSEC_GAMMA_PARSEC_DAT: the orbitals and the kind of parsec.dat of a
+            # k-point loop, read before the run
+            from .Output.parsec_dat import validate_settings as validate_parsec_dat_settings
+
+            validate_parsec_dat_settings()
         except ValueError as error:
             print(f"Input error: {error}", file=sys.stderr)
             return 2
+    # PARSEC_STATES_CLOSE_MULTIPLET: more states where States_Num cuts an occupied multiplet (SCF/state_extension.py)
+    from parsec_python.SCF.state_extension import close_multiplet_setting
+
+    try:
+        close_multiplet_setting()
+    except ValueError as error:
+        print(f"Input error: {error}", file=sys.stderr)
+        return 2
     if translation.problem.scf.spin_polarized:
         # PARSEC_SPIN_START: the start of the spin-polarized k-point loop and of run_scf_spin_polarized
         from parsec_python.SCF.spin_polarized import spin_start_setting
@@ -2918,6 +2983,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                     backend = periodic_backend(
                         *(backend_k_sampling if backend_k_sampling is not None else (None, None)),
                         extrapolation,
+                        # the orbitals of every k-point that parsec.dat selects (PARSEC_KPOINT_WAVEFUNCTIONS)
+                        file_keep=lambda: _parsec_dat_keep(files, {}),
                     )
                 elif spinor_ionic:
                     backend = fortran_spinor_backend(k_sampling, periodic=is_periodic)
@@ -2931,13 +2998,16 @@ def main(argv: Sequence[str] | None = None) -> int:
                         translation, k_sampling, is_periodic, has_soc_species, restart=restart
                     )
                     if k_sampling is None and ionic_k_sampling is not None:
-                        # parsec.dat then holds the complex Bloch orbitals of k = 0 that the loop keeps for the
-                        # forces: the limit of its default wavefunctions counts them so
+                        # parsec.dat then holds the Bloch orbitals of k = 0 that the loop keeps for the forces, made
+                        # real as those of the Gamma point (PARSEC_GAMMA_PARSEC_DAT=auto), else complex: the limit of
+                        # its default wavefunctions counts them so
+                        from .Output.parsec_dat import gamma_parsec_dat_setting
+
                         files.plan_wavefunctions(
                             system.grid.size,
                             planned_state_count(translation.problem, system.electron_count),
                             2,
-                            complex_values=True,
+                            complex_values=gamma_parsec_dat_setting() == "off",
                         )
                     backend = fortran_periodic_backend(ionic_k_sampling, extrapolation)
                 else:

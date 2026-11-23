@@ -183,6 +183,21 @@ class TdSpectrumTests(unittest.TestCase):
                 np.testing.assert_allclose(partners.T @ partners, np.eye(3) * (state @ state), atol=1e-12)
                 residual = hamiltonian @ partners - values[0] * partners
                 self.assertLess(float(np.max(np.abs(residual))), 1e-10)
+                # two solved states of one multiplet (weights 2 and 1): completed alone, the partner formed for the
+                # first can repeat part of the second; with their levels the three are orthonormal eigenvectors
+                second = (partners[:, 1] + partners[:, 2]) / np.sqrt(2.0)
+                pair = np.column_stack([state, second])
+                alone = reduction.partner_states(pair, np.array([2, 1]))
+                self.assertGreater(float(np.max(np.abs(alone.T @ alone - np.eye(3) * (state @ state)))), 1e-3)
+                joint = reduction.partner_states(pair, np.array([2, 1]), np.array([values[0], values[0] + 1e-9]))
+                np.testing.assert_allclose(joint[:, 0], state, atol=0.0)
+                np.testing.assert_allclose(joint[:, 2], second, atol=0.0)
+                np.testing.assert_allclose(joint.T @ joint, np.eye(3) * (state @ state), atol=1e-12)
+                self.assertLess(float(np.max(np.abs(hamiltonian @ joint - values[0] * joint))), 1e-10)
+                # a state without neighbours within the tolerance: the partners of before, bit for bit
+                np.testing.assert_array_equal(
+                    reduction.partner_states(state[:, None], np.array([3]), np.array([values[0]])), partners
+                )
                 # the switch keeps the group of before
                 with patch.dict(os.environ, {"PARSEC_ORBITAL_GROUP": "abelian"}):
                     self.assertIs(detect_point_group_reduction(grid, atoms, abelian), abelian)

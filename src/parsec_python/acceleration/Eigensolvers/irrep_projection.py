@@ -6,9 +6,10 @@ Hamiltonian is that of the sector, which commutes with the projector ``P`` onto 
 (:meth:`..Symmetry.representations.ReflectionRepresentationDecomposition.projection_tables`): a basis in the range
 of ``P`` stays there, but for rounding.  ``P`` is applied to every filtered block (:func:`project_filtered`),
 before the Rayleigh-Ritz step, in every filter route (one device, a group of devices, ranks that share a basis),
-and the random start of a first solve is projected by its first filter.  A filter amplifies a part outside the
-range as much as a level of the sector below the wanted ones, so the projection after it removes that part to the
-rounding of the projection.
+and the random start of a first solve is projected by its first filter: the CHEBFF blocks, and every block that
+CHEBDAV filters and appends to its Davidson basis (its random start and random candidates included,
+``chebdav._filter_in_unit``).  A filter amplifies a part outside the range as much as a level of the sector below
+the wanted ones, so the projection after it removes that part to the rounding of the projection.
 
 Two steps between the filters still leave the range, and are repaired here:
 
@@ -20,7 +21,9 @@ Two steps between the filters still leave the range, and are repaired here:
   device (also the gathered basis of a group of devices) and, where it exceeds :data:`UNIT_BASIS_TOLERANCE` or a
   column was drawn at random, projects the basis and orthonormalizes it again.  Ranks that share a basis
   orthonormalize it by a shifted Cholesky QR (combinations of the filtered columns, nothing drawn) and project their
-  columns before the Ritz step (``mpi_shared_basis.MPIShardGroup.orthonormal_ritz``).
+  columns before the Ritz step (``mpi_shared_basis.MPIShardGroup.orthonormal_ritz``).  CHEBDAV checks each block it
+  appends after its orthonormalization the same way (``chebdav._orthonormalize_appended_in_unit``: projected and
+  orthonormalized against the columns before it again).
 * The generalized Rayleigh-Ritz step whitens the filtered block itself (``X L^-T``), with the same loss.
   :func:`check_unit_basis` after every solve on one device projects the saved states back and orthonormalizes them
   symmetrically where their share exceeds the tolerance, and stops the run only beyond :data:`UNIT_BASIS_LIMIT`:

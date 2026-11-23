@@ -114,7 +114,9 @@ def run_self_consistent_soc(
     (:mod:`.soc_sectors`); ``auto`` (the default since 2026-11-21) is
     ``kramers`` where the whole-grid spinor basis reaches the floor of
     :func:`.soc_sectors.resolve_soc_sectors`, or where ``--symmetry on`` asks
-    for a reduction (``forced``), and the whole grid below it.  ``note``
+    for a reduction (``forced``), and the whole grid below it; under the
+    opt-in ``PARSEC_SOC_AUTO_FOURFOLD=auto`` it is ``fourfold`` (``kramers``
+    split by a four-fold operation about z) from a larger floor on.  ``note``
     receives a line that says which route the run takes and why.
     ``symmetry=False`` (``Ignore_Symmetry``, ``--symmetry off``) keeps the
     whole grid whatever the switch.
@@ -153,7 +155,7 @@ def run_self_consistent_soc(
     elif sectors != "off":
         route = _sector_route(
             system, soc_projectors, backend, note, parity=sectors == "on",
-            label="auto" if requested == "auto" else None,
+            label="auto" if requested == "auto" else None, fourfold=sectors == "fourfold",
         )
         if route is not None:
             result = run_reference_self_consistent_soc(
@@ -195,17 +197,19 @@ def run_self_consistent_soc(
     )
 
 
-def _sector_route(system, soc_projectors, backend, note, *, parity: bool, label: str | None = None):
+def _sector_route(
+    system, soc_projectors, backend, note, *, parity: bool, label: str | None = None, fourfold: bool = False
+):
     """The hooks of the double-group sectors (:class:`.soc_sectors.SectorRoute`), split by inversion parity with
-    ``parity``, or ``None`` (the whole grid) for a cluster without a two-fold rotation or mirror; ``note`` hears
-    which."""
+    ``parity`` or by a four-fold operation about z with ``fourfold``, or ``None`` (the whole grid) for a cluster
+    without a two-fold rotation or mirror; ``note`` hears which."""
     import time
 
     from .soc_sectors import SWITCH, SectorRoute, detect_sector_plan
 
-    setting = label or ("on" if parity else "kramers")
+    setting = label or ("on" if parity else "fourfold" if fourfold else "kramers")
     start = time.perf_counter()
-    plan, reason = detect_sector_plan(system.grid, system.atoms, parity=parity)
+    plan, reason = detect_sector_plan(system.grid, system.atoms, parity=parity, fourfold=fourfold)
     seconds = time.perf_counter() - start
     if plan is None:
         if note is not None:

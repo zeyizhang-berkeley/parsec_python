@@ -290,10 +290,8 @@ class ReflectionRepresentationDecomposition:
             raise RuntimeError("the projector of a unit needs the grid and the cosets of the full group")
         coefficients = np.asarray(reduction.sector_projections[index], dtype=np.float64)
         orbits = self.sector_orbit_indices(index)
-        representatives = reduction.representative_rows[orbits]
         mapping = self.orbit_to_sector[index]
         multiplicities = reduction.multiplicities.astype(np.float64)
-        translations = getattr(reduction, "coset_translations", None)
         size = orbits.size
         indices: list[np.ndarray] = []
         scales: list[np.ndarray] = []
@@ -305,12 +303,7 @@ class ReflectionRepresentationDecomposition:
                 indices.append(np.arange(size, dtype=np.int64))
                 scales.append(np.full(size, coefficient, dtype=np.float64))
                 continue
-            rows = _grid_row_mapping_operation(
-                grid, reduction.coset_operations[coset], 1.0e-10, representatives,
-                translation=None if translations is None else translations[coset],
-            )
-            if rows is None:
-                raise RuntimeError("a coset representative of the full group no longer maps the grid")
+            rows = self._coset_rows(coset, orbits)
             images = reduction.full_to_wedge[rows]
             columns = mapping[images]
             phase = self.phases[index, rows].astype(np.float64)
@@ -433,7 +426,6 @@ class ReflectionRepresentationDecomposition:
         coefficients = np.asarray(reduction.sector_projections[index], dtype=np.float64)
         orbits = self.sector_orbit_indices(index)
         trace = float(coefficients[0]) * float(orbits.size)
-        translations = getattr(reduction, "coset_translations", None)
         for coset in np.flatnonzero(np.abs(coefficients) > 1.0e-12):
             coset = int(coset)
             if coset == 0:
@@ -441,13 +433,7 @@ class ReflectionRepresentationDecomposition:
             fixed = np.flatnonzero(np.asarray(reduction.coset_images[coset])[orbits] == orbits)
             if not fixed.size:
                 continue
-            rows = _grid_row_mapping_operation(
-                reduction.grid, reduction.coset_operations[coset], 1.0e-10,
-                reduction.representative_rows[orbits[fixed]],
-                translation=None if translations is None else translations[coset],
-            )
-            if rows is None:
-                raise RuntimeError("a coset representative of the full group no longer maps the grid")
+            rows = self._coset_rows(coset, orbits[fixed])
             trace += float(coefficients[coset]) * float(np.sum(self.phases[index, rows].astype(np.float64)))
         size = int(round(trace))
         if abs(trace - size) > 1.0e-6 or size < 0:
@@ -467,15 +453,66 @@ class ReflectionRepresentationDecomposition:
 
         return tuple(self.solved_size(index) for index in range(self.representation_count))
 
+    def partner_orbit_classes(self, cosets: tuple[int, ...]) -> np.ndarray:
+        """The orbit of ``K = union_{c in cosets} H c`` of every orbit of ``H``, named by its smallest orbit of ``H``.
+
+        The orbit of ``K`` of a point ``r_w`` is ``union_c H c r_w``: the orbits ``coset_images[c, w]`` of ``H`` over
+        the cosets ``c`` of ``K`` (the identity among them), whose smallest index is the same for each of them.  One
+        minimum over ``[K:H]`` rows of the coset images, without a graph of the orbits; the closure of these names
+        under every coset of ``K`` is checked.  Kept for the decomposition's life.
+        """
+
+        cosets = tuple(int(c) for c in cosets)
+        key = ("classes", cosets)
+        cached = self._partner_cache.get(key)
+        if cached is not None:
+            return cached
+        images = np.asarray(self.reduction.coset_images)
+        if not cosets or cosets[0] != 0:
+            raise RuntimeError("the cosets of a larger subgroup begin with that of the identity")
+        classes = np.array(images[cosets[0]], dtype=np.int64, copy=True)
+        for coset in cosets[1:]:
+            np.minimum(classes, images[coset], out=classes)
+        for coset in cosets[1:]:
+            if not np.array_equal(classes[images[coset]], classes):
+                raise RuntimeError("the cosets of a larger subgroup do not carry its orbits onto themselves")
+        classes.setflags(write=False)
+        self._partner_cache[key] = classes
+        return classes
+
+    def _coset_rows(self, coset: int, orbits: np.ndarray) -> np.ndarray:
+        """The grid rows ``c r_w`` of coset representative ``coset`` applied to the representatives of ``orbits``."""
+
+        reduction = self.reduction
+        kept = getattr(reduction, "coset_rows", None)
+        if kept is not None:
+            # (the rows the detection mapped, PointGroupReduction.coset_rows)
+            return np.asarray(kept[int(coset)])[orbits]
+        translations = getattr(reduction, "coset_translations", None)
+        rows = _grid_row_mapping_operation(
+            reduction.grid, reduction.coset_operations[int(coset)], 1.0e-10,
+            np.asarray(reduction.representative_rows, dtype=np.int64)[orbits],
+            translation=None if translations is None else translations[int(coset)],
+        )
+        if rows is None:
+            raise RuntimeError("a coset representative of the full group no longer maps the grid")
+        return rows
+
     def partner_rows(self, representation: int) -> "PartnerRows | None":
         """The partner rows of unit ``representation`` (:meth:`partner_cosets`), or ``None``.
 
         The projector ``P`` of such a unit is ``E E^T``, ``E`` the isometry from the functions of the sector ``mu`` of
         ``K`` to the coefficients of the sector of ``H``: an orbit of ``K`` is the union of the orbits of ``H`` that
-        its cosets carry onto each other, and the normalized function of ``mu`` on it has the coefficient ``e_s =
-        +-sqrt(|O_s| / |O_K|)`` on each of them (zero on an orbit of ``K`` whose stabilizer ``mu`` does not admit).
-        ``E`` is read off ``P`` itself (:meth:`projection_tables`): the blocks of ``P`` on the orbits of ``K`` are
-        ``e e^T``, of rank one, which is checked entry by entry, with ``e`` positive at the first row of each.
+        its cosets carry onto each other (:meth:`partner_orbit_classes`), and the normalized function of ``mu`` on it,
+        ``v(k r_0) = mu(k) / sqrt(|O_K|)`` from the representative ``r_0`` of its smallest orbit of ``H``, has the
+        coefficient ``e_s = mu(k_s) sqrt(|O_s| / |O_K|)`` on each of them, ``k_s r_0 = r_s``: positive at that first
+        orbit.  For another orbit ``s`` a coset ``c`` of ``K`` carries ``r_s`` into the first one, ``c r_s = h r_0``,
+        and ``mu(k_s) = mu(c) lambda(h)``: the sign of the coset's coefficient (``b_c = mu(c) / [K:H]``) times the
+        phase of the row ``c r_s`` in the sector of ``H``.  ``mu`` admits the orbit of ``K`` where it admits the
+        first orbit of ``H`` and ``mu(c) lambda(h) = 1`` for every coset with ``c r_0 = h r_0``; else ``e`` is zero
+        there.  One row map of the representatives per orbit of ``H`` that is not first (and of the first ones that
+        a coset maps onto themselves), without the projector's tables; the rows found must be the trace of the
+        projector (:meth:`projector_trace`), and the tests check ``E E^T = P`` entry by entry.
         """
 
         index = int(representation)
@@ -486,53 +523,62 @@ class ReflectionRepresentationDecomposition:
         cached = self._partner_cache.get(key)
         if cached is not None:
             return cached
-        from scipy.sparse.csgraph import connected_components
-
-        indices, scales = self.projection_tables(index)
-        size = int(indices.shape[1])
-        own = np.broadcast_to(np.arange(size, dtype=np.int64)[None, :], indices.shape).reshape(-1)
-        matrix = sp.coo_matrix(
-            (np.asarray(scales, dtype=np.float64).reshape(-1), (own, np.asarray(indices).reshape(-1))),
-            shape=(size, size),
-        ).tocsr()
-        matrix.sum_duplicates()
-        largest = float(np.max(np.abs(matrix.data), initial=0.0))
-        matrix.data[np.abs(matrix.data) <= 1.0e-12 * max(largest, 1.0)] = 0.0
-        matrix.eliminate_zeros()
-        count, labels = connected_components(matrix, directed=True, connection="weak")
-        labels = np.asarray(labels, dtype=np.int64)
-        first = np.full(count, size, dtype=np.int64)
-        np.minimum.at(first, labels, np.arange(size, dtype=np.int64))
-        diagonal = matrix.diagonal()
-        pivot = diagonal[first]
-        admitted = pivot > 1.0e-12
-        coo = matrix.tocoo()
-        values = np.zeros(size, dtype=np.float64)
-        at_first = coo.col == first[labels[coo.row]]
-        values[coo.row[at_first]] = coo.data[at_first] / np.sqrt(pivot[labels[coo.row[at_first]]])
-        widths = np.bincount(labels, minlength=count)
-        entries = np.bincount(coo.row, minlength=size)
-        held = admitted[labels]
-        if (
-            np.any(held & (values == 0.0))
-            or np.any(~held & (entries > 0))
-            or np.any(held & (entries != widths[labels]))
-            or np.max(np.abs(coo.data - values[coo.row] * values[coo.col]), initial=0.0) > 1.0e-11
-            or np.any(values[first[admitted]] <= 0.0)
-        ):
+        reduction = self.reduction
+        classes = self.partner_orbit_classes(cosets)
+        images = np.asarray(reduction.coset_images)
+        coefficients = np.asarray(reduction.sector_projections[index], dtype=np.float64)
+        phases = self.phases[index]
+        mapping = self.orbit_to_sector[index]
+        orbits = self.sector_orbit_indices(index)
+        size = int(orbits.size)
+        first_orbit = classes[orbits]
+        # (every orbit of H of an orbit of K that mu admits lies in the sector of H: their stabilizers are conjugate)
+        first_row = mapping[first_orbit]
+        signs = np.zeros(size, dtype=np.int8)
+        leading = np.flatnonzero(first_orbit == orbits)
+        signs[leading] = 1
+        pending = np.flatnonzero((first_orbit != orbits) & (first_row >= 0))
+        for coset in cosets[1:]:
+            if not pending.size:
+                break
+            hit = images[coset][orbits[pending]] == first_orbit[pending]
+            if not np.any(hit):
+                continue
+            found = pending[hit]
+            pending = pending[~hit]
+            rows = self._coset_rows(coset, orbits[found])
+            signs[found] = np.sign(coefficients[coset]).astype(np.int8) * phases[rows]
+        if pending.size:
+            raise RuntimeError(f"no coset of the larger subgroup of unit {index} carries an orbit onto its first one")
+        # mu admits an orbit of K where mu(c) lambda(h) = 1 for every coset with c r_0 = h r_0
+        admitted = np.ones(size, dtype=bool)
+        first_orbits = orbits[leading]
+        for coset in cosets[1:]:
+            fixed = np.flatnonzero(images[coset][first_orbits] == first_orbits)
+            if not fixed.size:
+                continue
+            rows = self._coset_rows(coset, first_orbits[fixed])
+            refused = np.sign(coefficients[coset]) * phases[rows] != 1
+            admitted[leading[fixed[refused]]] = False
+        held = (first_row >= 0) & admitted[np.maximum(first_row, 0)]
+        if np.any(held & (signs == 0)):
             raise RuntimeError(
                 f"the projector of unit {index} is not that of a sector of a larger subgroup "
                 "(PARSEC_ORBITAL_IRREP_ROWS=sector solves it on the rows of its sector)"
             )
-        number = np.full(count, -1, dtype=np.int64)
-        kept = np.flatnonzero(admitted)
-        kept = kept[np.argsort(first[kept], kind="stable")]
+        multiplicities = np.asarray(reduction.multiplicities, dtype=np.float64)
+        class_sizes = np.bincount(classes, weights=multiplicities, minlength=int(reduction.wedge_size))
+        values = np.where(
+            held, signs.astype(np.float64) * np.sqrt(multiplicities[orbits] / class_sizes[first_orbit]), 0.0
+        )
+        kept = leading[admitted[leading]]
+        number = np.full(size, -1, dtype=np.int64)
         number[kept] = np.arange(kept.size, dtype=np.int64)
         rows = PartnerRows(
             representation=index,
             cosets=cosets,
-            first=np.ascontiguousarray(first[kept]),
-            row_of_sector=np.ascontiguousarray(number[labels]),
+            first=np.ascontiguousarray(kept),
+            row_of_sector=np.ascontiguousarray(np.where(held, number[np.maximum(first_row, 0)], -1)),
             values=np.ascontiguousarray(values),
         )
         if rows.rows != self.solved_size(index):
@@ -565,30 +611,22 @@ class ReflectionRepresentationDecomposition:
         cached = self._partner_cache.get(key)
         if cached is not None:
             return cached
-        from scipy.sparse.csgraph import connected_components
-
         from .axis_reflection import AxisReflectionReduction
 
         reduction = self.reduction
         wedge = int(reduction.wedge_size)
-        images = np.asarray(reduction.coset_images, dtype=np.int64)[list(rows.cosets)]
-        sources = np.repeat(np.arange(wedge, dtype=np.int64)[None, :], images.shape[0], axis=0).reshape(-1)
-        graph = sp.coo_matrix(
-            (np.ones(sources.size, dtype=np.int8), (sources, images.reshape(-1))), shape=(wedge, wedge)
-        ).tocsr()
-        count, labels = connected_components(graph, directed=True, connection="weak")
-        labels = np.asarray(labels, dtype=np.int64)
-        smallest = np.full(count, wedge, dtype=np.int64)
-        np.minimum.at(smallest, labels, np.arange(wedge, dtype=np.int64))
-        order = np.argsort(smallest, kind="stable")
-        number = np.empty(count, dtype=np.int64)
-        number[order] = np.arange(count, dtype=np.int64)
-        orbit_class = number[labels]
+        # the orbits of K, numbered in the order of their smallest orbit of H (partner_orbit_classes)
+        classes = self.partner_orbit_classes(rows.cosets)
+        smallest = np.flatnonzero(classes == np.arange(wedge, dtype=np.int64))
+        count = int(smallest.size)
+        number = np.full(wedge, -1, dtype=np.int64)
+        number[smallest] = np.arange(count, dtype=np.int64)
+        orbit_class = number[classes]
         multiplicities = np.bincount(
             orbit_class, weights=np.asarray(reduction.multiplicities, dtype=np.float64), minlength=count
         )
         multiplicities = np.rint(multiplicities).astype(np.int64)
-        representative_rows = np.asarray(reduction.representative_rows, dtype=np.int64)[smallest[order]]
+        representative_rows = np.asarray(reduction.representative_rows, dtype=np.int64)[smallest]
         orbits = self.sector_orbit_indices(index)
         held = rows.row_of_sector >= 0
         orbit_to_sector = np.full(count, -1, dtype=np.int64)

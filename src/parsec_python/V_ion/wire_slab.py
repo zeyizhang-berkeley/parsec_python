@@ -120,6 +120,20 @@ class ShortRangeLocalPotential:
     grid_charge: float
 
 
+_short_range_provider = None
+
+
+def set_short_range_provider(provider=None) -> None:
+    """Install (or, with ``None``, remove) a faster :func:`short_range_local_potential`.
+
+    ``provider(grid, atoms, potentials, specifications)`` returns the :class:`ShortRangeLocalPotential` of the
+    readable loop, or ``None`` for an input it does not take (the loop then runs).  The performance counterpart
+    lives in ``parsec_python.acceleration.V_ion.confined_setup``.
+    """
+    global _short_range_provider
+    _short_range_provider = provider
+
+
 def short_range_local_potential(
     grid,
     atoms: Sequence[Atom],
@@ -130,8 +144,14 @@ def short_range_local_potential(
 
     The images of every atom are Fortran's ``|m_i| <= nint(6 sigma/|a_i|) + 1``
     (:meth:`parsec_python.Grid.confined.ConfinedPeriodicGrid.compensation_image_translations`).
+    A builder installed with :func:`set_short_range_provider` runs first (importing
+    :mod:`parsec_python.acceleration` installs one that returns this sum bit for bit, its images on threads).
     """
 
+    if _short_range_provider is not None:
+        provided = _short_range_provider(grid, atoms, potentials, specifications)
+        if provided is not None:
+            return provided
     total = np.zeros(grid.size, dtype=np.float64)
     gaussian = np.zeros(grid.size, dtype=np.float64)
     nominal = 0.0
@@ -460,6 +480,7 @@ __all__ = [
     "charged_sheet_potential",
     "fortran_core_radius",
     "gaussian_width",
+    "set_short_range_provider",
     "short_range_local_potential",
     "slab_ewald",
     "wire_ion_ion_energy_and_forces",

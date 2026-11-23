@@ -13,7 +13,7 @@ order, CA-LDA functional, temperature, state count, and convergence criterion.
 The PARSEC values come from `parsec_reference.out`. The Python values come
 from `parsec_python.out`: `python src\parsec_python\main.py
 examples\h2_full_nonlocal\parsec.in --no-archive --log parsec_python.out`
-with the code of 20 November 2026 on one NVIDIA A100 (paths shortened to
+with the code of 22 November 2026 on one NVIDIA A100 (paths shortened to
 repository paths). The report prints the energy terms with eight decimals. Differences below are Python
 minus PARSEC.
 
@@ -37,7 +37,7 @@ Convergence and runtime:
 | Full active grid points | 179,944 | 179,944 |
 | Grid points diagonalized directly | eight symmetry sectors of 22,493 | six weighted sectors of a subgroup of order 8 of D_4h |
 | Nonlocal projector columns | 6 | 6 |
-| Wall time [s] | 19.30 (CPU) | 2.60 (A100 GPU) |
+| Wall time [s] | 19.30 (CPU) | 2.48 (A100 GPU) |
 
 ## Interpretation
 
@@ -59,9 +59,11 @@ partner is counted twice. `PARSEC_ORBITAL_GROUP_MAX_COST=0.5` keeps the
 `D_2h` sectors of before. The Python first solve is CHEBFF. Unoccupied states
 are not paired one-for-one in this table because the two codes distribute the
 states differently among the representations, and unoccupied states are
-converged less tightly; the Python log lists 17 levels for `States_Num: 16`,
-since a weighted sector reports every partner of its last multiplet.
-Degenerate subspaces may also rotate.
+converged less tightly; the Python log lists 16 levels for `States_Num: 16`,
+since the weighted state that holds the degenerate pair 16-17 counts for the
+one state left (`PARSEC_WEIGHTED_STATE_COUNT`; under `off` it reports both
+partners, 17 levels, with the same energy). Degenerate subspaces may also
+rotate.
 
 This result validates a full radial potential and the nonlocal KB path. It
 does not validate PARSEC's Ono-Hirose double-grid algorithm.

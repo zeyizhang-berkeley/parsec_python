@@ -37,6 +37,7 @@ from parsec_python.Output.eigen_dat import (
 from parsec_python.Output.output_files import RunOutputFiles, output_header_lines
 from parsec_python.SCF.restart import (
     RestartError,
+    check_restart_file,
     restart_fields,
     restart_warm_start,
     with_first_warm_start,
@@ -138,6 +139,14 @@ class RecordLayoutTests(unittest.TestCase):
             back = dat.read_parsec_dat(path)
         self.assertEqual(back.spin_count, 2)
         self.assertEqual(back.boundary_code, 1)
+        # a cell without k-points: kpnum 1, k = 0, weight 1 and PARSEC's kptmethod -1 (0 under
+        # PARSEC_GAMMA_PARSEC_DAT=off, as before)
+        self.assertEqual(back.periodic.kpoint_method, dat.KPOINT_NONE)
+        np.testing.assert_array_equal(back.periodic.k_points, np.zeros((1, 3)))
+        np.testing.assert_array_equal(back.periodic.k_weights, np.ones(1))
+        with patch.dict("os.environ", {dat.GAMMA_PARSEC_DAT_SWITCH: "off"}):
+            data_off, _ = dat.parsec_dat_from_result(Spin(), grid, WavefunctionSelection(mode="all"))
+        self.assertEqual(data_off.periodic.kpoint_method, 0)
         np.testing.assert_allclose(back.periodic.lattice_vectors, np.diag([4.0, 4.0, 4.8]))
         np.testing.assert_allclose(back.step, [0.8, 0.8, 0.8])
         self.assertEqual(back.rmax, 1.0)
@@ -155,18 +164,245 @@ class RecordLayoutTests(unittest.TestCase):
 
         k_points = np.array([[0.0, 0.0, 0.0], [0.5, 0.0, 0.0]])
         result = _Result(grid, k_points=k_points)
-        data, notes = dat.parsec_dat_from_result(
-            result, grid, WavefunctionSelection(), monkhorst_pack_grid=(2, 1, 1)
+        for setting, phrase in (
+            ("off", "k-point drivers keep no orbitals"),
+            ("auto", "its k-point loop kept no orbitals"),
+        ):
+            with self.subTest(setting=setting), patch.dict("os.environ", {dat.KPOINT_WAVEFUNCTIONS_SWITCH: setting}):
+                data, notes = dat.parsec_dat_from_result(
+                    result, grid, WavefunctionSelection(), monkhorst_pack_grid=(2, 1, 1)
+                )
+                self.assertTrue(any(phrase in note for note in notes))
+                with tempfile.TemporaryDirectory() as directory:
+                    back = dat.read_parsec_dat(dat.write_parsec_dat(Path(directory) / "parsec.dat", data))
+                self.assertEqual(back.wavefunction_kind, 1)
+                self.assertEqual(back.periodic.kpoint_method, dat.KPOINT_MONKHORST_PACK)
+                np.testing.assert_allclose(back.periodic.k_points, k_points)
+                np.testing.assert_allclose(back.periodic.k_weights, [0.5, 0.5])
+                self.assertEqual(len(back.levels[0]), 2)
+                self.assertEqual([block.state_numbers.size for block in back.wavefunctions[0]], [0, 0])
+
+    def test_kpoint_loops_write_the_kept_orbitals_of_every_kpoint(self) -> None:
+        # PARSEC_KPOINT_WAVEFUNCTIONS=auto: wfnsave.F90 writes the selected states of every (spin, k-point) block,
+        # each k-point's columns ordered by its own levels; off keeps the file of before (no orbitals).
+        grid = build_periodic_grid(
+            PeriodicCell(np.diag([4.0, 4.0, 4.8])), PeriodicGridSettings(spacing=0.8, expansion_order=4)
         )
-        self.assertTrue(any("k-point drivers keep no orbitals" in note for note in notes))
+        rng = np.random.default_rng(11)
+        states = 4
+        k_points = np.array([[0.0, 0.0, 0.0], [0.3, 0.0, 0.0], [0.0, 0.2, 0.1]])
+
+        def orbitals():
+            vectors = rng.normal(size=(grid.size, states)) + 1j * rng.normal(size=(grid.size, states))
+            return np.linalg.qr(vectors)[0]
+
+        def levels():
+            # unsorted within each k-point: the file sorts them, and its columns follow
+            return np.concatenate([rng.permutation(np.sort(rng.normal(size=states))) for _ in k_points])
+
+        occupied = np.tile([1.0, 1.0, 0.0, 0.0], len(k_points))
+
+        class Scalar:
+            eigenvalues = levels()
+            occupations = occupied.copy()
+            next_effective_potential = rng.normal(size=grid.size)
+            density = np.abs(rng.normal(size=grid.size))
+            k_weights = np.full(3, 1.0 / 3.0)
+            k_wavefunctions = tuple(orbitals() for _ in range(3))
+
+        Scalar.k_points = k_points
+
+        class SpinK:
+            eigenvalues_up = levels()
+            eigenvalues_down = levels()
+            occupations_up = occupied.copy()
+            occupations_down = np.tile([1.0, 0.0, 0.0, 0.0], 3)
+            density_up = np.abs(rng.normal(size=grid.size))
+            density_down = np.abs(rng.normal(size=grid.size))
+            scf_potentials = {"potential_up": rng.normal(size=grid.size), "potential_down": rng.normal(size=grid.size)}
+            next_potentials = None
+            k_weights = np.full(3, 1.0 / 3.0)
+            k_wavefunctions = (tuple(orbitals() for _ in range(3)), tuple(orbitals() for _ in range(3)))
+
+        SpinK.k_points = k_points
+        cases = (
+            (Scalar(), (Scalar.eigenvalues,), (Scalar.occupations,), (Scalar.k_wavefunctions,)),
+            (
+                SpinK(),
+                (SpinK.eigenvalues_up, SpinK.eigenvalues_down),
+                (SpinK.occupations_up, SpinK.occupations_down),
+                SpinK.k_wavefunctions,
+            ),
+        )
+        for result, values, occupations, kept in cases:
+            for selection, expected in ((WavefunctionSelection(mode="all"), None), (WavefunctionSelection(), "occ")):
+                with self.subTest(result=type(result).__name__, selection=selection.mode):
+                    data, notes = dat.parsec_dat_from_result(result, grid, selection)
+                    self.assertFalse(any("not in parsec.dat" in note for note in notes))
+                    with tempfile.TemporaryDirectory() as directory:
+                        back = dat.read_parsec_dat(dat.write_parsec_dat(Path(directory) / "parsec.dat", data))
+                    self.assertEqual(back.wavefunction_kind, 1)
+                    for spin in range(len(values)):
+                        orders = [
+                            np.argsort(values[spin][k * states : (k + 1) * states], kind="stable") for k in range(3)
+                        ]
+                        count = states if expected is None else dat.highest_occupied(
+                            [occupations[spin][k * states : (k + 1) * states][orders[k]] for k in range(3)]
+                        )
+                        for k in range(3):
+                            block = back.wavefunctions[spin][k]
+                            np.testing.assert_array_equal(block.state_numbers, np.arange(1, count + 1))
+                            np.testing.assert_allclose(block.vectors, kept[spin][k][:, orders[k][:count]])
+            with self.subTest(result=type(result).__name__, setting="off"), patch.dict(
+                "os.environ", {dat.KPOINT_WAVEFUNCTIONS_SWITCH: "off"}
+            ):
+                data, notes = dat.parsec_dat_from_result(result, grid, WavefunctionSelection(mode="all"))
+                self.assertTrue(any("k-point drivers keep no orbitals" in note for note in notes))
+                self.assertEqual(
+                    [block.state_numbers.size for channel in data.wavefunctions for block in channel],
+                    [0] * (3 * len(values)),
+                )
+        # a block without orbitals of the whole grid (a sector or row block): none written, with the note
+        partial = SpinK()
+        partial.k_wavefunctions = (SpinK.k_wavefunctions[0], (None,) * 3)
+        data, notes = dat.parsec_dat_from_result(partial, grid, WavefunctionSelection(mode="all"))
+        self.assertEqual([block.state_numbers.size for block in data.wavefunctions[0]], [states] * 3)
+        self.assertEqual([block.state_numbers.size for block in data.wavefunctions[1]], [0] * 3)
+        self.assertTrue(any("the MPI-distributed solvers gather none" in note for note in notes))
+        # the lowest columns of each k-point (a Save_Wfn_Bands list keeps those up to its highest state): written in
+        # place; a state beyond them is not in the file, with the note
+        lowest = Scalar()
+        lowest.eigenvalues = np.concatenate([np.sort(rng.normal(size=states)) for _ in k_points])
+        lowest.k_wavefunctions = tuple(block[:, :3] for block in Scalar.k_wavefunctions)
+        data, notes = dat.parsec_dat_from_result(lowest, grid, WavefunctionSelection(mode="list", indices=(1, 3)))
+        self.assertIsNotNone(data.wavefunctions[0][0].columns)
         with tempfile.TemporaryDirectory() as directory:
             back = dat.read_parsec_dat(dat.write_parsec_dat(Path(directory) / "parsec.dat", data))
-        self.assertEqual(back.wavefunction_kind, 1)
-        self.assertEqual(back.periodic.kpoint_method, dat.KPOINT_MONKHORST_PACK)
-        np.testing.assert_allclose(back.periodic.k_points, k_points)
-        np.testing.assert_allclose(back.periodic.k_weights, [0.5, 0.5])
-        self.assertEqual(len(back.levels[0]), 2)
-        self.assertEqual([block.state_numbers.size for block in back.wavefunctions[0]], [0, 0])
+        for k in range(3):
+            np.testing.assert_array_equal(back.wavefunctions[0][k].state_numbers, [1, 3])
+            np.testing.assert_allclose(back.wavefunctions[0][k].vectors, Scalar.k_wavefunctions[k][:, [0, 2]])
+            np.testing.assert_allclose(data.wavefunctions[0][k].selected_vectors, Scalar.k_wavefunctions[k][:, [0, 2]])
+        data, notes = dat.parsec_dat_from_result(lowest, grid, WavefunctionSelection(mode="list", indices=(4,)))
+        self.assertTrue(any("do not hold the selected states" in note for note in notes))
+        self.assertEqual([block.state_numbers.size for block in data.wavefunctions[0]], [0, 0, 0])
+
+    def test_a_gamma_point_input_on_the_kpoint_loop_writes_real_wavefunctions_of_kind_zero(self) -> None:
+        # PARSEC_GAMMA_PARSEC_DAT=auto: an input without k-points (Fortran's nkpt = 0, real wavefunctions) that runs
+        # as the 1x1x1 k-point mesh writes the file of the Gamma point; off: the complex file of a k-point run.
+        grid = build_periodic_grid(
+            PeriodicCell(np.diag([4.0, 4.0, 4.8])), PeriodicGridSettings(spacing=0.8, expansion_order=4)
+        )
+        rng = np.random.default_rng(13)
+        states = 6
+        # a real symmetric Hamiltonian with a triplet and a pair, and complex eigenvectors of it: random unitary
+        # mixtures inside each multiplet and random phases, as a complex solver returns them
+        levels = np.array([-1.0, -0.4, -0.4, -0.4, 0.3, 0.3])
+        basis = np.linalg.qr(rng.normal(size=(grid.size, states)))[0]
+        mixture = np.zeros((states, states), dtype=complex)
+        for block in ([0], [1, 2, 3], [4, 5]):
+            size = len(block)
+            unitary = np.linalg.qr(rng.normal(size=(size, size)) + 1j * rng.normal(size=(size, size)))[0]
+            mixture[np.ix_(block, block)] = unitary
+        complex_orbitals = basis @ mixture
+        # (the solver's levels of a multiplet differ by round-off; in ascending order)
+        values = levels + 1.0e-9 * np.array([0.0, 0.0, 1.0, 2.0, 0.0, 1.0])
+
+        class SpinGamma:
+            eigenvalues_up = values.copy()
+            eigenvalues_down = values.copy()
+            occupations_up = np.array([1.0, 1.0, 1.0, 1.0, 0.0, 0.0])
+            occupations_down = np.array([1.0, 1.0, 0.0, 0.0, 0.0, 0.0])
+            density_up = np.abs(rng.normal(size=grid.size))
+            density_down = np.abs(rng.normal(size=grid.size))
+            scf_potentials = {"potential_up": rng.normal(size=grid.size), "potential_down": rng.normal(size=grid.size)}
+            next_potentials = (rng.normal(size=grid.size), rng.normal(size=grid.size))
+            k_points = np.zeros((1, 3))
+            k_weights = np.ones(1)
+            k_wavefunctions = ((complex_orbitals,), (complex_orbitals,))
+
+        hamiltonian_columns = basis * levels[None, :]
+        for setting in ("auto", "off"):
+            with self.subTest(setting=setting), patch.dict("os.environ", {dat.GAMMA_PARSEC_DAT_SWITCH: setting}):
+                data, notes = dat.parsec_dat_from_result(
+                    SpinGamma(), grid, WavefunctionSelection(mode="all"), gamma_point=True
+                )
+                self.assertFalse(any("span the complex orbitals" in note for note in notes))
+                with tempfile.TemporaryDirectory() as directory:
+                    back = dat.read_parsec_dat(dat.write_parsec_dat(Path(directory) / "parsec.dat", data))
+                self.assertEqual(back.wavefunction_kind, 0 if setting == "auto" else 1)
+                self.assertEqual(
+                    back.periodic.kpoint_method, dat.KPOINT_NONE if setting == "auto" else dat.KPOINT_MANUAL
+                )
+                np.testing.assert_array_equal(back.periodic.k_points, np.zeros((1, 3)))
+                for spin in range(2):
+                    vectors = back.wavefunctions[spin][0].vectors
+                    np.testing.assert_array_equal(back.wavefunctions[spin][0].state_numbers, np.arange(1, 7))
+                    if setting == "off":
+                        np.testing.assert_allclose(vectors, complex_orbitals)
+                        continue
+                    self.assertEqual(vectors.dtype, np.float64)
+                    np.testing.assert_allclose(vectors.T @ vectors, np.eye(states), atol=1e-12)
+                    # eigenvectors of the real Hamiltonian H = basis diag(levels) basis^T, level by level
+                    applied = hamiltonian_columns @ (basis.T @ vectors)
+                    np.testing.assert_allclose(applied, vectors * np.sort(levels)[None, :], atol=1e-8)
+        # the occupied states only (default selection), and no conversion where the input has k-points
+        data, _ = dat.parsec_dat_from_result(SpinGamma(), grid, WavefunctionSelection(), gamma_point=True)
+        self.assertEqual([channel[0].state_numbers.size for channel in data.wavefunctions], [4, 2])
+        self.assertEqual(data.wavefunction_kind, 0)
+        data, _ = dat.parsec_dat_from_result(SpinGamma(), grid, WavefunctionSelection(), gamma_point=False)
+        self.assertEqual(data.wavefunction_kind, 1)
+        # a multiplet cut by the number of states: the real orbitals leave a part outside, which a note gives
+        cut = SpinGamma()
+        cut.eigenvalues_up = cut.eigenvalues_down = values[:5].copy()
+        cut.occupations_up = cut.occupations_down = np.array([1.0, 1.0, 1.0, 1.0, 0.0])
+        cut.k_wavefunctions = ((complex_orbitals[:, :5],), (complex_orbitals[:, :5],))
+        data, notes = dat.parsec_dat_from_result(cut, grid, WavefunctionSelection(mode="all"), gamma_point=True)
+        self.assertTrue(any("span the complex orbitals" in note for note in notes))
+        # the cut multiplet among empty states that the file does not write (the occupied states only): no note,
+        # and the written real orbitals span the complex ones of their states
+        data, notes = dat.parsec_dat_from_result(cut, grid, WavefunctionSelection(), gamma_point=True)
+        self.assertEqual([channel[0].state_numbers.size for channel in data.wavefunctions], [4, 4])
+        self.assertFalse(any("span the complex orbitals" in note for note in notes))
+        written = data.wavefunctions[0][0].vectors
+        captured = np.linalg.norm(written.T @ complex_orbitals[:, :4], axis=0)
+        np.testing.assert_allclose(captured, np.ones(4), atol=1e-12)
+
+    def test_real_gamma_orbitals_and_the_gamma_point_input(self) -> None:
+        rng = np.random.default_rng(17)
+        real = np.linalg.qr(rng.normal(size=(50, 3)))[0]
+        phases = np.exp(1j * rng.uniform(0, 2 * np.pi, size=3))
+        made, outside = dat.real_gamma_orbitals(real * phases[None, :], np.array([-1.0, 0.0, 1.0]))
+        self.assertLess(outside, 1e-12)
+        np.testing.assert_allclose(np.abs(np.sum(made * real, axis=0)), np.ones(3), atol=1e-12)
+        # a real input is returned as it is
+        same, outside = dat.real_gamma_orbitals(real, np.array([-1.0, 0.0, 1.0]))
+        np.testing.assert_array_equal(same, real)
+        self.assertEqual(outside, 0.0)
+        # a doublet cut to one of its complex partners: its part outside counts only where its column is named
+        pair = np.linalg.qr(np.concatenate([real, rng.normal(size=(50, 1))], axis=1))[0][:, 3]
+        cut = np.concatenate(
+            [real[:, :2] * phases[None, :2], (real[:, 2:3] + 1j * pair[:, None]) / np.sqrt(2.0)], axis=1
+        )
+        _, every = dat.real_gamma_orbitals(cut, np.array([-1.0, 0.0, 1.0]))
+        _, written = dat.real_gamma_orbitals(cut, np.array([-1.0, 0.0, 1.0]), columns=[0, 1])
+        self.assertAlmostEqual(every, np.sqrt(0.5), places=12)
+        self.assertLess(written, 1e-12)
+        cluster = PeriodicCell(np.diag([4.0, 4.0, 4.0]))
+
+        class Problem:
+            periodic_cell = cluster
+            has_kpoint_sampling = False
+
+        self.assertTrue(dat.gamma_point_input(Problem()))
+        Problem.has_kpoint_sampling = True
+        self.assertFalse(dat.gamma_point_input(Problem()))
+        Problem.periodic_cell = None
+        self.assertFalse(dat.gamma_point_input(Problem()))
+        self.assertFalse(dat.gamma_point_input(None))
+        for name in (dat.KPOINT_WAVEFUNCTIONS_SWITCH, dat.GAMMA_PARSEC_DAT_SWITCH):
+            with self.subTest(name=name), patch.dict("os.environ", {name: "on"}):
+                with self.assertRaisesRegex(ValueError, f"{name} must be auto or off"):
+                    dat.validate_settings()
 
     def test_spin_kpoint_loop_of_one_kpoint_writes_its_kept_orbitals_and_mixed_potentials(self) -> None:
         # The spin k-point loop with keep_wavefunctions (the ionic loops of a spin cell at the Gamma point,
@@ -207,22 +443,34 @@ class RecordLayoutTests(unittest.TestCase):
         # the default selection: the occupied states of each channel
         data, _ = dat.parsec_dat_from_result(result, grid, WavefunctionSelection())
         self.assertEqual([channel[0].state_numbers.size for channel in data.wavefunctions], [2, 1])
-        # without kept orbitals or mixed potentials (a single point of the loop), as before; several k-points keep
-        # no orbitals (one set of columns is written for every k-point)
-        for changes in (
-            {"k_wavefunctions": None, "next_potentials": None},
-            {"k_points": np.zeros((2, 3)), "k_weights": np.full(2, 0.5),
-             "eigenvalues_up": np.tile(SpinK.eigenvalues_up, 2), "eigenvalues_down": np.tile(SpinK.eigenvalues_down, 2),
-             "occupations_up": np.tile(SpinK.occupations_up, 2), "occupations_down": np.tile(SpinK.occupations_down, 2),
-             "k_wavefunctions": ((orbitals(), orbitals()), (orbitals(), orbitals()))},
-            {"k_wavefunctions": ((orbitals()[: grid.size - 1],), (orbitals()[: grid.size - 1],))},
+        # without kept orbitals or mixed potentials (a single point of the loop), as before; under
+        # PARSEC_KPOINT_WAVEFUNCTIONS=off several k-points keep no orbitals (one set of columns was written for
+        # every k-point), under auto each k-point writes its own
+        for setting, changes in (
+            ("auto", {"k_wavefunctions": None, "next_potentials": None}),
+            ("off", {"k_wavefunctions": None, "next_potentials": None}),
+            ("off", {"k_points": np.zeros((2, 3)), "k_weights": np.full(2, 0.5),
+                     "eigenvalues_up": np.tile(SpinK.eigenvalues_up, 2),
+                     "eigenvalues_down": np.tile(SpinK.eigenvalues_down, 2),
+                     "occupations_up": np.tile(SpinK.occupations_up, 2),
+                     "occupations_down": np.tile(SpinK.occupations_down, 2),
+                     "k_wavefunctions": ((orbitals(), orbitals()), (orbitals(), orbitals()))}),
+            ("auto", {"k_wavefunctions": ((orbitals()[: grid.size - 1],), (orbitals()[: grid.size - 1],))}),
+            ("off", {"k_wavefunctions": ((orbitals()[: grid.size - 1],), (orbitals()[: grid.size - 1],))}),
         ):
-            with self.subTest(changes=sorted(changes)):
+            with self.subTest(setting=setting, changes=sorted(changes)), patch.dict(
+                "os.environ", {dat.KPOINT_WAVEFUNCTIONS_SWITCH: setting}
+            ):
                 other = SpinK()
                 for name, value in changes.items():
                     setattr(other, name, value)
                 data, notes = dat.parsec_dat_from_result(other, grid, WavefunctionSelection(mode="all"))
-                self.assertTrue(any("k-point drivers keep no orbitals" in note for note in notes))
+                phrase = (
+                    "k-point drivers keep no orbitals" if setting == "off"
+                    else "its k-point loop kept no orbitals" if other.k_wavefunctions is None
+                    else "not on the whole grid"
+                )
+                self.assertTrue(any(phrase in note for note in notes))
                 self.assertEqual([block.state_numbers.size for channel in data.wavefunctions for block in channel],
                                  [0] * (2 * len(other.k_points)))
                 expected = (
@@ -361,6 +609,27 @@ class GridMappingTests(unittest.TestCase):
         with self.assertRaises(RestartError) as caught:
             restart_fields(data, periodic, spin_count=1)
         self.assertEqual(caught.exception.code, 363)
+        # a cell restarted on another grid (another rule): error 364 names both counts and the spacing of this run
+        coarse = build_periodic_grid(
+            PeriodicCell(np.diag([4.0, 4.0, 4.0])), PeriodicGridSettings(spacing=0.5, expansion_order=4)
+        )
+        stored, _ = dat.parsec_dat_from_result(_Result(periodic), periodic, WavefunctionSelection())
+        with self.assertRaises(RestartError) as caught:
+            restart_fields(stored, coarse, spin_count=1)
+        self.assertEqual(caught.exception.code, 364)
+        message = str(caught.exception)
+        self.assertIn(f"{[int(v) for v in periodic.points_per_axis]} points along the lattice vectors", message)
+        self.assertIn(f"this run {[int(v) for v in coarse.points_per_axis]}", message)
+        self.assertIn("Grid_Spacing 0.500000 bohr", message)
+        self.assertIn("default routines", message)
+        # steps that differ between the lattice vectors: no one spacing gives them, the routine set does
+        from parsec_python.SCF.restart import _grid_difference
+
+        text = _grid_difference(stored, coarse, np.array([0.5, 0.5, 0.6]))
+        self.assertIn("Use_Fortran_Routines: .false.", text)
+        self.assertNotIn("Grid_Spacing", text)
+        # the same grid restarts as before
+        self.assertFalse(check_restart_file(stored, periodic, spin_count=1, complex_wavefunctions=False))
 
     def test_warm_start_takes_the_stored_potential_or_rebuilds_it(self) -> None:
         grid = _cluster_grid()
@@ -486,6 +755,67 @@ class OutputFileTests(unittest.TestCase):
         off = RunOutputFiles(OutputFileSettings(output_data=False), ".", write=lambda line: None)
         self.assertFalse(off.plan_wavefunctions(1000, 10, 1))
         self.assertEqual(off.paths(), [])
+        # the k-points of a k-point run count: 1000 points x 10 states x 16 bytes x 8 k-points = 1.28 MB
+        counted = RunOutputFiles(OutputFileSettings(), ".", write=lambda line: None, wavefunction_limit_bytes=200_000)
+        self.assertTrue(counted.plan_wavefunctions(1000, 10, 1, complex_values=True))
+        self.assertFalse(counted.plan_wavefunctions(1000, 10, 1, complex_values=True, kpoint_count=8))
+
+    def test_kpoint_loops_keep_their_orbitals_for_the_file_only(self) -> None:
+        from parsec_python.cli import _orbitals_for_file_only, _parsec_dat_keep
+        from parsec_python.Output.output_files import parsec_dat_kept_vectors as _parsec_dat_kept_vectors
+        from parsec_python.models import SpinPolarizedSinglePointResult
+
+        files = RunOutputFiles(OutputFileSettings(), ".", write=lambda line: None)
+        files.plan_wavefunctions(1000, 10, 1)
+        keep = _parsec_dat_keep(files, {})
+        self.assertEqual(sorted(keep), ["keep_vectors", "keep_wavefunctions"])
+        # a loop that keeps them already, a file without wavefunctions, no files, and the switch off: nothing added
+        self.assertEqual(_parsec_dat_keep(files, {"keep_wavefunctions": True}), {})
+        self.assertEqual(_parsec_dat_keep(None, {}), {})
+        empty = RunOutputFiles(OutputFileSettings(output_data=False), ".", write=lambda line: None)
+        empty.plan_wavefunctions(1000, 10, 1)
+        self.assertEqual(_parsec_dat_keep(empty, {}), {})
+        with patch.dict("os.environ", {dat.KPOINT_WAVEFUNCTIONS_SWITCH: "off"}):
+            self.assertEqual(_parsec_dat_keep(files, {}), {})
+
+        class Solver:
+            def __init__(self, vectors):
+                self.held = vectors
+
+            def vectors(self, task):
+                if self.held is None:
+                    raise NotImplementedError
+                return self.held
+
+        np.testing.assert_array_equal(_parsec_dat_kept_vectors(Solver(np.eye(3)), 0), np.eye(3))
+        # a Save_Wfn_Bands list keeps the lowest columns up to its highest state (a copy: the whole block is freed)
+        whole = np.arange(12.0).reshape(4, 3)
+        lowest = _parsec_dat_kept_vectors(Solver(whole), 0, columns=2)
+        np.testing.assert_array_equal(lowest, whole[:, :2])
+        self.assertIsNone(lowest.base)
+        listed = RunOutputFiles(
+            OutputFileSettings(wavefunctions=WavefunctionSelection(mode="list", indices=(1, 3), explicit=True)),
+            ".", write=lambda line: None,
+        )
+        listed.plan_wavefunctions(1000, 10, 1)
+        self.assertEqual(listed.kpoint_keep()["keep_vectors"].keywords, {"columns": 3})
+        self.assertEqual(listed.kpoint_keep(whole=True)["keep_vectors"].keywords, {"columns": None})
+        self.assertEqual(files.kpoint_keep()["keep_vectors"].keywords, {"columns": None})
+        # the MPI-distributed solvers: an empty block, or none
+        self.assertIsNone(_parsec_dat_kept_vectors(Solver(np.empty((3, 0))), 0))
+        self.assertIsNone(_parsec_dat_kept_vectors(Solver(None), 0))
+        # the fields keep_wavefunctions adds besides the orbitals are dropped
+        fields = {name: None for name in SpinPolarizedSinglePointResult.__dataclass_fields__}
+        result = SpinPolarizedSinglePointResult(**{
+            **fields, "k_wavefunctions": ((np.eye(2),),), "next_potentials": (np.ones(2), np.ones(2)),
+            "scf_input_potentials": (np.ones(2), np.ones(2)), "xc_potentials": (np.ones(2), np.ones(2)),
+            "scf_hartree_potential": np.ones(2),
+        })
+        kept = _orbitals_for_file_only(result, True)
+        self.assertIs(kept.k_wavefunctions, result.k_wavefunctions)
+        for name in ("next_potentials", "scf_input_potentials", "xc_potentials", "scf_hartree_potential"):
+            self.assertIsNone(getattr(kept, name))
+        self.assertIs(_orbitals_for_file_only(result, False), result)
 
     def test_header_lines_only_for_keywords_of_the_input(self) -> None:
         self.assertEqual(output_header_lines(OutputFileSettings()), [])

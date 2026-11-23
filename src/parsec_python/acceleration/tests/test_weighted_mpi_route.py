@@ -203,6 +203,64 @@ class AbelianSplitTests(unittest.TestCase):
         self.assertIsNotNone(weighted.translations)
         self.assertIsNone(weighted.sector_abelian_split)
 
+    def test_flags_of_a_cell_with_translations(self) -> None:
+        # A cell whose abelian route takes its commuting involutions with their translations
+        # (periodic_abelian_reduction): the flags against that very group are formed when the guard asks
+        # (PARSEC_WEIGHTED_GUARD_SHORTCUT_TRANSLATIONS=auto); off gives none, as before.
+        from types import SimpleNamespace
+
+        from ..SCF.spin_sectors import SpinSectorReducer
+        from ..Symmetry import PointGroupReduction, SignedPermutationReduction, detect_point_group_reduction
+        from ..Symmetry.axis_reflection import periodic_abelian_reduction
+        from .test_gamma_spin_sectors import _vacancy_cell
+
+        def keys(matrices, shifts, counts):
+            return sorted(
+                (
+                    tuple(int(v) for v in np.rint(matrix).ravel()),
+                    tuple(int(v) for v in np.mod(np.asarray(shift, dtype=np.int64), counts)),
+                )
+                for matrix, shift in zip(matrices, shifts)
+            )
+
+        for repeats, site, points in ((2, None, 8), (2, (0.25, 0.25, 0.25), 8), (1, None, 12)):
+            grid, atoms = _vacancy_cell(repeats, site, points_per_cube=points)
+            origin = SignedPermutationReduction.detect(grid, atoms)
+            reduction = detect_point_group_reduction(grid, atoms, origin)
+            self.assertIsInstance(reduction, PointGroupReduction)
+            self.assertIsNone(reduction.sector_abelian_split)
+            source = reduction.sector_abelian_split_source
+            self.assertIsNotNone(source)
+            members = source.members()
+            route = periodic_abelian_reduction(grid, atoms, origin)
+            self.assertIsNot(route, origin)
+            counts = np.asarray(grid.points_per_axis, dtype=np.int64)
+            self.assertEqual(
+                keys([reduction.full_operations[m] for m in members], [reduction.full_translations[m] for m in members],
+                     counts),
+                keys(route.operations, route.translations, counts),
+            )
+            flags = source()
+            self.assertFalse(flags.flags.writeable)
+            self.assertEqual(len(flags), len(reduction.sector_weights))
+            # a one-dimensional representation of G is never split: sectors of weight 1 that hold one alone
+            self.assertTrue(np.any(flags))
+            guard = SimpleNamespace(reducer=SimpleNamespace(reduction=reduction))
+            with mock.patch.dict(os.environ, {"PARSEC_WEIGHTED_GUARD_SHORTCUT_TRANSLATIONS": "auto"}):
+                np.testing.assert_array_equal(SpinSectorReducer.sector_abelian_split.fget(guard), flags)
+            with mock.patch.dict(os.environ, {"PARSEC_WEIGHTED_GUARD_SHORTCUT_TRANSLATIONS": "off"}):
+                self.assertIsNone(SpinSectorReducer.sector_abelian_split.fget(guard))
+        # the pristine 2^3 cell: the 32 involutions of the seven half-cell translations with D2; the t2 of every
+        # sector that holds one splits over them
+        grid, atoms = _vacancy_cell(2, None, points_per_cube=8)
+        reduction = detect_point_group_reduction(grid, atoms, SignedPermutationReduction.detect(grid, atoms))
+        self.assertEqual(len(reduction.sector_abelian_split_source.members()), 32)
+        with mock.patch.dict(os.environ, {"PARSEC_WEIGHTED_GUARD_SHORTCUT_TRANSLATIONS": "maybe"}):
+            from ..Symmetry.weighted_inputs import weighted_route_settings
+
+            with self.assertRaises(ValueError):
+                weighted_route_settings()
+
     def test_abelian_group_itself(self) -> None:
         # the group of the abelian route splits nothing it holds (every representation is one-dimensional)
         from ..Symmetry.orbital_groups import abelian_split_sectors, multiplication_table, orbital_group_plan

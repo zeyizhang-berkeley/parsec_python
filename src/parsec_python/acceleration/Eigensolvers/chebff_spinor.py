@@ -588,6 +588,26 @@ def _check_finite(xp, array, operator=None) -> None:
 
 
 # ------------------------------------------------------------------- first solve
+def place_start_columns(xp, vectors, saved) -> None:
+    """Write the saved columns ``saved`` (host or device, ``(rows, kept)``) into the leading columns of the random
+    start ``vectors`` and scale the columns behind them to about unit norm, as the saved have
+    (:func:`..sector_growth.new_column_scale`)."""
+    rows, columns = map(int, vectors.shape)
+    kept = min(int(saved.shape[1]), columns)
+    if kept:
+        vectors[:, :kept] = xp.asarray(saved[:, :kept])
+    if kept < columns:
+        vectors[:, kept:] *= start_column_scale(rows, xp.iscomplexobj(vectors))
+
+
+def start_column_scale(rows: int, complex_values: bool) -> float:
+    """The factor that gives a column of the random start (uniform in [-1, 1], real and imaginary parts where
+    ``complex_values``) about unit norm, as saved Ritz vectors have."""
+    from .sector_growth import new_column_scale
+
+    return new_column_scale(rows) / (np.sqrt(2.0) if complex_values and rows >= 3 else 1.0)
+
+
 def _first_solve(
     xp,
     operator,
@@ -600,12 +620,15 @@ def _first_solve(
     converged: Callable[[Any, np.ndarray], bool] | None = None,
     resume: "list | None" = None,
     cursor_out: "list[FirstSolveCursor] | None" = None,
+    start: "list | None" = None,
 ):
     """CHEBFF from a random start: ``filter_cycles`` cycles, plus more (up to ``max_cycles`` in all)
     while ``converged(vectors, eigenvalues)`` says the pairs are not yet converged.  ``resume``: the list
     ``[vectors, cursor]`` of earlier cycles, which go on from there as the same loop would; it is emptied, so that
     no reference keeps the starting basis on the device during the first filter.
-    ``cursor_out`` receives the :class:`FirstSolveCursor` after the last cycle."""
+    ``cursor_out`` receives the :class:`FirstSolveCursor` after the last cycle.  ``start``: a list holding the saved
+    columns of a basis that grows (a k-point sector, :func:`place_start_columns`), which replace the leading columns
+    of the random start; it is emptied."""
     if resume is None:
         dimension = int(operator.shape[0])
         rows = _local_rows(operator, dimension)
@@ -622,6 +645,8 @@ def _first_solve(
             vectors[:, c0:c1] = rng.uniform(-1.0, 1.0, (rows, c1 - c0)) + 1j * rng.uniform(
                 -1.0, 1.0, (rows, c1 - c0)
             )
+        if start:
+            place_start_columns(xp, vectors, start.pop())
         bound_rng = np.random.default_rng(settings.random_seed + 1)
         bound_rule, bound_steps = bound_request(settings)
         with stats.timed("lanczos_seconds"):
@@ -814,6 +839,7 @@ def solve_spinor_eigval(
     max_extra_cycles: int | None = None,
     residual_period: int | None = None,
     reported: ReportedFirstSolve | None = None,
+    start=None,
 ) -> SpinorEigvalResult:
     """One eigensolve of the SCF loop (``solve_eigval``'s policy on the device).
 
@@ -838,6 +864,11 @@ def solve_spinor_eigval(
 
     ``reported`` (with ``converge_first``): a first solve in the two parts of :class:`ReportedFirstSolve`, whose
     test covers only the pairs the caller can report; ``None``: the test of all the requested pairs.
+
+    ``start``: for a first solve (no reusable ``state``) of a basis that grows, the saved columns ``(rows, kept)``
+    (host or device) of its former basis, which replace the leading columns of the random start
+    (``PARSEC_KPOINT_SECTOR_WARM_GROWTH``, :func:`place_start_columns`); a solve that continues earlier cycles or makes
+    a SUBSPACE step does not read it.
     """
     if xp is None:
         xp, _ = require_cupy()
@@ -908,6 +939,7 @@ def solve_spinor_eigval(
             converged=converged,
             resume=resume,
             cursor_out=cursor_out,
+            start=None if start is None or resume is not None else [start],
         )
         if converge_first:
             residuals = seen[-1] if seen else None

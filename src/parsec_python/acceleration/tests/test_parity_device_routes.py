@@ -225,7 +225,9 @@ class FastPeriodicSetupGridsTests(unittest.TestCase):
             grids.append(build_general_periodic_grid(cell, settings))
         return grids
 
-    def test_general_grids_keep_the_dense_support_and_the_direct_ewald_sum(self) -> None:
+    def test_general_grids_keep_the_dense_rows_and_take_the_split_by_default(self) -> None:
+        # Up to 2026-11-22 (PARSEC_PERIODIC_OBLIQUE_SPLIT=auto) the local potential of linear species on these grids
+        # was the direct Ewald sum (no provider); the default fast takes the split for every species.
         from parsec_python.acceleration.V_ion import periodic_setup_fortran as periodic_setup
         from parsec_python.V_ion.ionic_potential import dense_support
 
@@ -237,11 +239,13 @@ class FastPeriodicSetupGridsTests(unittest.TestCase):
                 expected = dense_support(grid, centre, 2.3)
                 for value, reference in zip(found, expected):
                     np.testing.assert_array_equal(value, reference)
-                self.assertIsNone(
-                    periodic_setup.fft_local_ionic_potential(
-                        grid, [], {}, {}, grid.cell.lattice_vectors, None, 1.0e-8
+                arguments = (grid, [], {}, {}, grid.cell.lattice_vectors, None, 1.0e-8)
+                with mock.patch.dict(os.environ, {"PARSEC_PERIODIC_OBLIQUE_SPLIT": "auto"}):
+                    self.assertIsNone(periodic_setup.fft_local_ionic_potential(*arguments))
+                with mock.patch.dict(os.environ, {"PARSEC_PERIODIC_OBLIQUE_SPLIT": ""}):
+                    np.testing.assert_array_equal(
+                        periodic_setup.fft_local_ionic_potential(*arguments), np.zeros(grid.size)
                     )
-                )
 
     def test_local_forces_differentiate_the_potential_the_scf_used(self) -> None:
         # The FFT provider returns the converged Ewald sum on the plain orthorhombic grid: the

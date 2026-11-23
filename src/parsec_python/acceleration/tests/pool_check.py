@@ -5,6 +5,7 @@
     python -m parsec_python.acceleration.tests.pool_check sectors RANKS POOLS
     python -m parsec_python.acceleration.tests.pool_check guard RANKS SECTOR_POOLS PLAIN_POOLS
     python -m parsec_python.acceleration.tests.pool_check buffers RANKS [EXCHANGE_BYTES]
+    python -m parsec_python.acceleration.tests.pool_check start SIZES
 
 Run it with ``OPENBLAS_NUM_THREADS=1`` (test_kpoint_pools.py does): the package imports NumPy before
 this module, so the settings below come too late for the BLAS of a ``-m`` run (:mod:`.thread_mpi`).  The
@@ -158,6 +159,55 @@ def check_eigensolver(method: str, sizes: str, steps: int, real: bool = False) -
     return report
 
 
+def _compare(results, reference) -> dict:
+    """Every rank's numbers against those of the first rank (bit for bit) and of the one-device solver."""
+
+    equal = all(
+        all(np.array_equal(x, y) for x, y in zip(a, b)) for other in results[1:] for a, b in zip(other, results[0])
+    )
+    value_error = max(float(np.max(np.abs(a[0] - b[0]))) for a, b in zip(results[0], reference))
+    norm_error = max(float(np.max(np.abs(a[1] - b[1]))) for a, b in zip(results[0], reference))
+    cycles = [[int(a[2]) for a in results[0]], [int(b[2]) for b in reference]]
+    return {"ranks_equal": bool(equal), "value_error": value_error, "norm_error": norm_error, "cycles": cycles}
+
+
+def check_start(sizes: str) -> dict:
+    """A first solve from the refined Ritz vectors of a smaller basis (``start``, ``PARSEC_KPOINT_SECTOR_WARM_GROWTH``)
+    on the shared columns of each number of ranks of ``sizes`` (the former basis laid out over them), against the
+    one-device solver from the same columns; ``moved``: how far that start moves the levels from a random start."""
+
+    from parsec_python.acceleration.Eigensolvers.chebff_columns import ColumnLayout
+
+    operator = _operator(False)
+    settings = _settings("chebff")
+    smaller = _REQUESTED - 8
+    old = solve_spinor_eigval(operator, smaller, settings=settings, state=None, xp=np)
+    old = solve_spinor_eigval(operator, smaller, settings=settings, state=old.state, xp=np)
+    saved = np.asarray(old.state.vectors)
+    width = int(saved.shape[1])
+
+    def one(result):
+        return [(result.eigenvalues.copy(), np.asarray(result.residual_norms).copy(), 0)]
+
+    reference = one(solve_spinor_eigval(operator, _REQUESTED, settings=settings, state=None, xp=np, start=saved.copy()))
+    cold = one(solve_spinor_eigval(operator, _REQUESTED, settings=settings, state=None, xp=np))
+    report = {"moved": float(np.max(np.abs(reference[0][0] - cold[0][0])))}
+    for size in (int(value) for value in sizes.split(",")):
+        layout = ColumnLayout(width, settings.subspace.block_size, size)
+
+        def rank(context):
+            group = ColumnGroup(context.comm, np)
+            local = np.ascontiguousarray(saved[:, layout.global_columns(group.rank)])
+            return one(
+                solve_column_eigval(
+                    operator, _REQUESTED, settings=settings, group=group, state=None, xp=np, start=(layout, local)
+                )
+            )
+
+        report[str(size)] = _compare(run_ranks(size, rank), reference)
+    return report
+
+
 _LOCAL = threading.local()
 
 
@@ -240,7 +290,11 @@ def check_sectors(ranks: int, pools: int, real: bool = False) -> dict:
     def counters(found) -> dict:
         detail = found.timings.detail
         names = ("tasks", "regrowths", "regrown_tasks", "rebuilds", "pairs")
-        return {name: float(detail.get(f"kpoint_sector_{name}", 0.0)) for name in names}
+        found_counters = {name: float(detail.get(f"kpoint_sector_{name}", 0.0)) for name in names}
+        # the grown sectors that started from their Ritz vectors (PARSEC_KPOINT_SECTOR_WARM_GROWTH; on the pools those of
+        # the pool of this rank)
+        found_counters["warm_growths"] = float(detail.get("kpoint_warm_growths", 0.0))
+        return found_counters
 
     result = run_scf_kpoints(system, k_points, weights)
     serial = dict(_summary(result), **counters(result), real_operators=made["real"])
@@ -438,6 +492,10 @@ def main() -> None:
     if "grow" in sys.argv[1:]:
         os.environ["POOL_CHECK_GROW"] = "1"
         sys.argv.remove("grow")
+    # "warm=<auto|all|off>": the PARSEC_KPOINT_SECTOR_WARM_GROWTH of the run
+    for argument in [a for a in sys.argv[1:] if a.startswith("warm=")]:
+        os.environ["PARSEC_KPOINT_SECTOR_WARM_GROWTH"] = argument.split("=", 1)[1]
+        sys.argv.remove(argument)
     # "assign=<auto|cyclic>": the PARSEC_KPOINT_POOL_ASSIGN of the run (tasks of different sizes)
     for argument in [a for a in sys.argv[1:] if a.startswith("assign=")]:
         os.environ["PARSEC_KPOINT_POOL_ASSIGN"] = argument.split("=", 1)[1]
@@ -467,6 +525,8 @@ def main() -> None:
         payload = check_guard(int(sys.argv[2]), int(sys.argv[3]), int(sys.argv[4]))
     elif mode == "projectors":
         payload = check_projectors(int(sys.argv[2]))
+    elif mode == "start":
+        payload = check_start(sys.argv[2])
     elif mode == "buffers":
         exchange = sys.argv[3] if len(sys.argv) > 3 else None
         if exchange is not None:
