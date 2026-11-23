@@ -29,6 +29,7 @@ from parsec_python.Eigensolvers.arpack import ArpackSettings, run_arpack
 from parsec_python.Eigensolvers.iterative import IterativeDiagonalizationError
 from parsec_python.Input import parse_parsec_input
 from parsec_python.acceleration.backends.cupy import cupy_available
+from parsec_python.tests.parsec15_tables import start_parsec15_tables
 
 GPU_AVAILABLE = cupy_available()
 DATA = Path(__file__).resolve().parents[2] / "tests" / "data"
@@ -288,6 +289,12 @@ class DeviceArpackTests(unittest.TestCase):
 
 @unittest.skipUnless(GPU_AVAILABLE, "CuPy with a CUDA device is required")
 class AcceleratedCalculationTests(unittest.TestCase):
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        # PARSEC 1.5's numbers: its tables
+        start_parsec15_tables(cls)
+        super().setUpClass()
     def setUp(self) -> None:
         folder = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         self.addCleanup(folder.cleanup)

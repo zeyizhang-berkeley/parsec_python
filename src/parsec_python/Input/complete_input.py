@@ -651,6 +651,12 @@ def complete_input_text(
     elif routines is not None and routines.fortran:
         chosen = ", ".join((*routines.defaults, *routines.reasons)).replace(";", ",")
         lines += ["", "# Routines (the run chose them: " + chosen.replace("#", "") + ")", "Use_Fortran_Routines  .true."]
+    elif routines is not None and cell is not None and any(
+        problem.pseudopotentials[symbol].use_spline for symbol in getattr(translation, "cubic_spline_defaulted", ())
+    ):
+        # Andrew Grieder's routines for a cell whose species took the cubic spline by default: Cubic_Spline .true.
+        # written above would make the forces at the Gamma point take the Fortran-derived ones (Input.routines)
+        lines += ["", "# Routines (Cubic_Spline by default)", "Use_Fortran_Routines  .false."]
 
     # The k-point lists of an input whose Super_Cell is expanded here (the reader would convert them with the
     # expanded cell): their Cartesian k-points.

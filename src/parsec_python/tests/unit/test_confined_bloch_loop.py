@@ -134,7 +134,8 @@ class ConfinedBlochLoopTests(unittest.TestCase):
             # the wire/slab path diagonalizes every k-point again (a semilocal result) to a tight residual
             reference = wire_slab_kpoint_nonlocal_forces(system, result)
         self.assertTrue(result.converged)
-        self.assertGreater(float(np.max(np.abs(reference))), 1.0e-2)
+        # a force worth comparing (7.4e-3 Ry/bohr with the cubic spline of the default, above 1e-2 with linear tables)
+        self.assertGreater(float(np.max(np.abs(reference))), 5.0e-3)
         np.testing.assert_allclose(np.asarray(result.nonlocal_forces), reference, rtol=0, atol=1.0e-7)
 
 

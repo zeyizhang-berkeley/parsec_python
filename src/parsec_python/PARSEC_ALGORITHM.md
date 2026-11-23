@@ -346,6 +346,38 @@ over the `(2N-1)^3` points `r_i + (dx,dy,dz)h/N` with the weights
 any of its fine points lies within the projector radius. That is separate
 from the kinetic finite-difference order.
 
+The weights are those of linear interpolation from the coarse grid, so
+`h³ sum_j beta_alm(j) psi_j` becomes the integral of the projector against the
+linear interpolant of the orbital. For an orbital that varies on the scale of
+`h`, that interpolant is too small near the atom and every projection loses
+weight at order `h²`, while plain sampling of a smooth projector is already
+accurate. The 4d pseudo-orbital of the Ag table of the tests
+(`tests/data/Ag_POTRE.DAT`, local s) projects onto its own projector with
+0.876 of the radial value at `h = 0.45` bohr with `Double_grid_order 2`
+(0.943 at 0.30, 0.974 at 0.20 bohr; order 3: 0.856, 0.933, 0.969), and with
+1.000 within 6e-4 at order one; the s channels of POTRE tables of C, Si and
+O lose 0.4 to 3.4 % at 0.45 bohr. The nonlocal energy of a channel scales with
+the square of its projections, so the d channel of Ag, -7.3 Ry per electron in
+its atomic orbital, loses about a quarter. An Ag3 cluster (sphere of 10 bohr,
+order-12 stencil) gives -181.212 Ry at `h = 0.45` bohr with order 2 and
+-177.681 Ry with order 3 against -218.482 Ry with order one, and -197.226
+against -218.406 Ry at 0.30 bohr; PARSEC 1.5 gives the same energies (within
+1e-8 Ry with `Hartree_Boundary_Tolerance: off`, within 6e-5 Ry with the
+default boundary values). With the order-8 stencil the gap closes as `h²`,
+from 37.6 Ry at 0.45 bohr to 10.6 Ry at 0.20 bohr, while order one moves by
+0.52 Ry over the same range; fcc Ag at the Gamma point lies 55 Ry higher per
+four atoms at `h = a/16`. With LDA+U on the Ag d shell, the d levels of the
+order-2 cluster reach the Fermi level and the SCF does not converge in 400
+iterations, in PARSEC 1.5 as here, while order one converges in under 30. For
+s and p valence the shifts are small: 8 mRy for CH4 at 0.4 bohr, 10 mRy for
+Si5H12 at 0.45 bohr, 12 mRy for the Si8 cell at 0.43 bohr; H2O at 0.4 bohr
+comes out 0.30 Ry lower (the oxygen s channel is repulsive). The forces are
+the derivatives of the double-grid energy. The report prints these
+projections after the double-grid warning, for every species and channel
+whose share falls below 0.99, with the first-order change of the nonlocal
+energy of the reference configuration
+(`V_ion/double_grid.double_grid_note_lines`; output only).
+
 ### Ion-ion energy
 
 For an isolated system, `forceion.f90:39-96` uses

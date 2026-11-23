@@ -13,9 +13,9 @@ repository, so that the matrix can be run unchanged on any later tree.  Groups:
     and 2e-3 bohr, SCF to 1e-10 Ry; the Richardson value of the two is printed too).  Tolerance 1e-5 Ry/bohr at both
     steps.  Atoms on a grid point, 5e-4 bohr from one and 0.05 bohr off a site; C (POTRE and FHI), Si, Ge (core
     correction), Ag (d channel), Mg (core correction), O, H, B, N; both routine sets; clusters, Gamma cells, a 2x2x2
-    mesh, a slab and a wire; spin, spin-orbit and LDA+U.  The force compared is the total before its net part was
-    removed (``forces_total + forces_net / N``), the derivative of the energy.  ``dgrid`` is the distance of the
-    atom from the nearest grid point where the archive holds the grid.
+    mesh, two slabs (one under PARSEC_HARTREE_VARIATIONAL=on) and a wire; spin, spin-orbit and LDA+U.  The force
+    compared is the total before its net part was removed (``forces_total + forces_net / N``), the derivative of the
+    energy.  ``dgrid`` is the distance of the atom from the nearest grid point where the archive holds the grid.
 ``mpi``
     One case per launch under ``srun`` or ``mpirun`` (2 or 4 ranks, one GPU each): the MPI full-SCF runner for a
     cluster and a Gamma cell, ``--mpi`` of the command line for a k-point mesh.  Rank 0 then runs the same input in
@@ -135,6 +135,7 @@ ALL_OFF = {
     "PARSEC_KPOINT_TRIM_REAL": "off",
     "PARSEC_LDAU_PROJECTOR_ORBITS": "off",
     "PARSEC_LDAU_SECTOR_FORCES": "off",
+    "PARSEC_LDAU_SMOOTH_PROJECTORS": "off",
     "PARSEC_LDAU_SPIN_FULL_GRID": "off",
     "PARSEC_LDAU_SPIN_SECTORS": "off",
     "PARSEC_LDAU_WEIGHTED_SECTORS": "off",
@@ -188,6 +189,11 @@ ALL_OFF = {
     "PARSEC_SOC_PROJECTOR_SPLINE": "off",
     "PARSEC_SPINOR_MOVE_FLAG_SUBGROUP": "off",
     "PARSEC_RUNNER_FORTRAN_FIXED_SECTORS": "off",
+    # defaults changed after 30edaacf1: the cubic spline of a species without Cubic_Spline, the projector tail
+    "PARSEC_CUBIC_SPLINE_DEFAULT": "off",
+    "PARSEC_PROJECTOR_TAIL": "off",
+    "PARSEC_EXCHANGE_OCCUPATION_CUT": "off",
+    "PARSEC_FOCK_DIIS_TAIL": "off",
 }
 NO_SYMMETRY_ENV = {"PARSEC_PERIODIC_SYMMETRY": "off", "PARSEC_KPOINT_SECTORS": "off"}
 NO_SYMMETRY_ARGS = ("--symmetry", "off")
@@ -201,6 +207,7 @@ PP_FILES = {
     "Si_POTRE": "src/parsec_python/tests/data/Si_POTRE.DAT",
     "Si_FHI": "examples/3d_hybrid_functionals/Si_FHIPP.DAT",
     "Ge_POTRE": "src/parsec_python/tests/data/Ge_POTRE.DAT",
+    "Gep_POTRE": "src/parsec_python/tests/data/Ge_POTRE.DAT",
     "Ag_POTRE": "src/parsec_python/tests/data/Ag_POTRE.DAT",
     "H_POTRE": "examples/0d_benzene/H_POTRE.DAT",
     "Hw_POTRE": "examples/0d_water_geoopt/H_POTRE.DAT",
@@ -244,6 +251,7 @@ SPECIES = {
     "Si_POTRE": ("Si_POTRE.DAT", _potre("Si", "p")),
     "Si_FHI": ("Si_FHIPP.DAT", _fhi("Si", 2.1, "2 2 0")),
     "Ge_POTRE": ("Ge_POTRE.DAT", _potre("Ge", "d")),
+    "Gep_POTRE": ("Ge_POTRE.DAT", _potre("Ge", "p")),
     "Ag_POTRE": ("Ag_POTRE.DAT", _potre("Ag", "s", element=True)),
     "H_POTRE": ("H_POTRE.DAT", _potre("H", "s")),
     "Hw_POTRE": ("H_POTRE.DAT", _potre("H", "s")),
@@ -788,6 +796,24 @@ def bn_slab(name, *, fortran=None, mesh=None, snap=True, criterion=1.0e-10, potr
     boron, nitrogen = ("Bx_POTRE", "Nx_POTRE") if potre else ("B_FHI", "N_FHI")
     lattice = np.array([[4.73, 0.0, 0.0], [-2.365, 4.0963001599, 0.0], [0.0, 0.0, 1.0]])
     return Structure(name, text, positions, (boron, nitrogen), lattice, 2, snap=0 if snap else None)
+
+
+def ge2_slab(name, *, height=6.0, env=None):
+    """Two Ge atoms (POTRE with a core correction, local p, CA) in a square slab cell of 5.6 bohr at h 0.45, the domain
+    |z| <= ``height``; at 6 bohr the density at the edge of the slab is 1.1e-4 e/bohr^3, where the Hartree operator of
+    the slab is not symmetric (``PARSEC_HARTREE_VARIATIONAL``)."""
+
+    positions = np.array([[0.1, -0.1, 1.2], [-2.7, 2.7, -1.1]])
+    vectors = np.array([[5.6, 0.0, 0.0], [0.0, 5.6, 0.0]])
+
+    def text(p):
+        return (
+            cell_head(vectors, 0.45, boundary="slab", radius=height, sad=False)
+            + scf_block("ca", 8, temperature=300.0) + atom_blocks([("Gep_POTRE", p, "")])
+        )
+
+    lattice = np.array([[5.6, 0.0, 0.0], [0.0, 5.6, 0.0], [0.0, 0.0, 1.0]])
+    return Structure(name, text, positions, ("Gep_POTRE",), lattice, 2, env=dict(env or {}))
 
 
 def c_wire(name, *, snap=True):
@@ -1440,7 +1466,8 @@ def snap_structures(runner: Runner, structures: list) -> None:
 
 
 def linear(structure):
-    """``structure`` with the linear radial tables of PARSEC 1.5 (every ``Cubic_Spline`` line removed)."""
+    """``structure`` without its ``Cubic_Spline`` lines: the interpolation of ``PARSEC_CUBIC_SPLINE_DEFAULT`` (the
+    cubic spline by default, the linear radial tables of PARSEC 1.5 under ``off``)."""
 
     def strip(text):
         return "".join(line for line in text.splitlines(keepends=True) if not line.startswith("Cubic_Spline"))
@@ -1486,7 +1513,12 @@ def force_checks():
         ("f_bnslab_f_grid", bn_slab("bnslab_f"), ((0, 0), (0, 2), (1, 0)), on),
         ("f_bnslab_d_grid", bn_slab("bnslab_d", fortran=False), ((0, 2), (1, 0)), on),
         ("f_cwire_grid", c_wire("cwire"), ((0, 0), (0, 2), (1, 0)), on),
-        # linear radial tables (no Cubic_Spline, PARSEC 1.5's interpolation; added after the first run)
+        # a slab whose density reaches the edge of its domain, with the Poisson potential and with the derivative of
+        # the Hartree energy (added after 30edaacf1)
+        ("f_ge2slab", ge2_slab("ge2slab"), ((0, 2), (0, 0)), on),
+        ("f_ge2slab_var", ge2_slab("ge2slab_var", env={"PARSEC_HARTREE_VARIATIONAL": "on"}), ((0, 2), (1, 2)), on),
+        # no Cubic_Spline in the input (added after the first run, when such an input took PARSEC 1.5's linear tables
+        # and these cases were exempt; after 30edaacf1 the default of PARSEC_CUBIC_SPLINE_DEFAULT is the cubic spline)
         ("f_si8k_lin_d", linear(diamond("si8k_lin_d", "Si_POTRE", A_SI, "ca", 24, mesh=(2, 2, 2))),
          ((6, 0), (0, 0)), on),
         ("f_ch4_lin", linear(ch4("ch4_lin")), ((0, 0), (1, 0)), on),
@@ -1507,16 +1539,19 @@ def force_checks():
         "f_c8f_d_grid": {6: fhi_on_point},
         "f_c8f_f_grid": {6: fhi_on_point},
         "f_ch4_grid": {0: fhi_on_point},
+        "f_ch4_lin": {0: fhi_on_point},  # f_ch4_grid without its Cubic_Spline lines
+        # the Hartree operator of the slab is not symmetric where the density reaches the edge of its domain: the
+        # potential of the Poisson solve is not the derivative of the Hartree energy, the SCF does not make the energy
+        # stationary, and the force misses the term of the density response at every step (1.05e-5 Ry/bohr on
+        # 30edaacf1); f_ge2slab_var takes the derivative (PARSEC_HARTREE_VARIATIONAL=on)
+        "f_ge2slab": {0: (FORCE_STEPS, "slab Hartree operator not symmetric where the density reaches the edge of the "
+                          "slab (PARSEC_HARTREE_VARIATIONAL=on: f_ge2slab_var)")},
         # not for the O table (its eighth sample is at 9.3e-4 bohr), nor for the slab and the wire, whose radial
         # table terms within rs(2) are skipped (an open item that this exception must not hide)
     }
-    # Linear interpolation of the radial tables (PARSEC 1.5 without Cubic_Spline): the energy has a kink at every
-    # radial sample a grid point crosses, so its slope over a step is not the force at the point.  Kept visible as
-    # EXEMPT; whether such inputs should take Cubic_Spline is a decision outside the code.
-    linear_tables = (FORCE_STEPS, "linear radial tables (no Cubic_Spline): the energy has kinks at the radial "
-                     "samples, its slope over a step is not the force (PARSEC 1.5's interpolation)")
-    for name, atoms in (("f_si8k_lin_d", (6, 0)), ("f_ch4_lin", (0, 1)), ("f_h2o_lin", (0, 1))):
-        exempt[name] = {atom: linear_tables for atom in atoms}
+    # The linear radial tables of PARSEC 1.5 (PARSEC_CUBIC_SPLINE_DEFAULT=off for an input without Cubic_Spline) have
+    # a kink at every radial sample a grid point crosses, so the slope of the energy over a step is not the force at
+    # the point; with the default cubic spline the three cases above are ordinary checks.
     return [ForceCheck("force", name, notes.get(name, ""), structure, targets, offset, exempt=exempt.get(name, {}))
             for name, structure, targets, offset in table]
 

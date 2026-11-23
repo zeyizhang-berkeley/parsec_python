@@ -51,6 +51,7 @@ from parsec_python.acceleration.Symmetry.sector_stencil import (
 from parsec_python.acceleration.backends.cupy import cupy_available
 from parsec_python.acceleration.backends.native import native_available
 from parsec_python.models import Atom, PeriodicCell, PeriodicGridSettings
+from parsec_python.tests.parsec15_tables import start_parsec15_tables
 
 _SILICON_EXAMPLE = Path(__file__).resolve().parents[3].parent / "examples" / "3d_Si"
 _SILICON_SIDE = 10.26
@@ -292,6 +293,12 @@ begin Atom_Coord
 
 @unittest.skipUnless(cupy_available() and native_available(), "CUDA runtime or native extension is unavailable")
 class PaletteLadderSCFTests(unittest.TestCase):
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        # inputs and tolerances made with PARSEC 1.5's tables
+        start_parsec15_tables(cls)
+        super().setUpClass()
     def _run(self, problem, environment):
         from parsec_python.acceleration import driver
 

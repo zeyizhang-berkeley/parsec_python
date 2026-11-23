@@ -28,7 +28,6 @@ from __future__ import annotations
 import numpy as np
 
 from .potre import ParsecPseudopotential
-from .radial_quadrature import parsec_radial_integral
 from .radial_spline import ParsecRadialSpline
 
 
@@ -67,7 +66,8 @@ LINEAR_SLOPES = ("tabulated", "interpolant")
 def linear_slope_setting() -> str:
     """``PARSEC_LINEAR_TABLE_SLOPES``: how forces differentiate a radial table that the energy interpolates linearly.
 
-    A species without ``Cubic_Spline`` (PARSEC's default) samples its local potential (``r V``), its core density
+    A species with linear tables (``Cubic_Spline: .false.``, PARSEC 1.5's default for a species without the label,
+    here under ``PARSEC_CUBIC_SPLINE_DEFAULT=off``) samples its local potential (``r V``), its core density
     and its projectors by linear interpolation between the radial samples, so the energy is piecewise smooth in the
     atom positions.
 
@@ -310,9 +310,7 @@ def radial_projector_with_derivative(
         potential.channel_potentials[angular_momentum], local_l
     )
     radial_wave = potential.radial_wavefunctions[angular_momentum]
-    denominator = parsec_radial_integral(
-        potential.radii, radial_wave * radial_wave * delta_v
-    )
+    denominator = potential.kb_denominator(radial_wave * radial_wave * delta_v)
     raw = delta_v * radial_wave / potential.radii / np.sqrt(abs(denominator))
     constant_through = 2 * DERIVATIVE_HALF_WIDTH - 2
     derivative = log_grid_derivative(potential, raw, first=constant_through)

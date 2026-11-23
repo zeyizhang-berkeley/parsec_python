@@ -796,5 +796,36 @@ class SpinorIonicCliTests(unittest.TestCase):
         self.assertEqual(cli_main([str(path), "--quiet"]), 2)  # refused before the run starts
 
 
+class SpinorDispersionForceTests(unittest.TestCase):
+    def test_the_spinor_forces_carry_the_ts_term(self) -> None:
+        # Forces.compute_spinor_forces (the forces of Relaxation.spinor_backend) left the TS term out; it must give the
+        # forces of Forces.spin_orbit_fortran.compute_spin_orbit_forces, which adds it, on the same result.
+        from parsec_python.Forces.spin_orbit_fortran import compute_spin_orbit_forces
+        from parsec_python.Input.parsec_input import parse_parsec_input
+
+        text = (
+            "Boundary_Sphere_Radius: 7.0\nGrid_Spacing: 0.7\nCoordinate_Unit: Cartesian_Bohr\nExpansion_Order: 6\n"
+            "Correlation_Type: pb\nStates_Num: 30\nFermi_Temp: 300 K\nMax_Iter: 60\nConvergence_Criterion: 1e-5 Ry\n"
+            "Mixing_Param: 0.25\nEigensolver: chebff\nSO_from_scratch: .true.\nVan_Der_Waals: .true.\n"
+            "Ignore_Symmetry: .true.\nAtom_Types_Num: 1\nAtom_Type: Au\nPseudopotential_Format: martins_new\n"
+            "Local_Component: s\nCubic_Spline: true\nSO_PSP: .true.\n"
+            "begin Atom_Coord\n -2.31 0.17 0.22\n 2.43 -0.11 0.13\nend Atom_Coord\n"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory)
+            shutil.copy(_AU, folder / "Au_POTRE.DAT")
+            (folder / "parsec.in").write_text(text)
+            system = prepare_single_point(parse_parsec_input(folder / "parsec.in").problem)
+        backend = spinor_backend()
+        result = backend.run_scf(system)
+        self.assertIsNotNone(result.dispersion)
+        forces = backend.compute_forces(system, result)
+        reference = compute_spin_orbit_forces(system, result, symmetrize=False)
+        self.assertIsNotNone(forces.dispersion)
+        self.assertGreater(float(np.max(np.abs(forces.dispersion))), 1.0e-5)
+        np.testing.assert_allclose(forces.dispersion, reference.dispersion, rtol=0.0, atol=1.0e-14)
+        np.testing.assert_allclose(forces.unsymmetrized, reference.unsymmetrized, rtol=0.0, atol=1.0e-10)
+
+
 if __name__ == "__main__":
     unittest.main()

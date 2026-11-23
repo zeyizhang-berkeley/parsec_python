@@ -34,6 +34,7 @@ import numpy as np
 
 from parsec_python.Grid.pbc import adjust_step, build_periodic_grid
 from parsec_python.Input.parsec_input import UnsupportedParsecOptionError, parse_parsec_input
+from parsec_python.tests.parsec15_tables import parsec15_tables
 
 _SILICON = Path(__file__).resolve().parents[1] / "data" / "Si_POTRE.DAT"
 
@@ -155,6 +156,8 @@ class IncommensurateTranslationTests(_InputCase):
                 _FCC_SI2.format(spacing=0.6, second=0.27, extra="Symmetrize_Charge_Density: .true.")
             )
 
+    # PARSEC 1.5's energy and forces: its tables
+    @parsec15_tables()
     def test_c3v_fcc_si2_gives_the_energy_and_forces_of_parsecs_twelve_point_grid(self) -> None:
         from parsec_python.Forces import compute_forces
         from parsec_python.SCF.pbc import prepare_periodic_single_point

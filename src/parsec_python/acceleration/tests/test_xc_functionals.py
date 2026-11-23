@@ -31,6 +31,9 @@ from parsec_python.tests.xc_reference import (
 )
 from parsec_python.V_xc import wigner_lda, xalpha_lda
 
+# PARSEC 1.5's numbers: its linear tables and tabulated projector tails (parsec_python.tests.parsec15_tables)
+from parsec_python.tests.parsec15_tables import parsec15_tables_module as setUpModule  # noqa: F401, N812
+
 
 def _solve(name: str, backend: str):
     case = load_xc_cases()[name]

@@ -88,7 +88,7 @@ import numpy as np
 from scipy import fft as scipy_fft
 from scipy.linalg import solve_triangular
 
-from .exact_exchange import OCCUPATION_THRESHOLD
+from .exact_exchange import exchange_occupation_threshold
 
 
 #: Pair densities solved together unless a caller chooses (``Exx_Batch_Size``).
@@ -708,9 +708,13 @@ class BlochOrbitalSet:
                 found.append((rep, -1, True, -np.asarray(k_point, dtype=np.float64)))
         return tuple(found)
 
-    def sources(self, occupation_threshold: float = OCCUPATION_THRESHOLD):
-        """``(k', occupied columns of u_k', their occupations)`` of every point of the full mesh."""
+    def sources(self, occupation_threshold: float | None = None):
+        """``(k', occupied columns of u_k', their occupations)`` of every point of the full mesh.
 
+        ``occupation_threshold`` ``None``: :func:`~parsec_python.V_xc.exact_exchange.exchange_occupation_threshold`."""
+
+        if occupation_threshold is None:
+            occupation_threshold = exchange_occupation_threshold()
         sources = []
         for rep, operation, conjugate, k_source in self.mesh_sources():
             values = self.occupations[rep]
@@ -808,7 +812,7 @@ def apply_bloch_exchange(
     columns: str = "all",
     known: BlochExchangeApplication | None = None,
     batch_size: int = DEFAULT_BATCH_SIZE,
-    occupation_threshold: float = OCCUPATION_THRESHOLD,
+    occupation_threshold: float | None = None,
     pair_symmetry: bool = True,
     image_pairs: bool | None = None,
 ) -> BlochExchangeApplication:
@@ -832,10 +836,14 @@ def apply_bloch_exchange(
     (``None``: :func:`image_pairs_setting`) extends this to the image sources
     of a wedge whose mirror source is in the list (:attr:`MeshStars.mirrors`):
     the mirror pair gets ``P_(g^-1)`` of the term the identity's partner would
-    get, where :func:`image_pair_relation_holds`.
+    get, where :func:`image_pair_relation_holds`.  ``occupation_threshold``
+    (``None``: :func:`~parsec_python.V_xc.exact_exchange.exchange_occupation_threshold`)
+    is the occupation a source must exceed.
     """
 
     started = perf_counter()
+    if occupation_threshold is None:
+        occupation_threshold = exchange_occupation_threshold()
     batch_size = int(batch_size)
     if batch_size < 1:
         raise ValueError("batch_size must be a positive integer")
@@ -1052,10 +1060,11 @@ def bloch_band_energy(operators: Sequence, orbital_set: BlochOrbitalSet) -> floa
     """``E_x(P, P0) = (s/2) sum_t w_t sum_n f_nt <u_nt|V_ACE_t|u_nt>`` (Ry, unscaled) of ``orbital_set``."""
 
     total = 0.0
+    threshold = exchange_occupation_threshold()
     for t, (operator, block, values) in enumerate(zip(operators, orbital_set.orbitals, orbital_set.occupations)):
         if operator is None:
             continue
-        occupied = np.flatnonzero(values > OCCUPATION_THRESHOLD)
+        occupied = np.flatnonzero(values > threshold)
         if not occupied.size:
             continue
         expectation = operator.expectation_values(block[:, occupied], scaled=False)

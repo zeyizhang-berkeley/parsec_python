@@ -55,6 +55,7 @@ from ..Eigensolvers import (
 from ..Energy import total_energy, total_energy_no_degeneracy_spin_polarized
 from ..Occupations import fixed_occupations, spin_fixed_occupations
 from ..Grid.point_group import symmetrize_density
+from ..Hartree.variational import electrostatic_hartree
 from ..Hamiltonian.kpoint_operator import KPointExchangeHamiltonian, KPointKohnShamHamiltonian
 from ..Laplacian.finite_difference import bloch_laplacian_or_none
 from ..Mixer import make_mixer, potential_residual_metrics, preconditioned_mixer
@@ -912,7 +913,7 @@ def run_scf_kpoints(
         density=density,
         core_density=system.core_density,
         ionic_potential=ionic_potential,
-        hartree_potential=hartree_potential,
+        hartree_potential=electrostatic_hartree(system, hartree_potential),
         xc_potential=xc.potential,
         input_effective_potential=input_potential,
         output_effective_potential=output_potential,
@@ -1844,7 +1845,7 @@ def _spin_kpoint_loop(
             "scf_input_potentials": last_inputs,
             "next_potentials": (input_potential_up, input_potential_down),
             "xc_potentials": (xc.potential_up, xc.potential_down),
-            "scf_hartree_potential": hartree_potential,
+            "scf_hartree_potential": electrostatic_hartree(system, hartree_potential),
         }
         if keep_wavefunctions
         else {}

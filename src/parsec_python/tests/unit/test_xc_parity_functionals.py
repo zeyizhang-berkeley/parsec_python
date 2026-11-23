@@ -79,6 +79,7 @@ from parsec_python.tests.xc_reference import (
     load_xc_cases,
     write_xc_case,
 )
+from parsec_python.tests.parsec15_tables import parsec15_tables
 
 _pw91_module = importlib.import_module("parsec_python.V_xc.pw91")
 _asymptotic_module = importlib.import_module("parsec_python.V_xc.asymptotic_correction")
@@ -755,6 +756,8 @@ class PeriodicAndNoncollinearTests(unittest.TestCase):
         self.assertAlmostEqual(totals["lb94"], totals["ca"], delta=1.0e-2)
 
 
+# PARSEC 1.5's numbers: its tables
+@parsec15_tables()
 class FortranComparisonTests(unittest.TestCase):
     """Complete calculations on the readable solver against Fortran PARSEC."""
 

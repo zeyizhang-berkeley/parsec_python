@@ -919,7 +919,18 @@ the input sets them).
    `X_k` the density matrix of the operator of loop `k` and `Y_k` that of its
    orbitals; the operator of `X_{n+1}` is built from its natural orbitals with
    fractional occupations (the `n_occ` largest; the empty states of the last
-   loop complete the ACE) by the same pair solves. It is used only when the
+   loop complete the ACE) by the same pair solves. The stored orbitals are
+   those whose occupation exceeds 1e-3 (`PARSEC_FOCK_DIIS_TAIL=on`, the
+   default): the thermal tail of a gap at a raised Fermi temperature (empty
+   levels up to 1e-3, which count as integer occupations below) completes
+   the ACE of the extrapolated density matrix as empty states, while no
+   such level holds more than `1e-3 sqrt(Exx_Tolerance / Ry)` (a larger
+   tail clears the window: the stop test resolves the levels to about
+   `sqrt(Exx_Tolerance)` only, and at a finite temperature the energy is of
+   first order in them through their occupations, `f ln(1/f)` per Ry of
+   level error); with `off` every orbital the exact exchange counts is
+   stored, and a tail level among the kept natural occupations refuses every
+   extrapolation. It is used only when the
    last orbitals have integer occupations (a symmetric half-filled ensemble
    is a saddle that an extrapolation is drawn to), dexx did not rise in the
    last step, the plain loop converges slowly (dexx ratio above 0.05) and the

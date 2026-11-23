@@ -88,6 +88,7 @@ import parsec_python.cli as cli_module
 from parsec_python.cli import main as cli_main, relaxation_exit_code
 from parsec_python.models import Atom, RelaxationSettings
 from parsec_python.tests.force_reference import write_case
+from parsec_python.tests.parsec15_tables import start_parsec15_tables
 
 
 DATA = Path(__file__).resolve().parents[1] / "data"
@@ -4373,6 +4374,12 @@ class _CommandLineRuns(unittest.TestCase):
 
 class ReadableDriverTests(_CommandLineRuns):
     """Four runs on the coarse grid, under a minute together."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        # Fortran PARSEC's relaxations: its tables
+        start_parsec15_tables(cls)
+        super().setUpClass()
 
     NAMES = (
         "water_coarse_bfgs_part1",

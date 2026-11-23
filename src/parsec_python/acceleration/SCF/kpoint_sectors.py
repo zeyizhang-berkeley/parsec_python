@@ -2189,11 +2189,11 @@ class SectorKPointSolver:
         """``(s/2) w_k sum_n f_n <v_n|U^H V_ACE U|v_n>`` of a sector (unscaled): the exchange term reduced to it
         (made with its Hamiltonian, :meth:`KPointSectors.hamiltonian`), on the host."""
 
-        from parsec_python.V_xc.exact_exchange import OCCUPATION_THRESHOLD
+        from parsec_python.V_xc.exact_exchange import exchange_occupation_threshold
 
         cached = self._plans[k_index]._exchange.get(sector)
         values = np.asarray(_host(occupations), dtype=np.float64).reshape(-1)
-        occupied = np.flatnonzero(values > OCCUPATION_THRESHOLD)
+        occupied = np.flatnonzero(values > exchange_occupation_threshold())
         if cached is None or not occupied.size:
             return np.zeros(1)
         block = np.asarray(_host(vectors))[:, occupied]

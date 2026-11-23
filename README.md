@@ -514,7 +514,13 @@ Atomic_Energy_Correction: -572.190341 Ry
 ```
 
 `Local_Component` is the channel that passed the ghost-state test; do not
-replace it by another one without testing. Use `Correlation_Type: pbe` with
+replace it by another one without testing. Without a `Cubic_Spline` line the
+tables are interpolated with PARSEC's cubic spline, and the projectors of a
+table converted from UPF are zero beyond its cutoff radii, as in the UPF file:
+the energy is then a smooth function of the positions and the forces are its
+slope. `PARSEC_CUBIC_SPLINE_DEFAULT=off PARSEC_PROJECTOR_TAIL=off` (or
+`Cubic_Spline: .false.` where no table has such a tail) give the numbers of
+PARSEC 1.5's linear interpolation. Use `Correlation_Type: pbe` with
 the potentials of `PBE/` and `Correlation_Type: ca` with those of `CA/`; the
 self-consistent hybrid functionals (`pbe0`, `hse06`, `b3lyp`, `hf`, ...; see
 [the package guide](src/parsec_python/README.md#self-consistent-hybrid-functionals))
@@ -1011,9 +1017,12 @@ parameter `Use_Fortran_Routines` chooses:
   - forces, a relaxation or molecular dynamics of a bulk cell at the Gamma point (no k-point input), with or
     without spin polarization, where the orthorhombic grid of the Fortran-derived routines has the points of
     Andrew Grieder's grid (the same counts, steps and shift) and every species uses `Cubic_Spline` (his local
-    potential is the cubic spline), so that the run with forces has the energy of the run without them: the
-    accelerated path of the Fortran-derived routines is 2.5-5 times faster there, and their forces are the
-    derivative of their energy. Since the parity round of PARSEC 1.5 both orthorhombic grids are Fortran's
+    potential is the cubic spline; a species that takes the spline by default, without the label, keeps his
+    routines, `PARSEC_CUBIC_SPLINE_DEFAULT`), so that the run with forces has the energy of the run without them, and
+    their forces are the derivative of their energy. Their accelerated path was 2.5-5 times faster there when this
+    default was set; with the device forces and sectors Andrew Grieder's routines have since, his are as fast or
+    faster (first runs on an A100: Si64 single point 7.1 against 7.4 s, 6 steps of molecular dynamics 14.4 against
+    16.5 s, Si216 with forces 10.1 against 12.0 s). Since the parity round of PARSEC 1.5 both orthorhombic grids are Fortran's
     (`adjust_step`'s even number of points, half a step off the origin unless `Ignore_Symmetry`), so this holds
     for cells with and without symmetry; the grids differ where the space group's fractional translations
     change the number of points (Andrew Grieder's grid has no space group) and where a side is an even multiple

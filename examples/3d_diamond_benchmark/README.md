@@ -59,7 +59,11 @@ Every run is a first calculation in a new process (no SCF or symmetry cache), wi
 storage and one warm-up run per allocation; program time is the code's own wall time from start to the end of the
 SCF. GPU memory is the largest nvidia-smi reading of any GPU (it includes CuPy's pool cache), host memory the largest
 resident memory of any rank. Code: the round's integration head (244c4ccd for most rows, d1391c63 for n = 9 and
-k3 n = 7; the two differ in no code path these runs take).
+k3 n = 7; the two differ in no code path these runs take). All tables below predate 22 November 2026, since when a
+`martins_new` projector is zero beyond the largest cutoff radius of its channels (`PARSEC_PROJECTOR_TAIL=auto`;
+`off` restores the former projector): the carbon projector of these inputs changes by 2.1e-5 of its size and the
+energy per atom by 1.1e-7 Ry ("Energy per atom" below); the cubic-spline default of that day does not reach these
+inputs, which name `Cubic_Spline`.
 
 ### Gamma point
 
@@ -376,6 +380,10 @@ the sectors agree with one sector of the identity (`PARSEC_PERIODIC_SYMMETRY=off
 | 2x2x2 n = 6, 7 | -11.4039108, -11.4039172 |
 | 3x3x3 n = 6, 7 | -11.4039207, -11.4039244 |
 | 4x4x4 n = 6 | -11.4039169 |
+
+With the projector tail rule of 22 November 2026 (code of that day, one node of four A100) Gamma n = 6 gives
+-11.4039329 and 2x2x2 n = 6 -11.4039107 Ry/atom, 1.1e-7 Ry/atom above the table, in 7 and 8 SCF steps as with
+`PARSEC_PROJECTOR_TAIL=off`, which gives the values of the table to every digit.
 
 A Gamma-centred m x m x m mesh on an n-cell supercell samples the same k-points as the Gamma point of the
 (m n)-cell supercell, but the k-point runs discretize the Bloch operator `-(grad + ik)^2` on u, which differs from

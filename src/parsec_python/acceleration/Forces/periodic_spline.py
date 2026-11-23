@@ -86,13 +86,11 @@ def takes(grid, lattice_vectors, specifications, atoms) -> bool:
     )
 
 
-def _ball_sum(grid, position, radius, field, slope_over_distance, balls=None) -> np.ndarray:
-    """``sum_T sum_(r in ball_T) field(r) s'(d)/d (r - R - T)`` (``d > 0``) over the balls of radius ``radius``;
-    ``slope_over_distance(d)`` is ``s'(d)/d``; ``balls`` the generator of the balls (the orthorhombic one of
-    :mod:`..V_ion.periodic_setup_fortran` by default, the lattice one of :mod:`..V_ion.periodic_setup` for the
-    general grid)."""
+def _ball_terms(grid, position, radius, field, slope_over_distance, balls=None) -> list:
+    """The pairs ``(weight, relative)`` of :func:`_ball_sum`, one per batch of about ``_POINTS_PER_CALL`` points:
+    ``weight = field(r) s'(d)/d`` (zero at ``d = 0``) and ``relative = r - R - T`` of the points of the balls."""
 
-    total = np.zeros(3)
+    terms = []
     pending: tuple[list, list, list] = ([], [], [])
     points = 0
 
@@ -104,11 +102,11 @@ def _ball_sum(grid, position, radius, field, slope_over_distance, balls=None) ->
         nonzero = distances > 0.0
         weight = np.zeros_like(distances)
         weight[nonzero] = field[rows[nonzero]] * slope_over_distance(distances[nonzero])
-        total[:] += weight @ relative
+        terms.append((weight, relative))
         pending, points = ([], [], []), 0
 
     if radius <= 0.0:
-        return total
+        return terms
     for rows, distances, relative in (_setup._atom_balls if balls is None else balls)(
         grid, position, radius, vectors=True
     ):
@@ -118,7 +116,25 @@ def _ball_sum(grid, position, radius, field, slope_over_distance, balls=None) ->
             flush()
     if points:
         flush()
+    return terms
+
+
+def _sum_terms(terms) -> np.ndarray:
+    """``sum weight @ relative`` over the batches of :func:`_ball_terms`, in their order."""
+
+    total = np.zeros(3)
+    for weight, relative in terms:
+        total[:] += weight @ relative
     return total
+
+
+def _ball_sum(grid, position, radius, field, slope_over_distance, balls=None) -> np.ndarray:
+    """``sum_T sum_(r in ball_T) field(r) s'(d)/d (r - R - T)`` (``d > 0``) over the balls of radius ``radius``;
+    ``slope_over_distance(d)`` is ``s'(d)/d``; ``balls`` the generator of the balls (the orthorhombic one of
+    :mod:`..V_ion.periodic_setup_fortran` by default, the lattice one of :mod:`..V_ion.periodic_setup` for the
+    general grid)."""
+
+    return _sum_terms(_ball_terms(grid, position, radius, field, slope_over_distance, balls))
 
 
 def _device_density_terms(grid, atoms, potentials, specifications, lattice_vectors, fields, tolerance):
@@ -263,19 +279,30 @@ def spline_periodic_local_forces(
                 else 0.0,
                 "core": lambda distances, _s=core_slope, _c=smooth: with_smooth_center(_s, distances, _c) / distances,
             }
+
+    def work(index):
+        # the batches of the three sums of one atom (elementwise, on a worker thread); their products are summed by
+        # the calling thread below in the order of the readable loop, so the forces do not depend on the threads
+        atom = atoms[index]
         terms = species[atom.symbol]
         position = positions[index]
-        ionic[index] = _ball_sum(grid, position, terms["reach"], rho, terms["local"], balls)
+        found = [_ball_terms(grid, position, terms["reach"], rho, terms["local"], balls), None, None]
         if residual_present and device is None:
-            self_consistency[index] = _ball_sum(
-                grid, position, terms["valence_reach"], residual, terms["valence"], balls
-            )
+            found[1] = _ball_terms(grid, position, terms["valence_reach"], residual, terms["valence"], balls)
         if (
             xc_present
-            and potential.has_nonlinear_core_correction
+            and potentials[atom.symbol].has_nonlinear_core_correction
             and (host_core is None or atom.symbol in host_core)
         ):
-            core_correction[index] = _ball_sum(grid, position, terms["core_reach"], xc, terms["core"], balls)
+            found[2] = _ball_terms(grid, position, terms["core_reach"], xc, terms["core"], balls)
+        return found
+
+    for index, found in enumerate(_setup._ordered_results(work, range(count), _setup.setup_threads())):
+        ionic[index] = _sum_terms(found[0])
+        if found[1] is not None:
+            self_consistency[index] = _sum_terms(found[1])
+        if found[2] is not None:
+            core_correction[index] = _sum_terms(found[2])
 
     volume_element = grid.volume_element
     if oblique:

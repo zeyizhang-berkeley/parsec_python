@@ -134,6 +134,11 @@ def _reference_cache_key(
     # species uses Cubic_Spline; the default up to 2026-11-22, which adds nothing: the default validated adds its name).
     if getattr(problem, "periodic_cell", None) is not None and periodic_oblique_split() != "auto":
         digest.update(f"periodic-oblique-{periodic_oblique_split()}".encode("ascii"))
+    # PARSEC_PROJECTOR_TAIL other than its default auto (the projectors of the tables with a tail at rcore)
+    from ..Pseudopotential.potre import PROJECTOR_TAIL_DEFAULT, projector_tail_setting
+
+    if projector_tail_setting() != PROJECTOR_TAIL_DEFAULT:
+        digest.update(f"projector-tail-{projector_tail_setting()}".encode("ascii"))
     digest.update(bytes((int(bool(defer_native_laplacian)),)))
     cache_path = (
         "disabled"

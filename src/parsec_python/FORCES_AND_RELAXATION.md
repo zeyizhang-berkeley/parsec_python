@@ -256,8 +256,10 @@ point, off the slope of the SCF energy at steps of 1e-3 / 2e-3 bohr: `tip`
 on cells below gives the measurements.
 
 Two properties of PARSEC's tables limit how closely a force follows the
-slope of the energy over finite steps. Without `Cubic_Spline` (PARSEC 1.5's
-default) the energy interpolates `r V_local` and the projectors linearly
+slope of the energy over finite steps. With the linear tables of PARSEC 1.5's
+default (`Cubic_Spline: .false.`, or no value under
+`PARSEC_CUBIC_SPLINE_DEFAULT=off`; a species without the label takes the
+cubic spline here by default) the energy interpolates `r V_local` and the projectors linearly
 between the radial samples (`ionpot.f90`, `nonloc.F90`), while the forces
 take the smooth derivative tables above: the energy has a kink wherever a
 grid point crosses a radial sample. At h 0.3 bohr its slope over intervals
@@ -278,11 +280,25 @@ beyond the largest channel cutoff, where most tables converted from UPF
 files still hold a value, so that the energy jumps when a grid point
 crosses it (Cr2 with `Cubic_Spline` 6.7e-4 Ry/bohr, the diamond cell of
 eight atoms at h 0.37 with the carbon table of the diamond examples
-7.4e-5). `PARSEC_PROJECTOR_TAIL=auto` (opt-in) sets those tails to zero, as
+7.4e-5). `PARSEC_PROJECTOR_TAIL=auto` (the default since 2026-11-22; `off`
+keeps the tails, as PARSEC 1.5) sets those tails to zero, as
 the UPF files have them: Cr2 3.2e-6, the diamond cell 8.9e-6 (5e-7
 extrapolated). A check of forces against differences of the energy
-therefore needs `Cubic_Spline` species and, with converted tables, that
-switch or steps over which no grid point crosses a support edge. On the
+therefore needs the cubic spline and the zero tails of the defaults, or,
+under the off values, steps over which no grid point crosses a radial
+sample or a support edge. It also
+needs smooth tables: the copies of the former linear converter that the
+spin tests keep for their Fortran fixture (`tests/data/spin_*_POTRE.DAT`)
+ripple at the sample spacing (fourth differences of the potentials as
+large as the second), and the spline follows the ripple. A spin C7N cell
+at h 0.37 with the CA tables of C and N then has an energy whose third
+derivative along the moved N is about 3e3 Ry/bohr^3: the slopes at 1e-3
+and 2e-3 bohr miss the force by 6.0e-4 and 2.2e-3 Ry/bohr and approach it
+as the step squared (7.3e-6 at 1e-4 bohr), on both routine sets, with the
+magnetic moment and the occupations smooth along the scan; the library
+tables of the same pseudopotentials (cubic converter) give 1.4e-6 and
+6.2e-6, and a C8 cell without spin 2.0e-4 / 8.9e-4 with the rippled carbon
+table against 2.5e-7 / 1.0e-6. On the
 Fortran-derived routines it also needs one grid for all its inputs: their
 grid rule depends on the structure, and an Si8 cell with one atom moved by
 1e-3 bohr along x or z ran on Fortran's general grid (3.3e-4 Ry above the
@@ -299,7 +315,9 @@ symmetric run are not its force; started in that broken-symmetry state
 Fe2 AFM and non-magnetic Fe2 (Richardson values 2.7e-6, 3.2e-6 and 3.0e-6
 Ry/bohr, `Cubic_Spline`).
 
-**Linear tables.** A species without `Cubic_Spline` (PARSEC's default)
+**Linear tables.** A species with `Cubic_Spline: .false.` (PARSEC 1.5's
+default for a species without the label, here under
+`PARSEC_CUBIC_SPLINE_DEFAULT=off`)
 samples its local potential (`r V`), its core density and its projectors by
 linear interpolation between the radial samples, 1 to 2.5 % of the radius
 apart. Its energy therefore changes slope wherever a grid point crosses a
@@ -325,18 +343,23 @@ the cells measured, by -1e-5 to +1.4e-4 for MgO (the Mg table carries a core
 correction; the value depends on the positions), by +9.4e-4 to +1.3e-3 for Ge
 with its core correction (cells of 8 and 64 atoms, slabs), by -1.7e-4 to
 -5.3e-4 for carbon FHI tables and -2.1e-3 for silicon FHI tables (the FHI
-grids are twice as coarse), and by +9e-3 to +1.2e-2 for Au and Ag. The spline
+grids are twice as coarse), by +9e-3 to +1.2e-2 for Au and Ag, and by +3.6e-2
+for the spin-polarized PBE Fe table of the tests (bcc Fe2 at h 0.22 bohr, whose
+SCF then takes 199 steps instead of 75). The spline
 is not free everywhere. First runs with forces on one A100 each, the linear
-and the spline run started together (spline / linear wall time): a core
+and the spline run started together (linear -> spline wall time, since the
+spline of a table is built once and the spline local forces of the
+Fortran-derived routines run on threads, with the same bits): a core
 correction superposed with the spline costs its preparation (the core density
-of a Ge8 slab 0.011 -> 0.92 s, of Ge64 cells 0.002 -> 0.7-0.9 s, of MgO64 0.002 ->
-0.59 s, with the block superposition of `PARSEC_SPLINE_SETUP`) and, on slabs
-and the Fortran-derived routines, a slower force stage (Ge8 slab 0.21 -> 1.52 s,
-Ge64 0.32 -> 2.10 s): Ge8 slab 1.89 (6.3 -> 12.0 s), Ge64 on the Fortran-derived
-routines 1.45 (7.1 -> 10.3 s), Ge64 on the default routines 1.06, Ge2 slab
-1.03, MgO64 1.04; a silicon cell of 216 atoms 1.30 (8.1 -> 10.6 s: three more SCF
-iterations, and its forces take the Fortran-derived routines, the parser's
-choice for `Cubic_Spline`); the other 14 cases 0.89 to 1.10. PARSEC 1.5 shows the same mismatch
+of a Ge8 slab 0.01 -> 1.06 s, of Ge64 cells 0.002 -> 0.7-0.8 s, of MgO64 0.002 ->
+0.59 s, with the block superposition of `PARSEC_SPLINE_SETUP`): Ge8 slab
+6.6 -> 7.9 s (12.0 s before those changes), Ge64 on the Fortran-derived
+routines 8.2 -> 9.2 s (10.3 s before), Ge64 on the default routines 8.4 -> 9.1 s,
+a Ge2 slab 6.5 -> 7.7 s (77 -> 92 SCF steps), MgO64 1.04 times; a silicon cell of
+216 atoms with forces at the Gamma point 9.8 -> 9.9 s (Andrew Grieder's
+routines, which a species that takes the spline by default keeps; with
+`Cubic_Spline: .true.` its forces take the Fortran-derived routines, the same
+energy in 12.0 s); the clusters and the other cells within 5 to 10 %. PARSEC 1.5 shows the same mismatch
 (its own grid, 8 MPI ranks, energies printed to 1e-8 Ry: the breathing mode of
 GeH4 1.3e-2 and 1.2e-2 Ry/bohr, of NH4 2.6e-3 and 3.0e-3; with `Cubic_Spline`
 4e-6 and 2e-6, 4e-5 and 1.6e-4). `PARSEC_LINEAR_TABLE_SLOPES=interpolant` differentiates
@@ -354,8 +377,11 @@ and the hand-built benzene of `examples/0d_mlff_initial_structure` does not
 converge in its 60 moves (14 with the tables, 13 with `Cubic_Spline`). It
 stays opt-in. In microcanonical molecular dynamics the spline halves to
 quarters the scatter of the conserved energy (C60, 21 steps of 20 a.u.: 2.2e-3
--> 9.5e-4 Ry; Si28H36, 16 steps: 7.3e-4 -> 3.5e-4 Ry). For forces,
-relaxations and molecular dynamics, give every species `Cubic_Spline: .true.`.
+-> 9.5e-4 Ry; Si28H36, 16 steps: 7.3e-4 -> 3.5e-4 Ry). This is why a species
+without `Cubic_Spline` takes the cubic spline by default
+(`PARSEC_CUBIC_SPLINE_DEFAULT=on`, `acceleration/README.md`):
+`PARSEC_CUBIC_SPLINE_DEFAULT=off PARSEC_PROJECTOR_TAIL=off` give the energies
+and forces of PARSEC 1.5's interpolation.
 
 **CA correlation.** The Perdew-Zunger fit of `Correlation_Type: ca` (the
 constants of PARSEC 1.5's `exc.f90`) has two branches that differ by 6.413e-5
@@ -587,7 +613,7 @@ Forces (`Forces.compute_periodic_forces`; the Fortran routines are `forpbc.f90`,
    49.9 -> 42.3 s, its forces 13.6 -> 0.49 s.
 
 The terms are exact derivatives of the energies the SCF evaluates (`Forces` tests: finite differences of each energy and of the
-SCF total energy, 1e-5 Ry/bohr or better), with the exceptions of the tables described under Forces: for a species without `Cubic_Spline` the projectors and the core density of the default routines (at the Gamma point
+SCF total energy, 1e-5 Ry/bohr or better), with the exceptions of the tables described under Forces: for a species with linear tables (`Cubic_Spline: .false.`, or no value under `PARSEC_CUBIC_SPLINE_DEFAULT=off`) the projectors and the core density of the default routines (at the Gamma point
 and on k-point meshes) use PARSEC's derivative tables (`PARSEC_LINEAR_TABLE_SLOPES=tabulated`, the local potential of those routines is always the spline), while the
 energy interpolates the tables linearly and is rough on the scale of a relaxation step (see the paragraph on linear
 tables in the forces of an isolated system): a silicon cell of 216 atoms at the Gamma point misses the slope of its
@@ -598,7 +624,7 @@ Ry/bohr (it differs by 5e-4 between the two steps) and the forces of `Cubic_Spli
 of that cell stops at the noise of those forces (17 structures to 1e-3 Ry/bohr against 3 with `Cubic_Spline`).
 `PARSEC_PERIODIC_FORCE_SLOPES=tables` (opt-in) takes the tables of `pseudo.f90` there as well; it relaxes POTRE cells
 as `Cubic_Spline` does, but does not follow the energy of linear FHI tables and is slower (acceleration/README.md). The support of the projectors of a table converted from a UPF file ends with a jump of
-the energy (`PARSEC_PROJECTOR_TAIL`).
+the energy under `PARSEC_PROJECTOR_TAIL=off` (the default `auto` sets the tail to zero).
 
 Atoms leave the cell as they move. The coordinates of the optimizer and the integrator are kept continuous (they are never
 wrapped), and every image sum is built for the atoms folded into the cell (`PeriodicPreparedSinglePointSystem.cell_atoms`).
@@ -685,7 +711,8 @@ case:
   spin, the `lsxy` ladders on the other). A projector depends on the atom only through `r - R_a`, so
   `F_a = 2 sum_n f_n Re sum_(sigma,j) conj(<grad P_j|u_n,sigma>) c_(sigma,j)`. The gradient takes the derivative of the
   radial functions the Hamiltonian samples, so the force is the derivative of the energy that is minimized, not of
-  another table (Fortran's `dv_ion`/`dv_so` tables): for a species with `Cubic_Spline` PARSEC's cubic spline of `vionr`
+  another table (Fortran's `dv_ion`/`dv_so` tables): for a species with `Cubic_Spline` (by default also one without
+  the label, `PARSEC_CUBIC_SPLINE_DEFAULT`) PARSEC's cubic spline of `vionr`
   and `vsor` and its derivative, as `nonloc.F90` evaluates them under `uspline` (`PARSEC_SOC_PROJECTOR_SPLINE=auto`, since
   2026-11-22), otherwise the linear interpolation of the tables and its slope. The energy of linear tables has a kink
   wherever a grid point crosses a radial knot: their forces are exact derivatives over steps of 1e-6 bohr but miss the
@@ -1098,7 +1125,12 @@ real-space Ewald split instead of the G-space `v_first`/`pot_local`):
   steps and the kinks are a property of that convention. A finer grid makes
   each step smaller (a step is the term of the one grid point that crosses the
   cut), and a check of the forces against differences of the energy needs
-  steps that cross no cut;
+  steps that cross no cut. The opt-in `PARSEC_LDAU_SMOOTH_PROJECTORS`
+  (`Hamiltonian/hubbard.py`, README of `acceleration/`) replaces the linear
+  interpolation by a cubic spline and the cut by a taper from `(1 - f/2) r_c`
+  to `(1 + f/2) r_c` (`f = 0.2`), antisymmetric about `r_c`: the energy is then
+  twice differentiable and the forces follow its slope over finite steps, at
+  the price of energies that differ from PARSEC's;
 - with fractional occupations the forces are the derivative of the Mermin free
   energy `E - TS`, not of the printed total energy (as in Fortran).
 
@@ -1345,6 +1377,46 @@ Gaussian charges takes the analytic slope of the Gaussian,
 finite-difference gradient of `V_H`, which does not resolve the Gaussian on
 coarse grids (2.5e-4 Ry/bohr at h 0.4 for hydrogen; an hBN slab at h 0.4 meets
 the slope of the energy within 6e-8 instead of 7.9e-5).
+
+The Hartree operator of a slab, `G = A^-1 (8 pi - A_IB M)` with `M` the
+sheet sums of the grid planes at the missing stencil points
+(`Hartree/slab_fortran.py`), is not symmetric where the density reaches the
+edge of the domain: the continuum potential of the planes is not the inverse
+of the finite-difference operator. Then `V_H = G rho` is not the derivative
+of `(h^3/2) rho.G rho`, the SCF does not make the energy stationary, the
+forces miss `(h^3/2) [rho.G drho/dR - drho/dR.G rho]`, and the force of the
+Gaussian charges is the derivative of `-dV rho . V_G` only with `G^T rho` in
+place of `V_H`. A Ge2 slab (square cell of 5.6 bohr, h 0.45, half-height 6
+bohr, density 1.1e-4 at the edge) has F_z 1.05e-5 Ry/bohr below the slope of
+its energy at both steps and at every position of a scan; in process on the
+CPU every term matches the derivative of its energy term at fixed density
+and orbitals within 1e-9 except the Gaussian one (8.1e-7), and the response
+term above is -1.14e-5. The gap grows as the atoms approach the edge: with
+the atoms at z = +2.1/-2.0 instead of +1.2/-1.1 the same slab misses by
+5.5e-5 / 5.8e-5 Ry/bohr in z (atoms 0 / 1) and 6.4e-6 in x. At a half-height
+of 8 bohr the first geometry misses by 5e-8, while the energy moves by
+4.7e-2 Ry: the gap marks a domain too small for its density.
+`PARSEC_HARTREE_VARIATIONAL=on` (or `auto`) gives a slab whose forces are
+computed the potential `V' = (V_H + 8 pi u - M^T A_IB^T u)/2` (one more CG
+per Hartree solve, no tail) and the Gaussian term with `G^T rho`: A100, the
+Ge2 slab 1.05e-5 -> 7.2e-8 Ry/bohr at 1e-3 bohr (atom 0 on a grid point
+1.02e-5 -> 1.1e-7; atoms at z = +2.1/-2.0 5.5e-5 / 5.8e-5 -> 4.8e-7 / 2.0e-6
+in z, 6.4e-6 -> 8.1e-8 in x), a Si2 slab 1.03e-5 -> 9.9e-8 (its atom 1
+8.9e-6 -> 1.8e-7), energies -1.3e-8 Ry. The Si2 numbers take the default
+`PARSEC_PROJECTOR_TAIL=auto`: the Si table of the tests holds 3.8e-6 Ry
+beyond its channel cutoff, and with that tail (`off`) F_z of atom 1 kept a
+residual of about 6.5e-6 Ry/bohr (Richardson value) under either value at a
+half-height of 8 bohr, 1.5e-7 with the tail removed. Two pitfalls of such
+checks on slabs: with a k-point mesh (2x2x1) and CA the Perdew-Zunger step
+at r_s = 1 (a jump of E_xc of 1.5e-6 Ry when a grid point crosses it) can
+spoil the slopes under either value, which `PARSEC_CA_CONTINUITY=on`
+removes; and a slab whose lowest and highest atoms are centred more than 0.1
+bohr off z = 0 is re-centred
+(`Recenter_Atoms_In_Aperiodic_Directions`), which moves the atoms off the
+positions of the input and invalidates a slope check along z. As
+for clusters it is off by default: PARSEC's potential is that of the
+Poisson solve. A wire keeps it (its cylindrical multipoles have no
+transpose here).
 
 Symmetrization (`symm_forces.f90`): over the space group the input reader
 finds for the wire or slab (`symmetries.f90` with `alatt` = `latt_vec` and
@@ -1726,7 +1798,8 @@ the Hartree energy it gives, which the forces assume; and the atomic tail of
 the boundary moves with the atoms with no force term of its own.
 
 `PARSEC_HARTREE_VARIATIONAL` (off by default; `Hartree/variational.py`)
-removes both. With `on` a cluster with a multipole boundary takes the
+removes both (a slab takes the same potential with its sheet sums, see
+[Wires and slabs](#wires-and-slabs)). With `on` a cluster with a multipole boundary takes the
 derivative of its Hartree energy as its Hartree potential and adds the force
 of the tail: with `u = A^-1 rho` (zero boundary values, one more CG per
 solve),

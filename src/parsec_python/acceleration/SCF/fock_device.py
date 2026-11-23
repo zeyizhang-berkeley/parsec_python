@@ -18,8 +18,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from parsec_python.SCF.fock_diis import OccupiedBlock, orthonormal_complement
-from parsec_python.V_xc.exact_exchange import OCCUPATION_THRESHOLD
+from parsec_python.SCF.fock_diis import OccupiedBlock, orthonormal_complement, window_occupation_floor
 
 from ..Hamiltonian.exchange_device import ChannelOrbitals, OrbitalSector
 
@@ -33,13 +32,14 @@ BUILD_COLUMNS = 3
 
 
 def _sector_bytes(sets, occupied_only: bool) -> dict[int, int]:
-    """Bytes of the occupied (or all) columns of ``sets`` on each device."""
+    """Bytes of the columns of the window (or all columns) of ``sets`` on each device."""
 
     counts: dict[int, int] = {}
+    threshold = window_occupation_floor()
     for orbitals in sets:
         for sector in orbitals.sectors:
             weights = orbitals.occupations[sector.states]
-            count = int(np.count_nonzero(weights > OCCUPATION_THRESHOLD)) if occupied_only else int(weights.size)
+            count = int(np.count_nonzero(weights > threshold)) if occupied_only else int(weights.size)
             counts[int(sector.device)] = counts.get(int(sector.device), 0) + 8 * int(sector.rows) * count
     return counts
 
@@ -89,7 +89,8 @@ def build_fits(sets) -> bool:
 
 
 def occupied_blocks(sets) -> list | None:
-    """Per channel ``{representation: OccupiedBlock}``: copies of the occupied columns on each sector's device.
+    """Per channel ``{representation: OccupiedBlock}``: copies of the occupied columns on each sector's device
+    (occupations above :func:`~parsec_python.SCF.fock_diis.window_occupation_floor`).
 
     ``None`` when the copies do not fit the free memory of the devices
     (:func:`window_fits`): the outer DIIS then stops and the loop goes on
@@ -106,7 +107,7 @@ def occupied_blocks(sets) -> list | None:
         blocks = {}
         for sector in orbitals.sectors:
             weights = orbitals.occupations[sector.states]
-            positions = np.flatnonzero(weights > OCCUPATION_THRESHOLD)
+            positions = np.flatnonzero(weights > window_occupation_floor())
             if not positions.size:
                 continue
             with cp.cuda.Device(sector.device):
@@ -138,7 +139,7 @@ def natural_channels(sets, natural):
         start = 0
         for sector in orbitals.sectors:
             weights = orbitals.occupations[sector.states]
-            empty = np.flatnonzero(weights <= OCCUPATION_THRESHOLD)
+            empty = np.flatnonzero(weights <= window_occupation_floor())
             phi, values = blocks.get(sector.representation, (None, np.zeros(0)))
             with cp.cuda.Device(sector.device):
                 rest = sector.columns(cp, empty) if empty.size else None

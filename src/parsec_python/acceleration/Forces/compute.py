@@ -397,8 +397,13 @@ def compute_periodic_forces(
     elif kept:
         averaged_over = kept
     clock["nonlocal"] = perf_counter() - mark
+    mark = perf_counter()
+    # the LDA+U and TS terms, as the Fortran-derived routines (periodic_device) and Forces.compute_periodic_forces add them
+    corrections = correction_forces(system, result)
+    if corrections:
+        clock["corrections"] = perf_counter() - mark
     forces = assemble_forces(
-        positions, repulsion, local, separable, averaged_over, phase_seconds=clock, periodic=True
+        positions, repulsion, local, separable, averaged_over, phase_seconds=clock, periodic=True, **corrections
     )
     if completion is not None:
         # What the average over the group changed (Ry/bohr, not seconds): the asymmetry of the Ewald and local terms
@@ -488,7 +493,7 @@ def compute_forces(
     from parsec_python.Pseudopotential.radial_derivatives import linear_slope_setting
 
     # PARSEC_LINEAR_TABLE_SLOPES=interpolant: the device kernels interpolate the slope tables of pseudo.f90; the
-    # slopes of the linear interpolants of a species without Cubic_Spline are summed by the readable routine
+    # slopes of the linear interpolants of a species with linear tables are summed by the readable routine
     host_slopes = linear_slope_setting() == "interpolant" and any(
         not specifications[atom.symbol].use_spline for atom in atoms
     )

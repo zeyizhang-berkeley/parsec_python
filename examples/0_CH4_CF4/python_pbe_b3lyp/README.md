@@ -47,7 +47,8 @@ in `../python_pbe`, and `analyze.py` reads it where the first is absent:
 | `parsec_gpu_hartree.out` | `parsec_gpu_hartree_python.out` | the command below with `PARSEC_HARTREE_LINEAR_BACKEND=cupy` (Poisson solves on the GPU, the default since 2026-11-07); all four cases |
 | `parsec.out` | `parsec_python.out` | the command below with `PARSEC_HARTREE_LINEAR_BACKEND=native` (Poisson solves on the CPU, the default before 2026-11-07); all four cases |
 
-The kept logs are of 20 November 2026, one NVIDIA A100 per run ("Time and
+The kept logs are of 20 November 2026, those of the IS cases of 22 November
+2026, one NVIDIA A100 per run ("Time and
 memory" below). Until then CF4 FS_1s had no CPU-solver log: its run of
 11 October 2026 on a laptop was stopped during its refinement, when other
 jobs on the machine had slowed its CPU Poisson solves to more than a minute
@@ -65,7 +66,7 @@ From one of the four case directories:
 ```
 
 On a GPU the Poisson solves of the SCF and of the refinement run there, the
-default since 2026-11-07, which is 23 times faster per pair for CF4 than
+default since 2026-11-07, which is 22 times faster per pair for CF4 than
 the 28 CPU threads of the runs below (`--log parsec_gpu_hartree.out` for
 that log); set `$env:PARSEC_HARTREE_LINEAR_BACKEND = "native"` before the
 command to solve them on the CPU, as for `parsec_python.out`.
@@ -184,10 +185,16 @@ PBE gives -0.50 eV and -0.48 eV.
 ## Time and memory
 
 First calculations (no symmetry cache, no restart) in double precision with
-the code of 20 November 2026 on one NVIDIA A100 (80 GB) per run, each run with
-32 CPUs of a Perlmutter GPU node (28 threads) and four runs side by side on
-the node. "Refinement" is `Time for energy refinement` of the log, "host
-memory" the high-water mark of the process at the end of the run.
+the code of 20 November 2026 (the IS rows: 22 November 2026, when a
+`martins_new` projector became zero beyond the largest cutoff radius of its
+channels, `PARSEC_PROJECTOR_TAIL=auto`, which changes a few eigenvalues of the
+SCF iterations in the tenth decimal and no energy; the CH4 IS rows also with
+the exchange occupation cut below) on one NVIDIA A100 (80 GB)
+per run, each run with 32 CPUs of a Perlmutter GPU node (28 threads) and four
+runs side by side on the node; the CPU-solver run of CF4 IS had its node to
+itself, the other three GPUs idle. "Refinement" is `Time for energy
+refinement` of the log, "host memory" the high-water mark of the process at
+the end of the run.
 
 With `PARSEC_HARTREE_LINEAR_BACKEND=cupy` (conjugate gradients in double
 precision on the GPU, for the Hartree potential of the SCF and for the pair
@@ -195,9 +202,9 @@ densities; the default since 2026-11-07):
 
 | case | grid points | SCF steps | SCF [s] | occupied orbitals | pair solves | refinement [s] | s per pair | whole run [s] | host memory [GiB] |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| CH4 IS | 539,152 | 28 | 3.9 | 5 | 15 | 1.2 | 0.067 | 7.8 | 2.24 |
+| CH4 IS | 539,152 | 28 | 4.0 | 4 | 10 | 0.9 | 0.066 | 7.4 | 2.22 |
 | CH4 FS_1s | 539,152 | 21 | 3.2 | 4 | 10 | 0.8 | 0.060 | 6.5 | 2.23 |
-| CF4 IS | 3,103,688 | 40 | 33.4 | 16 | 136 | 59.1 | 0.418 | 101.8 | 9.28 |
+| CF4 IS | 3,103,688 | 40 | 33.1 | 16 | 136 | 60.0 | 0.425 | 103.4 | 9.26 |
 | CF4 FS_1s | 3,103,688 | 37 | 31.8 | 16 | 136 | 62.0 | 0.439 | 103.5 | 9.26 |
 
 The default settings before 2026-11-07, now
@@ -206,16 +213,19 @@ C++/OpenMP on 28 threads):
 
 | case | grid points | SCF steps | SCF [s] | occupied orbitals | pair solves | refinement [s] | s per pair | whole run [s] | host memory [GiB] |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| CH4 IS | 539,152 | 28 | 18.6 | 5 | 15 | 6.9 | 0.447 | 27.4 | 2.11 |
+| CH4 IS | 539,152 | 28 | 18.7 | 4 | 10 | 4.4 | 0.423 | 26.4 | 2.13 |
 | CH4 FS_1s | 539,152 | 21 | 13.2 | 4 | 10 | 4.1 | 0.389 | 19.4 | 2.14 |
-| CF4 IS | 3,103,688 | 40 | 472.4 | 16 | 136 | 1337.2 | 9.815 | 1816.5 | 8.69 |
+| CF4 IS | 3,103,688 | 40 | 475.0 | 16 | 136 | 1302.4 | 9.560 | 1784.3 | 8.63 |
 | CF4 FS_1s | 3,103,688 | 37 | 445.6 | 16 | 136 | 1328.9 | 9.752 | 1781.8 | 8.66 |
 
-CH4 IS counts five occupied orbitals: the first empty level has an
-occupation just above 1e-12, the threshold of the exact exchange, at the
-Fermi temperature of the input; its pairs change no printed digit of the
-energies. On the GPU a pair solve on the CF4 grid takes 0.42 to 0.44 s, on
-the CPU 9.8 s. The logs of 11 October 2026 came from a laptop (32 logical
+The first empty level of CH4 IS keeps an occupation between 1e-12 and
+1e-10 at the Fermi temperature of the input. The exact exchange leaves out
+orbitals whose occupation is within the electron-count tolerance of the
+Fermi search, 1e-10 (`PARSEC_EXCHANGE_OCCUPATION_CUT`, default on since
+22 November 2026), so CH4 IS counts four occupied orbitals and 10 pairs;
+with `off` (the former threshold 1e-12) it counts five and 15, with the
+same energies to the printed digits. On the GPU a pair solve on the CF4 grid takes 0.42 to 0.44 s, on
+the CPU 9.6 to 9.8 s. The logs of 11 October 2026 came from a laptop (32 logical
 cores, RTX 5070 Laptop GPU with 8 GB, 32 GB of memory): CF4 IS took 680 s
 with the GPU solver (1.5 s per pair) and a CPU solve 8.5 to 8.8 s there,
 with the same iteration counts and the same energies.

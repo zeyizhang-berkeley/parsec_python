@@ -253,6 +253,22 @@ class SplineForceTests(unittest.TestCase):
         # the readable sum adds the spline error of -2Z/r out to erfcinv(1e-26)/eta (26 bohr here): 2.6e-7 Ry/bohr
         np.testing.assert_allclose(fast.ionic, dense.ionic, rtol=0.0, atol=2.0e-6)
 
+    def test_the_threads_do_not_change_the_forces(self) -> None:
+        import os
+        from unittest import mock
+
+        from parsec_python.acceleration.Forces.periodic_spline import spline_periodic_local_forces
+
+        # the batches of every atom are formed on the threads of the periodic setup, their products summed in the
+        # order of the readable loop: the same bits with one thread and with four
+        found = {}
+        for threads in ("1", "4"):
+            with mock.patch.dict(os.environ, {"PARSEC_PERIODIC_SETUP_THREADS": threads}):
+                found[threads] = self._forces(spline_periodic_local_forces)
+        for term in ("ionic", "self_consistency", "core_correction"):
+            with self.subTest(term=term):
+                np.testing.assert_array_equal(getattr(found["4"], term), getattr(found["1"], term))
+
     def test_host_and_device_density_terms_agree(self) -> None:
         import os
         from unittest import mock

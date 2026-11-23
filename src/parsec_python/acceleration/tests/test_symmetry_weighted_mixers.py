@@ -28,6 +28,7 @@ from parsec_python.acceleration.SCF import (
 )
 from parsec_python.acceleration.Symmetry import AxisReflectionReduction
 from parsec_python.models import MixingSettings
+from parsec_python.tests.parsec15_tables import start_parsec15_tables
 
 DATA = Path(__file__).resolve().parents[2] / "tests" / "data"
 
@@ -103,6 +104,8 @@ class WeightedWedgeSCFTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls) -> None:
+        # inputs and tolerances made with PARSEC 1.5's tables
+        start_parsec15_tables(cls)
         text = (
             "Boundary_Sphere_Radius: 5.0 bohr\nGrid_Spacing: 0.6 bohr\n"
             "Coordinate_Unit: Cartesian_Bohr\nExpansion_Order: 4\nStates_Num: 2\n"

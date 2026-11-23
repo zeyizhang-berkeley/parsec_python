@@ -77,7 +77,7 @@ from typing import Callable, Protocol, Sequence
 import numpy as np
 from scipy.linalg import solve_triangular
 
-from .exact_exchange import OCCUPATION_THRESHOLD, occupied_columns
+from .exact_exchange import exchange_occupation_threshold, occupied_columns
 
 
 #: Pair densities solved together unless a caller chooses (``Exx_Batch_Size``).
@@ -365,11 +365,12 @@ def apply_exchange_to_orbitals(
     columns: Sequence[int] | None = None,
     known: ExchangeApplication | None = None,
     batch_size: int = DEFAULT_BATCH_SIZE,
-    occupation_threshold: float = OCCUPATION_THRESHOLD,
+    occupation_threshold: float | None = None,
 ) -> ExchangeApplication:
     """``W = V_x Psi`` for the columns ``columns`` of the orbital block itself.
 
-    The occupied orbitals (occupation above ``occupation_threshold``) form
+    The occupied orbitals (occupation above ``occupation_threshold``, ``None``:
+    :func:`~parsec_python.V_xc.exact_exchange.exchange_occupation_threshold`) form
     the operator.  Pairs of two occupied target columns are solved once and
     serve both; a target without occupation pairs with every occupied
     orbital.  ``known`` is an earlier application to the same orbitals (for
@@ -470,7 +471,7 @@ def apply_exchange(
     solver: PairPoissonSolver,
     *,
     batch_size: int = DEFAULT_BATCH_SIZE,
-    occupation_threshold: float = OCCUPATION_THRESHOLD,
+    occupation_threshold: float | None = None,
 ) -> np.ndarray:
     """``V_x X`` for arbitrary grid vectors ``X`` (``(grid points,)`` or ``(grid points, m)``).
 
@@ -625,7 +626,7 @@ def exchange_band_energy(
     if operator is None:
         return 0.0
     occupations = np.asarray(occupations, dtype=np.float64)
-    occupied = np.flatnonzero(occupations > OCCUPATION_THRESHOLD)
+    occupied = np.flatnonzero(occupations > exchange_occupation_threshold())
     if occupied.size == 0:
         return 0.0
     values = operator.expectation_values(

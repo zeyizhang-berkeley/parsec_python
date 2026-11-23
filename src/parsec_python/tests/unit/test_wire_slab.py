@@ -56,6 +56,7 @@ from parsec_python.V_ion.wire_slab import (
     wire_ion_ion_energy_and_forces,
     wire_pair_energy_and_force,
 )
+from parsec_python.tests.parsec15_tables import start_parsec15_tables
 
 DATA = Path(__file__).resolve().parents[1] / "data"
 HYDROGEN = DATA / "water_H_POTRE.DAT"
@@ -588,6 +589,12 @@ SLAB_CELL = " 5.0 0.0 0.0\n 0.0 5.5 0.0"
 
 class SlabRecentringTests(unittest.TestCase):
     """PARSEC moves a slab so that its highest and lowest atoms are as far from z = 0."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        # PARSEC 1.5's energy and forces of the lifted slab: its tables
+        start_parsec15_tables(cls)
+        super().setUpClass()
 
     def setUp(self) -> None:
         self.directory = Path(tempfile.mkdtemp())

@@ -30,6 +30,7 @@ from parsec_python.tests.martins_old_reference import (
     support_sizes,
     write_case,
 )
+from parsec_python.tests.parsec15_tables import start_parsec15_tables
 
 
 def _hybrid_available() -> bool:
@@ -93,6 +94,12 @@ class NativeProjectorSupportTests(unittest.TestCase):
 @unittest.skipUnless(_hybrid_available(), "CUDA runtime or native extension is unavailable")
 class FortranReferenceTests(unittest.TestCase):
     """Energy, levels, occupations and force tables of Fortran PARSEC."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        # PARSEC 1.5's numbers: its tables
+        start_parsec15_tables(cls)
+        super().setUpClass()
 
     def _run(self, name: str, *, operations: int, **options) -> None:
         case = load_cases()[name]

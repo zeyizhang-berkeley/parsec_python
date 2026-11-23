@@ -96,6 +96,34 @@ _ESDF_ENERGY_JOULE = {
 # ESDF's ``k`` (esdf_mod.f90 phy_n(54)): an energy unit, k_B * 1 K in joule.
 _ESDF_BOLTZMANN_JOULE = 1.38066e-23
 
+CUBIC_SPLINE_DEFAULT_ENV = "PARSEC_CUBIC_SPLINE_DEFAULT"
+CUBIC_SPLINE_DEFAULT = "on"
+
+
+def cubic_spline_default_setting() -> str:
+    """``PARSEC_CUBIC_SPLINE_DEFAULT``: the radial interpolation of a species whose input gives no ``Cubic_Spline``.
+
+    ``on`` (the default): the cubic spline of PARSEC (``Cubic_Spline: .true.``) for the local potential, the core
+    density and the projectors of the species.  With the linear tables of PARSEC 1.5's default the energy has a kink
+    wherever a grid point crosses a radial sample, and the forces, which differentiate smooth tables
+    (``pseudo.f90``), miss the slope of the energy at steps of 1e-3 bohr by 1e-3 to 0.45 Ry/bohr, in PARSEC 1.5 as
+    here; with the spline they follow it within 1e-5 (1e-6 and less away from grid points).  The energies move by
+    -2e-3 to +1.2e-2 Ry per atom (the most for Ag and Au; +8.3e-3 for the spin-polarized PBE Fe table of the tests in
+    one SCF state of bcc Fe2, a cell with at least four that both interpolations reach), and against much denser tables
+    the error of the spline is 1.9 to 540 times smaller than that of the linear tables.  The routines of the Gamma-point
+    forces of a bulk cell are those of before (``Input/routines.py``: the Fortran-derived ones for
+    ``Cubic_Spline: .true.`` only).  ``off``: the linear tables of PARSEC 1.5 (``usrinputfile.F90`` reads
+    ``Cubic_Spline`` with the default ``.false.``), the results before this switch.  A ``Cubic_Spline`` value of the
+    input always wins, and a cluster with ``Old_Interpolation_Format: .true.`` (an interpolation of the linear tables)
+    keeps the linear tables for its species without a value.  The parser reads it for every input, so that a wrong
+    value stops before the calculation.
+    """
+
+    value = os.environ.get(CUBIC_SPLINE_DEFAULT_ENV, CUBIC_SPLINE_DEFAULT).strip().lower() or CUBIC_SPLINE_DEFAULT
+    if value not in ("on", "off"):
+        raise ValueError(f"{CUBIC_SPLINE_DEFAULT_ENV} must be on or off, got {value!r}")
+    return value
+
 _FLOAT_PATTERN = re.compile(
     r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[EeDd][-+]?\d+)?"
 )
@@ -301,6 +329,9 @@ class ParsecInputTranslation:
     # its symmetry (parsec_python.Input.restarted_symmetry).
     pseudopotential_directory: Path | None = None
     esdf_lenient: bool = False
+    # The species whose input gives no Cubic_Spline: their interpolation is the default of
+    # PARSEC_CUBIC_SPLINE_DEFAULT (cubic_spline_default_setting; parsec.out says which).
+    cubic_spline_defaulted: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -3779,6 +3810,10 @@ def _parse_parsec_input(
     coordinate_notes: list[str] = []
     specifications: dict[str, SpeciesPotential] = {}
     global_cubic_occurrences = scalar.get("cubic_spline", [])
+    # the interpolation of a species without Cubic_Spline (PARSEC_CUBIC_SPLINE_DEFAULT; read for every input, so that
+    # a wrong value stops here); Old_Interpolation_Format asks for the linear tables of a cluster
+    spline_default = cubic_spline_default_setting() == "on" and not (old_interpolation and not is_periodic)
+    spline_defaulted: list[str] = []
     old_format_species = 0
     hubbard_notes: list[str] = []
     # The position of each format-dependent label's cursor (FORMATS_READING).
@@ -3843,14 +3878,15 @@ def _parse_parsec_input(
             species_value("read_vcd", species_index, "false"),
             label=f"{symbol} Read_VCD",
         )
-        use_spline = (
-            _boolean(
+        if species_index < len(global_cubic_occurrences):
+            use_spline = _boolean(
                 str(global_cubic_occurrences[species_index].value),
                 label=f"{symbol} Cubic_Spline",
             )
-            if species_index < len(global_cubic_occurrences)
-            else False
-        )
+        else:
+            # no Cubic_Spline for this species: PARSEC_CUBIC_SPLINE_DEFAULT (PARSEC 1.5: .false.)
+            use_spline = spline_default
+            spline_defaulted.append(symbol)
         format_input: dict[str, object] = {}
         if pseudo_format != "martins_new":
             if read_vcd:
@@ -5722,7 +5758,14 @@ def _parse_parsec_input(
             spinors=bool(self_consistent_spin_orbit or noncollinear),
             spin_polarized=spin_polarized,
             ignore_symmetry=ignore_symmetry,
-            spline_species=all(specification.use_spline for specification in specifications.values()),
+            # the species with Cubic_Spline: .true. in the input; one that takes the spline by default
+            # (PARSEC_CUBIC_SPLINE_DEFAULT) keeps the routines it had, Andrew Grieder's, whose local potential is the
+            # spline anyway: the same energy (2e-11 Ry), faster for large cells, and the full-grid ionic loops of the
+            # MPI runner
+            spline_species=all(
+                specification.use_spline and symbol not in spline_defaulted
+                for symbol, specification in specifications.items()
+            ),
             search_info=_bulk_symmetry_search_info(
                 periodic_cell,
                 ignore_symmetry=ignore_symmetry,
@@ -6757,6 +6800,7 @@ def _parse_parsec_input(
         **({} if standard_orientation is None else {"standard_orientation": standard_orientation}),
         pseudopotential_directory=pp_directory,
         esdf_lenient=bool(esdf_lenient),
+        cubic_spline_defaulted=tuple(spline_defaulted),
     )
     if input15.complete_input:
         # PARSEC 1.5's Generate_Complete_Parsec_In: the effective input (bak_complete_parsec.in)
@@ -10320,10 +10364,13 @@ def summarize_translation(translation: ParsecInputTranslation) -> str:
 
 __all__ = [
     "ANGSTROM_TO_BOHR",
+    "CUBIC_SPLINE_DEFAULT",
+    "CUBIC_SPLINE_DEFAULT_ENV",
     "EV_TO_RYDBERG",
     "ParsecInputError",
     "ParsecInputTranslation",
     "UnsupportedParsecOptionError",
+    "cubic_spline_default_setting",
     "parse_parsec_input",
     "summarize_translation",
 ]

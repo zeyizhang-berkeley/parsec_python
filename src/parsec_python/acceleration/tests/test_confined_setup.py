@@ -233,18 +233,26 @@ class ShortRangeTests(unittest.TestCase):
 @unittest.skipUnless(cupy_available(), "CUDA runtime is unavailable")
 class DeviceDensityTests(unittest.TestCase):
     def test_the_device_densities_are_the_readable_sums(self) -> None:
+        from dataclasses import replace
+
         for kind in ("slab", "wire"):
             problem, grid, potentials = _Cases.get(kind)
             lattice = problem.periodic_cell.lattice_vectors
+            # linear tables (a species without Cubic_Spline takes the spline by default, whose core density keeps
+            # the host sum: the test below)
+            specifications = {
+                symbol: replace(specification, use_spline=False)
+                for symbol, specification in problem.pseudopotentials.items()
+            }
             for core in (False, True):
                 with self.subTest(kind=kind, core=core):
                     device = confined_setup.device_confined_atomic_density(
-                        grid, problem.atoms, potentials, problem.pseudopotentials, lattice, core
+                        grid, problem.atoms, potentials, specifications, lattice, core
                     )
                     self.assertIsNotNone(device)
                     with _readable():
                         readable = _ionic.superpose_atomic_density(
-                            grid, problem.atoms, potentials, problem.pseudopotentials, lattice, core=core
+                            grid, problem.atoms, potentials, specifications, lattice, core=core
                         )
                     self.assertGreater(float(np.max(readable)), 0.0)
                     np.testing.assert_array_equal(device, readable)

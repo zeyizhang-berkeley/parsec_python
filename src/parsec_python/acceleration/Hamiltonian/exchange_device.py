@@ -75,7 +75,7 @@ from typing import Any, Sequence
 
 import numpy as np
 
-from parsec_python.V_xc.exact_exchange import OCCUPATION_THRESHOLD
+from parsec_python.V_xc.exact_exchange import exchange_occupation_threshold
 
 
 # ---------------------------------------------------------------------------
@@ -344,7 +344,7 @@ class ChannelOrbitals:
         return int(self.occupations.size)
 
     def occupied_states(self) -> np.ndarray:
-        return np.flatnonzero(self.occupations > OCCUPATION_THRESHOLD)
+        return np.flatnonzero(self.occupations > exchange_occupation_threshold())
 
 
 def channel_orbitals(
@@ -1677,9 +1677,9 @@ def _blocks(orbitals: ChannelOrbitals, wanted: set[int], size: int):
     empty_blocks: list[_Block] = []
     for index, sector in enumerate(orbitals.sectors):
         weights = orbitals.occupations[sector.states]
-        occupied = np.flatnonzero(weights > OCCUPATION_THRESHOLD)
+        occupied = np.flatnonzero(weights > exchange_occupation_threshold())
         empty = np.array(
-            [position for position in np.flatnonzero(weights <= OCCUPATION_THRESHOLD)
+            [position for position in np.flatnonzero(weights <= exchange_occupation_threshold())
              if int(sector.states[position]) in wanted],
             dtype=np.int64,
         )
@@ -2030,7 +2030,7 @@ def sector_exchange_energies(orbitals: ChannelOrbitals, applied: list, sectors=N
         if sectors is not None and index not in sectors:
             continue
         weights = orbitals.occupations[sector.states]
-        occupied = np.flatnonzero(weights > OCCUPATION_THRESHOLD)
+        occupied = np.flatnonzero(weights > exchange_occupation_threshold())
         if not occupied.size:
             continue
         with cp.cuda.Device(sector.device):
@@ -2418,7 +2418,7 @@ class DeviceCompressedExchange:
             if xi is None:
                 continue
             weights = orbitals.occupations[sector.states]
-            occupied = np.flatnonzero(weights > OCCUPATION_THRESHOLD)
+            occupied = np.flatnonzero(weights > exchange_occupation_threshold())
             if not occupied.size:
                 continue
             with cp.cuda.Device(int(xi.device.id)):

@@ -11,7 +11,8 @@ Here (``PARSEC_SPLINE_SETUP=auto``, the default) the same loop runs with the spl
 (:meth:`~parsec_python.Pseudopotential.ParsecPseudopotential.density_spline`: the same knots and second derivatives),
 the terms of the images formed on the threads of the periodic setup (``PARSEC_PERIODIC_SETUP_THREADS``) in blocks of
 consecutive images of one atom: the grid points and distances of each image from the installed support finder (a
-wire or slab block from one dense scan of its images, the rows and distances of ``dense_support``), the points inside
+wire or slab block, also of Andrew Grieder's slab grid, from one dense scan of its images, the rows and distances of
+``dense_support``), the points inside
 the support, and the values of the whole block from one call of the readable interpolation (elementwise functions of
 the distances: the values of the separate calls).  The calling thread adds them into the density in the order of the
 readable loop (atom, then image): the density is the readable one bit for bit.  ``readable`` restores the loop.
@@ -50,12 +51,21 @@ def spline_setup_setting() -> str:
 
 
 def _takes_grid(grid) -> bool:
-    """The grids whose readable sum takes the images of :func:`atomic_density_images` with the default dimensions
-    (every periodic grid but Andrew Grieder's slab, whose caller passes its own)."""
+    """Every periodic grid: those whose readable sum takes the images of :func:`atomic_density_images` with the
+    default dimensions, and Andrew Grieder's slab, whose caller passes two (:func:`_slab_grid`)."""
 
-    from parsec_python.Grid.pbc import PeriodicRealSpaceGrid, SlabRealSpaceGrid
+    from parsec_python.Grid.pbc import PeriodicRealSpaceGrid
 
-    return isinstance(grid, PeriodicRealSpaceGrid) and not isinstance(grid, SlabRealSpaceGrid)
+    return isinstance(grid, PeriodicRealSpaceGrid)
+
+
+def _slab_grid(grid) -> bool:
+    """Andrew Grieder's slab grid: its images run along the two in-plane vectors to the end of the table
+    (``periodic_dimensions=2`` of the readable sum) and its support finder is the dense scan."""
+
+    from parsec_python.Grid.pbc import SlabRealSpaceGrid
+
+    return isinstance(grid, SlabRealSpaceGrid)
 
 
 def spline_superposed_density(grid, atoms, potentials, specifications, lattice_vectors, core: bool):
@@ -76,7 +86,9 @@ def spline_superposed_density(grid, atoms, potentials, specifications, lattice_v
 
     padding = grid.settings.stencil_half_width
     volume_element = float(getattr(grid, "volume_element", 0.0) or 0.0)
-    confined = bool(getattr(grid, "is_confined_periodic", False))
+    slab = _slab_grid(grid)
+    # a wire or slab of the Fortran-derived routines and Andrew Grieder's slab: the dense scan of dense_support
+    confined = bool(getattr(grid, "is_confined_periodic", False)) or slab
     columns = [np.asarray(grid.coordinates)[:, axis] for axis in range(3)] if confined else None
     splines = {}
     items = []
@@ -88,7 +100,7 @@ def spline_superposed_density(grid, atoms, potentials, specifications, lattice_v
             splines[atom.symbol] = potential.density_spline(padding, core=True)
         position = np.asarray(atom.position, dtype=np.float64)
         support, translations = _ionic.atomic_density_images(
-            grid, position, potential, specification, lattice_vectors, core=True
+            grid, position, potential, specification, lattice_vectors, core=True, periodic_dimensions=2 if slab else 3
         )
         # the images of one atom in blocks of about _BLOCK_POINTS points of their balls, in the readable order
         ball = int(grid.size)

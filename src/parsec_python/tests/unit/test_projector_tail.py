@@ -3,8 +3,8 @@
 ``nonloc.F90`` keeps the grid points up to ``rcore``, the first radial sample beyond the largest channel cutoff ``rc``
 of a ``MARTINS_NEW`` table.  The tables converted from UPF files hold a small ``V_l - V_local`` beyond ``rc`` (the
 carbon table of the diamond examples: its projectors are 1.6e-4 and -1.3e-4 at ``rcore``), so the nonlocal energy
-jumps whenever a grid point crosses that sphere.  ``auto`` sets the difference to zero beyond ``rc``; ``off`` (the
-default) keeps the table.  Checked here (CPU):
+jumps whenever a grid point crosses that sphere.  ``auto`` (the default) sets the difference to zero beyond ``rc``;
+``off`` keeps the table (PARSEC 1.5).  Checked here (CPU):
 
 * the values of the switch, refused before any projector is built;
 * ``off`` is the formula of ``pseudo.f90`` bit for bit, and a table whose difference is zero beyond ``rc`` is not
@@ -47,7 +47,7 @@ class ProjectorTailSwitchTests(unittest.TestCase):
     def test_values(self):
         with mock.patch.dict(os.environ, {}, clear=False):
             os.environ.pop(PROJECTOR_TAIL_ENV, None)
-            self.assertEqual(projector_tail_setting(), "off")
+            self.assertEqual(projector_tail_setting(), "auto")
         for value in ("auto", "off", " AUTO "):
             with _setting(value):
                 self.assertEqual(projector_tail_setting(), value.strip().lower())

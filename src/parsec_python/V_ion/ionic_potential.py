@@ -563,8 +563,9 @@ def warn_spline_without_coulomb_tail(potential: ParsecPseudopotential, local_l: 
     warnings.warn(
         f"{potential.symbol}: the local potential (l={local_l}) of {getattr(potential, 'source', 'its file')} is not "
         f"-2Z/r at the end of its table, so its periodic images are summed out to {reach:.1f} bohr, where the cubic "
-        "spline of Cubic_Spline: .true. adds its interpolation error (up to 1e-5 Ry per image); Cubic_Spline: .false. "
-        "interpolates r V linearly without it",
+        "spline (Cubic_Spline: .true., also the default of a species without the label) adds its interpolation error "
+        "(up to 1e-5 Ry per image); Cubic_Spline: .false. (or PARSEC_CUBIC_SPLINE_DEFAULT=off for a species without "
+        "the label) interpolates r V linearly without it",
         UserWarning,
         stacklevel=3,
     )

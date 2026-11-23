@@ -15,6 +15,7 @@ import re
 import tempfile
 from types import SimpleNamespace
 import unittest
+import unittest.mock
 
 import numpy as np
 
@@ -33,6 +34,7 @@ from parsec_python.Hamiltonian.hubbard import (
     hubbard_terms,
     hubbard_terms_from_orbitals,
     hubbard_support,
+    hubbard_support_radius,
     interpolate_hubbard_radial,
     occupation_matrices,
     periodic_replica_translations,
@@ -457,6 +459,140 @@ class HubbardForceTest(unittest.TestCase):
                 numeric = -(energy(plus) - energy(minus)) / (2 * step)
                 self.assertAlmostEqual(forces[atom, component], numeric, delta=2e-6 + 1e-4 * abs(numeric))
 
+    def _frozen(self, positions):
+        """Energy at frozen orbitals and the forces of the system at ``positions`` (cluster grid of h = 0.6)."""
+
+        grid, atoms, potentials, specifications, projectors = _ag_system(positions, u=0.5)
+        rng = np.random.default_rng(9)
+        # orbitals with large overlaps: the projector columns with some noise, orthonormalized
+        columns = projectors.projectors.toarray()
+        orbitals = np.linalg.qr(columns + 0.02 * rng.normal(size=columns.shape))[0][:, :8]
+        occupations = np.array([1.0, 1.0, 0.8, 0.5, 0.2, 0.9, 0.7, 0.0])
+
+        def energy(moved):
+            moved_atoms = tuple(Atom("Ag", position) for position in moved)
+            moved_projectors = build_hubbard_projectors(grid, moved_atoms, potentials, specifications)
+            terms = hubbard_terms_from_orbitals(moved_projectors, [orbitals], [occupations])
+            return terms.band_energy + terms.energy, moved_projectors.support_sizes
+
+        system = SimpleNamespace(
+            hubbard=projectors, atoms=atoms, grid=grid, pseudopotentials=potentials,
+            input=SimpleNamespace(periodic_cell=None),
+        )
+        return energy, hubbard_forces(system, [orbitals], [occupations])
+
+    def _slope_errors(self, positions, step, axis=0):
+        energy, forces = self._frozen(positions)
+        plus, minus = positions.copy(), positions.copy()
+        plus[0, axis] += step
+        minus[0, axis] -= step
+        (upper, upper_sizes), (lower, lower_sizes) = energy(plus), energy(minus)
+        return abs(forces[0, axis] + (upper - lower) / (2 * step)), upper_sizes != lower_sizes
+
+    def test_smooth_projectors_follow_the_energy_over_finite_steps(self):
+        # Steps of 1e-3 and 2e-3 bohr cross samples of the radial table; the linear interpolation of upot.F90 then
+        # gives a slope that differs from the force (its derivative jumps there), the smooth projectors do not.
+        positions = np.array([[0.05, -0.1, -1.25], [0.15, 0.08, 1.35]])
+        with unittest.mock.patch.dict(os.environ, {"PARSEC_LDAU_SMOOTH_PROJECTORS": "off"}):
+            linear = max(self._slope_errors(positions, step)[0] for step in (1.0e-3, 2.0e-3))
+        with unittest.mock.patch.dict(os.environ, {"PARSEC_LDAU_SMOOTH_PROJECTORS": "on"}):
+            smooth = max(self._slope_errors(positions, step)[0] for step in (1.0e-3, 2.0e-3))
+        self.assertGreater(linear, 5.0e-6)
+        self.assertLess(smooth, 2.0e-7)
+
+    def test_smooth_energy_is_continuous_where_a_point_leaves_the_support(self):
+        # Atom 0 is moved along x until a grid point crosses the support radius: the energy of upot.F90's cut jumps
+        # there, that of the smooth projectors does not.
+        positions = np.array([[0.05, -0.1, -1.25], [0.15, 0.08, 1.35]])
+        for setting, bound in (("off", None), ("on", 1.0e-9)):
+            with unittest.mock.patch.dict(os.environ, {"PARSEC_LDAU_SMOOTH_PROJECTORS": setting}):
+                energy, _ = self._frozen(positions)
+                shifts = np.linspace(0.0, 0.3, 601)
+                values = [energy(positions + np.array([[s, 0, 0], [0, 0, 0]])) for s in shifts]
+                changes = [i for i in range(1, len(values)) if values[i][1] != values[i - 1][1]]
+                self.assertTrue(changes, setting)
+                i = changes[0]
+                left, right = shifts[i - 1], shifts[i]
+                for _ in range(40):  # bisect to the crossing
+                    middle = 0.5 * (left + right)
+                    if energy(positions + np.array([[middle, 0, 0], [0, 0, 0]]))[1] == values[i - 1][1]:
+                        left = middle
+                    else:
+                        right = middle
+                below = energy(positions + np.array([[left, 0, 0], [0, 0, 0]]))[0]
+                above = energy(positions + np.array([[right, 0, 0], [0, 0, 0]]))[0]
+                if bound is None:
+                    self.assertGreater(abs(above - below), 1.0e-6)
+                else:
+                    self.assertLess(abs(above - below), bound)
+
+    def test_smooth_radial_function(self):
+        potential = read_parsec_pseudopotential(AG)
+        rc = hubbard_cutoff_radius(potential)
+        with unittest.mock.patch.dict(os.environ, {"PARSEC_LDAU_SMOOTH_PROJECTORS": "0.3"}):
+            self.assertAlmostEqual(hubbard_support_radius(potential), 1.15 * rc, places=12)
+            r = np.linspace(1.0e-3, 1.3 * rc, 4001)
+            values, slopes = interpolate_hubbard_radial(potential, r)
+            np.testing.assert_array_equal(values[r >= 1.15 * rc], 0.0)
+            np.testing.assert_array_equal(slopes[r >= 1.15 * rc], 0.0)
+            step = 1.0e-6
+            upper, _ = interpolate_hubbard_radial(potential, r + step)
+            lower, _ = interpolate_hubbard_radial(potential, r - step)
+            np.testing.assert_allclose(slopes, (upper - lower) / (2 * step), atol=1e-8)
+        linear, _ = interpolate_hubbard_radial(potential, r)
+        inside = r < 0.85 * rc
+        # Inside the taper the spline differs from the linear interpolation of the table by its truncation only.
+        np.testing.assert_allclose(values[inside], linear[inside], atol=2e-4)
+        # The taper is antisymmetric about r_c, S(r_c + x) + S(r_c - x) = 1 (overlaps with smooth functions are those
+        # of the cut to second order in f; the norm, quadratic in the taper, changes at first order).
+        x = np.linspace(-0.15 * rc, 0.15 * rc, 3001)
+        with unittest.mock.patch.dict(os.environ, {"PARSEC_LDAU_SMOOTH_PROJECTORS": "0.3"}):
+            tapered, _ = interpolate_hubbard_radial(potential, rc + x)
+        plain, _ = interpolate_hubbard_radial(potential, rc + x)
+        ratio = tapered / plain
+        np.testing.assert_allclose(ratio + ratio[::-1], 1.0, atol=5e-3)
+
+    def test_smooth_overlaps_change_at_second_order_and_the_norm_at_first(self):
+        from scipy.interpolate import CubicSpline
+
+        from parsec_python.Hamiltonian.hubbard import _extended_radial_tables
+
+        potential = read_parsec_pseudopotential(AG)
+        rc = hubbard_cutoff_radius(potential)
+        spline = CubicSpline(*_extended_radial_tables(potential), bc_type=((1, 0.0), "natural"))
+        r = np.linspace(1.0e-6, 1.6 * rc, 200001)
+        smooth = np.exp(-((r / 2.0) ** 2)) * r * r  # a smooth d-like radial function
+        cut = np.where(r <= rc, spline(r), 0.0)
+        changes = {}
+        for fraction in (0.2, 0.1):
+            with unittest.mock.patch.dict(os.environ, {"PARSEC_LDAU_SMOOTH_PROJECTORS": str(fraction)}):
+                tapered, _ = interpolate_hubbard_radial(potential, r)
+            changes[fraction] = (
+                np.trapezoid((tapered**2 - cut**2) * r * r, r),
+                np.trapezoid((tapered - cut) * smooth * r * r, r),
+            )
+        norm_ratio = changes[0.2][0] / changes[0.1][0]
+        overlap_ratio = changes[0.2][1] / changes[0.1][1]
+        self.assertLess(changes[0.2][0], 0.0)
+        self.assertTrue(1.8 < norm_ratio < 2.5, norm_ratio)  # first order in f
+        self.assertTrue(3.6 < overlap_ratio < 4.4, overlap_ratio)  # second order in f
+
+    def test_smooth_switch_values(self):
+        from parsec_python.Hamiltonian.hubbard import ldau_smooth_projectors_fraction
+
+        cases = (
+            ("off", 0.0), ("0", 0.0), ("0.0", 0.0), ("0e0", 0.0), ("no", 0.0), ("on", 0.2), ("true", 0.2),
+            ("0.35", 0.35), ("1", 0.2), ("1.0", 1.0),
+        )
+        for value, expected in cases:
+            with unittest.mock.patch.dict(os.environ, {"PARSEC_LDAU_SMOOTH_PROJECTORS": value}):
+                self.assertEqual(ldau_smooth_projectors_fraction(), expected)
+        for value in ("smooth", "1.5", "-0.1", "nan"):
+            with unittest.mock.patch.dict(os.environ, {"PARSEC_LDAU_SMOOTH_PROJECTORS": value}):
+                with self.assertRaises(ValueError) as caught:
+                    ldau_smooth_projectors_fraction()
+                self.assertIn("is written 1.0", str(caught.exception))
+
     def test_forces_refused_with_j(self):
         grid, atoms, potentials, _, projectors = _ag_system([[0, 0, 0]], j=0.05, radius=4.0, spacing=0.8)
         system = SimpleNamespace(
@@ -465,6 +601,106 @@ class HubbardForceTest(unittest.TestCase):
         )
         with self.assertRaises(NotImplementedError):
             hubbard_forces(system, [np.zeros((grid.size, 1))], [np.ones(1)])
+
+
+class HubbardSmoothOutputTest(unittest.TestCase):
+    def test_parsec_out_names_the_smooth_projectors_only_under_the_switch(self):
+        from parsec_python.Output.correction_output import hubbard_setup_lines
+
+        lines = {}
+        for setting in ("off", "on", "0.4"):
+            with unittest.mock.patch.dict(os.environ, {"PARSEC_LDAU_SMOOTH_PROJECTORS": setting}):
+                _, _, _, specifications, projectors = _ag_system([[0.05, -0.1, 0.02]], radius=5.0, spacing=0.7)
+                system = SimpleNamespace(hubbard=projectors, input=SimpleNamespace(pseudopotentials=specifications))
+                lines[setting] = hubbard_setup_lines(system)
+        named = [line for line in lines["off"] if "PARSEC_LDAU_SMOOTH_PROJECTORS" in line]
+        self.assertEqual(named, [])
+        self.assertIn("  Cut-off radii [bohr] ", lines["off"])
+        rc = hubbard_cutoff_radius(read_parsec_pseudopotential(AG))
+        self.assertIn(f"Ag{rc:12.4f}", lines["off"])
+        for setting, fraction in (("on", 0.2), ("0.4", 0.4)):
+            named = [line for line in lines[setting] if "PARSEC_LDAU_SMOOTH_PROJECTORS" in line]
+            self.assertEqual(len(named), 1, lines[setting])
+            self.assertIn(f"f = {fraction:.4f} r_c", named[0])
+            self.assertIn(f"Ag{(1.0 + 0.5 * fraction) * rc:12.4f}", lines[setting])
+            # the rest of the block is that of upot.F90 with the radii of the support
+            self.assertEqual(len(lines[setting]), len(lines["off"]) + 1)
+
+
+class HubbardPeriodicBackendTest(unittest.TestCase):
+    def test_readable_periodic_forces_carry_the_lda_u_term(self):
+        # parsec_python.Forces.compute_periodic_forces (the forces of Relaxation.periodic_backend) left the LDA+U term
+        # out; it must give the forces of Forces.periodic.compute_periodic_forces, which adds it.
+        from parsec_python.Forces import compute_periodic_forces
+        from parsec_python.Forces.periodic import compute_periodic_forces as full_periodic_forces
+        from parsec_python.Input import parse_parsec_input
+        from parsec_python.SCF import run_scf
+        from parsec_python.SCF.pbc import prepare_periodic_single_point
+
+        text = (
+            "Periodic_System: .true.\nUse_Fortran_Routines: .false.\nBoundary_Conditions: bulk\n"
+            "begin Cell_Shape\n 6.0 6.0 6.0\nend Cell_Shape\nGrid_Spacing: 0.6\nExpansion_Order: 6\n"
+            "Fermi_Temp: 300.0\nMax_Iter: 100\nConvergence_Criterion: 1.0e-9\nMixing_Param: 0.3\nEigensolver: chebff\n"
+            "States_Num: 16\nCorrelation_Type: ca\nAtom_Types_Num: 1\nAtom_Type: Ag\nLocal_Component: s\n"
+            "ldaplusu_u 4.0 eV\nbegin Atom_Coord\n 0.8 2.9 3.1\n 3.9 3.2 2.8\nend Atom_Coord\n"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory)
+            (folder / "Ag_POTRE.DAT").write_bytes(AG.read_bytes())
+            (folder / "parsec.in").write_text(text)
+            system = prepare_periodic_single_point(parse_parsec_input(folder / "parsec.in").problem)
+            result = run_scf(system)
+        readable = compute_periodic_forces(system, result)
+        full = full_periodic_forces(system, result, symmetrize=False)
+        self.assertIsNotNone(readable.hubbard)
+        self.assertGreater(np.max(np.abs(readable.hubbard)), 1.0e-4)
+        np.testing.assert_allclose(readable.hubbard, full.hubbard, rtol=0.0, atol=1.0e-12)
+        np.testing.assert_allclose(
+            readable.unsymmetrized,
+            readable.ion_ion + readable.local.total + readable.nonlocal_pseudopotential + readable.hubbard,
+            rtol=0.0,
+            atol=1.0e-12,
+        )
+
+    def test_the_default_periodic_routines_refuse_lda_u(self):
+        # They build no LDA+U projectors: a cell with U prepared on them would leave the term out of the SCF, the
+        # energy and the forces (readable, accelerated and k-point loops alike), so the preparation refuses it.
+        from dataclasses import replace
+
+        from parsec_python.Input import parse_parsec_input
+        from parsec_python.SCF.pbc import prepare_periodic_single_point
+
+        text = (
+            "Periodic_System: .true.\nBoundary_Conditions: bulk\n"
+            "begin Cell_Shape\n 6.0 6.0 6.0\nend Cell_Shape\nGrid_Spacing: 0.6\nExpansion_Order: 6\n"
+            "States_Num: 16\nCorrelation_Type: ca\nAtom_Types_Num: 1\nAtom_Type: Ag\nLocal_Component: s\n"
+            "ldaplusu_u 4.0 eV\nbegin Atom_Coord\n 0.8 2.9 3.1\n 3.9 3.2 2.8\nend Atom_Coord\n"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory)
+            (folder / "Ag_POTRE.DAT").write_bytes(AG.read_bytes())
+            (folder / "parsec.in").write_text(text)
+            problem = parse_parsec_input(folder / "parsec.in").problem
+            # the parser gives the input the Fortran-derived routines, whose preparation builds the projectors
+            self.assertTrue(problem.grid.fortran_routines)
+            self.assertIsNotNone(prepare_periodic_single_point(problem).hubbard)
+            default = replace(problem, grid=replace(problem.grid, fortran_routines=False))
+            with self.assertRaises(NotImplementedError) as caught:
+                prepare_periodic_single_point(default)
+            self.assertIn("Fortran-derived", str(caught.exception))
+            self.assertIn("Ag", str(caught.exception))
+            from parsec_python.acceleration import driver
+
+            with self.assertRaises(NotImplementedError):
+                driver.prepare_single_point(default, backend="scipy", symmetry="off")
+            # without U the default routines prepare the same cell
+            plain = replace(
+                default,
+                pseudopotentials={
+                    key: replace(value, hubbard_u=0.0, hubbard_j=0.0) for key, value in default.pseudopotentials.items()
+                },
+            )
+            self.assertIsNone(prepare_periodic_single_point(plain).hubbard)
 
 
 class HubbardSCFTest(unittest.TestCase):

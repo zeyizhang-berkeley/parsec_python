@@ -212,9 +212,11 @@ def input_record(
     """Parse an input and describe the problem, or the error it stops with."""
 
     try:
-        translation = parse_parsec_input(
-            path, pseudopotential_directory=pseudopotential_directory
-        )
+        # the stored records were made when a species without Cubic_Spline took PARSEC 1.5's linear tables
+        with patch.dict(os.environ, {"PARSEC_CUBIC_SPLINE_DEFAULT": "off"}):
+            translation = parse_parsec_input(
+                path, pseudopotential_directory=pseudopotential_directory
+            )
     except Exception as error:
         return {"error": [type(error).__name__, portable(str(error), roots)]}
     return problem_record(translation, roots)

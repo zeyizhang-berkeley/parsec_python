@@ -24,6 +24,9 @@ from parsec_python.models import EmbeddingEnergyBreakdown
 from parsec_python.Output.pot_dat import potential_field_from_result, read_potential_field
 from parsec_python.SCF import prepare_single_point, run_scf
 
+# PARSEC 1.5's numbers: its linear tables and tabulated projector tails (parsec_python.tests.parsec15_tables)
+from parsec_python.tests.parsec15_tables import parsec15_tables_module as setUpModule  # noqa: F401, N812
+
 DATA = Path(__file__).resolve().parents[1] / "data"
 
 TIP = """\

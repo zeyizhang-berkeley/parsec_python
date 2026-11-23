@@ -56,8 +56,8 @@ def soc_projector_spline_setting() -> str:
     spline: the forces are then the slope of a smooth energy.  ``off``: the linear interpolation of the tables for
     every species, as before, whose energy has a kink wherever a grid point crosses a radial knot (forces within
     1e-11 Ry/bohr of the energy over steps of 1e-6 bohr, but 1.6e-5 to 3.1e-5 Ry/bohr off its slope over steps of
-    1e-3 to 2e-3 bohr in the spin-orbit Ge8 cell).  A species without ``Cubic_Spline`` keeps the linear tables under
-    both values, as Fortran does."""
+    1e-3 to 2e-3 bohr in the spin-orbit Ge8 cell).  A species with linear tables (``Cubic_Spline: .false.``, or no
+    value under ``PARSEC_CUBIC_SPLINE_DEFAULT=off``) keeps them under both values, as Fortran does."""
 
     import os
 

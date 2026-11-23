@@ -28,6 +28,9 @@ from parsec_python.tests.martins_old_reference import (
     write_case,
 )
 
+# PARSEC 1.5's numbers: its linear tables and tabulated projector tails (parsec_python.tests.parsec15_tables)
+from parsec_python.tests.parsec15_tables import parsec15_tables_module as setUpModule  # noqa: F401, N812
+
 
 class _FortranCase:
     """Solve one case of the fixture once for the tests of a class."""

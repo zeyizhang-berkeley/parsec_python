@@ -15,6 +15,7 @@ from dataclasses import replace
 import io
 from pathlib import Path
 import tempfile
+from types import SimpleNamespace
 import unittest
 
 import numpy as np
@@ -26,17 +27,22 @@ from parsec_python.Forces.nonlocal_force import (
 from parsec_python.Grid import build_cluster_grid
 from parsec_python.Input import ParsecInputError, UnsupportedParsecOptionError, parse_parsec_input
 from parsec_python.Pseudopotential import read_parsec_pseudopotential
+from parsec_python.Pseudopotential.radial_quadrature import parsec_radial_integral
 from parsec_python.Pseudopotential.radial_derivatives import (
     evaluate_local_potential_derivative,
     local_potential_derivative_table,
 )
 from parsec_python.V_ion import build_nonlocal_projectors, check_core_density, load_pseudopotentials
 from parsec_python.V_ion.double_grid import (
+    NOTE_RATIO,
     build_double_grid_projectors,
+    double_grid_note_lines,
     double_grid_points,
     double_grid_support,
     double_grid_weights,
+    orbital_projection_ratios,
 )
+from parsec_python.V_ion.ionic_potential import real_spherical_harmonics
 from parsec_python.acceleration.cli import _reference_only_features
 from parsec_python.models import Atom, GridSettings, SpeciesPotential
 
@@ -203,6 +209,14 @@ end Atom_Coord
             " Order of double grid is    3\n WARNING! DOUBLE GRID WILL MODIFY FORCES AND \n\nTOTAL ENERGY.\n\n",
             text,
         )
+        # The note on the projections the double grid loses (h = 0.567 bohr):
+        # the s channel of O, after the warning; none for order one.
+        self.assertIn(
+            "TOTAL ENERGY.\n\n NOTE: Double_Grid_Order 3 shrinks the projections of these pseudo-orbitals",
+            text,
+        )
+        self.assertRegex(text, r"\n       O l=0: 0\.9[0-8]\d of the radial value \(order 1: ")
+        self.assertNotIn("NOTE: Double_Grid_Order", self.header(default))
         # The accelerated builders average the projectors of a cluster too
         # (acceleration/tests/test_pseudopotential_setup.py).
         self.assertEqual(_reference_only_features(three, accelerated_backend_selected=False), [])
@@ -221,6 +235,85 @@ end Atom_Coord
         self.assertIn("\n\n Using old (direct) interpolation of pseudopot. !\n", self.header(old))
         # The native and CuPy local builders interpolate V directly too.
         self.assertEqual(_reference_only_features(old, accelerated_backend_selected=False), [])
+
+
+class ProjectionNoteTests(unittest.TestCase):
+    """The projections of a species' pseudo-orbitals behind the double-grid NOTE of the report."""
+
+    def test_ratios_use_the_projectors_of_the_run(self) -> None:
+        # The projection ratio equals that of the double-grid projectors of
+        # a cluster grid with the atom on a grid point.
+        species, _, potentials = water()
+        oxygen, specification = potentials["O"], species["O"]
+        spacing = 0.3 * ANGSTROM
+        for order in (1, 3):
+            channels = orbital_projection_ratios(
+                oxygen, specification, order, spacing, GridSettings(spacing, 1.0).stencil_half_width
+            )
+            self.assertEqual([channel.angular_momentum for channel in channels], [0, 2])
+            grid = build_cluster_grid(
+                GridSettings(spacing=spacing, radius=5.5, expansion_order=12, shift=(0.0, 0.0, 0.0),
+                             double_grid_order=order)
+            )
+            operator = build_nonlocal_projectors(grid, [Atom("O", np.zeros(3))], potentials, species)
+            columns = operator.projectors.toarray()
+            distance = np.linalg.norm(grid.coordinates, axis=1)
+            for channel in channels:
+                l = channel.angular_momentum
+                table, sign = oxygen.radial_projector(l, 1)
+                wave = oxygen.radial_wavefunctions[l]
+                radial = parsec_radial_integral(oxygen.radii, table * wave * oxygen.radii)
+                orbital = np.interp(distance, oxygen.radii, wave / oxygen.radii, right=0.0)[:, None] * (
+                    real_spherical_harmonics(l, grid.coordinates, center_radius=float(oxygen.radii[0]))
+                )
+                picked = [index for index, label in enumerate(operator.labels) if label[1] == l]
+                projections = np.einsum("ph,ph->h", columns[:, picked], orbital) * np.sqrt(grid.volume_element)
+                self.assertAlmostEqual(channel.ratio, float(np.mean(projections)) / radial, delta=1e-12)
+                self.assertAlmostEqual(channel.kb_energy, sign * radial * radial, delta=1e-14)
+                if order == 1:
+                    self.assertEqual(channel.ratio, channel.sampled_ratio)
+
+    def test_silver_d_channel(self) -> None:
+        silver = {"Ag": SpeciesPotential(DATA / "Ag_POTRE.DAT", 0, use_spline=True)}
+        potential = load_pseudopotentials(silver)["Ag"]
+        width = GridSettings(0.45, 1.0, expansion_order=8).stencil_half_width
+        channels = {
+            channel.angular_momentum: channel
+            for channel in orbital_projection_ratios(potential, silver["Ag"], 2, 0.45, width)
+        }
+        self.assertEqual(sorted(channels), [1, 2])
+        d = channels[2]
+        self.assertAlmostEqual(d.ratio, 0.876, delta=2e-3)
+        self.assertAlmostEqual(d.sampled_ratio, 1.0, delta=2e-3)
+        self.assertEqual(d.occupation, 10.0)
+        self.assertLess(d.kb_energy, -7.0)
+        self.assertAlmostEqual(d.energy_change, d.kb_energy * (d.ratio**2 - 1.0), delta=1e-15)
+        self.assertGreater(d.energy_change, 1.5)
+        self.assertGreater(channels[1].ratio, NOTE_RATIO)
+
+    def test_note_lines(self) -> None:
+        silver = {"Ag": SpeciesPotential(DATA / "Ag_POTRE.DAT", 0, use_spline=True)}
+        atoms = [Atom("Ag", np.zeros(3)), Atom("Ag", np.array([4.8, 0.0, 0.0]))]
+        problem = SimpleNamespace(
+            grid=GridSettings(spacing=0.45, radius=10.0, expansion_order=8, double_grid_order=2),
+            pseudopotentials=silver,
+            atoms=atoms,
+        )
+        lines = double_grid_note_lines(problem)
+        self.assertEqual(lines[0], " NOTE: Double_Grid_Order 2 shrinks the projections of these pseudo-orbitals onto their own")
+        self.assertEqual(len(lines), 5)
+        self.assertRegex(
+            lines[3],
+            r"^       Ag l=2: 0\.87\d of the radial value \(order 1: 0\.99\d\), \+1\.\d{4} Ry per electron, "
+            r"\+3\d\.\d{3} Ry for 2 atoms with 10\.00 electrons each$",
+        )
+        self.assertEqual(lines[4], "")
+        problem.grid = GridSettings(spacing=0.45, radius=10.0, expansion_order=8)
+        self.assertEqual(double_grid_note_lines(problem), ())
+        # a failure of the estimate prints nothing
+        problem.grid = GridSettings(spacing=0.45, radius=10.0, expansion_order=8, double_grid_order=2)
+        problem.pseudopotentials = {"Ag": SpeciesPotential(DATA / "missing_POTRE.DAT", 0)}
+        self.assertEqual(double_grid_note_lines(problem), ())
 
 
 class OldInterpolationTests(unittest.TestCase):

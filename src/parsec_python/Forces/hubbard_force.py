@@ -18,7 +18,11 @@ with ``grad`` the gradient with respect to the electron coordinate and
 linear interpolant of :func:`parsec_python.Hamiltonian.hubbard.interpolate_hubbard_radial`:
 the exact derivative of the sampled projector, so the forces are the exact
 derivative of the discrete energy except where a grid point crosses the
-projector radius (the projector is cut where ``R_d`` is not zero).
+projector radius (the projector is cut where ``R_d`` is not zero: the energy
+jumps) or the distance of a point crosses a sample of the radial table (the
+derivative jumps).  Over finite steps the slope of the energy then differs from
+the force; the smooth projectors of ``PARSEC_LDAU_SMOOTH_PROJECTORS`` (opt-in)
+remove both events.
 
 With ``J != 0`` the potential matrix of PARSEC is not symmetric and not the
 derivative of its energy (see the module of the term), so there is no force
@@ -40,6 +44,7 @@ from ..Hamiltonian.hubbard import (
     support_tree,
     hubbard_terms_from_orbitals,
     interpolate_hubbard_radial,
+    ldau_smooth_projectors_fraction,
     periodic_replica_translations,
 )
 from ..models import Atom
@@ -53,10 +58,11 @@ def _gradient_samples(potential, distance: np.ndarray, setting: str) -> tuple[np
     ``auto``: all three at :func:`parsec_python.V_ion.ionic_potential.projector_gradient_distance` (3e-3 bohr next to
     the atom, ``|d|`` beyond), the rule of the Kleinman-Bylander gradients; the d tables follow ``c r^2`` from their
     first sample on to 1e-5, so this changes the gradients by round-off and keeps every route on one rule.  ``tip`` and
-    ``off``: ``upot.F90``'s clamp of the distance at the first radial sample, as before.
+    ``off``: ``upot.F90``'s clamp of the distance at the first radial sample, as before.  Smooth projectors
+    (``PARSEC_LDAU_SMOOTH_PROJECTORS``) take that clamp under every setting: the exact derivative of their values.
     """
 
-    if projector_gradient_rule(potential, setting) == "floor":
+    if not ldau_smooth_projectors_fraction() and projector_gradient_rule(potential, setting) == "floor":
         sampled = projector_gradient_distance(distance, potential)
         radial, slope = interpolate_hubbard_radial(potential, sampled)
         return radial, slope, 1.0 / sampled

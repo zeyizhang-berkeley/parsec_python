@@ -19,8 +19,15 @@ local potentials, core densities, and Kleinman-Bylander radial projectors.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from threading import Lock
 
 import numpy as np
+
+#: The splines built so far, by table, padding width and inner value (:meth:`ParsecRadialSpline.from_positive_grid`),
+#: the oldest dropped beyond this many (a few per species and radial function).
+_SPLINE_CACHE_SIZE = 512
+_SPLINES: dict = {}
+_SPLINES_LOCK = Lock()
 
 
 def _clamped_second_derivatives(
@@ -35,9 +42,16 @@ def _clamped_second_derivatives(
     used by PARSEC's ``spline.f90`` when finite endpoint derivatives are
     supplied.  Pseudopotential callers use ``left_slope=right_slope=0``.
     """
-    point_count = knots.size
-    second = np.zeros(point_count, dtype=float)
-    work = np.zeros(point_count, dtype=float)
+    # The recurrence on Python floats: each operation is the IEEE double operation of the NumPy scalars it replaces,
+    # in the same order (no fused multiply-add on either), so the result is the same to the last bit, about ten
+    # times faster than on NumPy scalars.
+    knots = [float(value) for value in np.asarray(knots, dtype=float)]
+    values = [float(value) for value in np.asarray(values, dtype=float)]
+    left_slope = float(left_slope)
+    right_slope = float(right_slope)
+    point_count = len(knots)
+    second = [0.0] * point_count
+    work = [0.0] * point_count
 
     first_step = knots[1] - knots[0]
     second[0] = -0.5
@@ -71,7 +85,7 @@ def _clamped_second_derivatives(
 
     for index in range(point_count - 2, -1, -1):
         second[index] = second[index] * second[index + 1] + work[index]
-    return second
+    return np.asarray(second, dtype=float)
 
 
 @dataclass(frozen=True)
@@ -126,13 +140,23 @@ class ParsecRadialSpline:
         if not np.isfinite(inner_value):
             raise ValueError("origin_value must be finite")
 
-        artificial_radii = np.arange(-width - 1, 1, dtype=float)
-        knots = np.concatenate((artificial_radii, radial_grid))
-        padded_values = np.concatenate(
-            (np.full(artificial_radii.size, inner_value, dtype=float), radial_values)
-        )
-        second = _clamped_second_derivatives(knots, padded_values)
-        return cls(knots=knots, values=padded_values, second_derivatives=second)
+        # The same table, width and inner value give the same spline: the callers that build it for every batch
+        # of points (the local forces of a slab, the projectors of every atom) take the one built first.
+        # (copies of the cached arrays, so that no caller can change another's spline)
+        key = (radial_grid.tobytes(), radial_values.tobytes(), width, float(inner_value))
+        cached = _SPLINES.get(key)
+        if cached is None:
+            artificial_radii = np.arange(-width - 1, 1, dtype=float)
+            knots = np.concatenate((artificial_radii, radial_grid))
+            padded_values = np.concatenate(
+                (np.full(artificial_radii.size, inner_value, dtype=float), radial_values)
+            )
+            cached = (knots, padded_values, _clamped_second_derivatives(knots, padded_values))
+            with _SPLINES_LOCK:
+                if len(_SPLINES) >= _SPLINE_CACHE_SIZE:
+                    _SPLINES.pop(next(iter(_SPLINES)))
+                _SPLINES[key] = cached
+        return cls(knots=cached[0].copy(), values=cached[1].copy(), second_derivatives=cached[2].copy())
 
     def __call__(self, points: np.ndarray | float) -> np.ndarray | float:
         """Evaluate with PARSEC's ``splint`` cubic formula.

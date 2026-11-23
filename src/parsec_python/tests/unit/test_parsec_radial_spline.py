@@ -78,6 +78,49 @@ class ParsecRadialSplineTests(unittest.TestCase):
             atol=2.0e-14,
         )
 
+    def test_the_recurrence_on_floats_is_that_of_numpy_scalars(self) -> None:
+        """The second derivatives on Python floats equal the recurrence on NumPy scalars bit for bit, and a spline
+        built again for the same table is equal and owns its arrays."""
+        from parsec_python.Pseudopotential.radial_spline import _clamped_second_derivatives
+
+        def numpy_recurrence(knots, values):
+            count = knots.size
+            second, work = np.zeros(count), np.zeros(count)
+            first = knots[1] - knots[0]
+            second[0] = -0.5
+            work[0] = (3.0 / first) * ((values[1] - values[0]) / first - 0.0)
+            for i in range(1, count - 1):
+                span = knots[i + 1] - knots[i - 1]
+                sigma = (knots[i] - knots[i - 1]) / span
+                pivot = sigma * second[i - 1] + 2.0
+                second[i] = (sigma - 1.0) / pivot
+                difference = (values[i + 1] - values[i]) / (knots[i + 1] - knots[i]) - (values[i] - values[i - 1]) / (
+                    knots[i] - knots[i - 1]
+                )
+                work[i] = (6.0 * difference / span - sigma * work[i - 1]) / pivot
+            last = knots[-1] - knots[-2]
+            right = (3.0 / last) * (0.0 - (values[-1] - values[-2]) / last)
+            second[-1] = (right - 0.5 * work[-2]) / (0.5 * second[-2] + 1.0)
+            for i in range(count - 2, -1, -1):
+                second[i] = second[i] * second[i + 1] + work[i]
+            return second
+
+        data = Path(__file__).resolve().parents[1] / "data"
+        for name in ("Ge_POTRE.DAT", "Si_POTRE.DAT", "Ag_POTRE.DAT"):
+            potential = read_parsec_pseudopotential(data / name)
+            for table in (potential.core_density, *potential.channel_potentials.values()):
+                if table is None or np.asarray(table).shape != potential.radii.shape:
+                    continue
+                spline = ParsecRadialSpline.from_positive_grid(potential.radii, table, 4)
+                with self.subTest(name=name):
+                    np.testing.assert_array_equal(
+                        _clamped_second_derivatives(spline.knots, spline.values),
+                        numpy_recurrence(spline.knots, spline.values),
+                    )
+                    again = ParsecRadialSpline.from_positive_grid(potential.radii, table, 4)
+                    np.testing.assert_array_equal(again.second_derivatives, spline.second_derivatives)
+                    self.assertIsNot(again.second_derivatives, spline.second_derivatives)
+
     def test_padding_width_is_expansion_order_half_width(self) -> None:
         spline = ParsecRadialSpline.from_positive_grid(
             np.array([0.1, 0.4]),

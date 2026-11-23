@@ -20,6 +20,7 @@ import unittest
 from unittest import mock
 
 import numpy as np
+from parsec_python.tests.parsec15_tables import start_parsec15_tables
 
 
 def _channel(values, filled, sectors):
@@ -121,6 +122,12 @@ end Atom_Coord
 
 @unittest.skipUnless(_cupy_ready(), "needs a CUDA device")
 class SectorDoubletRouteTests(unittest.TestCase):
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        # inputs and tolerances made with PARSEC 1.5's tables (the states of the routes)
+        start_parsec15_tables(cls)
+        super().setUpClass()
     def test_note_keeps_the_bits_and_stop_takes_the_full_grid(self) -> None:
         import parsec_python.acceleration.cli as cli_module
         from parsec_python.tests.spin_reference import pseudopotential_file

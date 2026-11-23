@@ -113,7 +113,7 @@ def local_forces(
     the derivative table together with the spline coefficients of the
     density itself there, which does not give a derivative of the density.
 
-    The radial slopes of a species without ``Cubic_Spline`` follow
+    The radial slopes of a species with linear tables (no ``Cubic_Spline``) follow
     ``PARSEC_LINEAR_TABLE_SLOPES``
     (:func:`parsec_python.Pseudopotential.radial_derivatives.linear_slope_setting`):
     the tables of ``pseudo.f90`` by default, the slopes of the linear

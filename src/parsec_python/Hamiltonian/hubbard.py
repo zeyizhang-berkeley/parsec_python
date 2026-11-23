@@ -16,7 +16,11 @@ the file by ``r`` at its end) interpolated linearly on the logarithmic grid,
 and ``Y_2m`` the real d harmonics of ``ylm_real`` in the order xy, yz, xz,
 3z^2-1, x^2-y^2.  The projectors are not renormalized on the grid and they
 end at the radius ``r_c`` of the 0.95 rule below, where ``R_d`` is not zero;
-the cut and the missing normalization are PARSEC's and are kept.  A grid
+the cut and the missing normalization are PARSEC's and are kept.  The cut and
+the linear interpolation make the energy a non-smooth function of the atomic
+positions; ``PARSEC_LDAU_SMOOTH_PROJECTORS`` (opt-in,
+:func:`ldau_smooth_projectors_fraction`) replaces both by a cubic spline that
+a taper centred on ``r_c`` takes to zero.  A grid
 point belongs to the support of an atom if it lies within ``r_c`` of the atom
 or, in a periodic cell, of one of its images one cell away in each periodic
 direction; every such (point, image) pair is one entry of the projector.
@@ -180,6 +184,8 @@ def interpolate_hubbard_radial(
     logarithmic grid ``r_j = a(exp(b(j-1)) - 1)``, as there.  The slope is
     that of the linear interpolant (zero where the distance was raised): the
     exact derivative of the sampled projector with respect to the distance.
+    Under ``PARSEC_LDAU_SMOOTH_PROJECTORS`` (:func:`ldau_smooth_projectors_fraction`)
+    both are those of the cubic spline times the taper centred on ``r_c``.
     """
 
     radii, radial = _extended_radial_tables(potential)
@@ -198,7 +204,98 @@ def interpolate_hubbard_radial(
         radial[lower + 1] - radial[lower]
     )
     slope = np.where(distance < first, 0.0, slope)
+    if fraction := ldau_smooth_projectors_fraction():
+        values, slope = _smooth_radial(potential, clamped, fraction)
+        slope = np.where(distance < first, 0.0, slope)
     return values, slope
+
+
+#: ``PARSEC_LDAU_SMOOTH_PROJECTORS``: ``off`` (default), ``on`` or a width as a fraction of ``r_c`` (see
+#: :func:`ldau_smooth_projectors_fraction`).
+LDAU_SMOOTH_PROJECTORS_SWITCH = "PARSEC_LDAU_SMOOTH_PROJECTORS"
+#: Width of the taper of ``PARSEC_LDAU_SMOOTH_PROJECTORS=on``, as a fraction of ``r_c``.
+HUBBARD_TAPER_FRACTION = 0.2
+
+
+def ldau_smooth_projectors_fraction() -> float:
+    """``PARSEC_LDAU_SMOOTH_PROJECTORS``: the width of the taper of smooth LDA+U projectors over ``r_c``, or 0.
+
+    ``off`` (default; ``false``, ``no``, or any number equal to 0): 0, the projectors of ``upot.F90``: ``R_d``
+    interpolated linearly on the logarithmic grid and cut at ``r_c``, where it is not zero.  Both make the LDA+U
+    energy a non-smooth function of the atomic positions, in PARSEC 1.5 as here: it jumps when a grid point crosses
+    the sphere of radius ``r_c``
+    around an atom (fcc Ag with U = 4 eV on a grid of h = 0.48 bohr: 2e-4 Ry for one point), and its derivative jumps
+    when the distance of a point crosses a sample of the radial table (about 4e-5 Ry/bohr for one point at frozen
+    orbitals), so the forces, which are the exact derivative between those events, differ from the slope of the
+    energy over finite steps (Ag4: 5e-2 Ry/bohr at a step of 2e-3 bohr across the sphere, up to 4e-4 Ry/bohr at steps
+    of 1e-3 bohr that only cross table samples).
+
+    ``on`` (``1``, ``true``, ``yes``): :data:`HUBBARD_TAPER_FRACTION`; another number ``f`` in ``(0, 1]``: that
+    fraction.  ``1`` is the boolean spelling of ``on`` (``f`` = 0.2), as in the other switches; the full width
+    ``f`` = 1 is written ``1.0``.  ``R_d`` is the cubic spline of the table (zero slope at the origin, natural at its
+    end) times the taper ``S(r) = 1 - t^3 (10 - 15 t + 6 t^2)``, ``t = (r - r_c)/(f r_c) + 1/2``, which is 1 below
+    ``(1 - f/2) r_c``, falls to zero with its first two derivatives at ``(1 + f/2) r_c`` (the support radius of these
+    projectors) and is antisymmetric about ``r_c`` (``S(r_c + x) + S(r_c - x) = 1``).  The overlaps of the projector
+    with smooth functions, and so the occupations, are therefore those of the cut at ``r_c`` up to terms of order
+    ``f^2``; its norm, which is quadratic in the taper, changes at first order (Ag: 0.9501 for the cut, 0.9446 at
+    ``f`` = 0.2, a change of about -0.026 ``f`` from ``f`` = 0.4 down to 0.05).  The energy is then twice
+    differentiable in the positions and the forces are its derivative; energies and occupations differ from PARSEC's
+    by those terms and by the spline (see the README).
+    """
+
+    import os
+
+    value = os.environ.get(LDAU_SMOOTH_PROJECTORS_SWITCH, "off").strip().lower() or "off"
+    if value in ("off", "false", "no"):
+        return 0.0
+    if value in ("on", "1", "true", "yes"):
+        return HUBBARD_TAPER_FRACTION
+    try:
+        fraction = float(value)
+    except ValueError:
+        fraction = float("nan")
+    if fraction == 0.0:
+        return 0.0
+    if not 0.0 < fraction <= 1.0:
+        raise ValueError(
+            f"{LDAU_SMOOTH_PROJECTORS_SWITCH} must be off (or 0), on (or 1, which means the width 0.2) or a width "
+            f"in (0, 1] as a fraction of the projector radius (the full width 1 is written 1.0), not {value!r}"
+        )
+    return fraction
+
+
+def hubbard_support_radius(potential: ParsecPseudopotential) -> float:
+    """The radius of the support of the LDA+U projectors: ``r_c`` (:func:`hubbard_cutoff_radius`), or
+    ``(1 + f/2) r_c`` for the smooth projectors of ``PARSEC_LDAU_SMOOTH_PROJECTORS``."""
+
+    return hubbard_cutoff_radius(potential) * (1.0 + 0.5 * ldau_smooth_projectors_fraction())
+
+
+#: Splines of :func:`_smooth_radial`, by ``id`` of the pseudopotential (which the entry keeps alive).
+_SMOOTH_SPLINES: dict[int, tuple[object, object, float]] = {}
+
+
+def _smooth_radial(
+    potential: ParsecPseudopotential, clamped: np.ndarray, fraction: float
+) -> tuple[np.ndarray, np.ndarray]:
+    """``R_d S`` and its slope at the distances ``clamped`` (``PARSEC_LDAU_SMOOTH_PROJECTORS``)."""
+
+    from scipy.interpolate import CubicSpline
+
+    entry = _SMOOTH_SPLINES.get(id(potential))
+    if entry is None or entry[0] is not potential:
+        radii, radial = _extended_radial_tables(potential)
+        spline = CubicSpline(radii, radial, bc_type=((1, 0.0), "natural"))
+        entry = (potential, spline, hubbard_cutoff_radius(potential))
+        _SMOOTH_SPLINES[id(potential)] = entry
+    _, spline, radius = entry
+    values = spline(clamped)
+    slopes = spline(clamped, 1)
+    width = fraction * radius
+    t = np.clip((clamped - radius) / width + 0.5, 0.0, 1.0)
+    taper = 1.0 - t * t * t * (10.0 - 15.0 * t + 6.0 * t * t)
+    taper_slope = -30.0 * t * t * (1.0 - t) * (1.0 - t) / width
+    return values * taper, slopes * taper + values * taper_slope
 
 
 def periodic_replica_translations(lattice_vectors: np.ndarray | None) -> np.ndarray:
@@ -394,8 +491,9 @@ class HubbardProjectors:
     ``phi_a,m`` of the ``k``-th Hubbard atom are ``5k`` to ``5k + 4``.
     ``atom_indices[k]`` is the position of that atom in the atoms of the
     system, ``hubbard_u[k]`` and ``hubbard_j[k]`` its parameters in Ry.
-    ``cutoff_radii`` maps each species with LDA+U to ``r_c`` (bohr) and
-    ``support_sizes[k]`` is the number of support entries of the atom
+    ``cutoff_radii`` maps each species with LDA+U to the radius of its
+    support (bohr; ``r_c``, or :func:`hubbard_support_radius` of the smooth
+    projectors) and ``support_sizes[k]`` is the number of support entries of the atom
     (``nlatom`` of ``upot.F90``).
     """
 
@@ -469,7 +567,7 @@ def build_hubbard_projectors(
     for index in hubbard_atoms:
         symbol = atoms[index].symbol
         if symbol not in radii:
-            radii[symbol] = hubbard_cutoff_radius(potentials[symbol])
+            radii[symbol] = hubbard_support_radius(potentials[symbol])
     if lattice_vectors is not None:
         sides = np.linalg.norm(
             np.asarray(lattice_vectors, dtype=np.float64).reshape(-1, 3), axis=1
@@ -872,6 +970,7 @@ __all__ = [
     "d_harmonic_rotation",
     "hubbard_atom_permutations",
     "hubbard_cutoff_radius",
+    "hubbard_support_radius",
     "hubbard_operator",
     "hubbard_replica_lattice",
     "hubbard_support",
@@ -881,6 +980,7 @@ __all__ = [
     "hubbard_terms_from_orbitals",
     "interpolate_hubbard_radial",
     "kpoint_occupation_matrix",
+    "ldau_smooth_projectors_fraction",
     "occupation_matrices",
     "periodic_replica_translations",
     "symmetrize_occupations",

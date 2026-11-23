@@ -27,6 +27,9 @@ import numpy as np
 from parsec_python.cli import main as cli_main
 from parsec_python.tests.archives import read_archive
 
+# PARSEC 1.5's numbers: its linear tables and tabulated projector tails (parsec_python.tests.parsec15_tables)
+from parsec_python.tests.parsec15_tables import parsec15_tables_module as setUpModule  # noqa: F401, N812
+
 _FIXTURES = Path(__file__).resolve().parents[4] / "examples" / "0d_AuH"
 
 

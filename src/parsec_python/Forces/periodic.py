@@ -129,7 +129,8 @@ from .symmetry import POSITION_TOLERANCE, SpaceGroupAtomOperation, symmetrize_fo
 # ---------------------------------------------------------------------------
 # Radial slopes of the interpolants the energy uses.
 
-#: How the forces of these routines differentiate the radial tables of a species without ``Cubic_Spline``:
+#: How the forces of these routines differentiate the radial tables of a species with linear tables (``Cubic_Spline:
+#: .false.``, or no value under ``PARSEC_CUBIC_SPLINE_DEFAULT=off``):
 #: ``"interpolant"`` (default) the slopes of the linear interpolants the energy samples (local potential, densities,
 #: projectors), the exact derivative of the computed energy; ``"tabulated"`` the slope table ``dvw`` of
 #: ``pseudo.f90`` for the projectors only, as Fortran's ``forcnloc.f90`` (its nonlocal forces to 1e-6 Ry/bohr);
@@ -497,7 +498,7 @@ def periodic_local_forces(
 
     A provider installed with :func:`set_local_force_provider` takes the
     cell first (see there), except under ``PARSEC_PERIODIC_FORCE_SLOPES=tables``
-    with a species without ``Cubic_Spline``: the slopes of ``pseudo.f90``'s
+    with a species of linear tables: the slopes of ``pseudo.f90``'s
     tables are summed here.
     """
 

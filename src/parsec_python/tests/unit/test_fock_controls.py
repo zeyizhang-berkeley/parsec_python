@@ -9,11 +9,15 @@ the fixed controls for the energies of the loop with the new ones.
 
 from __future__ import annotations
 
+from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import replace
+from io import StringIO
+import os
 from pathlib import Path
 import shutil
 import tempfile
 import unittest
+from unittest import mock
 
 import numpy as np
 
@@ -224,6 +228,23 @@ def _orthonormal(rows, columns, generator):
     return vectors
 
 
+def _environment(name: str, value: str | None):
+    """``os.environ`` with ``name`` set to ``value`` (removed for ``None``) inside the block."""
+
+    environment = {key: item for key, item in os.environ.items() if key != name}
+    if value is not None:
+        environment[name] = value
+    return mock.patch.dict(os.environ, environment, clear=True)
+
+
+def _tail(value: str | None):
+    return _environment("PARSEC_FOCK_DIIS_TAIL", value)
+
+
+def _cut(value: str | None):
+    return _environment("PARSEC_EXCHANGE_OCCUPATION_CUT", value)
+
+
 class OuterDIISTests(unittest.TestCase):
     @staticmethod
     def extrapolation(scale: float):
@@ -386,6 +407,110 @@ class OuterDIISTests(unittest.TestCase):
         rest = orthonormal_complement(phi, empty)
         np.testing.assert_allclose(phi.T @ rest, 0.0, atol=1e-12)
         np.testing.assert_allclose(rest.T @ rest, np.eye(4), atol=1e-12)
+
+    def test_tail_setting_and_window_floor(self) -> None:
+        """PARSEC_FOCK_DIIS_TAIL: on (default) stores the levels above FRACTIONAL_GUARD, off those the exchange counts."""
+
+        from parsec_python.SCF.fock_diis import FRACTIONAL_GUARD, fock_diis_tail_setting, window_occupation_floor
+
+        with _tail(None), _cut(None):
+            self.assertEqual(fock_diis_tail_setting(), "on")
+            self.assertEqual(window_occupation_floor(), FRACTIONAL_GUARD)
+        for cut, threshold in (("on", 1.0e-10), ("off", 1.0e-12)):
+            with _cut(cut):
+                with _tail("off"):
+                    self.assertEqual(fock_diis_tail_setting(), "off")
+                    self.assertEqual(window_occupation_floor(), threshold)
+                with _tail(" On "):
+                    self.assertEqual(window_occupation_floor(), FRACTIONAL_GUARD)
+        with _tail("auto"), self.assertRaisesRegex(ValueError, "PARSEC_FOCK_DIIS_TAIL"):
+            fock_diis_tail_setting()
+
+    def test_a_tail_above_its_limit_clears_the_window(self) -> None:
+        """With on, the gate opens only while every level left out of the window holds at most
+        TAIL_SHARE * sqrt(Exx_Tolerance); off keeps the gate of before (the tail is then stored and refused)."""
+
+        import math
+
+        from parsec_python.SCF.fock_diis import FRACTIONAL_GUARD, TAIL_SHARE, tail_limit, thermal_tail
+
+        with _cut(None):
+            self.assertAlmostEqual(tail_limit(1.0e-6), 1.0e-6, delta=1e-18)
+            self.assertAlmostEqual(tail_limit(1.0e-9), TAIL_SHARE * math.sqrt(1.0e-9), delta=1e-20)
+            self.assertEqual(tail_limit(1.0), FRACTIONAL_GUARD)
+            self.assertEqual(tail_limit(1.0e-30), 1.0e-10)  # never below the cut of the exchange
+            self.assertEqual(thermal_tail([np.array([1.0, 1.0, 5.0e-7, 5.0e-11, 0.0]), np.array([1.0, 2.0e-8])]), 5.0e-7)
+            self.assertEqual(thermal_tail([np.array([1.0, 0.0]), np.zeros((2, 3))]), 0.0)
+        generator = np.random.default_rng(5)
+        block = {None: OccupiedBlock(_orthonormal(20, 2, generator), np.ones(2))}
+        clean = [np.array([1.0, 1.0, 1.0e-12, 0.0])]
+        tail = [np.array([1.0, 1.0, 5.0e-7, 0.0])]
+
+        def run(tolerance, occupations):
+            diis = OuterDIIS(enabled=True, tolerance=tolerance)
+            kept = [
+                diis.observe(OutputSet(step, [block], {} if step == 0 else {step - 1: 1.0}, error, -float(step)), values)
+                for step, (error, values) in enumerate(occupations)
+            ]
+            return diis, kept
+
+        slow = [(None, tail), (1.0e-4, tail), (3.0e-5, tail), (1.0e-5, tail)]
+        with _cut(None):
+            with _tail("on"):
+                self.assertEqual(run(1.0e-9, slow)[1], [False] * 4)  # 5e-7 above 3.2e-8
+                self.assertEqual(run(1.0e-6, slow)[1], [False, False, True, True])  # 5e-7 below 1e-6
+                diis, kept = run(1.0e-9, [(None, clean), (1.0e-4, clean), (3.0e-5, clean), (1.0e-5, tail)])
+                self.assertEqual(kept, [False, False, True, False])
+                self.assertEqual(diis.window, [])
+                self.assertIn("empty level holds 5.0E-07 (above 3.2E-08)", diis.last_note)
+            with _tail("off"):
+                self.assertEqual(run(1.0e-9, slow)[1], [False, False, True, True])
+
+    def test_a_thermal_tail_stays_out_of_the_window(self) -> None:
+        """Four full levels and one at 1e-6 (below FRACTIONAL_GUARD, above the exchange cut): with on the window holds
+        the four, the extrapolation is taken and the tail level completes its ACE as an empty state; with off the
+        tail stands among the kept natural occupations and the proposal is refused, as before."""
+
+        from parsec_python.SCF.hybrid import HostExchange, OrbitalSet, natural_orbital_sets
+
+        generator = np.random.default_rng(11)
+        base = _orthonormal(30, 6, generator)
+        occupations = np.array([1.0, 1.0, 1.0, 1.0, 1.0e-6, 0.0])
+        steps = [generator.standard_normal(base.shape) for _ in range(3)]
+        sets = []
+        for step, factor in enumerate((0.0, 1.0, 1.3)):
+            rotated, _ = np.linalg.qr(base + 0.003 * factor * steps[step])
+            sets.append((OrbitalSet(rotated, occupations, 2.0),))
+        engine = HostExchange.__new__(HostExchange)  # occupied_blocks reads no state of the engine
+        coefficients = {1: -0.5, 2: 1.5}
+        for value, stored in (("on", 4), ("off", 5)):
+            with self.subTest(value=value), _tail(value), _cut(None):
+                diis = OuterDIIS(enabled=True, tolerance=1e-8)
+                for step, orbital_sets in enumerate(sets):
+                    blocks = engine.occupied_blocks(orbital_sets)
+                    self.assertEqual(blocks[0][None].vectors.shape[1], stored)
+                    diis.append(OutputSet(step, blocks, {} if step == 0 else {step - 1: 1.0}))
+                natural = diis.natural_orbitals(coefficients)
+                if value == "off":
+                    self.assertIsNone(natural)
+                    self.assertIn("another occupation pattern", diis.last_note)
+                    continue
+                self.assertIsNotNone(natural, diis.last_note)
+                phi, numbers = natural[0][None]
+                self.assertEqual(phi.shape[1], 4)
+                self.assertAlmostEqual(float(numbers.sum()), 4.0, places=12)
+                # The extrapolation of the full levels (the tail is not in it).
+                full = [orbital_sets[0].orbitals[:, :4] for orbital_sets in sets]
+                target = sum(c * full[k] @ full[k].T for k, c in coefficients.items())
+                error = np.linalg.norm(phi @ np.diag(numbers) @ phi.T - target)
+                self.assertLess(error, 0.1 * np.linalg.norm(target - full[2] @ full[2].T))
+                # Its ACE set: the natural orbitals, then the tail and the empty level of the last loop, orthonormal.
+                completed = natural_orbital_sets(sets[2], natural)[0]
+                self.assertEqual(completed.orbitals.shape, (30, 6))
+                np.testing.assert_allclose(completed.orbitals.T @ completed.orbitals, np.eye(6), atol=1e-12)
+                np.testing.assert_allclose(completed.occupations[4:], 0.0)
+                tail = sets[2][0].orbitals[:, 4]
+                self.assertGreater(float(np.linalg.norm(completed.orbitals[:, 4:].T @ tail)), 0.999)
 
 
 class FockLoopControlTests(unittest.TestCase):
@@ -559,6 +684,73 @@ Exx_Tolerance: 1.0e-9 Ry
         self.assertFalse(outer[4].extrapolated)
         # The exact loops end with their levels converged at their last Hamiltonian.
         self.assertGreater(outer[-1].level_passes, 0)
+
+    def test_a_thermal_tail_does_not_refuse_the_extrapolation(self) -> None:
+        """At 6000 K the empty pair holds a few 1e-9 (above the exchange cut, below FRACTIONAL_GUARD): with
+        PARSEC_FOCK_DIIS_TAIL=on it stays out of the window and the slow loop is extrapolated; with off every
+        proposal is refused (another occupation pattern), as before.  Both reach the same state."""
+
+        from parsec_python.SCF.fock_diis import FRACTIONAL_GUARD
+
+        saved = self.BASE
+        runs = {}
+        try:
+            self.BASE = saved.replace("Fermi_Temp: 80", "Fermi_Temp: 6000")
+            for value in ("on", "off"):
+                with _tail(value), _cut(None):
+                    runs[value] = self.run_case("")
+        finally:
+            self.BASE = saved
+        (on, on_outer), (off, off_outer) = runs["on"], runs["off"]
+        self.assertTrue(on.converged and off.converged)
+        tail = np.asarray(on.occupations)[2:]
+        self.assertTrue(np.all((tail > 1.0e-10) & (tail < FRACTIONAL_GUARD)), tail)
+        self.assertTrue(any(record.extrapolated for record in on_outer))
+        self.assertFalse(any("another occupation pattern" in record.outer_note for record in on_outer))
+        self.assertTrue(any("another occupation pattern" in record.outer_note for record in off_outer))
+        self.assertFalse(any(record.extrapolated for record in off_outer))
+        self.assertLess(on_outer[-1].iteration, off_outer[-1].iteration)
+        self.assertLess(on_outer[-1].estimated_error, 1.0e-9)
+        self.assertAlmostEqual(on.energies.total, off.energies.total, delta=2.0e-9)
+
+    def test_a_tail_above_its_limit_runs_the_loop_of_before(self) -> None:
+        """At 9000 K the empty pair holds about 2e-6, above the limit of Exx_Tolerance 1e-9 (3.2e-8): with on the
+        window stays closed, with off every proposal is refused; both run the plain operators, the same bits."""
+
+        from parsec_python.SCF.fock_diis import tail_limit
+
+        saved = self.BASE
+        runs = {}
+        try:
+            self.BASE = saved.replace("Fermi_Temp: 80", "Fermi_Temp: 9000")
+            for value in ("on", "off"):
+                with _tail(value), _cut(None):
+                    runs[value] = self.run_case("")
+        finally:
+            self.BASE = saved
+        (on, on_outer), (off, off_outer) = runs["on"], runs["off"]
+        with _cut(None):
+            self.assertTrue(np.all(np.asarray(on.occupations)[2:] > tail_limit(1.0e-9)))
+        self.assertFalse(any(record.extrapolated for record in on_outer + off_outer))
+        self.assertTrue(any("another occupation pattern" in record.outer_note for record in off_outer))
+        self.assertEqual([record.pair_solves for record in on_outer], [record.pair_solves for record in off_outer])
+        self.assertEqual(on.energies.total, off.energies.total)
+
+    def test_an_unknown_tail_value_is_refused_before_the_run(self) -> None:
+        from parsec_python import cli as cli_module
+
+        with tempfile.TemporaryDirectory() as scratch:
+            directory = Path(scratch)
+            library = Path(__file__).resolve().parents[3] / "pp_generation" / "NCPPs" / "PBE" / "H" / "PARSEC"
+            shutil.copy(library / "H_POTRE.DAT", directory / "H_POTRE.DAT")
+            path = directory / "parsec.in"
+            path.write_text(self.BASE.format(extra=""))
+            errors = StringIO()
+            with _tail("maybe"), redirect_stdout(StringIO()), redirect_stderr(errors):
+                code = cli_module.main([str(path), "--quiet"])
+            self.assertEqual(code, 2)
+            self.assertIn("PARSEC_FOCK_DIIS_TAIL", errors.getvalue())
+            self.assertFalse((directory / "parsec.out").exists())
 
     def test_keywords(self) -> None:
         from parsec_python.Input import parse_parsec_input

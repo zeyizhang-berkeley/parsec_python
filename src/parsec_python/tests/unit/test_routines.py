@@ -431,8 +431,12 @@ class BulkDefaultTests(_ParserCase):
                 translation = self.parse(text)
                 self.assert_default(translation, GAMMA_FORCES_FEATURE)
         for name, text in (
-            # linear tables: his local potential is the cubic spline, theirs the linear table
-            ("linear tables on the same grid", cube.replace("\nCubic_Spline: .true.", "")),
+            # linear tables (Cubic_Spline: .false.; also a species without the label under
+            # PARSEC_CUBIC_SPLINE_DEFAULT=off): his local potential is the cubic spline, theirs the linear table
+            ("linear tables on the same grid", cube.replace("Cubic_Spline: .true.", "Cubic_Spline: .false.")),
+            # the cubic spline by default (no Cubic_Spline in the input, PARSEC_CUBIC_SPLINE_DEFAULT=on): his routines,
+            # as before the default, whose local potential is the spline anyway (the same energy)
+            ("the spline by default", cube.replace("\nCubic_Spline: .true.", "")),
             # 9.6/0.4: 24 points in theirs (PARSEC 1.5's slack of adjust_step), 22 in his (1/24 is a rounding below
             # 0.4/9.6)
             ("other counts", _bulk("Skip_Force: .false.\nCubic_Spline: .true.", cell="  9.6  9.6  9.6").replace(

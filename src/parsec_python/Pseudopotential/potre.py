@@ -14,7 +14,7 @@ import re
 
 import numpy as np
 
-from .radial_quadrature import parsec_radial_integral
+from .radial_quadrature import kb_quadrature_setting, log_mesh_integral, parsec_radial_integral
 from .radial_spline import ParsecRadialSpline
 
 
@@ -27,13 +27,14 @@ _FLOAT_RE = re.compile(
 _BARE_EXPONENT_RE = re.compile(r"(?<=[\d.])([-+]\d{3})$")
 
 PROJECTOR_TAIL_ENV = "PARSEC_PROJECTOR_TAIL"
-PROJECTOR_TAIL_DEFAULT = "off"
+PROJECTOR_TAIL_DEFAULT = "auto"
 
 
 def projector_tail_setting() -> str:
     """``PARSEC_PROJECTOR_TAIL``: what a ``MARTINS_NEW`` table's projectors hold beyond its channel cutoffs.
 
-    ``off`` (default): the tabulated ``V_l - V_local`` at every radius, as ``pseudo.f90`` forms it.  ``nonloc.F90``
+    ``off``: the tabulated ``V_l - V_local`` at every radius, as ``pseudo.f90`` forms it (PARSEC 1.5, and the
+    default before 2026-11-22).  ``nonloc.F90``
     keeps the grid points up to ``rcore``, the first radial sample beyond the largest cutoff ``rc`` of the file's
     pseudo-wavefunction headers, and drops the rest.  A table whose projector is not zero at ``rcore`` makes the
     nonlocal energy jump whenever a grid point crosses that sphere: the energy is then not a continuous function of
@@ -44,10 +45,12 @@ def projector_tail_setting() -> str:
     ``rcore``, 2e-5 of its maximum) and the PBE Cr table (2.1e-4).  At steps of 1e-3 bohr the energy slope then misses the force by 7.4e-5 Ry/bohr (diamond cell of eight
     atoms, h 0.37) and 6.7e-4 Ry/bohr (Cr2, h 0.3), both with ``Cubic_Spline``.
 
-    ``auto``: ``V_l - V_local = 0`` beyond the largest channel cutoff of the file, as the norm-conserving construction
-    (and the UPF the table came from) has it, so that every projector is zero at ``rcore`` and the energy is
-    continuous.  Tables without channel cutoffs (FHI, ``MARTINS_OLD``) and tables whose difference is zero there
-    already are not changed (same bits).
+    ``auto`` (the default): ``V_l - V_local = 0`` beyond the largest channel cutoff of the file, as the
+    norm-conserving construction (and the UPF the table came from) has it, so that every projector is zero at
+    ``rcore`` and the energy is continuous (8.9e-6 and 3.2e-6 Ry/bohr in the two cases above; the energies move by
+    1e-6 to 2e-5 Ry).  Tables without channel cutoffs (FHI, ``MARTINS_OLD``) and tables whose difference is zero
+    there already are not changed (same bits).  The rule is a property of the file, so every process of a run
+    decides the same.
     """
 
     import os
@@ -198,6 +201,14 @@ class ParsecPseudopotential:
         if not np.any(difference[beyond] != 0.0):
             return difference
         return np.where(beyond, 0.0, difference)
+
+    def kb_denominator(self, integrand: np.ndarray) -> float:
+        """``integral integrand dr`` of a Kleinman-Bylander denominator (``u_l^2 (V_l - V_local)`` on the radii) by the
+        quadrature of :func:`~.radial_quadrature.kb_quadrature_setting` (``PARSEC_KB_QUADRATURE``)."""
+
+        if kb_quadrature_setting() == "trapezoid":
+            return parsec_radial_integral(self.radii, integrand)
+        return log_mesh_integral(self.radii, integrand, self.radial_parameter_b, self.radial_offset)
 
     def validate_local_channel(self, local_l: int) -> None:
         if local_l not in self.channel_potentials:
@@ -350,10 +361,7 @@ class ParsecPseudopotential:
             self.channel_potentials[angular_momentum], local_l
         )
         radial_wave = self.radial_wavefunctions[angular_momentum]
-        denominator = parsec_radial_integral(
-            self.radii,
-            radial_wave * radial_wave * delta_v,
-        )
+        denominator = self.kb_denominator(radial_wave * radial_wave * delta_v)
         if abs(denominator) < 1.0e-18:
             raise ValueError(f"nearly zero Kleinman-Bylander denominator for l={angular_momentum}")
         if angular_momentum in self.filtered_projectors:
@@ -430,9 +438,7 @@ class ParsecPseudopotential:
 
         def _normalize(v_j: np.ndarray) -> tuple[np.ndarray, float]:
             delta_v = self.potential_difference(v_j, local_l)
-            denominator = parsec_radial_integral(
-                self.radii, radial_wave * radial_wave * delta_v
-            )
+            denominator = self.kb_denominator(radial_wave * radial_wave * delta_v)
             if abs(denominator) < 1.0e-18:
                 raise ValueError(
                     "nearly zero spin-orbit Kleinman-Bylander denominator for "

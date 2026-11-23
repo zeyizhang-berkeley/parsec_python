@@ -118,6 +118,9 @@ class WireSlabPreparedSystem(PeriodicPreparedSinglePointSystem):
     charged_sheet_forces: np.ndarray | None = None
     ewald: SlabEwaldTerms | None = None
     fortran_quirks: frozenset = field(default_factory=frozenset)
+    # PARSEC_HARTREE_VARIATIONAL: the parsec_python.Hartree.variational.ConfinedVariationalHartree of a slab whose
+    # Hartree potential is the derivative of its Hartree energy; None keeps the potential of the Poisson solve.
+    hartree_variational: object | None = None
 
     @property
     def periodicity(self) -> int:
@@ -130,7 +133,10 @@ class WireSlabPreparedSystem(PeriodicPreparedSinglePointSystem):
         *,
         raise_on_nonconvergence: bool = True,
     ) -> ConfinedHartreeResult:
-        return solve_confined_hartree(
+        if self.hartree_variational is not None:
+            # the loop passes the V' it was given: the Poisson solution of that density starts the solve
+            initial_potential = self.hartree_variational.electrostatic(initial_potential)
+        result = solve_confined_hartree(
             density,
             self.hartree_plan,
             self.negative_laplacian,
@@ -138,6 +144,9 @@ class WireSlabPreparedSystem(PeriodicPreparedSinglePointSystem):
             initial_potential,
             raise_on_nonconvergence=raise_on_nonconvergence,
         )
+        if self.hartree_variational is None:
+            return result
+        return self.hartree_variational.potential(density, result)
 
 
 def check_atoms_inside(atoms, grid: ConfinedPeriodicGrid) -> None:
@@ -221,6 +230,11 @@ def prepare_wire_slab_single_point(
     )
     finite_difference_seconds = time.perf_counter() - stage_start
 
+    from ..Hartree.variational import confined_variational_hartree_for
+
+    # PARSEC_HARTREE_VARIATIONAL (an unknown value is refused here, before the SCF)
+    hartree_variational = confined_variational_hartree_for(problem, hartree_plan, negative_laplacian)
+
     parts = _atom_dependent_parts(
         problem, grid, pseudopotentials, negative_laplacian, hartree_plan, atoms, quirks
     )
@@ -249,6 +263,7 @@ def prepare_wire_slab_single_point(
         hartree_plan=hartree_plan,
         fortran_quirks=quirks,
         density_symmetry=density_symmetry,
+        hartree_variational=hartree_variational,
         **parts,
     )
 

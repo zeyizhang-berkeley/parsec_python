@@ -19,25 +19,36 @@ The run computes four structures and ends with exit status 0.
 ## Expected trajectory
 
 `atom_cor_fortran_reference.out` is the `atom.cor` of Fortran PARSEC for this
-input. Energy per atom in eV and largest force in Ry/bohr:
+input. Energy per atom in eV and largest force in Ry/bohr (this package: code
+of 22 November 2026 on one NVIDIA A100, 2.4 s):
 
-| Structure | Fortran PARSEC | This package, PARSEC boundary | This package, default |
-|---:|---|---|---|
-| 0 | -23.45045, 0.37619 | -23.45045, 0.37619 | -23.45046, 0.37619 |
-| 1 | -24.82806, 0.15740 | -24.82806, 0.15740 | -24.82810, 0.15740 |
-| 2 | -25.23815, 0.05513 | -25.23815, 0.05513 | -25.23824, 0.05513 |
-| 3 | -25.31114, 0.01485 | -25.31114, 0.01485 | -25.31127, 0.01485 |
+| Structure | Fortran PARSEC | This package, PARSEC boundary | This package, default | PARSEC boundary and linear tables |
+|---:|---|---|---|---|
+| 0 | -23.45045, 0.37619 | -23.45152, 0.37621 | -23.45153, 0.37621 | -23.45045, 0.37619 |
+| 1 | -24.82806, 0.15740 | -24.82897, 0.15749 | -24.82901, 0.15749 | -24.82806, 0.15740 |
+| 2 | -25.23815, 0.05513 | -25.23934, 0.05504 | -25.23942, 0.05504 | -25.23815, 0.05513 |
+| 3 | -25.31114, 0.01485 | -25.31203, 0.01481 | -25.31216, 0.01481 | -25.31114, 0.01485 |
 
 The sphere is small, so the default Hartree boundary of this package adds the
 atomic tail that PARSEC's multipole expansion leaves out, and the energies
-move by about 1e-4 eV per atom. The input line
+move by up to about 1e-4 eV per atom. The input line
 
 ```text
 Hartree_Boundary_Tolerance: off
 ```
 
-restores PARSEC's boundary and with it every printed digit of the Fortran
-trajectory. See "Physical scope" in the
+restores PARSEC's boundary ("PARSEC boundary"). The input gives no
+`Cubic_Spline` lines, so both tables are interpolated by cubic splines, the
+default since 22 November 2026; PARSEC 1.5 interpolates linearly, and the
+splines lower the energies by 0.9e-3 to 1.2e-3 eV per atom. With PARSEC's
+boundary and
+
+```text
+PARSEC_CUBIC_SPLINE_DEFAULT=off PARSEC_PROJECTOR_TAIL=off
+```
+
+in the environment (last column) every printed digit of the Fortran
+trajectory is reproduced. See "Physical scope" in the
 [package README](../../src/parsec_python/README.md).
 
 `occup.in` holds two sections. A spin-unpolarized run reads the first one

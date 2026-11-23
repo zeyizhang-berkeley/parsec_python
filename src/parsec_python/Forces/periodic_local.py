@@ -141,7 +141,7 @@ def dense_periodic_local_forces(
     half_width = grid.settings.stencil_half_width
     tables: dict = {}
     center = spline_force_center_setting()
-    slopes = linear_slope_setting()  # PARSEC_LINEAR_TABLE_SLOPES (the core density of a species without Cubic_Spline)
+    slopes = linear_slope_setting()  # PARSEC_LINEAR_TABLE_SLOPES (the core density of a species with linear tables)
 
     for index, atom in enumerate(atoms):
         potential = potentials[atom.symbol]

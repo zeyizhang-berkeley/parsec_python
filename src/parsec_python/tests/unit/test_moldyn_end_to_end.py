@@ -41,6 +41,9 @@ import numpy as np
 from parsec_python.Input import parse_parsec_input
 from parsec_python.cli import main as cli_main
 
+# PARSEC 1.5's numbers: its linear tables and tabulated projector tails (parsec_python.tests.parsec15_tables)
+from parsec_python.tests.parsec15_tables import parsec15_tables_module as setUpModule  # noqa: F401, N812
+
 DATA = Path(__file__).resolve().parents[1] / "data"
 REFERENCE = json.loads(
     (DATA / "moldyn_parsec_end_to_end_reference.json").read_text(encoding="utf-8")

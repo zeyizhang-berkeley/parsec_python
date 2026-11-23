@@ -60,8 +60,8 @@ from ..V_xc.bloch_exchange import (
     mesh_stars,
     periodic_pair_solver,
 )
-from ..V_xc.exact_exchange import OCCUPATION_THRESHOLD
-from .fock_diis import OccupiedBlock
+from ..V_xc.exact_exchange import exchange_occupation_threshold
+from .fock_diis import OccupiedBlock, window_occupation_floor
 
 
 #: Reduced coordinates closer than this are one value (and steps of a mesh this close are equal).
@@ -224,7 +224,7 @@ class PeriodicFockOperator:
 
         operator = self.operator(spin, k)
         values = np.asarray(occupations, dtype=np.float64)
-        occupied = np.flatnonzero(values > OCCUPATION_THRESHOLD)
+        occupied = np.flatnonzero(values > exchange_occupation_threshold())
         if operator is None or not occupied.size:
             return xp.zeros(1)
         if xp is not np and isinstance(operator.projectors, np.ndarray):
@@ -974,13 +974,14 @@ class BlochExchange:
         """Nothing to drop: host orbitals pin no eigensolver memory."""
 
     def occupied_blocks(self, sets) -> list:
-        """Copies of the occupied Bloch factors of each set, one block per k-point (``Exx_Outer_Mixing: diis``)."""
+        """Copies of the occupied Bloch factors of each set, one block per k-point (``Exx_Outer_Mixing: diis``): those
+        whose occupation exceeds :func:`~parsec_python.SCF.fock_diis.window_occupation_floor`."""
 
         blocks = []
         for orbital_set in sets:
             channel = {}
             for t, (block, values) in enumerate(zip(orbital_set.orbitals, orbital_set.occupations)):
-                occupied = np.flatnonzero(values > OCCUPATION_THRESHOLD)
+                occupied = np.flatnonzero(values > window_occupation_floor())
                 if occupied.size:
                     channel[t] = BlochOccupiedBlock(
                         np.array(block[:, occupied]),
@@ -991,13 +992,14 @@ class BlochExchange:
         return blocks
 
     def natural_sets(self, sets, natural):
-        """The orbital sets of the natural orbitals ``natural`` (per set ``{k: (Phi, n)}``) and the empty states."""
+        """The orbital sets of the natural orbitals ``natural`` (per set ``{k: (Phi, n)}``) and the empty states (the
+        orbitals not stored in the window)."""
 
         result = []
         for orbital_set, blocks in zip(sets, natural):
             orbitals, occupations = [], []
             for t, (block, values) in enumerate(zip(orbital_set.orbitals, orbital_set.occupations)):
-                empty = block[:, values <= OCCUPATION_THRESHOLD]
+                empty = block[:, values <= window_occupation_floor()]
                 phi, numbers = blocks.get(t, (None, np.zeros(0)))
                 if phi is None:
                     columns, weights = empty, np.zeros(empty.shape[1])

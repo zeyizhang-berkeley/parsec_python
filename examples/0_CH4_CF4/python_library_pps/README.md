@@ -57,10 +57,17 @@ beside the potential.
 
 The kept logs are first runs without cache, double precision, with the Poisson
 solves on the GPU (`PARSEC_HARTREE_LINEAR_BACKEND=cupy`, the default since 2026-11-07), on A100 GPUs with
-80 GB, one run per GPU (code of 20 November 2026): 6–8 s per CH4 case,
-40–50 s per CF4 case (3.1 million grid points). On a laptop with an RTX 5070
+80 GB, one run per GPU (code of 22 November 2026): 6–8 s per CH4 case,
+40–49 s per CF4 case (3.1 million grid points). On a laptop with an RTX 5070
 Laptop GPU (8 GB) the same cases took 20–33 s and 336–402 s with the library files as they were
 before 12 October 2026 (see `src/pp_generation/README.md`).
+
+Since 22 November 2026 a `martins_new` projector is zero beyond the largest
+cutoff radius of its channels (`PARSEC_PROJECTOR_TAIL=auto`). On the C, C-1s
+and F tables of these cases that changes the projectors by 1e-5 to 2e-5 of
+their size and the totals by 4e-8 to 8e-6 Ry (CF4 is converged to 5e-5 Ry);
+the binding energies move by at most 2e-4 eV, no digit of the table above.
+`PARSEC_PROJECTOR_TAIL=off` gives the former logs to every printed digit.
 
 ## All-electron reference
 

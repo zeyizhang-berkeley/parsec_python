@@ -16,6 +16,7 @@ import numpy as np
 
 from parsec_python.acceleration.Symmetry import orbital_groups as og
 from parsec_python.acceleration.tests.test_orbital_group_arrays import _captured_plan_inputs, _diamond, _rocksalt
+from parsec_python.tests.parsec15_tables import start_parsec15_tables
 
 
 class SwitchTests(unittest.TestCase):
@@ -246,7 +247,12 @@ class SectorOverheadRelaxationTests(unittest.TestCase):
 
 
 #: bcc Fe in its cubic cell (a 5.42 bohr, h 0.22), PBE, spin-polarized at 100 K: the full grid leaves the state of the
-#: full group, which the spin guard of the plan of the least rows x states detects (found 2026-11-21).
+#: full group, which the spin guard of the plan of the least rows x states detects (found 2026-11-21).  The test runs
+#: with the linear tables of PARSEC 1.5 (75 SCF steps): the cell has at least four SCF states, which both interpolations
+#: reach, and with the cubic spline a species without Cubic_Spline takes by default the state this SCF reaches depends
+#: on the mixing and on round-off (A100: Anderson 0.2 199 steps to -79.47553335 Ry in a separate process, the test's
+#: process 300 steps without converging near -79.4191; 0.1 281 steps to -79.40528861; 0.3 not converged in 300 near
+#: -79.5197), so it would not test the plan.
 _IRON_INPUT = """\
 Periodic_System: .true.
 Boundary_Conditions: bulk
@@ -282,6 +288,12 @@ class SpinGuardRegressionTests(unittest.TestCase):
     """Spin-polarized bcc Fe2 at 100 K under the default switches (the fixed cost of a sector and the device rule at
     ``auto``) reaches the energy of the full grid: the run keeps the plan of the least rows x states, whose guard
     leaves the weighted sectors, instead of the two sectors of weight 1 that held the symmetric state 0.125 Ry above."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        # the linear tables of PARSEC 1.5 (see _IRON_INPUT)
+        start_parsec15_tables(cls)
+        super().setUpClass()
 
     def test_the_default_reaches_the_full_grid(self) -> None:
         from contextlib import redirect_stderr, redirect_stdout

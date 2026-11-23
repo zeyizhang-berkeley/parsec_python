@@ -90,7 +90,7 @@ from typing import Any, Sequence
 
 import numpy as np
 
-from parsec_python.V_xc.exact_exchange import OCCUPATION_THRESHOLD
+from parsec_python.V_xc.exact_exchange import exchange_occupation_threshold
 
 
 # ---------------------------------------------------------------------------
@@ -1006,7 +1006,7 @@ class DeviceBlochChannel:
         return len(self.orbitals)
 
     def occupied(self, rep: int) -> np.ndarray:
-        return np.flatnonzero(np.asarray(self.occupations[rep]) > OCCUPATION_THRESHOLD)
+        return np.flatnonzero(np.asarray(self.occupations[rep]) > exchange_occupation_threshold())
 
     def sources(self):
         """``(rep, k', conjugate, operation)`` of every point of the mesh: the representative, then its partner
@@ -1843,7 +1843,7 @@ def device_cross_energy(xp, operator: DeviceBlochACE, vectors, occupations, weig
     """``(s/2) w_t sum_n f_n <u_n|V_ACE|u_n>`` (unscaled) of one k-point as an ``xp`` array of shape ``(1,)``."""
 
     occupations = np.asarray(occupations, dtype=np.float64)
-    occupied = np.flatnonzero(occupations > OCCUPATION_THRESHOLD)
+    occupied = np.flatnonzero(occupations > exchange_occupation_threshold())
     if operator is None or not occupied.size:
         return xp.zeros(1, dtype=xp.float64)
     columns = vectors[:, : int(occupied[-1]) + 1] if occupied.size == occupied[-1] + 1 else vectors[:, occupied]

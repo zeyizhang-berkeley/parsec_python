@@ -22,6 +22,7 @@ import tempfile
 import unittest
 
 import numpy as np
+from parsec_python.tests.parsec15_tables import parsec15_tables
 
 DATA = Path(__file__).resolve().parents[1] / "data"
 
@@ -111,6 +112,8 @@ def check_against_fortran(test: unittest.TestCase, records: list[dict]) -> None:
 
 
 class RestartCoordinateTests(unittest.TestCase):
+    # Fortran's energies: PARSEC 1.5's tables
+    @parsec15_tables()
     def test_reference_restart_reaches_the_fortran_energies(self) -> None:
         from parsec_python.cli import main
 

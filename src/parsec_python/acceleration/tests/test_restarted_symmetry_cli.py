@@ -23,6 +23,7 @@ import tempfile
 import unittest
 
 import numpy as np
+from parsec_python.tests.parsec15_tables import start_parsec15_tables
 
 try:
     from parsec_python.acceleration.backends.cupy import cupy_available
@@ -37,6 +38,8 @@ CODATA_ANGSTROM = 0.529177210903
 class RestartedKpointTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
+        # energies pinned with PARSEC 1.5's tables
+        start_parsec15_tables(cls)
         cls.folder = Path(tempfile.mkdtemp(prefix="parsec_restartgroup_cli_"))
 
     @classmethod

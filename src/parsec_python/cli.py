@@ -2425,9 +2425,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 2
     # PARSEC_STATES_CLOSE_MULTIPLET: more states where States_Num cuts an occupied multiplet (SCF/state_extension.py)
     from parsec_python.SCF.state_extension import close_multiplet_setting
+    # PARSEC_EXCHANGE_OCCUPATION_CUT: the occupation an orbital needs to enter the exact exchange (V_xc/exact_exchange.py)
+    from parsec_python.V_xc.exact_exchange import exchange_occupation_cut_setting
+    # PARSEC_FOCK_DIIS_TAIL: the orbitals the window of the outer DIIS of a Fock loop stores (SCF/fock_diis.py)
+    from parsec_python.SCF.fock_diis import fock_diis_tail_setting
 
     try:
         close_multiplet_setting()
+        exchange_occupation_cut_setting()
+        fock_diis_tail_setting()
     except ValueError as error:
         print(f"Input error: {error}", file=sys.stderr)
         return 2
@@ -2442,6 +2448,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         except ValueError as error:
             print(f"Input error: {error}", file=sys.stderr)
             return 2
+    # PARSEC_LDAU_SMOOTH_PROJECTORS: the shape of the LDA+U projectors (Hamiltonian/hubbard.py), read in every run as
+    # the accelerated command line does, so that a value it does not know is refused before the SCF
+    from parsec_python.Hamiltonian.hubbard import ldau_smooth_projectors_fraction
+
+    try:
+        ldau_smooth_projectors_fraction()
+    except ValueError as error:
+        print(f"Input error: {error}", file=sys.stderr)
+        return 2
     if (
         getattr(translation, "polarizability_field", None) is not None
         and getattr(translation, "energy_refinement", None) is not None

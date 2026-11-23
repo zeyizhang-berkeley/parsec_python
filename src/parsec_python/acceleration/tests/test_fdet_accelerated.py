@@ -26,6 +26,9 @@ from parsec_python.acceleration.cli import _mpi_unsupported_features
 from parsec_python.acceleration.cli import main as accelerated_main
 from parsec_python.Input import parse_parsec_input
 
+# PARSEC 1.5's numbers: its linear tables and tabulated projector tails (parsec_python.tests.parsec15_tables)
+from parsec_python.tests.parsec15_tables import parsec15_tables_module as setUpModule  # noqa: F401, N812
+
 DATA = Path(__file__).resolve().parents[2] / "tests" / "data"
 CUPY = cupy_available()
 

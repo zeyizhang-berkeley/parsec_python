@@ -128,7 +128,9 @@ class ParsecInputTests(unittest.TestCase):
         self.assertEqual(problem.hartree.boundary_method, "auto")
         self.assertEqual(problem.scf.net_charge, 0.0)
         self.assertFalse(problem.scf.use_plain_residual)
-        self.assertFalse(hydrogen.use_spline)
+        # no Cubic_Spline in the input: the cubic spline of PARSEC_CUBIC_SPLINE_DEFAULT (PARSEC 1.5: linear tables)
+        self.assertTrue(hydrogen.use_spline)
+        self.assertEqual(translation.cubic_spline_defaulted, ("H",))
         self.assertTrue(translation.output_all_states)
         self.assertEqual(translation.output_level, 4)
         self.assertFalse(

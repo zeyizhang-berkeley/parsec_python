@@ -34,6 +34,7 @@ in Rydberg, like every energy of the solver.
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+import os
 from time import perf_counter
 from typing import Callable, Sequence
 
@@ -42,14 +43,49 @@ import scipy.sparse as sp
 
 from ..Grid import RealSpaceGrid
 from ..models import HartreeSettings
+from ..Occupations.fermi_dirac import FERMI_COUNT_TOLERANCE
 
 
 # An orbital whose occupation is below this bound is not occupied: with the
 # Coulomb integrals of valence orbitals (below a few Hartree) it would change
-# the exchange energy by less than 1e-11 Hartree.
+# the exchange energy by less than 1e-11 Hartree.  The cut of
+# ``PARSEC_EXCHANGE_OCCUPATION_CUT=off``; :func:`exchange_occupation_threshold`
+# gives the cut in force.
 OCCUPATION_THRESHOLD = 1.0e-12
 # Occupations this close to zero or one count as integers in the report.
 FRACTIONAL_TOLERANCE = 1.0e-8
+
+#: ``PARSEC_EXCHANGE_OCCUPATION_CUT``: ``on`` (default) leaves out of the exact
+#: exchange (energy, Fock and ACE operators, of clusters, cells and k-points)
+#: every orbital whose occupation does not exceed the electron-count tolerance
+#: of the Fermi-level search, ``FERMI_COUNT_TOLERANCE`` (1e-10, ``small`` of
+#: PARSEC 1.5's ``flevel.f90``).  In a gap that bisection stops at the first
+#: level whose count is within the tolerance, so the empty levels keep
+#: occupations anywhere between zero and about 1e-10 that the search does not
+#: resolve; each such orbital adds a Poisson solve per occupied orbital and
+#: changes the energy by less than 1e-10 Ry.  ``off``: the cut
+#: :data:`OCCUPATION_THRESHOLD` (1e-12), as before.
+EXCHANGE_OCCUPATION_CUT_ENV = "PARSEC_EXCHANGE_OCCUPATION_CUT"
+
+
+def exchange_occupation_cut_setting() -> str:
+    """``on`` (default) or ``off``, from ``PARSEC_EXCHANGE_OCCUPATION_CUT``; another value is an error."""
+
+    value = os.environ.get(EXCHANGE_OCCUPATION_CUT_ENV, "on").strip().lower() or "on"
+    if value not in ("on", "off"):
+        raise ValueError(f"{EXCHANGE_OCCUPATION_CUT_ENV} must be on or off, got {value!r}")
+    return value
+
+
+def exchange_occupation_threshold() -> float:
+    """The occupation an orbital must exceed to take part in the exact exchange.
+
+    ``FERMI_COUNT_TOLERANCE`` (1e-10) with ``PARSEC_EXCHANGE_OCCUPATION_CUT=on``
+    (default), :data:`OCCUPATION_THRESHOLD` (1e-12) with ``off``.  The same
+    bound applies to an occupation that carries a k-point or sector weight.
+    """
+
+    return FERMI_COUNT_TOLERANCE if exchange_occupation_cut_setting() == "on" else OCCUPATION_THRESHOLD
 
 
 @dataclass(frozen=True)
@@ -77,14 +113,17 @@ class ExactExchangeResult:
 
 def occupied_columns(
     occupations: np.ndarray,
-    threshold: float = OCCUPATION_THRESHOLD,
+    threshold: float | None = None,
 ) -> np.ndarray:
     """Return the indices of the orbitals that carry electrons.
 
     Occupations must lie in ``[0, 1]`` (one is a doubly occupied orbital);
-    anything else is refused rather than clipped.
+    anything else is refused rather than clipped.  ``threshold`` ``None``:
+    :func:`exchange_occupation_threshold`.
     """
 
+    if threshold is None:
+        threshold = exchange_occupation_threshold()
     occupations = np.asarray(occupations, dtype=np.float64)
     if occupations.ndim != 1:
         raise ValueError("occupations must be a one-dimensional array")
@@ -105,7 +144,7 @@ def exact_exchange_energy(
     volume_element: float,
     solve_pair_potential: Callable[[np.ndarray], object],
     *,
-    occupation_threshold: float = OCCUPATION_THRESHOLD,
+    occupation_threshold: float | None = None,
     progress: Callable[[int, int, float], None] | None = None,
 ) -> ExactExchangeResult:
     """Accumulate ``-sum_ij f_i f_j (ij|ij)`` over the occupied orbitals.
@@ -127,6 +166,9 @@ def exact_exchange_energy(
         :class:`parsec_python.Hartree.HartreeResult`).  It must be linear in
         ``rho``: a solver that adds a static term to its boundary values,
         such as the atomic tail of the total density, is not one.
+    occupation_threshold
+        The occupation an orbital must exceed to enter; ``None``:
+        :func:`exchange_occupation_threshold`.
     progress
         Optional ``progress(done, total, seconds)`` called after each solve.
     """
@@ -210,7 +252,7 @@ def spin_exact_exchange_energy(
     volume_element: float,
     solve_pair_potential: Callable[[np.ndarray], object],
     *,
-    occupation_threshold: float = OCCUPATION_THRESHOLD,
+    occupation_threshold: float | None = None,
     progress: Callable[[int, int, float], None] | None = None,
 ) -> ExactExchangeResult:
     """Exact exchange energy of the orbitals of two spin channels.
@@ -232,6 +274,8 @@ def spin_exact_exchange_energy(
 
     if len(wavefunctions) != 2 or len(occupations) != 2:
         raise ValueError("the orbitals and occupations of two spin channels are needed")
+    if occupation_threshold is None:
+        occupation_threshold = exchange_occupation_threshold()
     started = perf_counter()
     pair_counts = []
     for channel_occupations in occupations:
@@ -307,10 +351,13 @@ def reference_pair_poisson(
 
 
 __all__ = [
+    "EXCHANGE_OCCUPATION_CUT_ENV",
     "FRACTIONAL_TOLERANCE",
     "OCCUPATION_THRESHOLD",
     "ExactExchangeResult",
     "exact_exchange_energy",
+    "exchange_occupation_cut_setting",
+    "exchange_occupation_threshold",
     "occupied_columns",
     "pair_hartree_settings",
     "reference_pair_poisson",

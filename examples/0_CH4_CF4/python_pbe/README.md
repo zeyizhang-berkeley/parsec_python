@@ -155,9 +155,9 @@ The larger offsets in individual absolute totals are systematic discretization
 and implementation differences.  They cancel within each matched ordinary/
 core-hole PP pair; the final chemical-shift disagreement is about 13 meV.
 
-For this cold run (the kept logs, code of 20 November 2026, one NVIDIA A100
-per case), CH4 IS/FS used 28/21 SCF iterations and CF4 IS/FS used 40/37.  CF4
-wall times were 43/40 seconds.  Its dominant cost was the Hartree linear solve
+For this cold run (the kept logs, code of 20 November 2026 for FS_1s and of
+22 November 2026 for IS, one NVIDIA A100 per case), CH4 IS/FS used 28/21
+SCF iterations and CF4 IS/FS used 40/37.  CF4 wall times were 43/40 seconds.  Its dominant cost was the Hartree linear solve
 (15/14 seconds), followed by GPU diagonalization (12/12 seconds); PBE
 evaluation itself was not the dominant kernel. Since 2026-11-07 that linear
 solve runs on the GPU by default (`PARSEC_HARTREE_LINEAR_BACKEND`,
@@ -165,7 +165,11 @@ solve runs on the GPU by default (`PARSEC_HARTREE_LINEAR_BACKEND`,
 `PARSEC_HARTREE_LINEAR_BACKEND=native` takes the host CG of the logs of
 1 September 2026, whose CF4 runs took 793/627 seconds on the tested hybrid
 machine (host CG 446/407 seconds, GPU diagonalization 225/111 seconds), with
-the same energies to the printed digits.
+the same energies to the printed digits. The IS logs were run again when a
+`martins_new` projector became zero beyond the largest cutoff radius of its
+channels (`PARSEC_PROJECTOR_TAIL=auto`, since 22 November 2026): the carbon
+table of these inputs holds 7e-13 Ry beyond it, which changes a few
+eigenvalues of the SCF iterations in the tenth decimal and no energy.
 
 ## B3LYP status
 

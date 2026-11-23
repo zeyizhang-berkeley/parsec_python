@@ -1270,7 +1270,9 @@ def prepare_periodic_single_point(
     restart file does not change the routines of its input.
 
     These are Andrew Grieder's routines, the default; ``problem.grid.fortran_routines``
-    (``Use_Fortran_Routines``) selects :func:`_prepare_fortran_periodic_single_point`.
+    (``Use_Fortran_Routines``) selects :func:`_prepare_fortran_periodic_single_point`.  A species with LDA+U is
+    refused here: these routines build no LDA+U projectors (the parser gives every input with LDA+U the
+    Fortran-derived ones).
     ``negative_laplacian_builder(grid)`` replaces :func:`~..Laplacian.build_negative_laplacian` (the accelerated
     driver's deferred descriptor of the same matrix).
     """
@@ -1279,6 +1281,19 @@ def prepare_periodic_single_point(
     if getattr(problem.grid, "fortran_routines", False) or getattr(problem.grid, "periodicity", 3) in (1, 2):
         # Use_Fortran_Routines (parsec_python.Input.routines), and the wires and slabs of those routines
         return _prepare_fortran_periodic_single_point(problem)
+    hubbard_species = sorted(
+        symbol
+        for symbol, specification in problem.pseudopotentials.items()
+        if getattr(specification, "has_hubbard", False)
+    )
+    if hubbard_species:
+        # These routines build no LDA+U projectors: the term would be left out of the SCF, the energy and the forces.
+        raise NotImplementedError(
+            f"LDA+U (ldaplusu_u/ldaplusu_j of {', '.join(hubbard_species)}) is not implemented on the default periodic "
+            "routines (Andrew Grieder's), which build no LDA+U projectors: prepare the cell on the Fortran-derived "
+            "routines (Use_Fortran_Routines: .true., PeriodicGridSettings(fortran_routines=True)), as the input "
+            "parser does for every input with LDA+U"
+        )
     preparation_start = time.perf_counter()
     # 1. Geometry, pseudopotentials, and electron count.
     atoms = tuple(problem.atoms)

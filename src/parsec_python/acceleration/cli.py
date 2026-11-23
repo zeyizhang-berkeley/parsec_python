@@ -2225,10 +2225,22 @@ def _run(
         from parsec_python.SCF.state_extension import close_multiplet_setting
 
         close_multiplet_setting()
+        # PARSEC_EXCHANGE_OCCUPATION_CUT: the occupation an orbital needs to enter the exact exchange
+        from parsec_python.V_xc.exact_exchange import exchange_occupation_cut_setting
+
+        exchange_occupation_cut_setting()
+        # PARSEC_FOCK_DIIS_TAIL: the orbitals the window of the outer DIIS of a Fock loop stores
+        from parsec_python.SCF.fock_diis import fock_diis_tail_setting
+
+        fock_diis_tail_setting()
         # PARSEC_KPOINT_WAVEFUNCTIONS and PARSEC_GAMMA_PARSEC_DAT (parsec.dat of the k-point loops)
         from parsec_python.Output.parsec_dat import validate_settings as validate_parsec_dat_settings
 
         validate_parsec_dat_settings()
+        # PARSEC_LDAU_SMOOTH_PROJECTORS: the shape of the LDA+U projectors (Hamiltonian/hubbard.py)
+        from parsec_python.Hamiltonian.hubbard import ldau_smooth_projectors_fraction
+
+        ldau_smooth_projectors_fraction()
         if translation.problem.scf.spin_polarized:
             # PARSEC_SPIN_FALLBACK_DENSITY: the density of the full grid a spin cluster leaves its sectors for
             from .SCF.fallback_density import fallback_density_setting

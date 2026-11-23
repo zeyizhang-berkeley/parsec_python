@@ -363,7 +363,8 @@ def compute_spinor_forces(
     spin-polarized case: the total density, the spin-averaged exchange-correlation potential for the core correction and
     the last ``V_out - V_in`` of the spin-averaged potential for the SCF residual.  The nonlocal term is the force of
     the Kleinman-Bylander projectors on both spin components plus that of the spin-orbit projectors
-    (:mod:`parsec_python.Forces.spin_orbit`); each spinor state holds ``occupation`` electrons.
+    (:mod:`parsec_python.Forces.spin_orbit`); each spinor state holds ``occupation`` electrons.  With
+    ``Van_Der_Waals`` the TS term of the result is added (:func:`correction_forces`).
 
     Averaging over the point group of the atoms (``symmetrize``) is valid only where the magnetization does not break
     that symmetry, so it is off unless asked for; the net force is removed in any case.
@@ -420,6 +421,8 @@ def compute_spinor_forces(
         separable,
         operations,
         seconds=perf_counter() - started,
+        # the TS term, as Forces.spin_orbit_fortran.compute_spin_orbit_forces adds it (LDA+U is refused with spinors)
+        **correction_forces(system, result),
         **({} if tail_term is None else {"hartree_boundary": tail_term}),
     )
 
@@ -518,6 +521,8 @@ def compute_periodic_forces(
         seconds=perf_counter() - started,
         phase_seconds=clock,
         periodic=True,
+        # the LDA+U and TS terms, as Forces.periodic.compute_periodic_forces adds them
+        **correction_forces(system, result),
     )
 
 

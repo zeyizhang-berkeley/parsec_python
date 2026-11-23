@@ -87,6 +87,15 @@ def hubbard_setup_lines(system) -> list[str]:
     species = [symbol for symbol in specifications if symbol in projectors.cutoff_radii]
     for symbol in species:
         lines.append(f"{symbol:<2.2s}{projectors.cutoff_radii[symbol]:12.4f}")
+    from ..Hamiltonian.hubbard import ldau_smooth_projectors_fraction
+
+    fraction = ldau_smooth_projectors_fraction()
+    if fraction:
+        # Only under PARSEC_LDAU_SMOOTH_PROJECTORS (the output of upot.F90 is unchanged without it).
+        lines.append(
+            f"  PARSEC_LDAU_SMOOTH_PROJECTORS: smooth projectors, taper width f = {fraction:.4f} r_c; "
+            "the radii above are those of their support, (1 + f/2) r_c"
+        )
     lines += ["", "  Potential constant (eV) "]
     for symbol in species:
         specification = specifications[symbol]

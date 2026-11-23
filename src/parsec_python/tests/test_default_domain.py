@@ -913,7 +913,8 @@ class InputsWithARadiusTests(unittest.TestCase):
         inputs = parsed_inputs.shipped_inputs()
         self.assertEqual(sorted(inputs), sorted(GOLDEN["inputs"]))
         for name, (path, pseudopotentials) in inputs.items():
-            with self.subTest(input=name):
+            # the records were made when a species without Cubic_Spline took PARSEC 1.5's linear tables
+            with self.subTest(input=name), patch.dict(os.environ, {"PARSEC_CUBIC_SPLINE_DEFAULT": "off"}):
                 translation = parse_parsec_input(
                     path, pseudopotential_directory=pseudopotentials
                 )

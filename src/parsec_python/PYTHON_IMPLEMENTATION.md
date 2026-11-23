@@ -285,7 +285,10 @@ The reader retains radial channels, wavefunctions, occupations, cutoffs,
 valence density, and optional core density. It validates radial monotonicity and
 declared channel count. `ParsecRadialSpline` is a direct NumPy translation of
 PARSEC's clamped `spline.f90` recurrence, including the artificial
-negative-radius padding tied to `Expansion_Order/2`.
+negative-radius padding tied to `Expansion_Order/2`. The recurrence runs on
+Python floats, operation for operation, and `from_positive_grid` returns the
+spline it built before for the same table, width and inner value (copies of
+its arrays), so the routines that ask for it per batch of points build it once.
 
 ### Hartree only
 
@@ -460,6 +463,25 @@ at the Gamma point and of the little groups of k-points
 
 The Python `shift` is independent of symmetry. This avoids copying PARSEC's
 `Ignore_Symmetry -> zero shift` coupling.
+
+### Cubic spline and projector tail by default
+
+Two defaults differ from PARSEC 1.5 for the sake of forces that follow the
+slope of the energy (`FORCES_AND_RELAXATION.md`, Forces):
+
+- A species without `Cubic_Spline` in the input takes PARSEC's cubic spline of
+  its local potential, core density and projectors, as with
+  `Cubic_Spline: .true.` (`PARSEC_CUBIC_SPLINE_DEFAULT=on`); PARSEC 1.5 reads
+  the label with the default `.false.` (linear tables). A value in the input
+  wins, and a cluster with `Old_Interpolation_Format: .true.` keeps the linear
+  tables.
+- The projectors of a `MARTINS_NEW` table are zero beyond its largest channel
+  cutoff (`PARSEC_PROJECTOR_TAIL=auto`), as in the UPF file the table was
+  converted from; PARSEC 1.5 keeps the tabulated difference up to `rcore`.
+
+`PARSEC_CUBIC_SPLINE_DEFAULT=off PARSEC_PROJECTOR_TAIL=off` (or `Cubic_Spline:
+.false.` for every species, where no table has such a tail) reproduce the
+numbers of PARSEC 1.5's interpolation, those of this package before the change.
 
 ### Eigensolver initialization
 

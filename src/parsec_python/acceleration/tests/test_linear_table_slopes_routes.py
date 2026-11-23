@@ -22,6 +22,9 @@ from parsec_python.acceleration.backends.cupy import cupy_available
 from parsec_python.acceleration.backends.native import native_available
 from parsec_python.tests.force_reference import load_cases, write_case
 
+# PARSEC 1.5's numbers: its linear tables and tabulated projector tails (parsec_python.tests.parsec15_tables)
+from parsec_python.tests.parsec15_tables import parsec15_tables_module as setUpModule  # noqa: F401, N812
+
 _ENV = "PARSEC_LINEAR_TABLE_SLOPES"
 
 

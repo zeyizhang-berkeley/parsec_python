@@ -73,6 +73,8 @@ class SlabBoundaryPlan:
     decay: np.ndarray
     distance: np.ndarray  # (distinct exterior planes, n3)
     to_box: object
+    #: the grid vector of the active points of an index box (the transpose of ``to_box``)
+    from_box: object = None
 
     def plane_moments(self, density: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """``(qc, qs, sigma')`` of ``density``: ``(G, n3)``, ``(G, n3)``, ``(n3,)``."""
@@ -100,6 +102,35 @@ class SlabBoundaryPlan:
         periodic = periodic + np.einsum("bg,gb->b", self.boundary_sin, sine_part[:, plane])
         mean = self.distance @ sigma
         return 2.0 * (mean[plane] + 2.0 * self.volume_element * periodic)
+
+    def boundary_transpose(self, values: np.ndarray) -> np.ndarray:
+        """The transpose of :meth:`boundary_values`: ``values`` holds one number per exterior stencil point, the result
+        one per grid point, and ``values . boundary_values(n) = boundary_transpose(values) . n`` for every ``n``."""
+
+        if self.from_box is None:
+            raise ValueError("this slab boundary plan was built without from_box")
+        values = 2.0 * np.asarray(values, dtype=np.float64)
+        plane = self.boundary_plane
+        planes = self.distance.shape[0]
+        sigma_bar = self.distance.T @ np.bincount(plane, weights=values, minlength=planes)
+        weighted = 2.0 * self.volume_element * values
+        cosine_bar = np.zeros((self.lengths.size, planes))
+        sine_bar = np.zeros_like(cosine_bar)
+        for index in range(planes):
+            rows = plane == index
+            cosine_bar[:, index] = self.boundary_cos[rows].T @ weighted[rows]
+            sine_bar[:, index] = self.boundary_sin[rows].T @ weighted[rows]
+        scale = (2.0 * np.pi / (self.area * self.lengths))[:, None] * self.plane_used[None, :]
+        qc_bar = np.einsum("gpk,gp->gk", self.decay, cosine_bar) * scale
+        qs_bar = np.einsum("gpk,gp->gk", self.decay, sine_bar) * scale
+        box = np.einsum("gij,gk->ijk", self.plane_cos, qc_bar) + np.einsum("gij,gk->ijk", self.plane_sin, qs_bar)
+        filled = self.plane_counts > 0
+        per_plane = np.zeros_like(sigma_bar)
+        per_plane[filled] = (
+            -2.0 * np.pi * self.plane_spacing * self.plane_used[filled] * sigma_bar[filled] / self.plane_counts[filled]
+        )
+        box = box + per_plane[None, None, :]
+        return self.from_box(box)
 
 
 def slab_reciprocal_half_plane(order: int) -> np.ndarray:
@@ -188,6 +219,7 @@ def build_slab_boundary_plan(
         decay=decay,
         distance=distance,
         to_box=grid.to_box,
+        from_box=grid.from_box,
     )
 
 

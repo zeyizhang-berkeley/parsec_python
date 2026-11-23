@@ -30,7 +30,26 @@ and scaled to the electron count of the channel; the empty states of the last
 loop, orthogonalized against them, complete the ACE (the empty levels).  A
 proposal whose kept occupations fall below one half, or whose dropped
 occupations exceed ``DROPPED_LIMIT``, is not taken (another occupation
-pattern).
+pattern).  The stored orbitals are those whose occupation exceeds
+:func:`window_occupation_floor`: with ``PARSEC_FOCK_DIIS_TAIL=on`` (default)
+the levels that the guard below counts as empty (at most ``FRACTIONAL_GUARD``:
+the tail of a gap at a raised Fermi temperature) stay out of the window and
+complete the ACE of an extrapolated density matrix as empty states, so that
+the extrapolation holds the integer occupations alone; with ``off`` every
+level the exact exchange counts is stored, and one such level among the
+kept natural occupations refuses every proposal.  Such a tail is left out
+only up to :func:`tail_limit` (``TAIL_SHARE * sqrt(Exx_Tolerance)``): the
+stop test bounds dexx, which is quadratic in the change of the density
+matrix and weighs a level of occupation ``f`` by ``f^2``, so at the stop the
+levels are converged to about ``sqrt(Exx_Tolerance)`` Ry only, and at a
+finite temperature the energy is of first order in them (a level off by
+``de`` moves it by ``f ln(1/f) de`` through its occupation).  After an
+extrapolation the loop stopped with its empty levels further from converged
+than after plain steps (Hartree-Fock of a bent H4 chain at ``Exx_Tolerance``
+1e-9: at 12000 K the lowest empty level 2.6e-5 Ry off against 1.1e-5 Ry;
+with tails of 2e-6 to 5e-4, 9000 to 16000 K, totals 4e-9 to 2.3e-8 Ry from
+the converged ones against 2e-10 to 3e-9 Ry for the plain loop).  A larger
+tail clears the window as a fractional state does.
 
 When (:meth:`OuterDIIS.judge`, :meth:`OuterDIIS.proposal`): two residuals at least; the last
 orbitals with integer occupations in every channel (largest ``min(f, 1 - f)``
@@ -66,6 +85,8 @@ opens files.
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
+import math
+import os
 
 import numpy as np
 
@@ -92,6 +113,77 @@ REGULARIZATION = 1.0e-12
 #: Residuals along one slow mode are nearly parallel: the oldest are dropped while the
 #: normalized residual matrix is worse conditioned than this.
 CONDITION_LIMIT = 1.0e10
+
+#: ``PARSEC_FOCK_DIIS_TAIL``: ``on`` (default) stores in the window only the
+#: orbitals whose occupation exceeds ``FRACTIONAL_GUARD``; the levels between
+#: the exchange cut and that guard (the thermal tail of a gap, which the gate
+#: counts as empty) complete the operator of an extrapolated density matrix
+#: as empty states, while none of them exceeds :func:`tail_limit` (a larger
+#: one clears the window).  ``off``: the window stores every orbital the exact
+#: exchange counts (:func:`parsec_python.V_xc.exact_exchange.exchange_occupation_threshold`),
+#: as before: a tail level then stands among the ``n_occ`` kept natural
+#: occupations, below one half, and every proposal is refused.
+FOCK_DIIS_TAIL_ENV = "PARSEC_FOCK_DIIS_TAIL"
+#: Largest occupation of a level left out of the window, as a share of ``sqrt(Exx_Tolerance / 1 Ry)``.  A model
+#: estimate, not a proven bound: at the stop of the loop the levels are taken as converged to about
+#: ``sqrt(Exx_Tolerance)`` Ry (dexx is quadratic in the change of the density matrix; measured 2.6e-5 Ry at 1e-9),
+#: and a level of occupation ``f`` off by ``de`` moves the energy by ``f ln(1/f) de``; below
+#: ``1e-3 sqrt(Exx_Tolerance)`` that estimate is ``1e-3 ln(1/f) Exx_Tolerance`` (2 % of it at ``f`` = 1e-9).
+TAIL_SHARE = 1.0e-3
+
+
+def fock_diis_tail_setting() -> str:
+    """``on`` (default) or ``off``, from ``PARSEC_FOCK_DIIS_TAIL``; another value is an error."""
+
+    value = os.environ.get(FOCK_DIIS_TAIL_ENV, "on").strip().lower() or "on"
+    if value not in ("on", "off"):
+        raise ValueError(f"{FOCK_DIIS_TAIL_ENV} must be on or off, got {value!r}")
+    return value
+
+
+def window_occupation_floor() -> float:
+    """The occupation an orbital must exceed to be stored in the window (its occupied blocks).
+
+    The orbitals at or below it complete the ACE of an extrapolated density
+    matrix as empty states (the engines' ``natural_sets``).
+    ``FRACTIONAL_GUARD`` with ``PARSEC_FOCK_DIIS_TAIL=on`` (default), the cut
+    of the exact exchange with ``off``.  The gate (:meth:`OuterDIIS.judge`)
+    keeps a window only while every occupation lies within
+    ``FRACTIONAL_GUARD`` of 0 or 1, so the stored levels are then those near 1.
+    """
+
+    from parsec_python.V_xc.exact_exchange import exchange_occupation_threshold
+
+    cut = exchange_occupation_threshold()
+    return max(FRACTIONAL_GUARD, cut) if fock_diis_tail_setting() == "on" else cut
+
+
+def tail_limit(tolerance: float) -> float:
+    """The largest occupation of a level left out of the window (``PARSEC_FOCK_DIIS_TAIL=on``) at which the gate opens.
+
+    ``TAIL_SHARE * sqrt(tolerance)`` (``tolerance`` the ``Exx_Tolerance`` in
+    Ry), between the cut of the exact exchange and ``FRACTIONAL_GUARD``.
+    """
+
+    from parsec_python.V_xc.exact_exchange import exchange_occupation_threshold
+
+    scaled = TAIL_SHARE * math.sqrt(max(float(tolerance), 0.0))
+    return min(FRACTIONAL_GUARD, max(exchange_occupation_threshold(), scaled))
+
+
+def thermal_tail(occupations) -> float:
+    """The largest occupation among the levels the window leaves out (``PARSEC_FOCK_DIIS_TAIL=on``) that the exact
+    exchange counts: above its cut and at most ``FRACTIONAL_GUARD``; 0 for none."""
+
+    from parsec_python.V_xc.exact_exchange import exchange_occupation_threshold
+
+    cut = exchange_occupation_threshold()
+    largest = 0.0
+    for values in occupations:
+        values = np.asarray(values, dtype=np.float64)
+        tail = values[(values > cut) & (values <= FRACTIONAL_GUARD)]
+        largest = max(largest, float(np.max(tail, initial=0.0)))
+    return largest
 
 
 def array_module(array):
@@ -252,7 +344,8 @@ class OuterDIIS:
         say whether its orbitals join the window.
 
         Nothing is copied before the loop is judged slow, by the gate of an
-        extrapolated step: integer occupations, dexx not risen, the dexx ratio
+        extrapolated step: integer occupations (with ``PARSEC_FOCK_DIIS_TAIL=on``
+        no level left out of the window above :func:`tail_limit`), dexx not risen, the dexx ratio
         of the last two plain steps above ``SLOW_RATIO``, the next loop
         neither expected to be the last (``criteria``) nor the last allowed
         (``final_next``).  A loop that fails it frees the window (a fractional
@@ -274,6 +367,12 @@ class OuterDIIS:
         if fractional > FRACTIONAL_GUARD:
             self._free("fractional occupations: window cleared")
             return False
+        if fock_diis_tail_setting() == "on":
+            tail, limit = thermal_tail(occupations), tail_limit(self.tolerance)
+            if tail > limit:
+                # The levels left out of the window would hold more than the stop test resolves (tail_limit).
+                self._free(f"an empty level holds {tail:.1E} (above {limit:.1E}): window cleared")
+                return False
         if (
             previous is not None
             and not output.extrapolated
@@ -515,13 +614,19 @@ __all__ = [
     "COEFFICIENT_LIMIT",
     "CONDITION_LIMIT",
     "DROPPED_LIMIT",
+    "FOCK_DIIS_TAIL_ENV",
     "FRACTIONAL_GUARD",
     "OccupiedBlock",
     "OuterDIIS",
     "OutputSet",
     "SLOW_RATIO",
+    "TAIL_SHARE",
     "WINDOW",
     "array_module",
+    "fock_diis_tail_setting",
     "orthonormal_complement",
+    "tail_limit",
+    "thermal_tail",
     "to_host",
+    "window_occupation_floor",
 ]

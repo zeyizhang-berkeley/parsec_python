@@ -432,6 +432,8 @@ class OrbitalSymmetryTests(unittest.TestCase):
         self.assertIn("no two-fold rotation or mirror", str(caught.exception))
 
 
+#: Max_Iter 80: with the cubic spline a species without Cubic_Spline takes by default the Kramers sectors need 49 SCF
+#: steps (29 with the linear tables of PARSEC 1.5).
 _CLI_INPUT = """\
 Boundary_Sphere_Radius: 6.0
 Grid_Spacing: 0.6
@@ -440,7 +442,7 @@ Expansion_Order: 6
 States_Num: 20
 Net_Charges: 0
 Fermi_Temp: 500.0
-Max_Iter: 40
+Max_Iter: 80
 Convergence_Criterion: 5.0e-3
 
 Mixing_Method: Anderson

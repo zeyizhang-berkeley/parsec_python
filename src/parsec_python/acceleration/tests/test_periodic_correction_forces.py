@@ -345,5 +345,38 @@ class BandTest(unittest.TestCase):
                 self.assertGreater(np.max(np.abs(without - bands["cpu"])), 1.0e-2)
 
 
+class DefaultRoutineCorrectionForceTest(unittest.TestCase):
+    """``compute_periodic_forces`` of the default routines (``Forces/compute.py``, reached from the API only: the
+    command lines take the Fortran-derived routines for TS and LDA+U) adds the TS term once, as the readable
+    ``Forces.compute_periodic_forces`` of the same routines does."""
+
+    def test_the_ts_term_is_added_once(self):
+        from parsec_python.Grid.pbc import uses_fortran_routines
+        from parsec_python.Relaxation.backend import periodic_backend
+        from parsec_python.SCF.pbc import prepare_periodic_single_point
+
+        from ..Forces.compute import correction_forces
+
+        problem = _translation("h4").problem
+        problem = dataclasses.replace(problem, grid=dataclasses.replace(problem.grid, fortran_routines=False))
+        system = driver.prepare_single_point(problem, backend="cupy" if cupy_available() else "scipy", symmetry="off")
+        self.assertFalse(uses_fortran_routines(system.grid))
+        backend = driver.ionic_backend()
+        result = backend.run_scf(system)
+        forces = backend.compute_forces(system, result, symmetrize=False)
+        self.assertIsNotNone(forces.dispersion)
+        self.assertGreater(float(np.max(np.abs(forces.dispersion))), 1.0e-5)
+        np.testing.assert_array_equal(forces.dispersion, correction_forces(system, result)["dispersion"])
+        terms = forces.ion_ion + forces.local.total + forces.nonlocal_pseudopotential + forces.dispersion
+        if forces.hubbard is not None:
+            terms = terms + forces.hubbard
+        np.testing.assert_allclose(forces.unsymmetrized, terms, rtol=0.0, atol=1.0e-12)
+        reference_backend = periodic_backend()
+        reference_system = prepare_periodic_single_point(problem)
+        reference = reference_backend.compute_forces(reference_system, reference_backend.run_scf(reference_system))
+        np.testing.assert_allclose(forces.dispersion, reference.dispersion, rtol=0.0, atol=1.0e-9)
+        np.testing.assert_allclose(forces.unsymmetrized, reference.unsymmetrized, rtol=0.0, atol=1.0e-7)
+
+
 if __name__ == "__main__":
     unittest.main()

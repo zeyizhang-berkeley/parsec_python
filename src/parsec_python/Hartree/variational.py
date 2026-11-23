@@ -70,6 +70,11 @@ differs from ``V_H`` by up to 5e-2 Ry), so the results keep ``V_H`` as their
 Hartree potential (:func:`electrostatic_hartree`): the archive, the cube
 files and the files of a frozen-density embedding hold the potential of the
 Poisson solve, the effective potentials of the SCF the one it ran with.
+
+A slab whose forces are computed takes the same potential under ``on`` and
+``auto`` with the sheet sums of its boundary values in place of the multipole
+series (:class:`ConfinedVariationalHartree`; no tail, no estimate); a wire
+keeps the Poisson solution.
 """
 
 from __future__ import annotations
@@ -105,7 +110,10 @@ def hartree_variational_setting() -> str:
     below it, and with ``Hartree_Boundary_Tolerance: off`` (PARSEC's boundary
     values, for a comparison with Fortran PARSEC), the run keeps the potential
     of the Poisson solve, bit for bit that of ``off``.  ``on``: in every such
-    cluster calculation, without the estimate.  An unknown value is refused.
+    cluster calculation, without the estimate.  A slab whose forces are
+    computed takes the potential of its sheet sums under ``on`` and ``auto``
+    alike, without an estimate (:class:`ConfinedVariationalHartree`); a wire
+    keeps the Poisson solution.  An unknown value is refused.
     """
 
     value = os.environ.get(HARTREE_VARIATIONAL_SWITCH, "off").strip().lower() or "off"
@@ -948,6 +956,101 @@ class VariationalHartreeSolve:
         return getattr(self.inner, name)
 
 
+class ConfinedVariationalHartree:
+    """``V' = (V_H + G^T rho)/2`` of a slab in place of the Poisson solution ``V_H = G rho``.
+
+    The Hartree solve of a slab (:mod:`parsec_python.Hartree.confined`) is ``A V = 8 pi rho - A_IB M rho`` with ``M``
+    the sheet sums of :mod:`parsec_python.Hartree.slab_fortran` at the missing stencil points: ``G = A^-1 (8 pi -
+    A_IB M)`` is not symmetric (the continuum potential of the planes is not the inverse of the finite-difference
+    operator), so ``V_H`` is not the derivative of ``E_H = (h^3/2) rho.G rho``, the SCF does not make the energy
+    stationary and the Hellmann-Feynman forces miss ``(h^3/2) [rho.G drho/dR - drho/dR.G rho]`` (Ge2 slab with
+    density 1.1e-4 at the edge of a half-height of 6 bohr: -1.1e-5 Ry/bohr).  ``G^T rho = 8 pi u - M^T A_IB^T u``
+    with ``A u = rho`` (zero boundary values), one more conjugate-gradient solve per Hartree solve.  ``rho.V' =
+    rho.V_H`` at every density, so the energy functional and its bookkeeping are unchanged; the forces then need the
+    transposed operator in the term of the Gaussian charges (:meth:`transpose`).  The boundary has no term that moves
+    with the atoms.  Wires keep the Poisson solution.
+    """
+
+    def __init__(self, plan, negative_laplacian, settings):
+        self.plan = plan
+        self.negative_laplacian = negative_laplacian
+        self.settings = settings
+        self.active = True
+        # (u, V_H) of the last solve, the start of the next; (V', V_H) of the last potential returned
+        self.last = None
+        self.record = None
+        self.solves = 0
+        self.iterations = 0
+        self.unconverged = 0
+        self.seconds = 0.0
+
+    def transpose(self, density, poisson=None) -> np.ndarray:
+        """``G^T rho``; ``poisson`` is ``V_H = G rho`` of the same density where known (it starts the solve of ``u``)."""
+
+        from .poisson import _conjugate_gradient
+
+        started = perf_counter()
+        density = np.asarray(density, dtype=np.float64)
+        start = np.zeros_like(density)
+        if self.last is not None and self.last[0].shape == density.shape:
+            start = self.last[0]
+            if poisson is not None and self.last[1] is not None:
+                start = start + (np.asarray(poisson, dtype=np.float64) - self.last[1]) / (8.0 * math.pi)
+        u, converged, iterations, _, _, _ = _conjugate_gradient(self.negative_laplacian, density, start, self.settings)
+        stencil = self.plan.stencil
+        exterior = stencil.coefficients * u[stencil.rows]
+        transposed = 8.0 * math.pi * u - self.plan.boundary.boundary_transpose(exterior)
+        self.last = (u, None if poisson is None else np.array(poisson, dtype=np.float64, copy=True))
+        self.solves += 1
+        self.iterations += int(iterations)
+        if not converged:
+            self.unconverged += 1
+        self.seconds += perf_counter() - started
+        return transposed
+
+    def potential(self, density, result):
+        """``result`` of the Poisson solve of ``density`` with ``V'`` as its potential."""
+
+        poisson = np.asarray(result.potential, dtype=np.float64)
+        corrected = 0.5 * (poisson + self.transpose(density, poisson))
+        self.record = (corrected, poisson)
+        return replace(result, potential=corrected)
+
+    def electrostatic(self, potential):
+        """The Poisson solution where ``potential`` is the V' of the last call, else ``potential``."""
+
+        if self.record is None or potential is None or hasattr(potential, "get"):
+            return potential
+        array = np.asarray(potential)
+        corrected, poisson = self.record
+        if array.shape == corrected.shape and np.array_equal(array, corrected):
+            return np.array(poisson, dtype=np.float64, copy=True)
+        return potential
+
+    def report(self) -> str:
+        text = f"{self.solves} solves of A u = rho ({self.iterations} CG steps, {self.seconds:.3f} s)"
+        if self.unconverged:
+            text += f", {self.unconverged} stopped at the step budget"
+        return text
+
+
+def confined_variational_hartree_for(problem, plan, negative_laplacian):
+    """The :class:`ConfinedVariationalHartree` of a prepared slab, or ``None`` where it does not apply.
+
+    ``PARSEC_HARTREE_VARIATIONAL`` ``on`` or ``auto`` (an unknown value is refused here, before the SCF), a slab
+    (``Boundary_Conditions: slab``; a wire keeps the Poisson solution) whose forces are computed
+    (:attr:`parsec_python.models.SinglePointInput.forces_wanted`), on the sheet sums of the Fortran-derived routines.
+    ``auto`` takes it there without an estimate (one more solve per Hartree solve of a slab).
+    """
+
+    setting = hartree_variational_setting()
+    if setting == "off" or not bool(getattr(problem, "forces_wanted", False)):
+        return None
+    if getattr(problem.grid, "periodicity", 3) != 2 or not hasattr(plan.boundary, "boundary_transpose"):
+        return None
+    return ConfinedVariationalHartree(plan, negative_laplacian, problem.hartree)
+
+
 def tail_charges(system):
     """``(positions, charges)`` of the atomic tail of a prepared cluster, ``None`` where its boundary has none."""
 
@@ -1033,6 +1136,7 @@ def hartree_tail_forces(system, result):
 
 __all__ = [
     "BoundaryPairs",
+    "ConfinedVariationalHartree",
     "FieldLayout",
     "HARTREE_VARIATIONAL_SWITCH",
     "HARTREE_VARIATIONAL_VALUES",
@@ -1043,6 +1147,7 @@ __all__ = [
     "ZeroBoundaryDeviceSolver",
     "ZeroBoundaryHostSolver",
     "boundary_pairs",
+    "confined_variational_hartree_for",
     "coulomb_sums",
     "electrostatic_hartree",
     "hartree_tail_forces",

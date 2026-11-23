@@ -61,8 +61,8 @@ import weakref
 
 import numpy as np
 
-from parsec_python.SCF.fock_diis import OccupiedBlock, orthonormal_complement
-from parsec_python.V_xc.exact_exchange import OCCUPATION_THRESHOLD
+from parsec_python.SCF.fock_diis import OccupiedBlock, orthonormal_complement, window_occupation_floor
+from parsec_python.V_xc.exact_exchange import exchange_occupation_threshold
 
 from ..Hamiltonian.exchange_device import (
     ChannelOrbitals,
@@ -1075,7 +1075,7 @@ class MPIExchangeService:
                     if xi is None or sector.vectors is None or self.owners[sector.representation] != self.rank:
                         continue
                     weights = orbitals.occupations[sector.states]
-                    occupied = np.flatnonzero(weights > OCCUPATION_THRESHOLD)
+                    occupied = np.flatnonzero(weights > exchange_occupation_threshold())
                     if not occupied.size:
                         continue
                     with cp.cuda.Device(int(xi.device.id)):
@@ -1136,7 +1136,7 @@ class MPIExchangeService:
                     if key is None:
                         continue
                     weights = orbitals.occupations[sector.states]
-                    positions = np.flatnonzero(weights > OCCUPATION_THRESHOLD)
+                    positions = np.flatnonzero(weights > window_occupation_floor())
                     if not positions.size:
                         continue
                     with cp.cuda.Device(sector.device):
@@ -1195,7 +1195,7 @@ class MPIExchangeService:
                 if self.owners[representation] != self.rank:
                     continue
                 weights = orbitals.occupations[sector.states]
-                empty = np.flatnonzero(weights <= OCCUPATION_THRESHOLD)
+                empty = np.flatnonzero(weights <= window_occupation_floor())
                 phi_key = item["phi"].get(representation)
                 phi = None if phi_key is None else self.objects.pop(int(phi_key))
                 with cp.cuda.Device(sector.device):
@@ -1681,7 +1681,7 @@ class MPIFockEngine(DeviceFockEngine):
             made = {}
             for representation, key in blocks.items():
                 weights = _sector_occupations(orbitals, selection, representation, exchange)
-                occupied = weights[weights > OCCUPATION_THRESHOLD]
+                occupied = weights[weights > window_occupation_floor()]
                 if not occupied.size:
                     continue
                 made[representation] = exchange._track(

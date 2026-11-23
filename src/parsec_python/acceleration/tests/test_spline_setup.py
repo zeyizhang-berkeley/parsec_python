@@ -80,6 +80,15 @@ def _cells():
         settings = PeriodicGridSettings(spacing=0.6, expansion_order=6, fortran_routines=fortran)
         grid = build_periodic_grid(PeriodicCell(lattice_vectors=lattice), settings)
         cases.append((label, grid, atoms, _germanium(), lattice))
+    # Andrew Grieder's slab grid: its images along the two in-plane vectors (periodic_dimensions=2 of the readable sum)
+    from parsec_python.Grid.pbc import build_slab_grid
+
+    slab_cell = np.array([[5.4, 0.0, 0.0], [0.0, 5.4, 0.0], [0.0, 0.0, 9.0]])
+    slab_grid = build_slab_grid(
+        PeriodicCell(lattice_vectors=slab_cell, dimensions=2), PeriodicGridSettings(spacing=0.6, expansion_order=6)
+    )
+    slab_atoms = [Atom("Ge", (0.31, 0.27, 1.10)), Atom("Ge", (2.93, 2.85, -1.05))]
+    cases.append(("default_slab", slab_grid, slab_atoms, _germanium(), slab_cell))
     for kind in ("slab", "wire"):
         problem = _confined_problem(kind)
         grid = build_confined_periodic_grid(problem.periodic_cell, problem.grid)
@@ -117,8 +126,12 @@ class DensityTests(unittest.TestCase):
     def test_the_spline_core_densities_are_the_readable_ones(self) -> None:
         for label, grid, atoms, specifications, lattice in _cells():
             potentials = _load(specifications)
+            # the slab of the default routines: its caller (SCF.pbc) passes the two periodic dimensions
+            dimensions = 2 if label == "default_slab" else 3
             with _readable():
-                readable = _ionic.superpose_atomic_density(grid, atoms, potentials, specifications, lattice, core=True)
+                readable = _ionic.superpose_atomic_density(
+                    grid, atoms, potentials, specifications, lattice, core=True, periodic_dimensions=dimensions
+                )
             self.assertGreater(float(np.max(readable)), 0.0)
             for threads in ("1", "3"):
                 with self.subTest(grid=label, threads=threads), mock.patch.dict(
@@ -126,7 +139,9 @@ class DensityTests(unittest.TestCase):
                 ), mock.patch.object(
                     spline_setup, "spline_superposed_density", wraps=spline_setup.spline_superposed_density
                 ) as fast:
-                    found = _ionic.superpose_atomic_density(grid, atoms, potentials, specifications, lattice, core=True)
+                    found = _ionic.superpose_atomic_density(
+                        grid, atoms, potentials, specifications, lattice, core=True, periodic_dimensions=dimensions
+                    )
                     self.assertGreaterEqual(fast.call_count, 1)
                     np.testing.assert_array_equal(found, readable)
 

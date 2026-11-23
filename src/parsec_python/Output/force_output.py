@@ -165,6 +165,10 @@ def force_report_lines(forces, output_level: int = 1, *, periodic: bool = False)
                 " ===========================================",
                 *_table(positions, boundary),
             ]
+        # Python addition: a slab whose SCF took the derivative of its Hartree energy (PARSEC_HARTREE_VARIATIONAL)
+        variational = getattr(forces, "hartree_variational", None)
+        if variational:
+            lines += ["", f" Hartree potential of the SCF: (V_H + G^T rho)/2 (PARSEC_HARTREE_VARIATIONAL), {variational}"]
     lines += ["", " Coordinates, forces, torque", " ============================", ""]
     if forces.symmetry_operations > 1:
         if output_level == 1:

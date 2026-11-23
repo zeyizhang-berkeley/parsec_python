@@ -476,7 +476,9 @@ def bulk_default_features(
     Gamma point alone; ``forces``: forces are computed (a relaxation, molecular dynamics or
     ``Skip_Force: .false.``); ``spinors``: self-consistent spin-orbit coupling or non-collinear magnetism;
     ``search_info``: the ``ierr`` of the Fortran-derived parser's space-group search
-    (``_bulk_symmetry_search_info``); ``spline_species``: every species uses ``Cubic_Spline``;
+    (``_bulk_symmetry_search_info``); ``spline_species``: every species has ``Cubic_Spline: .true.`` in the input
+    (the parser leaves out the spline a species without the label takes from ``PARSEC_CUBIC_SPLINE_DEFAULT``: such
+    an input keeps Andrew Grieder's routines, whose local potential is the spline anyway, with the same energy);
     ``requested_shift``: the ``Grid_Shift`` block of PARSEC 1.5 (``None`` without it), which both grids take.
 
     * :data:`GAMMA_FORCES_FEATURE`: forces of scalar orbitals (spin-polarized or not) at the Gamma point without a
@@ -487,9 +489,12 @@ def bulk_default_features(
       with the space group's translations, half a step off the origin unless ``Ignore_Symmetry``), so the grids
       coincide for symmetric cells too (a cube of a symmorphic group, or one whose translations
       ``adjust_step`` meets with the even count anyway, as the 8-atom diamond cube at the Gamma point, whose
-      operations fail ``symchk``), not only for ``Ignore_Symmetry`` inputs.  Their accelerated path is 2.5-5 times faster there (Si64 molecular dynamics on an A100: 7.6 against
-      41 s; device forces, device Hartree, geometry updates 4-15 times faster) and their forces are the
-      derivative of their energy.
+      operations fail ``symchk``), not only for ``Ignore_Symmetry`` inputs.  Their accelerated path was 2.5-5 times
+      faster there when this default was set (Si64 molecular dynamics on an A100: 7.6 against 41 s); since Andrew
+      Grieder's routines have their own device forces and sectors it is not (first runs on an A100 with the cubic
+      spline, his against theirs: Si64 single point 7.05 / 6.80 against 7.35 / 7.09 s, 6 steps of molecular dynamics
+      14.4 / 14.2 against 16.5 / 16.2 s, Si216 with forces 10.1 / 10.2 against 12.1 / 11.9 s, the same energies).
+      Their forces are the derivative of their energy.
     * :data:`SYMMETRIC_GRID_FEATURE`: a cell on Fortran's general grid whose space group's fractional
       translations change the number of points (``adjust_step``), so that Andrew Grieder's grid (no space group)
       is not Fortran's - in a run that both sets of routines give to the reference solver (k-points other than

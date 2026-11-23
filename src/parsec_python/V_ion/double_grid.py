@@ -248,9 +248,191 @@ def build_double_grid_projectors(
     )
 
 
+#: A channel is named in the note of :func:`double_grid_note_lines` when its projection falls below this share.
+NOTE_RATIO = 0.99
+#: Channels whose Kleinman-Bylander energy in the atomic orbital is below this (Ry) carry no energy to lose.
+NOTE_ENERGY_FLOOR = 1.0e-6
+
+
+@dataclass(frozen=True)
+class ChannelProjection:
+    """The projection of a species' pseudo-orbital onto its own projector on a grid.
+
+    ``ratio`` is ``<beta_lm|phi_lm>`` on the double grid of the run, averaged over ``m``, divided by the radial value
+    ``int beta_l(r) u_l(r) r dr``; ``sampled_ratio`` the same for plain sampling (order one) on the same grid.
+    ``kb_energy`` is ``sign * <beta|phi>^2`` of the radial value, the nonlocal energy of one electron in the atomic
+    orbital (Ry), and ``occupation`` that orbital's electrons in the reference configuration of the file (``None``
+    where the format gives none).
+    """
+
+    angular_momentum: int
+    ratio: float
+    sampled_ratio: float
+    kb_energy: float
+    occupation: float | None
+
+    @property
+    def energy_change(self) -> float:
+        """First-order change of the channel's nonlocal energy per electron in the atomic orbital (Ry)."""
+
+        return self.kb_energy * (self.ratio * self.ratio - 1.0)
+
+
+def _local_cube(spacing: float, reach: float) -> np.ndarray:
+    """The points of a cubic grid of ``spacing`` with the origin on a point, out to ``reach`` along each axis."""
+
+    count = int(np.ceil(reach / spacing)) + 1
+    axis = np.arange(-count, count + 1, dtype=np.float64) * spacing
+    x, y, z = np.meshgrid(axis, axis, axis, indexing="ij")
+    return np.column_stack((x.reshape(-1), y.reshape(-1), z.reshape(-1)))
+
+
+def orbital_projection_ratios(
+    potential: ParsecPseudopotential,
+    specification: SpeciesPotential,
+    order: int,
+    spacing: float,
+    stencil_half_width: int,
+    *,
+    chunk: int = 4096,
+) -> list[ChannelProjection]:
+    """:class:`ChannelProjection` of every nonlocal channel of a species with ``Double_Grid_Order`` ``order``.
+
+    The atom sits on a point of a cubic grid of ``spacing``.  The projector values are those of
+    :func:`build_double_grid_projectors` (the support, fine-point weights, radial table or spline, harmonics and
+    centre radius of the run); the orbital ``u_l(r)/r Y_lm`` is sampled at the coarse points.  Channels whose
+    Kleinman-Bylander energy is below :data:`NOTE_ENERGY_FLOOR` are left out.  The tables are taken as read (no
+    Fourier filter).  Nothing here enters a calculation.
+    """
+
+    from ..Pseudopotential.radial_quadrature import parsec_radial_integral
+    from .ionic_potential import (
+        _projector_support_radius,
+        projector_center_radius,
+        projector_center_setting,
+        real_spherical_harmonics,
+    )
+
+    radii = np.asarray(potential.radii, dtype=np.float64)
+    center_radius = projector_center_radius(potential, projector_center_setting(), off_radius=0.0)
+    support_radius = _projector_support_radius(potential)
+    displacements, _ = double_grid_points(order, spacing)
+    cube = _local_cube(spacing, support_radius + float(np.max(np.linalg.norm(displacements, axis=1))))
+    origin = np.zeros(3)
+    volume = spacing**3
+    local_l = specification.local_angular_momentum
+    occupations = getattr(potential, "channel_occupations", None) or {}
+    result: list[ChannelProjection] = []
+    for angular_momentum in sorted(potential.radial_wavefunctions):
+        if angular_momentum == local_l:
+            continue
+        table, sign = potential.radial_projector(angular_momentum, local_l)
+        wave = np.asarray(potential.radial_wavefunctions[angular_momentum], dtype=np.float64)
+        radial = parsec_radial_integral(radii, table * wave * radii)
+        if radial * radial < NOTE_ENERGY_FLOOR:
+            continue
+        spline = (
+            ParsecRadialSpline.from_positive_grid(radii, table, stencil_half_width)
+            if specification.use_spline
+            else None
+        )
+        width = 2 * angular_momentum + 1
+        ratios = []
+        for grid_order in (order, 1):
+            projections = np.zeros(width)
+            for start in range(0, cube.shape[0], chunk):
+                block = cube[start : start + chunk]
+                support = double_grid_support(block, origin, support_radius, grid_order, spacing)
+                if support.rows.size == 0:
+                    continue
+                points, fine = support.radius.shape
+                values = interpolate_projector(potential, table, support.radius.reshape(-1), spline)
+                harmonics = real_spherical_harmonics(
+                    angular_momentum, support.relative.reshape(-1, 3), center_radius=center_radius
+                )
+                beta = np.einsum(
+                    "pm,pmh->ph", support.weights, (values[:, None] * harmonics).reshape(points, fine, width)
+                )
+                coarse = block[support.rows]
+                distance = np.linalg.norm(coarse, axis=1)
+                orbital = np.interp(distance, radii, wave / radii, right=0.0)[:, None] * real_spherical_harmonics(
+                    angular_momentum, coarse, center_radius=float(radii[0])
+                )
+                projections += np.einsum("ph,ph->h", beta, orbital) * volume
+            ratios.append(float(np.mean(projections)) / radial)
+        occupation = occupations.get(angular_momentum)
+        result.append(
+            ChannelProjection(
+                angular_momentum=angular_momentum,
+                ratio=ratios[0],
+                sampled_ratio=ratios[1],
+                kb_energy=float(sign) * radial * radial,
+                occupation=None if occupation is None else float(occupation),
+            )
+        )
+    return result
+
+
+def double_grid_note_lines(problem) -> tuple[str, ...]:
+    """The NOTE of the report on the projections the double grid of ``problem`` loses (empty for order one).
+
+    One line per species and nonlocal channel whose :func:`orbital_projection_ratios` ratio falls below
+    :data:`NOTE_RATIO`: the ratio, that of plain sampling on the same spacing, and the first-order change of the
+    nonlocal energy per electron in the atomic orbital and for the atoms of the species with the electrons of the
+    file's reference configuration.  Output only: a failure of the estimate prints nothing.
+    """
+
+    grid = problem.grid
+    order = int(getattr(grid, "double_grid_order", 1) or 1)
+    if order <= 1:
+        return ()
+    try:
+        from .ionic_potential import load_pseudopotentials
+
+        specifications = problem.pseudopotentials
+        potentials = load_pseudopotentials(specifications, check_correlation=False)
+        spacing = float(grid.spacing)
+        rows = []
+        for label, specification in specifications.items():
+            count = sum(1 for atom in problem.atoms if atom.symbol == label)
+            if count == 0:
+                continue
+            for channel in orbital_projection_ratios(
+                potentials[label], specification, order, spacing, int(grid.stencil_half_width)
+            ):
+                if channel.ratio >= NOTE_RATIO:
+                    continue
+                change = channel.energy_change
+                text = (
+                    f"       {label} l={channel.angular_momentum}: {channel.ratio:.3f} of the radial value "
+                    f"(order 1: {channel.sampled_ratio:.3f}), {change:+.4f} Ry per electron"
+                )
+                if channel.occupation:
+                    text += (
+                        f", {change * channel.occupation * count:+.3f} Ry for {count} atom"
+                        f"{'s' if count > 1 else ''} with {channel.occupation:.2f} electrons"
+                        f"{' each' if count > 1 else ''}"
+                    )
+                rows.append(text)
+    except Exception:  # noqa: BLE001 - the note never stops or changes a run
+        return ()
+    if not rows:
+        return ()
+    return (
+        f" NOTE: Double_Grid_Order {order} shrinks the projections of these pseudo-orbitals onto their own",
+        f"       projectors (atom on a point of a cubic grid of spacing {spacing:.4f} bohr); first-order change of",
+        "       the nonlocal energy, which the SCF partly relaxes:",
+        *rows,
+        "",
+    )
+
+
 __all__ = [
+    "ChannelProjection",
     "DoubleGridSupport",
     "build_double_grid_projectors",
+    "double_grid_note_lines",
+    "orbital_projection_ratios",
     "double_grid_points",
     "double_grid_support",
     "double_grid_weights",

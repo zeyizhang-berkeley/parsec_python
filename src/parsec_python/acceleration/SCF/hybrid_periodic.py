@@ -37,14 +37,13 @@ from dataclasses import dataclass, replace
 
 import numpy as np
 
-from parsec_python.SCF.fock_diis import OccupiedBlock, array_module
+from parsec_python.SCF.fock_diis import OccupiedBlock, array_module, window_occupation_floor
 from parsec_python.SCF.hybrid_periodic import (
     BlochChannelExchange,
     BlochExchange,
     PeriodicFockOperator,
 )
 from parsec_python.V_xc.bloch_exchange import BlochOrbitalSet, time_reversal_partners
-from parsec_python.V_xc.exact_exchange import OCCUPATION_THRESHOLD
 
 from ..Hamiltonian.bloch_exchange_device import (
     DevicePeriodicBox,
@@ -405,7 +404,7 @@ class DeviceBlochExchange(BlochExchange):
         for orbital_set in sets:
             for block, values in zip(orbital_set.orbitals, orbital_set.occupations):
                 device = int(block.device.id)
-                occupied = int(np.count_nonzero(np.asarray(values) > OCCUPATION_THRESHOLD))
+                occupied = int(np.count_nonzero(np.asarray(values) > window_occupation_floor()))
                 # the copy, and the build of an extrapolated operator (three sets of the states)
                 needed[device] = needed.get(device, 0) + 16 * int(block.shape[0]) * (occupied + 3 * int(block.shape[1]))
         for device, count in needed.items():
@@ -416,7 +415,8 @@ class DeviceBlochExchange(BlochExchange):
         return True
 
     def occupied_blocks(self, sets) -> list | None:
-        """Copies of the occupied Bloch factors of each set, one block per k-point, on its device."""
+        """Copies of the occupied Bloch factors of each set, one block per k-point, on its device (occupations above
+        :func:`~parsec_python.SCF.fock_diis.window_occupation_floor`)."""
 
         from ..backends.cupy import require_cupy
 
@@ -427,7 +427,7 @@ class DeviceBlochExchange(BlochExchange):
         for orbital_set in sets:
             channel = {}
             for t, (block, values) in enumerate(zip(orbital_set.orbitals, orbital_set.occupations)):
-                occupied = np.flatnonzero(np.asarray(values) > OCCUPATION_THRESHOLD)
+                occupied = np.flatnonzero(np.asarray(values) > window_occupation_floor())
                 if not occupied.size:
                     continue
                 with cp.cuda.Device(int(block.device.id)):
@@ -450,7 +450,7 @@ class DeviceBlochExchange(BlochExchange):
             for t, (block, values) in enumerate(zip(orbital_set.orbitals, orbital_set.occupations)):
                 device = int(block.device.id)
                 with cp.cuda.Device(device):
-                    empty_index = np.flatnonzero(np.asarray(values) <= OCCUPATION_THRESHOLD)
+                    empty_index = np.flatnonzero(np.asarray(values) <= window_occupation_floor())
                     empty = block[:, cp.asarray(empty_index)]
                     phi, numbers = blocks.get(t, (None, np.zeros(0)))
                     if phi is None:

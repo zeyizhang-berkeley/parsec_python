@@ -51,12 +51,15 @@ of the same input takes `mlff_structure.xyz` instead of relaxing again.
 
 | System | Machine | DFT structures: crude / after `uma-s-1p2` | Time (program time of `parsec.out`): crude / force field + DFT |
 |---|---|---:|---:|
-| C6H6 | Windows laptop, RTX 5070 | 13 / 11 | 261 s / 132 + 132 s |
+| C6H6 | one node, 4 A100 | 13 / 10 | 16 s / 35 + 13 s |
 | C35H36 | Windows laptop, RTX 5070 | 29 / 13 | 658 s / 133 + 302 s |
 | C35H36 | one node, 4 A100 | 29 / 13 | 33 s / 30 + 22 s |
 | C185H124 | one node, 4 A100 | 38 / 18 | 122 s / 19 + 57 s |
 
-Every pair ends at the same structure and energy. From the GFN2-xTB
+The C6H6 row was run with the code of 22 November 2026, where species
+without a `Cubic_Spline` line, as in the benzene inputs, take cubic splines
+by default; the nanodiamond inputs give the line. Every pair ends at the
+same structure and energy. From the GFN2-xTB
 structures themselves the DFT runs took 13 (C35H36) and 21 (C185H124)
 structures: the force field brings a crude structure back to that quality.
 The force field costs a fixed half minute to two minutes, mostly loading the

@@ -1768,6 +1768,14 @@ def execute(args, cp, comm, MPI, initialization_seconds, initial_affinity=None):
     from parsec_python.SCF.state_extension import close_multiplet_setting
 
     close_multiplet_setting()
+    # PARSEC_EXCHANGE_OCCUPATION_CUT (V_xc/exact_exchange.py) likewise.
+    from parsec_python.V_xc.exact_exchange import exchange_occupation_cut_setting
+
+    exchange_occupation_cut_setting()
+    # PARSEC_FOCK_DIIS_TAIL (SCF/fock_diis.py) likewise: every rank's exchange service stores the window.
+    from parsec_python.SCF.fock_diis import fock_diis_tail_setting
+
+    fock_diis_tail_setting()
     use_symmetry, symmetry_note = symmetry_decision(translation)
     # Whether the atoms stay in the point group of the first structure, which Ignore_Symmetry does not tell.
     # The command line may overrule that keyword, but not a run that leaves the group.

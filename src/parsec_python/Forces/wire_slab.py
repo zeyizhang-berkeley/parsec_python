@@ -85,10 +85,13 @@ class WireSlabLocalForceTerms(LocalForceTerms):
 class WireSlabForceResult(ForceResult):
     """A :class:`~parsec_python.Forces.ForceResult` of a wire or slab.
 
-    PARSEC prints no torque for a periodic system.
+    PARSEC prints no torque for a periodic system.  ``hartree_variational`` says how the SCF of a slab that ran with
+    the derivative of its Hartree energy as its Hartree potential took it (``PARSEC_HARTREE_VARIATIONAL``), ``None``
+    for the potential of the Poisson solve.
     """
 
     omit_torque = True
+    hartree_variational: str | None = None
 
 
 #: The switch of the Gaussian compensation terms of the local forces of a wire or slab (:func:`wire_slab_gaussian_setting`).
@@ -126,7 +129,9 @@ def wire_slab_gaussian_force_setting() -> str:
 
     The energy holds ``-dV sum_r rho(r) V_G(r)``, ``V_G = G n_g`` the potential of the Gaussian charges; with the
     Hartree operator ``G`` of the wire or slab symmetric (to 1e-10 relative on an hBN slab) its derivative is
-    ``F_g = dV sum_r V_H(r) dn_g(r - R)/dR``, ``V_H = G rho``.
+    ``F_g = dV sum_r V_H(r) dn_g(r - R)/dR``, ``V_H = G rho``.  Where the density reaches the edge of the domain ``G``
+    is not symmetric (2.5e-6 relative on a Ge2 slab at a half-height of 6 bohr) and the derivative takes ``G^T rho``,
+    which a slab under ``PARSEC_HARTREE_VARIATIONAL`` uses (:func:`compute_wire_slab_forces`).
 
     * ``auto`` (default since 2026-11-22): that sum with the analytic derivative of the Gaussian,
       ``dn_g/dR = n_g 2 (r - R)/sigma^2``: the central difference of ``-dV rho . V_G`` within 1.5e-7 to 7.7e-7 Ry/bohr
@@ -213,7 +218,7 @@ def wire_slab_local_forces(
     # the Gaussian terms at every point (PARSEC_WIRE_SLAB_GAUSSIAN=auto) or with the skip of forcloc.f90 (off)
     every_point = wire_slab_gaussian_setting() == "auto"
     center_setting = spline_force_center_setting()
-    slopes = linear_slope_setting()  # PARSEC_LINEAR_TABLE_SLOPES (species without Cubic_Spline)
+    slopes = linear_slope_setting()  # PARSEC_LINEAR_TABLE_SLOPES (species with linear tables)
     for index, atom in enumerate(atoms):
         potential = potentials[atom.symbol]
         specification = specifications[atom.symbol]
@@ -726,6 +731,11 @@ def compute_wire_slab_forces(system, result, *, symmetrize: bool = True, operati
             result.input_effective_potential
         )
         hartree_potential = np.asarray(result.hartree_potential)
+    helper = getattr(system, "hartree_variational", None)
+    if helper is not None:
+        # PARSEC_HARTREE_VARIATIONAL: the SCF ran with V' = (V_H + G^T rho)/2, which makes the energy stationary; the
+        # term of the Gaussian charges is then the derivative of -h^3 rho.G n_g, which takes G^T rho
+        hartree_potential = helper.transpose(density)
     # the analytic form of the force of the Gaussian charges needs the potential, the former one its gradient
     # (PARSEC_WIRE_SLAB_GAUSSIAN_FORCE)
     analytic = wire_slab_gaussian_setting() == "auto" and wire_slab_gaussian_force_setting() == "auto"
@@ -780,7 +790,10 @@ def compute_wire_slab_forces(system, result, *, symmetrize: bool = True, operati
         # LDA+U (forcnloc_u; J = 0), empty without it.
         **correction_forces(system, result),
     )
-    return _as_wire_slab_result(forces)
+    converted = _as_wire_slab_result(forces)
+    if helper is not None:
+        converted = replace(converted, hartree_variational=helper.report())
+    return converted
 
 
 __all__ = [

@@ -184,8 +184,8 @@ and with spin polarization and their difference:
 | B ion, 1s hole | -128.686 | -128.688 | -129.234 | -129.236 | -0.548 | -0.548 |
 | C atom | -145.946 | -145.943 | -147.317 | -147.314 | -1.371 | -1.371 |
 | C ion, 1s hole | -240.672 | -240.665 | -242.727 | -242.723 | -2.056 | -2.058 |
-| N atom | -262.454 | -262.446 | -265.829 | -265.824 | -3.376 | -3.378 |
-| N ion, 1s hole | -401.751 | -401.742 | -406.413 | -406.408 | -4.662 | -4.666 |
+| N atom | -262.454 | -262.446 | -265.830 | -265.824 | -3.376 | -3.378 |
+| N ion, 1s hole | -401.752 | -401.742 | -406.413 | -406.408 | -4.662 | -4.666 |
 | O atom | -428.175 | -428.168 | -429.770 | -429.765 | -1.596 | -1.597 |
 | O ion, 1s hole | -619.402 | -619.405 | -621.450 | -621.455 | -2.048 | -2.050 |
 
@@ -193,7 +193,7 @@ and with spin polarization and their difference:
   the three 2p orbitals; with spin polarization the 2p shell is filled by
   Hund's rule (1, 2, 3 and 2 Bohr magnetons for B, C, N and O). An ion is the
   atom in the potential with a 1s hole, with the charge +1.
-- Largest difference: 0.009 in a total energy (N ion), 0.004 in an energy of
+- Largest difference: 0.010 in a total energy (N ion), 0.004 in an energy of
   spin polarization (N ion). The table of the paper comes from the radial
   program that generates the potentials. Here the atom is solved on the grid
   of 0.10 Å in a sphere of 7 Å, with the potentials as the solver reads them:
@@ -206,14 +206,14 @@ level of the hydronium oxygen relative to the water molecule of the 2022 set:
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
 | PBE, here | 9.929 | 7.890 | 6.187 | 5.630 | 5.546 | 5.025 | 5.278 | 4.803 | 4.565 | 4.211 |
 | PBE, figure | 9.94 | 7.86 | 6.17 | 5.59 | 5.50 | 4.98 | 5.29 | 4.80 | 4.56 | 4.18 |
-| refined, here | 9.983 | 7.975 | 6.295 | 5.743 | 5.663 | 5.142 | 5.414 | 4.935 | 4.694 | 4.342 |
+| refined, here | 9.983 | 7.975 | 6.295 | 5.743 | 5.663 | 5.142 | 5.414 | 4.935 | 4.695 | 4.342 |
 | refined, figure | 9.99 | 7.97 | 6.31 | 5.71 | 5.62 | 5.10 | 5.42 | 4.93 | 4.69 | 4.32 |
 
 | n | 11 | 12 | 13 | 14 | 15 | 16 | 17 | 18 | 19 | 20 |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
 | PBE, here | 3.930 | 3.692 | 3.713 | 3.515 | 3.371 | 3.516 | 3.436 | 3.343 | 3.233 | 3.169 |
 | PBE, figure | 3.92 | 3.62 | 3.68 | 3.49 | 3.35 | 3.51 | 3.40 | 3.32 | 3.18 | 3.15 |
-| refined, here | 4.069 | 3.821 | 3.853 | 3.657 | 3.510 | 3.657 | 3.580 | 3.484 | 3.376 | 3.314 |
+| refined, here | 4.069 | 3.821 | 3.853 | 3.658 | 3.510 | 3.657 | 3.580 | 3.484 | 3.376 | 3.314 |
 | refined, figure | 4.05 | 3.75 | 3.82 | 3.64 | 3.49 | 3.66 | 3.56 | 3.45 | 3.32 | 3.30 |
 
 - The paper gives the figure only. Its points were read from the image
@@ -242,51 +242,64 @@ level of the hydronium oxygen relative to the water molecule of the 2022 set:
 
 ## Time and memory
 
-The stored energies are from first calculations (no cache, no restart) in
-double precision on A100 GPUs with 80 GB (Perlmutter, one run per GPU, solver
-defaults). One job of 85 minutes on 16 GPUs ran them all; the 16 atoms ran
-again with the code of 22 November 2026 in symmetry sectors (one A100 per run,
-each with an empty kernel cache, two runs side by side on one node), with the
-same totals (the B atom without spin polarization 1e-8 Ry lower):
+The stored energies and times are from first calculations (no cache, no
+restart, an empty kernel cache for every run) in double precision on A100 GPUs
+with 80 GB (Perlmutter, one run per GPU, solver defaults), all made with the
+code of 22 November 2026; the atoms ran two side by side on one node. The 224
+runs took 11.9 GPU hours, 41 minutes on up to 28 GPUs:
 
 | set | runs | all runs | median run | shortest | longest |
 |---|---:|---:|---:|---:|---:|
-| 2022, 54 molecules | 108 | 2.6 GPU hours | 60 s | 19 s (CO) | 509 s (B(OC2H5)3) |
-| 2022, atoms of Table 1 | 16 | 0.05 GPU hours | 13 s | 10 s (C ion) | 15 s (B atom, polarized) |
-| 2022, protonated water | 40 | 14.1 GPU hours | 871 s | 59 s (H3O+(H2O)1) | 3426 s (H3O+(H2O)20) |
-| 2024, 21 molecules | 60 | 1.7 GPU hours | 83 s | 28 s (H2S) | 464 s (P(CF3)3) |
+| 2022, 54 molecules | 108 | 1.4 GPU hours | 31 s | 14 s (H2O) | 304 s (B(OC2H5)3) |
+| 2022, atoms of Table 1 | 16 | 0.06 GPU hours | 13 s | 10 s (B ion) | 15 s (N ion, polarized) |
+| 2022, protonated water | 40 | 9.6 GPU hours | 583 s | 27 s (H3O+(H2O)1) | 2422 s (H3O+(H2O)20) |
+| 2024, 21 molecules | 60 | 0.83 GPU hours | 41 s | 17 s (H2S) | 242 s (P(CF3)3) |
 
-The totals of the 37 molecular inputs that have run in symmetry sectors since
-21 November 2026 (`PARSEC_MOVING_SECTORS`: 28 of the 2022 set, 9 of the 2024
-set) are of those sector runs, while the times in this table and in
-`reference_energies.csv` stay those of the full-grid job. The totals moved by
-at most 6.4e-5 Ry, nine printed values by 0.001 eV. At an SCF criterion of
-2e-7 Ry the two routes agree within 1.3e-7 Ry on the four initial states
-checked, and the sector totals lie closer to those converged values.
+37 of the molecular inputs run in symmetry sectors (`PARSEC_MOVING_SECTORS`:
+28 of the 2022 set, 9 of the 2024 set), the others and the water clusters on
+the full grid. At the SCF criterion of the inputs, 5e-5 Ry, the two routes
+give totals up to 6.4e-5 Ry apart; at 2e-7 Ry they agree within 1.3e-7 Ry on
+the four initial states checked.
+
+The projectors of the potentials are zero beyond the largest cutoff radius of
+their channels (`PARSEC_PROJECTOR_TAIL=auto`, the default since 22 November
+2026; the B, S, Si and H potentials have no tail there). Against the earlier
+runs this moved the PBE totals by at most 4.2e-5 Ry and the refined totals by
+at most 6.9e-5 Ry (the SCF criterion is 5e-5 Ry); five printed binding
+energies and two printed atomic totals moved by 0.001 eV. With
+`PARSEC_PROJECTOR_TAIL=off`, 26 of the runs gave the earlier totals in all
+eight printed decimals.
 
 | run | grid points | occupied / computed states | SCF steps | SCF [s] | pair solves | refinement [s] | whole run [s] | host memory [GiB] |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
-| CO, neutral | 723,160 | 5 / 16 | 24 | 12 | 15 | 2 | 19 | 2.1 |
-| P(CF3)3, neutral | 1,854,640 | 40 / 48 | 41 | 65 | 820 | 288 | 363 | 5.4 |
-| B(OC2H5)3, neutral | 3,246,592 | 30 / 48 | 61 | 145 | 496 | 336 | 509 | 9.5 |
-| H3O+(H2O)1 | 1,360,280 | 8 / 16 | 38 | 41 | 36 | 9 | 59 | 3.3 |
-| H3O+(H2O)5 | 2,278,264 | 24 / 32 | 41 | 79 | 300 | 140 | 231 | 5.6 |
-| H3O+(H2O)10 | 3,260,032 | 44 / 64 | 40 | 100 | 990 | 640 | 765 | 10.2 |
-| H3O+(H2O)15 | 3,939,528 | 64 / 80 | 44 | 172 | 2080 | 1751 | 1990 | 14.3 |
-| H3O+(H2O)20 | 4,140,056 | 84 / 96 | 43 | 176 | 3655 | 3209 | 3426 | 16.0 |
+| CO, neutral | 723,160 | 5 / 16 | 24 | 8 | 15 | 2 | 14 | 2.2 |
+| P(CF3)3, neutral | 1,854,640 | 40 / 48 | 41 | 22 | 820 | 208 | 239 | 5.6 |
+| B(OC2H5)3, neutral | 3,246,592 | 30 / 48 | 61 | 50 | 465 | 223 | 287 | 9.4 |
+| H3O+(H2O)1 | 1,360,280 | 8 / 16 | 38 | 14 | 36 | 7 | 27 | 3.4 |
+| H3O+(H2O)5 | 2,278,264 | 24 / 32 | 41 | 26 | 300 | 97 | 131 | 5.8 |
+| H3O+(H2O)10 | 3,260,032 | 44 / 64 | 40 | 38 | 990 | 479 | 532 | 10.1 |
+| H3O+(H2O)15 | 3,939,528 | 64 / 80 | 44 | 53 | 2080 | 1279 | 1346 | 14.4 |
+| H3O+(H2O)20 | 4,140,056 | 84 / 96 | 43 | 58 | 3570 | 2310 | 2384 | 15.9 |
 
 The refinement is one Poisson solve per pair of orbitals that hold electrons:
-0.13 s on 0.7 million points, 0.26 s on 1.4 million, 0.88 s on 4.1 million. It
-takes 37 % of the time of the 2022 molecules, 44 % of the 2024 set and 88 % of
-the water clusters. Where a run counts one orbital more than the occupied ones
-(B(OC2H5)3: 496 pairs, H3O+(H2O)20: 3655), the first empty level has an
-occupation just above 1e-12, the threshold of the exact exchange, at the Fermi
-temperature of the inputs.
+0.09 s on 0.7 million points, 0.17 s on 1.4 million, 0.64 s on 4.1 million. It
+takes 48 % of the time of the 2022 molecules, 57 % of the 2024 set and 94 % of
+the water clusters. An orbital enters the exact exchange when its occupation
+exceeds 1e-10, the electron-count tolerance of the Fermi search
+(`PARSEC_EXCHANGE_OCCUPATION_CUT`, the default since 22 November 2026). With
+`off` the threshold is 1e-12; the search leaves the empty levels above a gap
+any occupation below 1e-10, so that some of them entered as well (CO 7
+orbitals for 5 and 28 pair solves for 15, P(CF3)3 903 for 820, H3O+(H2O)20
+3655 for 3570), with totals equal in every printed digit. 69 of the 208 runs
+still count one to three empty levels whose occupation lies above 1e-10 at the
+Fermi temperature of the inputs (H3O+(H2O)20 with the hole: 85 orbitals for
+84).
 
 On a laptop with 32 logical cores, an RTX 5070 Laptop GPU with 8 GB and 32 GB
 of memory, the runs of the next table, the second state of the two water
-clusters and the 16 atoms give the totals of the A100 runs in all eight
-printed decimals:
+clusters and the 16 atoms gave the totals of the A100 runs made before
+22 November 2026 (now `PARSEC_PROJECTOR_TAIL=off`) in all eight printed
+decimals:
 
 | run | grid points | occupied / computed states | SCF steps | SCF [s] | pair solves | refinement [s] | whole run [s] | host memory [GiB] |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|

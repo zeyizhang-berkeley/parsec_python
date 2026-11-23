@@ -97,9 +97,9 @@ from ..models import (
     RunTimings,
     SinglePointResult,
 )
-from ..V_xc.exact_exchange import OCCUPATION_THRESHOLD
+from ..V_xc.exact_exchange import exchange_occupation_threshold
 from .fock_controls import InnerCriterion, fock_loop_mixer, fractional_start, recording_hooks
-from .fock_diis import OccupiedBlock, OuterDIIS, OutputSet, orthonormal_complement
+from .fock_diis import OccupiedBlock, OuterDIIS, OutputSet, orthonormal_complement, window_occupation_floor
 from ..V_xc.exchange_operator import (
     CompressedExchange,
     apply_exchange_to_orbitals,
@@ -766,7 +766,7 @@ def meta_gga_start_semilocal(reference, start: SinglePointResult) -> float | Non
 
 
 def _occupied(occupations: np.ndarray) -> list[int]:
-    return [int(index) for index in np.flatnonzero(np.asarray(occupations) > OCCUPATION_THRESHOLD)]
+    return [int(index) for index in np.flatnonzero(np.asarray(occupations) > exchange_occupation_threshold())]
 
 
 def _exchange_of(sets, volume_element, solver, batch_size, known=None, columns="occupied"):
@@ -897,11 +897,12 @@ class HostExchange:
         """Nothing to drop: host orbitals pin no eigensolver memory."""
 
     def occupied_blocks(self, sets) -> list:
-        """Copies of the occupied orbitals of each set (``Exx_Outer_Mixing: diis``), one block per set."""
+        """Copies of the occupied orbitals of each set (``Exx_Outer_Mixing: diis``), one block per set: those whose
+        occupation exceeds :func:`~parsec_python.SCF.fock_diis.window_occupation_floor`."""
 
         blocks = []
         for orbital_set in sets:
-            occupied = np.flatnonzero(orbital_set.occupations > OCCUPATION_THRESHOLD)
+            occupied = np.flatnonzero(orbital_set.occupations > window_occupation_floor())
             blocks.append(
                 {}
                 if not occupied.size
@@ -923,11 +924,13 @@ class HostExchange:
 def natural_orbital_sets(sets, natural) -> tuple[OrbitalSet, ...]:
     """Host :class:`OrbitalSet` of natural orbitals with their occupations, and the
     empty states of ``sets`` orthonormalized against them (the ACE of an
-    extrapolated density matrix, :mod:`parsec_python.SCF.fock_diis`)."""
+    extrapolated density matrix, :mod:`parsec_python.SCF.fock_diis`).  Empty
+    here: the orbitals not stored in the window, occupations at or below
+    :func:`~parsec_python.SCF.fock_diis.window_occupation_floor`."""
 
     result = []
     for orbital_set, blocks in zip(sets, natural):
-        empty = orbital_set.orbitals[:, orbital_set.occupations <= OCCUPATION_THRESHOLD]
+        empty = orbital_set.orbitals[:, orbital_set.occupations <= window_occupation_floor()]
         phi, values = blocks.get(None, (None, np.zeros(0)))
         if phi is None:
             columns, occupations = empty, np.zeros(empty.shape[1])

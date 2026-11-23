@@ -45,6 +45,7 @@ from parsec_python.tests.martins_old_reference import (
     write_case,
     write_martins_old,
 )
+from parsec_python.tests.parsec15_tables import start_parsec15_tables
 
 
 def assert_printed(test, value: float, printed: float, digits: int) -> None:
@@ -248,6 +249,12 @@ class FortranReportTests(unittest.TestCase):
 
 class ProjectorBuilderGuardTests(unittest.TestCase):
     """A substituted builder must end the projectors at the core radius."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        # the guard of the linear tables: no projector value beyond the core radius (a spline continues past it)
+        start_parsec15_tables(cls)
+        super().setUpClass()
 
     @staticmethod
     def next_sample_builder(grid, atoms, potentials, specifications):

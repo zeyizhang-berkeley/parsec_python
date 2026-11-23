@@ -58,6 +58,7 @@ from ..V_ion import (
     ionic_charge,
     pseudopotential_matches_functional,
 )
+from ..V_ion.double_grid import double_grid_note_lines
 from ..V_xc.selection import (
     FORTRAN_CORRELATION_CODES,
     FORTRAN_CORRELATION_DESCRIPTIONS,
@@ -1829,6 +1830,33 @@ def _routines_lines(translation) -> tuple[str, ...]:
     return () if line is None else (line,)
 
 
+def cubic_spline_default_lines(translation) -> tuple[str, ...]:
+    """The line of parsec.out that names the species without ``Cubic_Spline`` in the input that the default of
+    ``PARSEC_CUBIC_SPLINE_DEFAULT`` gave the cubic spline (or, in a cluster with ``Old_Interpolation_Format``, the
+    linear tables); nothing where every species gives the value or under ``off`` (PARSEC 1.5's default, the
+    output of before)."""
+
+    symbols = tuple(getattr(translation, "cubic_spline_defaulted", ()) or ())
+    species = translation.problem.pseudopotentials
+    splined = [symbol for symbol in symbols if species[symbol].use_spline]
+    linear = [
+        symbol
+        for symbol in symbols
+        if not species[symbol].use_spline and getattr(species[symbol], "old_interpolation", False)
+    ]
+    if splined:
+        return (f" Cubic spline (default) for {' '.join(splined)}; PARSEC_CUBIC_SPLINE_DEFAULT=off: linear",)
+    if linear and cubic_spline_setting_on():
+        return (f" Linear tables for {' '.join(linear)} (Old_Interpolation_Format)",)
+    return ()
+
+
+def cubic_spline_setting_on() -> bool:
+    from ..Input.parsec_input import cubic_spline_default_setting
+
+    return cubic_spline_default_setting() == "on"
+
+
 class ParsecTextReporter:
     """Stateful writer for the subset of ``parsec.out`` Python can support.
 
@@ -1992,6 +2020,8 @@ class ParsecTextReporter:
             f" input file: {self.translation.source}",
             # The routines of the run (parsec_python.Input.routines), where the choice matters.
             *_routines_lines(self.translation),
+            # How the species without Cubic_Spline interpolate their tables (PARSEC_CUBIC_SPLINE_DEFAULT).
+            *cubic_spline_default_lines(self.translation),
             "",
             " =================================================================",
             "",
@@ -2043,6 +2073,8 @@ class ParsecTextReporter:
                             "",
                             "TOTAL ENERGY.",
                             "",
+                            # how much: the projections of the species' own pseudo-orbitals (output only)
+                            *double_grid_note_lines(self.problem),
                         )
                         if getattr(grid, "double_grid_order", 1) > 1
                         else ()
