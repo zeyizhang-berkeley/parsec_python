@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Iterable
 
 import numpy as np
 
+from ..fortran_numerics import fortran_boundary_defaults, fortran_numerics_setting, switch_value
 from ..models import (
     DEFAULT_INITIAL_SPIN_POLARIZATION,
     DEFAULT_RELAXATION_MAXIMUM_STEP,
@@ -119,7 +120,7 @@ def cubic_spline_default_setting() -> str:
     value stops before the calculation.
     """
 
-    value = os.environ.get(CUBIC_SPLINE_DEFAULT_ENV, CUBIC_SPLINE_DEFAULT).strip().lower() or CUBIC_SPLINE_DEFAULT
+    value = switch_value(CUBIC_SPLINE_DEFAULT_ENV, CUBIC_SPLINE_DEFAULT)
     if value not in ("on", "off"):
         raise ValueError(f"{CUBIC_SPLINE_DEFAULT_ENV} must be on or off, got {value!r}")
     return value
@@ -4767,8 +4768,11 @@ def _parse_parsec_input(
     # "Hartree_Boundary_Tolerance: off" restores PARSEC's boundary.  "auto",
     # and no line beside a radius left to the default rule, is the tolerance
     # that rule derives from the electron count: it replaces the default
-    # below.
-    boundary_tolerance_text = one("hartree_boundary_tolerance", "1e-3 Ry")
+    # below.  Under PARSEC_FORTRAN_NUMERICS=on both default to off (PARSEC's
+    # boundary values) where the input gives its domain; a radius left to the
+    # default rule keeps the boundary the rule chooses it for.
+    fortran_boundary = fortran_boundary_defaults() and not default_radius
+    boundary_tolerance_text = one("hartree_boundary_tolerance", "off" if fortran_boundary else "1e-3 Ry")
     boundary_tolerance_label = re.sub(
         r"[.\s_-]", "", boundary_tolerance_text.lower()
     )
@@ -4784,7 +4788,7 @@ def _parse_parsec_input(
             boundary_tolerance_text, label="Hartree_Boundary_Tolerance"
         )
     atomic_tail_text = re.sub(
-        r"[.\s_-]", "", one("hartree_atomic_tail", "auto").lower()
+        r"[.\s_-]", "", one("hartree_atomic_tail", "off" if fortran_boundary else "auto").lower()
     )
     if atomic_tail_text == "auto":
         atomic_tail = "auto"
@@ -5147,10 +5151,11 @@ def _parse_parsec_input(
     # stops here
     move_flag_space_group_setting()
     spinor_subgroup = spinor_move_flag_subgroup_setting() == "auto"
-    # PARSEC_CA_CONTINUITY (the high-density coefficients of CA-LDA): read for every input, so that a wrong value
-    # stops here
+    # PARSEC_FORTRAN_NUMERICS and PARSEC_CA_CONTINUITY (the high-density coefficients of CA-LDA): read for every
+    # input, so that a wrong value stops here
     from ..V_xc.ca_lda import ca_continuity_setting
 
+    fortran_numerics_setting()
     ca_continuity_setting()
     # the irreducible wedge of a hybrid's mesh (PARSEC_HYBRID_KPOINT_WEDGE; SinglePointInput.hybrid_kpoint_wedge)
     hybrid_kpoint_wedge = False

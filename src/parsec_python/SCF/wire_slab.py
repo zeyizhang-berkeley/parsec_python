@@ -91,9 +91,9 @@ def gaussian_solve_setting() -> str:
     * ``off``: the Hartree settings of the run, as before (bit for bit).
     """
 
-    import os
+    from ..fortran_numerics import switch_value
 
-    value = os.environ.get(GAUSSIAN_SOLVE_ENV, "auto").strip().lower() or "auto"
+    value = switch_value(GAUSSIAN_SOLVE_ENV, "auto")
     if value not in ("auto", "off"):
         raise ValueError(f"{GAUSSIAN_SOLVE_ENV} must be auto or off, not {value!r}")
     return value

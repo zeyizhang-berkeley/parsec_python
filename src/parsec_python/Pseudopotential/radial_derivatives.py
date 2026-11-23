@@ -227,7 +227,8 @@ def local_potential_derivative_table(
 
     The last nine samples take the Coulomb value ``2*Z/r**2`` and samples at
     radii up to ``3e-4`` bohr are zero, where the numerical derivative is
-    noise.
+    noise.  A table continued below its first sample by ``PARSEC_FHI_ORIGIN=auto``
+    (``origin_samples``) is smooth there: no sample of it is zeroed.
     """
 
     potential.validate_local_channel(local_l)
@@ -235,7 +236,8 @@ def local_potential_derivative_table(
     table = log_grid_derivative(potential, potential.channel_potentials[local_l])
     _, stop = _stencil_range(radii.size)
     table[stop:] = 2.0 * potential.ionic_charge / (radii[stop:] * radii[stop:])
-    table[radii <= _LOCAL_DERIVATIVE_NOISE_RADIUS] = 0.0
+    if not getattr(potential, "origin_samples", 0):
+        table[radii <= _LOCAL_DERIVATIVE_NOISE_RADIUS] = 0.0
     return table
 
 
@@ -388,6 +390,8 @@ def spline_force_center_setting() -> str:
     intervals.  Over a step of 1e-3 bohr the energy averages that interval out when it is narrower than the step (the
     FHI tables, whose first samples lie at 4.5e-4 to 1.25e-3 bohr) and follows the smooth behaviour ``V(0) + a r^2``,
     whose slope ``2 a d`` is neither the slope of the spline at the point nor the zero of ``forcloc.f90``'s skip.
+    (The FHI numbers are those of the tables as the file gives them, ``PARSEC_FHI_ORIGIN=off``; under its default
+    ``auto`` the reader continues an FHI table to 1e-5 bohr: :func:`..fhipp.fhi_origin_setting`.)
 
     * ``auto`` (default since 2026-11-22): every grid point closer to its atom than ``c = 2 rs(2)``
       (:func:`smooth_center_radius`) takes the slope of the smooth behaviour, ``s(c) d/c`` with ``s`` the slope the
@@ -408,9 +412,9 @@ def spline_force_center_setting() -> str:
       atom within round-off of a grid point took the slope of the cone in a random direction); as ``tip`` elsewhere.
     """
 
-    import os
+    from ..fortran_numerics import switch_value
 
-    value = os.environ.get(SPLINE_FORCE_CENTER_ENV, "auto").strip().lower() or "auto"
+    value = switch_value(SPLINE_FORCE_CENTER_ENV, "auto")
     if value not in ("auto", "tip", "fortran", "off"):
         raise ValueError(f"{SPLINE_FORCE_CENTER_ENV} must be auto, tip, fortran or off, not {value!r}")
     return value

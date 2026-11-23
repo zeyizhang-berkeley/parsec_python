@@ -13,7 +13,7 @@ repository, so that the matrix can be run unchanged on any later tree.  Groups:
     and 2e-3 bohr, SCF to 1e-10 Ry; the Richardson value of the two is printed too).  Tolerance 1e-5 Ry/bohr at both
     steps.  Atoms on a grid point, 5e-4 bohr from one and 0.05 bohr off a site; C (POTRE and FHI), Si, Ge (core
     correction), Ag (d channel), Mg (core correction), O, H, B, N; both routine sets; clusters, Gamma cells, a 2x2x2
-    mesh, two slabs (one under PARSEC_HARTREE_VARIATIONAL=on) and a wire; spin, spin-orbit and LDA+U.  The force
+    mesh, two slabs (one under PARSEC_HARTREE_VARIATIONAL=off) and a wire; spin, spin-orbit and LDA+U.  The force
     compared is the total before its net part was removed (``forces_total + forces_net / N``), the derivative of the
     energy.  ``dgrid`` is the distance of the atom from the nearest grid point where the archive holds the grid.
 ``mpi``
@@ -194,6 +194,15 @@ ALL_OFF = {
     "PARSEC_PROJECTOR_TAIL": "off",
     "PARSEC_EXCHANGE_OCCUPATION_CUT": "off",
     "PARSEC_FOCK_DIIS_TAIL": "off",
+    # defaults changed after b72375f60: the continuous Perdew-Zunger correlation, the exact quadrature of the KB
+    # denominators, the Hartree potential of a slab with forces
+    "PARSEC_CA_CONTINUITY": "off",
+    "PARSEC_KB_QUADRATURE": "trapezoid",
+    "PARSEC_HARTREE_VARIATIONAL": "off",
+    # after b72375f60: the Fermi level of a gap at the root of the electron count, FHI tables continued below their
+    # first radial sample
+    "PARSEC_FERMI_GAP_ROOT": "off",
+    "PARSEC_FHI_ORIGIN": "off",
 }
 NO_SYMMETRY_ENV = {"PARSEC_PERIODIC_SYMMETRY": "off", "PARSEC_KPOINT_SECTORS": "off"}
 NO_SYMMETRY_ARGS = ("--symmetry", "off")
@@ -1514,9 +1523,9 @@ def force_checks():
         ("f_bnslab_d_grid", bn_slab("bnslab_d", fortran=False), ((0, 2), (1, 0)), on),
         ("f_cwire_grid", c_wire("cwire"), ((0, 0), (0, 2), (1, 0)), on),
         # a slab whose density reaches the edge of its domain, with the Poisson potential and with the derivative of
-        # the Hartree energy (added after 30edaacf1)
-        ("f_ge2slab", ge2_slab("ge2slab"), ((0, 2), (0, 0)), on),
-        ("f_ge2slab_var", ge2_slab("ge2slab_var", env={"PARSEC_HARTREE_VARIATIONAL": "on"}), ((0, 2), (1, 2)), on),
+        # the Hartree energy (added after 30edaacf1; the derivative is the default of a slab since b72375f60)
+        ("f_ge2slab", ge2_slab("ge2slab", env={"PARSEC_HARTREE_VARIATIONAL": "off"}), ((0, 2), (0, 0)), on),
+        ("f_ge2slab_var", ge2_slab("ge2slab_var"), ((0, 2), (1, 2)), on),
         # no Cubic_Spline in the input (added after the first run, when such an input took PARSEC 1.5's linear tables
         # and these cases were exempt; after 30edaacf1 the default of PARSEC_CUBIC_SPLINE_DEFAULT is the cubic spline)
         ("f_si8k_lin_d", linear(diamond("si8k_lin_d", "Si_POTRE", A_SI, "ca", 24, mesh=(2, 2, 2))),
@@ -1525,29 +1534,21 @@ def force_checks():
         ("f_h2o_lin", linear(h2o("h2o_lin")), ((0, 1), (1, 0)), on),
     ]
     notes = {
-        "f_c8f_d_5e-4": "local spline slope near the atom (readable default routines)",
-        "f_c8f_f_5e-4": "local spline slope near the atom (Fortran-derived routines)",
         "f_ag4u_d_grid": "atom 0: LDA+U energy kink reported before",
     }
-    # Documented exceptions.  An FHI table's first eight radial samples (out to 1.27e-3 bohr for C) lie 25 to 48 %
-    # above the c r^l the table follows beyond; under PARSEC_PROJECTOR_CENTER=auto the projector gradient of an atom
-    # on a grid point is the slope of that smooth behaviour (README, PROJECTOR_GRADIENT_FLOOR), so the energy's
-    # slope over a step of 1e-3 bohr, inside those samples, is not the force by design.
-    fhi_on_point = ((1.0e-3,), "FHI table: a step of 1e-3 bohr lies in its first eight radial samples, whose slope "
-                    "the force does not follow by design (PARSEC_PROJECTOR_CENTER=auto)")
+    # Documented exceptions.  (Up to b72375f60 the FHI cases of an atom on a grid point were exempt at 1e-3 bohr: an FHI
+    # table starts at 0.00625/Z bohr, and the padded spline below its first sample and the projector values of its
+    # first eight samples gave the energy features within about 1.5e-3 bohr of the atom.  Under PARSEC_FHI_ORIGIN=auto
+    # the reader continues the table to 1e-5 bohr, replaces its first samples (FHI98PP's start) by their even fit and
+    # the projector gradients are exact from 2 r(17) on: these cases, and those 5e-4 bohr from a grid point, are
+    # ordinary checks (at converged steps of 2e-5 / 5e-5 bohr within 1.4e-8 Ry/bohr); under off they fail at 1e-3.)
     exempt = {
-        "f_c8f_d_grid": {6: fhi_on_point},
-        "f_c8f_f_grid": {6: fhi_on_point},
-        "f_ch4_grid": {0: fhi_on_point},
-        "f_ch4_lin": {0: fhi_on_point},  # f_ch4_grid without its Cubic_Spline lines
         # the Hartree operator of the slab is not symmetric where the density reaches the edge of its domain: the
         # potential of the Poisson solve is not the derivative of the Hartree energy, the SCF does not make the energy
         # stationary, and the force misses the term of the density response at every step (1.05e-5 Ry/bohr on
-        # 30edaacf1); f_ge2slab_var takes the derivative (PARSEC_HARTREE_VARIATIONAL=on)
+        # 30edaacf1); f_ge2slab_var takes the derivative (the default PARSEC_HARTREE_VARIATIONAL=slab)
         "f_ge2slab": {0: (FORCE_STEPS, "slab Hartree operator not symmetric where the density reaches the edge of the "
-                          "slab (PARSEC_HARTREE_VARIATIONAL=on: f_ge2slab_var)")},
-        # not for the O table (its eighth sample is at 9.3e-4 bohr), nor for the slab and the wire, whose radial
-        # table terms within rs(2) are skipped (an open item that this exception must not hide)
+                          "slab under PARSEC_HARTREE_VARIATIONAL=off (the default slab: f_ge2slab_var)")},
     }
     # The linear radial tables of PARSEC 1.5 (PARSEC_CUBIC_SPLINE_DEFAULT=off for an input without Cubic_Spline) have
     # a kink at every radial sample a grid point crosses, so the slope of the energy over a step is not the force at

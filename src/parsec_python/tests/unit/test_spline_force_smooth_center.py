@@ -65,8 +65,12 @@ def _species(table: str, *, spline: bool = True) -> SpeciesPotential:
     )
 
 
-def _load(specifications):
-    return load_pseudopotentials(specifications, xc_functional="pbe", check_correlation=False)
+def _load(specifications, origin: str = "off"):
+    # The FHI tables as the file gives them (PARSEC_FHI_ORIGIN=off), whose first sample lies at 1.04e-3 (C) and
+    # 1.25e-3 bohr (B): the rule acts on their padded first interval.  Under auto, the default, the reader continues
+    # them to 1e-5 bohr (FHIOriginTests below).
+    with mock.patch.dict(os.environ, {"PARSEC_FHI_ORIGIN": origin}):
+        return load_pseudopotentials(specifications, xc_functional="pbe", check_correlation=False)
 
 
 def _setting(value: str):
@@ -366,6 +370,48 @@ class CellTests(unittest.TestCase):
                     auto, tip = run(case, "auto", fast=fast), run(case, "tip", fast=fast)
                     for term in ("ionic", "self_consistency", "core_correction"):
                         np.testing.assert_array_equal(getattr(auto, term), getattr(tip, term))
+
+
+class FHIOriginTests(unittest.TestCase):
+    """``PARSEC_FHI_ORIGIN=auto``: the carbon FHI table continued below its first sample.  At fixed density the local
+    force of an atom on or next to a grid point is then the derivative of the local energy (central differences
+    converge to it as the square of the step); with the table as the file gives it the force of the rule follows the
+    difference over 2e-3 bohr only, and is 2.9e-3 Ry/bohr off the derivative 5e-4 bohr from the point (cluster, h 0.4,
+    CPU)."""
+
+    def test_local_force_is_the_derivative_of_the_energy(self) -> None:
+        grid = build_cluster_grid(GridSettings(spacing=0.4, radius=4.0, expansion_order=8))
+        for origin, offset in (("auto", 5.0e-4), ("auto", 1.0e-11), ("off", 5.0e-4)):
+            specifications = {"C": _species("fhi")}
+            potentials = _load(specifications, origin)
+            self.assertEqual(potentials["C"].origin_samples > 0, origin == "auto")
+            first = _near_point(grid, (0.3, -0.2, 0.1), offset)
+            atoms = (Atom("C", first.tolist()), Atom("C", (first + np.array([1.3, 1.1, -1.2])).tolist()))
+            density = superpose_atomic_density(grid, atoms, potentials, specifications)
+            zero = np.zeros(grid.size)
+
+            def energy(moved, potentials=potentials, specifications=specifications, density=density):
+                return grid.volume_element * float(
+                    density @ build_local_ionic_potential(grid, moved, potentials, specifications)
+                )
+
+            def slope(step):
+                values = []
+                for sign in (1.0, -1.0):
+                    position = np.array(atoms[0].position, dtype=float)
+                    position[0] += sign * step
+                    values.append(energy((Atom("C", position.tolist()), atoms[1])))
+                return -(values[0] - values[1]) / (2.0 * step)
+
+            with _setting("auto"):
+                force = local_forces(grid, atoms, potentials, specifications, density, zero, zero).ionic[0, 0]
+            # Richardson value of the steps 2.5e-4 and 1.25e-4 bohr
+            limit = (4.0 * slope(1.25e-4) - slope(2.5e-4)) / 3.0
+            with self.subTest(origin=origin, offset=offset):
+                if origin == "auto":
+                    self.assertLess(abs(force - limit), 1.0e-7)
+                else:
+                    self.assertGreater(abs(force - limit), 1.0e-3)
 
 
 if __name__ == "__main__":

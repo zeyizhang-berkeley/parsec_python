@@ -230,6 +230,27 @@ class LibraryTests(unittest.TestCase):
                         self.assertLess(_worst(own.unpolarized(*unpolarized), libxc.unpolarized(*unpolarized)), 2e-12)
                         self.assertLess(_worst(own.polarized(*polarized), libxc.polarized(*polarized)), 2e-12)
 
+    def test_ca_counterparts(self) -> None:
+        """``ca``: libxc's LDA_C_PZ_MOD under the default PARSEC_CA_CONTINUITY=on, LDA_C_PZ under off (round-off),
+        as OWN_FUNCTIONAL_COUNTERPARTS says; densities on both sides of r_s = 1."""
+
+        import os
+        from unittest import mock
+
+        from parsec_python.V_xc.ca_lda import ca_lda
+        from parsec_python.V_xc.libxc import OWN_FUNCTIONAL_COUNTERPARTS, LibxcSemilocal
+
+        self.assertEqual(OWN_FUNCTIONAL_COUNTERPARTS["ca"][0], "libxc:lda_x+lda_c_pz_mod")
+        rho = np.array([1.0e-4, 0.003, 0.02, 0.1, 0.2, 0.23, 0.25, 0.5, 2.0, 10.0, 40.0])
+        sigma = np.zeros_like(rho)
+        for setting, spec in (("on", "libxc:lda_x+lda_c_pz_mod"), ("off", "libxc:lda_x+lda_c_pz")):
+            with self.subTest(setting=setting), mock.patch.dict(os.environ, {"PARSEC_CA_CONTINUITY": setting}):
+                own = ca_lda(rho, 1.0)
+                energy, vrho, _ = LibxcSemilocal(spec).unpolarized(rho, sigma)
+                # Rydberg here, Hartree in libxc
+                np.testing.assert_allclose(own.energy_density, 2.0 * np.asarray(energy), rtol=1.0e-10)
+                np.testing.assert_allclose(own.potential, 2.0 * np.asarray(vrho), rtol=1.0e-10)
+
     def test_grid_fields_equal_the_code_pbe(self) -> None:
         """semilocal_xc with libxc's PBE = pbe()/pbe_spin() with libxc's digits, as grid fields."""
 

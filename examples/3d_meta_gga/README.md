@@ -44,26 +44,30 @@ QE at 200 Ry, dual 8. PBE:
 
 | mesh | E this code (Ry/cell) | E QE (Ry/cell) | difference (Ry) | gap this code (eV) | gap QE (eV) | dgap (meV) |
 |---|---|---|---|---|---|---|
-| 2x2x2 | -15.57525517 | -15.57491928 | -3.36e-04 | 0.6103 | 0.6102 | +0.1 |
-| 4x4x4 | -15.74905936 | -15.74871754 | -3.42e-04 | 0.7003 | 0.7002 | +0.1 |
+| 2x2x2 | -15.57492092 | -15.57491928 | -1.64e-06 | 0.6102 | 0.6102 | +0.0 |
+| 4x4x4 | -15.74871900 | -15.74871754 | -1.46e-06 | 0.7002 | 0.7002 | +0.0 |
 
-The PBE offset is PARSEC's Kleinman-Bylander quadrature (trapezoid on the logarithmic mesh against QE's Simpson
-rule; QE with this code's coefficients moves by -3.3e-4 to -3.6e-4 Ry per cell, `qe/README.md`); it cancels in
-E - E_PBE. Meta-GGAs, E - E_PBE in mRy per cell:
+The logs are of 23 November 2026, whose default integrates the Kleinman-Bylander energies exactly on the logarithmic
+mesh (Simpson's value to 1e-12 relative, as QE): the PBE totals lie 1.6e-6 and 1.5e-6 Ry per cell below QE's.
+PARSEC's trapezoid on that mesh, with which the logs before that date were made (`PARSEC_KB_QUADRATURE=trapezoid`;
+with `PARSEC_FHI_ORIGIN=off`, or with `PARSEC_FORTRAN_NUMERICS=on`, the totals of those logs to the printed digits),
+puts them 3.34e-4 and 3.40e-4 Ry lower (-15.57525517 and -15.74905936 Ry), as QE with those coefficients moves by
+-3.3e-4 to -3.6e-4 Ry per cell (`qe/README.md`). In E - E_PBE it cancels to 3 microRy: the meta-GGA rows below moved
+by at most 0.003 mRy, the gaps by at most 0.1 meV. Meta-GGAs, E - E_PBE in mRy per cell:
 
 | functional | mesh | E - E_PBE this code (mRy) | E - E_PBE QE (mRy) | this code - QE (mRy) | gap this code (eV) | gap QE (eV) | dgap (meV) | SCF iterations | gradient form |
 |---|---|---|---|---|---|---|---|---|---|
-| SCAN | 2x2x2 | -7.777 | -7.687 | -0.089 | 0.7954 | 0.7932 | +2.2 | 18 | orbital |
-| SCAN | 4x4x4 | -9.588 | -9.443 | -0.145 | 0.9654 | 0.9605 | +4.9 | 17 | orbital |
-| r2SCAN | 2x2x2 | +0.407 | +0.516 | -0.109 | 0.7651 | 0.7648 | +0.3 | 15 | orbital |
-| r2SCAN | 4x4x4 | -5.981 | -5.888 | -0.093 | 0.8564 | 0.8560 | +0.4 | 16 | orbital |
-| TPSS | 2x2x2 | +14.551 | +14.650 | -0.099 | 0.9632 | 0.9628 | +0.4 | 18 | density |
-| TPSS | 4x4x4 | +20.199 | +20.288 | -0.089 | 0.8712 | 0.8709 | +0.3 | 17 | density |
+| SCAN | 2x2x2 | -7.775 | -7.687 | -0.087 | 0.7954 | 0.7932 | +2.2 | 18 | orbital |
+| SCAN | 4x4x4 | -9.585 | -9.443 | -0.142 | 0.9653 | 0.9605 | +4.8 | 17 | orbital |
+| r2SCAN | 2x2x2 | +0.409 | +0.516 | -0.107 | 0.7651 | 0.7648 | +0.3 | 15 | orbital |
+| r2SCAN | 4x4x4 | -5.978 | -5.888 | -0.090 | 0.8564 | 0.8560 | +0.4 | 16 | orbital |
+| TPSS | 2x2x2 | +14.548 | +14.650 | -0.102 | 0.9631 | 0.9628 | +0.3 | 18 | density |
+| TPSS | 4x4x4 | +20.197 | +20.288 | -0.091 | 0.8712 | 0.8709 | +0.3 | 17 | density |
 
-E - E_PBE agrees within 0.09 to 0.15 mRy per cell, which is QE's own scatter of the meta-GGA totals between 120 and
+E - E_PBE agrees within 0.09 to 0.14 mRy per cell, which is QE's own scatter of the meta-GGA totals between 120 and
 250 Ry (+-0.15 mRy per cell, `qe/README.md`); the gaps of r2SCAN and TPSS within 0.4 meV, SCAN's within 2 to 5 meV
 (SCAN's grid sensitivity, see `../0d_meta_gga/README.md`; QE's SCAN gap moves by 1-2 meV with its cutoff). At
-h = 0.16 bohr the differences are the same to 0.07 mRy (r2SCAN -0.10 and -0.09, SCAN -0.16 and -0.11 mRy).
+h = 0.16 bohr the differences are the same to 0.08 mRy (r2SCAN -0.10 and -0.09, SCAN -0.16 and -0.11 mRy).
 
 ## TPSS at the Gamma point alone
 
@@ -77,22 +81,23 @@ Use a k-mesh (the 2x2x2 and 4x4x4 rows above converge in 17 and 18 iterations), 
 
 ## Costs
 
-`main.py` on one A100 (first run of each input with an empty kernel cache: program wall time, setup included, one
-process per input; peak device memory of the process):
+`main.py` on one A100 (the logs: first run of each input with an empty kernel cache, after one discarded run on each
+GPU, four inputs side by side, one per GPU; program wall time, setup included, one process per input; peak device
+memory of the process):
 
 | mesh | irreducible k-points | functional | SCF iterations | wall (s) | peak device memory (GiB) |
 |---|---|---|---|---|---|
-| 2x2x2 | 3 | PBE | 12 | 9.2 | 0.7 |
-| 2x2x2 | 3 | SCAN | 18 | 17.6 | 0.8 |
-| 2x2x2 | 3 | r2SCAN | 15 | 15.1 | 0.8 |
-| 2x2x2 | 3 | TPSS | 18 | 15.4 | 0.8 |
-| 4x4x4 | 8 | PBE | 11 | 11.6 | 0.8 |
-| 4x4x4 | 8 | SCAN | 17 | 22.7 | 1.0 |
-| 4x4x4 | 8 | r2SCAN | 16 | 21.4 | 1.0 |
-| 4x4x4 | 8 | TPSS | 17 | 21.4 | 1.0 |
+| 2x2x2 | 3 | PBE | 12 | 8.9 | 0.7 |
+| 2x2x2 | 3 | SCAN | 18 | 17.2 | 0.8 |
+| 2x2x2 | 3 | r2SCAN | 15 | 14.9 | 0.8 |
+| 2x2x2 | 3 | TPSS | 18 | 15.5 | 0.8 |
+| 4x4x4 | 8 | PBE | 11 | 11.2 | 0.8 |
+| 4x4x4 | 8 | SCAN | 17 | 22.6 | 1.0 |
+| 4x4x4 | 8 | r2SCAN | 16 | 21.1 | 1.0 |
+| 4x4x4 | 8 | TPSS | 17 | 21.0 | 1.0 |
 
 The orbital terms of a meta-GGA (`tau` of the orbitals of every k-point and `-div(vtau grad)` in every Bloch
-Hamiltonian) and the evaluation of libxc on the GPU make a meta-GGA run 1.6 to 1.9 times as long as PBE here.
+Hamiltonian) and the evaluation of libxc on the GPU make a meta-GGA run 1.7 to 2.0 times as long as PBE here.
 
 ## The check script
 

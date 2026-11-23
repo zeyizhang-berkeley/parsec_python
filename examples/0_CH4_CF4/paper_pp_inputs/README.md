@@ -36,3 +36,8 @@ projectors, D matrix, pseudo wave functions, atomic density) agrees. The
 headers differ only in notation (`core_correction="false"` for `"F"`) and in
 the energies, which the published files give as twice the five-decimal Hartree
 value of the FHI98PP log.
+
+FHI98PP itself (the Fortran program; M. Fuchs and M. Scheffler, Comput.
+Phys. Commun. **119**, 67 (1999)) gives from these four inputs the mesh, the
+potentials and the pseudo wave functions of the UPF files to 3e-11
+(relative), and its log the energies above to the five printed decimals.

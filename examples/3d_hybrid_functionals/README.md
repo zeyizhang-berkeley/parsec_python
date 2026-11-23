@@ -39,7 +39,7 @@ python src\parsec_python\main.py examples\3d_hybrid_functionals\Si_k222\pbe0\par
 ```
 
 `parsec.out` is written beside the input; compare it with `parsec_python.out`. Every input of this example, one after
-another on one node (about 1 h 3 min of program time on one A100, 40 min of it the two O2 hybrids), and the tables:
+another on one node (about 1 h 3 min of program time on one A100, 39 min of it the two O2 hybrids), and the tables:
 
 ```powershell
 python examples\3d_hybrid_functionals\run_examples.py            # or: run_examples.py Si_k222 hBN_k661/pbe0
@@ -107,7 +107,7 @@ default `auto` is:
 - **the `1/r` part with the extrapolation**, QE's default `gbx`: the PBE0, HF and B3LYP inputs at the defaults are
   like-for-like with QE's default rows. The element of the extrapolated `1/r` kernel does not depend on the
   exponent: Si 2x2x2 PBE0 with `Exx_Divergence: gygi-baldereschi-x` and QE's exponent 1/6 gives the total energy of
-  the default to 1e-8 Ry (both -15.59168695 Ry).
+  the default to 1e-8 Ry (both -15.59135195 Ry).
 - **the `erfc` part (HSE) without it**, QE's `gb`, with the exponent in the limit `a -> 0` instead of QE's
   `10/ecutwfc`. The short-range kernel has no divergence (`K -> 2 pi/omega^2` Ry bohr^2 as `q + G -> 0`); the auxiliary
   function only improves the sampling of the smooth integrand, and the extrapolation makes that worse. On Gaussian
@@ -115,7 +115,7 @@ default `auto` is:
   4.8e-4 Ry without the extrapolation and by 2e-8 with it, the `erfc` element by 1.7e-6 without it and by 4.4e-4 with
   it. The exponent of the `erfc` element matters on coarse meshes, where the element carries a k-point error of the
   whole sum: the `hse06` inputs of the bulk cells and of O2 pass QE's `10/ecutwfc` (like-for-like with `gb`), and
-  the `hse06_default` inputs show what the default gives: with the exponent a -> 0, E_hyb - E_PBE of Si lies 9.9e-4 Ry below the value with QE's exponent at 2x2x2 (gap +3.4 meV) and 4.7e-7 Ry below it at 4x4x4 (gap the same to 0.1 meV). The two elements are two quadratures of the same Brillouin-zone integral; they agree once the mesh resolves the short-range kernel.
+  the `hse06_default` inputs show what the default gives: with the exponent a -> 0, E_hyb - E_PBE of Si lies 9.9e-4 Ry below the value with QE's exponent at 2x2x2 (gap +3.4 meV) and 4.6e-7 Ry below it at 4x4x4 (gap the same to 0.1 meV). The two elements are two quadratures of the same Brillouin-zone integral; they agree once the mesh resolves the short-range kernel.
 
 QE's `gb` rows of the `1/r` kernel (not compared here) converge with the mesh like `1/N_k` (Si: `E_x(gb) - E_x(gbx)`
 = 0.32, 0.067 and 0.026 Ry at 1, 2 and 3 points per direction); its `gbx` rows and this code's default converge faster.
@@ -139,18 +139,31 @@ h-BN PBE0 its E_hyb - E_PBE lies 1.6e-3 Ry below the padded value at 3x3x1 and 2
 
 | system | E_PBE this code (Ry) | E_PBE QE (Ry) | difference (Ry) | gap this code (eV) | gap QE (eV) |
 |---|---|---|---|---|---|
-| Si_k222 | -15.57527352 | -15.57477255 | -5.0e-04 | 0.6103 | 0.6105 |
-| Si_k444 | -15.74907722 | -15.74854796 | -5.3e-04 | 0.7003 | 0.7006 |
-| Si_disp_k222 | -15.57474213 | -15.57432061 | -4.2e-04 | 0.4109 | 0.4113 |
-| C_k333 | -22.75888434 | -22.75901823 | +1.3e-04 | 4.1744 | 4.1749 |
-| MgO_k333 | -35.13808829 | -35.13885358 | +7.7e-04 | 4.6597 | 4.6579 |
-| hBN_k661 | -25.80786051 | -25.80737855 | -4.8e-04 | 4.6981 | 4.6973 |
-| O2_box | -63.71087697 | -63.71072842 | -1.5e-04 | 2.4873 | 2.4864 |
+| Si_k222 | -15.57493931 | -15.57477255 | -1.7e-04 | 0.6102 | 0.6105 |
+| Si_k444 | -15.74873691 | -15.74854796 | -1.9e-04 | 0.7003 | 0.7006 |
+| Si_disp_k222 | -15.57440787 | -15.57432061 | -8.7e-05 | 0.4109 | 0.4113 |
+| C_k333 | -22.75885110 | -22.75901823 | +1.7e-04 | 4.1753 | 4.1749 |
+| MgO_k333 | -35.13822874 | -35.13885358 | +6.2e-04 | 4.6617 | 4.6579 |
+| hBN_k661 | -25.80785832 | -25.80737855 | -4.8e-04 | 4.6983 | 4.6973 |
+| O2_box | -63.71114036 | -63.71072842 | -4.1e-04 | 2.4874 | 2.4864 |
 
-QE: Si 60, C 120, MgO 150, h-BN 100, O2 150 Ry. The differences hold QE's cutoff error of the totals (Si -1.4e-4, C
--5.5e-5, MgO -1.0e-4, h-BN -5.3e-4 Ry per cell against QE's converged total), PARSEC's Kleinman-Bylander quadrature
-(`qe/README.md`; in QE with this code's E_l: Si -3.6e-4, C +1.2e-4, MgO +2.9e-4, h-BN -1e-6 Ry per cell) and this
-code's grid (oxygen converges slowest: MgO about +5e-4 Ry at h 0.14). The gaps agree within 0.5 meV for Si and C, 0.8 meV for h-BN, 0.9 meV for O2 and 1.8 meV for MgO.
+QE: Si 60, C 120, MgO 150, h-BN 100, O2 150 Ry. The logs (23 November 2026) integrate the Kleinman-Bylander energies
+E_l exactly on the logarithmic mesh, which is QE's Simpson rule to 1e-12 relative, so the differences hold QE's cutoff
+error of the totals (Si -1.4e-4, C -5.5e-5, MgO -1.0e-4, h-BN -5.3e-4 Ry per cell against QE's converged total) and
+this code's grid (oxygen converges slowest: MgO about +5e-4 Ry at h 0.14); Si differs from QE by QE's cutoff error.
+PARSEC's trapezoid on the logarithmic mesh, with which the logs before that date were made (`qe/README.md`;
+`PARSEC_KB_QUADRATURE=trapezoid`, with `PARSEC_FHI_ORIGIN=off` the totals of those logs to the printed digits, as
+`PARSEC_FORTRAN_NUMERICS=on` gives them for every cell but h-BN, -1.4e-5 Ry there), changes the totals of the `pbe`
+inputs by -3.34e-4 (Si_k222, Si_disp_k222), -3.40e-4 (Si_k444), -3.3e-5 (C_k333), +1.41e-4 (MgO_k333), -2.2e-6
+(hBN_k661) and +2.63e-4 Ry (O2_box); the differences were -5.0e-4, -5.3e-4, -4.2e-4, +1.3e-4, +7.7e-4, -4.8e-4 and
+-1.5e-4 Ry with it. QE with the same E_l (UPF files with PARSEC's E_l) moved by -3.6e-4 Ry for Si on the 2x2x2 mesh and
+-1e-6 Ry for h-BN on a 3x3x1 mesh, within 7 % and 3e-6 Ry of this code's change. Its controls of C (+1.2e-4) and MgO
+(+2.9e-4 Ry per cell) were made at the Gamma point alone, not on the 3x3x3 mesh of the comparison: the change is first
+order in E_l, weighted by the projections of the occupied states on the projectors, and these depend on the k-points.
+At the Gamma point alone this code's trapezoid changes Si, C and MgO by -3.1e-4, +1.3e-4 and +2.8e-4 Ry (QE -3.3e-4,
++1.2e-4 and +2.9e-4 Ry, within 9 %), on the 3x3x3 mesh C and MgO by -3.3e-5 and +1.41e-4 Ry (the same inputs with the
+k-point list cut to the Gamma point, A100, 23 November 2026). The gaps agree within 0.4 meV for Si and C, 1.0 meV for
+h-BN and O2 and 3.8 meV for MgO (1.8 meV with the trapezoid, which lowers the MgO gap by 2.0 meV).
 
 ## Hybrids against QE
 
@@ -161,32 +174,32 @@ the mesh (eV; O2: lowest empty minus highest occupied level of both channels).
 
 | system | input | q+G=0 / slab | dE this code | dE QE | ddE | ddE (QE moved) | Fock this code | Fock QE | difference | gap this code | gap QE |
 |---|---|---|---|---|---|---|---|---|---|---|---|
-| Si_k222 | pbe0 | default (= QE gbx) | -0.01641343 | -0.01641613 | +2.7e-06 | +2.4e-06 | -1.09610764 | -1.09610497 | -2.7e-06 | 2.2890 | 2.2893 |
-| Si_k222 | hse06 | gb, a = 10/ecutwfc | -0.02017646 | -0.02018365 | +7.2e-06 | +4.7e-06 | -0.86447741 | -0.86447055 | -6.9e-06 | 1.6229 | 1.6231 |
-| Si_k222 | hse06_default | default (a -> 0) | -0.02117064 | -0.02018365 | -9.9e-04 | -9.9e-04 | -0.86547157 | -0.86447055 | -1.0e-03 | 1.6263 | 1.6231 |
-| Si_k222 | hf | default (= QE gbx) | +0.50036330 | +0.50037506 | -1.2e-05 |  | -4.46162446 | -4.46160434 | -2.0e-05 | 7.9361 | 7.9362 |
-| Si_k222 | b3lyp | default (= QE gbx) | +0.03822806 | +0.03826345 | -3.5e-05 |  | -0.88258426 | -0.88257822 | -6.0e-06 | 2.2127 | 2.2131 |
-| Si_k444 | pbe0 | default (= QE gbx) | -0.01057677 | -0.01058443 | +7.7e-06 | +7.6e-06 | -1.07070949 | -1.07070707 | -2.4e-06 | 1.9814 | 1.9817 |
-| Si_k444 | hse06 | gb, a = 10/ecutwfc | -0.00743333 | -0.00744763 | +1.4e-05 | +1.1e-05 | -0.83294312 | -0.83294089 | -2.2e-06 | 1.3272 | 1.3274 |
-| Si_k444 | hse06_default | default (a -> 0) | -0.00743380 | -0.00744763 | +1.4e-05 | +1.0e-05 | -0.83294359 | -0.83294089 | -2.7e-06 | 1.3272 | 1.3274 |
-| Si_k444 | hf | default (= QE gbx) | +0.53144241 | +0.53144092 | +1.5e-06 |  | -4.36744308 | -4.36746762 | +2.5e-05 | 6.7854 | 6.7861 |
-| Si_disp_k222 | pbe0 | default (= QE gbx) | -0.01639111 | -0.01639308 | +2.0e-06 |  | -1.09607620 | -1.09607990 | +3.7e-06 | 2.0797 | 2.0801 |
-| Si_disp_k222 | hse06 | gb, a = 10/ecutwfc | -0.02015608 | -0.02016056 | +4.5e-06 |  | -0.86444868 | -0.86444827 | -4.1e-07 | 1.4145 | 1.4149 |
-| C_k333 | pbe0 | default (= QE gbx) | -0.00224413 | -0.00224824 | +4.1e-06 | +2.4e-06 | -1.60903336 | -1.60903339 | +3.0e-08 | 6.2147 | 6.2152 |
-| C_k333 | hse06 | gb, a = 10/ecutwfc | -0.00440580 | -0.00443196 | +2.6e-05 | +4.2e-06 | -1.36981406 | -1.36981661 | +2.6e-06 | 5.5505 | 5.5510 |
-| MgO_k333 | pbe0 | default (= QE gbx) | +0.27007220 | +0.27005382 | +1.8e-05 | +1.9e-05 | -1.89793512 | -1.89795571 | +2.1e-05 | 7.2136 | 7.2118 |
-| MgO_k333 | hse06 | gb, a = 10/ecutwfc | +0.22883684 | +0.22876483 | +7.2e-05 | +1.9e-05 | -1.65474320 | -1.65476926 | +2.6e-05 | 6.5002 | 6.4986 |
-| hBN_k661 | pbe0 | default: padded slab | +0.01059845 | +0.01050458 | +9.4e-05 | +9.5e-05 | -1.68614080 | -1.68611913 | -2.2e-05 | 6.3731 | 6.3753 |
-| hBN_k661 | pbe0_periodic | periodic, gbx, a = 10/ecutwfc | +0.01060011 | +0.01050458 | +9.6e-05 | +9.6e-05 | -1.68613969 | -1.68611913 | -2.1e-05 | 6.3729 | 6.3753 |
-| hBN_k661 | hse06 | default: padded slab | +0.01120793 | +0.01110674 | +1.0e-04 | +9.3e-05 | -1.44208018 | -1.44206026 | -2.0e-05 | 5.7011 | 5.7089 |
-| hBN_k661 | hse06_periodic | periodic, gb, a = 10/ecutwfc | +0.01120802 | +0.01110674 | +1.0e-04 | +9.3e-05 | -1.44208013 | -1.44206026 | -2.0e-05 | 5.7011 | 5.7089 |
-| O2_box | pbe0 | default (= QE gbx) | +0.04049115 | +0.04044334 | +4.8e-05 | +3.5e-05 | -3.16298433 | -3.16297699 | -7.3e-06 | 6.1973 | 6.1969 |
-| O2_box | hse06 | gb, a = 10/ecutwfc | +0.03746132 | +0.03711984 | +3.4e-04 | +2.6e-05 | -2.80020064 | -2.80020128 | +6.4e-07 | 5.4189 | 5.4187 |
+| Si_k222 | pbe0 | default (= QE gbx) | -0.01641264 | -0.01641613 | +3.5e-06 | +3.2e-06 | -1.09610450 | -1.09610497 | +4.7e-07 | 2.2890 | 2.2893 |
+| Si_k222 | hse06 | gb, a = 10/ecutwfc | -0.02017563 | -0.02018365 | +8.0e-06 | +5.5e-06 | -0.86447419 | -0.86447055 | -3.6e-06 | 1.6229 | 1.6231 |
+| Si_k222 | hse06_default | default (a -> 0) | -0.02116980 | -0.02018365 | -9.9e-04 | -9.9e-04 | -0.86546836 | -0.86447055 | -1.0e-03 | 1.6263 | 1.6231 |
+| Si_k222 | hf | default (= QE gbx) | +0.50036207 | +0.50037506 | -1.3e-05 |  | -4.46161527 | -4.46160434 | -1.1e-05 | 7.9361 | 7.9362 |
+| Si_k222 | b3lyp | default (= QE gbx) | +0.03822767 | +0.03826345 | -3.6e-05 |  | -0.88258201 | -0.88257822 | -3.8e-06 | 2.2126 | 2.2131 |
+| Si_k444 | pbe0 | default (= QE gbx) | -0.01057606 | -0.01058443 | +8.4e-06 | +8.3e-06 | -1.07070730 | -1.07070707 | -2.3e-07 | 1.9814 | 1.9817 |
+| Si_k444 | hse06 | gb, a = 10/ecutwfc | -0.00743248 | -0.00744763 | +1.5e-05 | +1.1e-05 | -0.83294076 | -0.83294089 | +1.3e-07 | 1.3271 | 1.3274 |
+| Si_k444 | hse06_default | default (a -> 0) | -0.00743294 | -0.00744763 | +1.5e-05 | +1.1e-05 | -0.83294122 | -0.83294089 | -3.3e-07 | 1.3271 | 1.3274 |
+| Si_k444 | hf | default (= QE gbx) | +0.53144051 | +0.53144092 | -4.1e-07 |  | -4.36743650 | -4.36746762 | +3.1e-05 | 6.7855 | 6.7861 |
+| Si_disp_k222 | pbe0 | default (= QE gbx) | -0.01639032 | -0.01639308 | +2.8e-06 |  | -1.09607306 | -1.09607990 | +6.8e-06 | 2.0796 | 2.0801 |
+| Si_disp_k222 | hse06 | gb, a = 10/ecutwfc | -0.02015524 | -0.02016056 | +5.3e-06 |  | -0.86444547 | -0.86444827 | +2.8e-06 | 1.4145 | 1.4149 |
+| C_k333 | pbe0 | default (= QE gbx) | -0.00224134 | -0.00224824 | +6.9e-06 | +5.2e-06 | -1.60903011 | -1.60903339 | +3.3e-06 | 6.2156 | 6.2152 |
+| C_k333 | hse06 | gb, a = 10/ecutwfc | -0.00440271 | -0.00443196 | +2.9e-05 | +7.2e-06 | -1.36981048 | -1.36981661 | +6.1e-06 | 5.5515 | 5.5510 |
+| MgO_k333 | pbe0 | default (= QE gbx) | +0.27007272 | +0.27005382 | +1.9e-05 | +1.9e-05 | -1.89795905 | -1.89795571 | -3.3e-06 | 7.2158 | 7.2118 |
+| MgO_k333 | hse06 | gb, a = 10/ecutwfc | +0.22883771 | +0.22876483 | +7.3e-05 | +2.0e-05 | -1.65476674 | -1.65476926 | +2.5e-06 | 6.5023 | 6.4986 |
+| hBN_k661 | pbe0 | default: padded slab | +0.01060131 | +0.01050458 | +9.7e-05 | +9.8e-05 | -1.68614650 | -1.68611913 | -2.7e-05 | 6.3735 | 6.3753 |
+| hBN_k661 | pbe0_periodic | periodic, gbx, a = 10/ecutwfc | +0.01060296 | +0.01050458 | +9.8e-05 | +9.9e-05 | -1.68614545 | -1.68611913 | -2.6e-05 | 6.3733 | 6.3753 |
+| hBN_k661 | hse06 | default: padded slab | +0.01121085 | +0.01110674 | +1.0e-04 | +9.6e-05 | -1.44208592 | -1.44206026 | -2.6e-05 | 5.7016 | 5.7089 |
+| hBN_k661 | hse06_periodic | periodic, gb, a = 10/ecutwfc | +0.01121094 | +0.01110674 | +1.0e-04 | +9.6e-05 | -1.44208581 | -1.44206026 | -2.6e-05 | 5.7016 | 5.7089 |
+| O2_box | pbe0 | default (= QE gbx) | +0.04050163 | +0.04044334 | +5.8e-05 | +4.6e-05 | -3.16300446 | -3.16297699 | -2.7e-05 | 6.1976 | 6.1969 |
+| O2_box | hse06 | gb, a = 10/ecutwfc | +0.03747237 | +0.03711984 | +3.5e-04 | +3.7e-05 | -2.80022005 | -2.80020128 | -1.9e-05 | 5.4192 | 5.4187 |
 
-- **Si and C** (meshes 2x2x2 to 4x4x4; PBE0, HSE06, HF, B3LYP): ddE within 7.7e-6 Ry for PBE0, 1.2e-5 for HF and 1.4e-5 for HSE06 of Si; C's HSE06 lies +2.6e-5 Ry from QE's reference row and +4.2e-6 from the QE run with the atoms off its grid, and every HSE06 row of Si and C is within 1.1e-5 Ry of those runs. Fock energies within 6.9e-6 Ry (HF 2.5e-5, four times the exact exchange of PBE0); gaps within 0.7 meV. B3LYP lies 3.5e-5 Ry below QE with its Fock energy within 6e-6 Ry: the difference is in the semilocal B88, LYP and VWN-RPA part (libxc 402 in QE), not in the exchange.
-- **MgO** (3x3x3): PBE0 +1.8e-5 Ry, HSE06 +7.2e-5 Ry against the reference and +1.9e-5 Ry against QE with the atoms moved (QE's cutoff error of E_hyb - E_PBE: 1.2e-5 Ry); Fock +2.1e-5 and +2.6e-5 Ry; the gaps 1.8 and 1.6 meV above QE's, as at the PBE level (oxygen at h 0.14).
-- **h-BN** (6x6x1): +9.4e-5 to +1.0e-4 Ry against QE at 100 Ry, which is QE's own cutoff error of this difference (9.7e-5 Ry). Against QE at 160 Ry (`qe/*_e160.in`) the default PBE0 is -1.7e-6 Ry from QE's `gbx` row (QE's `gb` change from 100 to 160 Ry added to it) and the default HSE06 +6.4e-6 Ry from its `gb` row. Fock energies within 2.2e-5 Ry. The gaps (PBE0 -2.2 meV, HSE06 -7.8 meV) end at the conduction band minimum at Gamma, the nearly-free-electron state of the layer, which reaches into the vacuum where the two codes' cells differ.
-- **O2** (Gamma, spin, `occup.in`): PBE0 +4.8e-5 Ry (QE's cutoff error 3.1e-5 Ry; +3.5e-5 against QE with the molecule moved), HSE06 +3.4e-4 Ry against the reference but +2.6e-5 Ry against the moved QE (next section); Fock within 7.3e-6 Ry; gaps within 0.4 meV.
+- **Si and C** (meshes 2x2x2 to 4x4x4; PBE0, HSE06, HF, B3LYP): ddE within 8.4e-6 Ry for PBE0, 1.3e-5 for HF and 1.5e-5 for HSE06 of Si; C's HSE06 lies +2.9e-5 Ry from QE's reference row and +7.2e-6 from the QE run with the atoms off its grid, and every HSE06 row of Si and C is within 1.1e-5 Ry of those runs. Fock energies within 6.8e-6 Ry (HF 3.1e-5, four times the exact exchange of PBE0); gaps within 0.6 meV. B3LYP lies 3.6e-5 Ry below QE with its Fock energy within 4e-6 Ry: the difference is in the semilocal B88, LYP and VWN-RPA part (libxc 402 in QE), not in the exchange.
+- **MgO** (3x3x3): PBE0 +1.9e-5 Ry, HSE06 +7.3e-5 Ry against the reference and +2.0e-5 Ry against QE with the atoms moved (QE's cutoff error of E_hyb - E_PBE: 1.2e-5 Ry); Fock -3.3e-6 and +2.5e-6 Ry; the gaps 4.0 and 3.7 meV above QE's, as at the PBE level (oxygen at h 0.14).
+- **h-BN** (6x6x1): +9.7e-5 to +1.0e-4 Ry against QE at 100 Ry, which is QE's own cutoff error of this difference (9.7e-5 Ry). Against QE at 160 Ry (`qe/*_e160.in`) the default PBE0 is +1.2e-6 Ry from QE's `gbx` row (QE's `gb` change from 100 to 160 Ry added to it) and the default HSE06 +9.3e-6 Ry from its `gb` row. Fock energies within 2.7e-5 Ry. The gaps (PBE0 -1.8 meV, HSE06 -7.3 meV) end at the conduction band minimum at Gamma, the nearly-free-electron state of the layer, which reaches into the vacuum where the two codes' cells differ.
+- **O2** (Gamma, spin, `occup.in`): PBE0 +5.8e-5 Ry (QE's cutoff error 3.1e-5 Ry; +4.6e-5 against QE with the molecule moved), HSE06 +3.5e-4 Ry against the reference but +3.7e-5 Ry against the moved QE (next section); Fock within 2.7e-5 Ry; gaps within 0.7 meV.
 - **`hse06_default`**: the default exponent of the HSE element, above.
 
 ## QE's HSE energies and its grid
@@ -203,40 +216,43 @@ step along x, y and z), so that no such point is on the grid:
 
 | system | input | dE QE | dE QE moved | change | dE this code | ddE | ddE (moved) |
 |---|---|---|---|---|---|---|---|
-| Si_k222 | pbe0 | -0.01641613 | -0.01641586 | +2.7e-07 | -0.01641343 | +2.7e-06 | +2.4e-06 |
-| Si_k222 | hse06 | -0.02018365 | -0.02018111 | +2.5e-06 | -0.02017646 | +7.2e-06 | +4.7e-06 |
-| Si_k444 | pbe0 | -0.01058443 | -0.01058437 | +6.0e-08 | -0.01057677 | +7.7e-06 | +7.6e-06 |
-| Si_k444 | hse06 | -0.00744763 | -0.00744394 | +3.7e-06 | -0.00743333 | +1.4e-05 | +1.1e-05 |
-| C_k333 | pbe0 | -0.00224824 | -0.00224656 | +1.7e-06 | -0.00224413 | +4.1e-06 | +2.4e-06 |
-| C_k333 | hse06 | -0.00443196 | -0.00440995 | +2.2e-05 | -0.00440580 | +2.6e-05 | +4.2e-06 |
-| MgO_k333 | pbe0 | +0.27005382 | +0.27005349 | -3.3e-07 | +0.27007220 | +1.8e-05 | +1.9e-05 |
-| MgO_k333 | hse06 | +0.22876483 | +0.22881796 | +5.3e-05 | +0.22883684 | +7.2e-05 | +1.9e-05 |
-| hBN_k661 | pbe0 | +0.01050458 | +0.01050371 | -8.7e-07 | +0.01059845 | +9.4e-05 | +9.5e-05 |
-| hBN_k661 | hse06 | +0.01110674 | +0.01111519 | +8.5e-06 | +0.01120793 | +1.0e-04 | +9.3e-05 |
-| O2_box | pbe0 | +0.04044334 | +0.04045604 | +1.3e-05 | +0.04049115 | +4.8e-05 | +3.5e-05 |
-| O2_box | hse06 | +0.03711984 | +0.03743523 | +3.2e-04 | +0.03746132 | +3.4e-04 | +2.6e-05 |
+| Si_k222 | pbe0 | -0.01641613 | -0.01641586 | +2.7e-07 | -0.01641264 | +3.5e-06 | +3.2e-06 |
+| Si_k222 | hse06 | -0.02018365 | -0.02018111 | +2.5e-06 | -0.02017563 | +8.0e-06 | +5.5e-06 |
+| Si_k444 | pbe0 | -0.01058443 | -0.01058437 | +6.0e-08 | -0.01057606 | +8.4e-06 | +8.3e-06 |
+| Si_k444 | hse06 | -0.00744763 | -0.00744394 | +3.7e-06 | -0.00743248 | +1.5e-05 | +1.1e-05 |
+| C_k333 | pbe0 | -0.00224824 | -0.00224656 | +1.7e-06 | -0.00224134 | +6.9e-06 | +5.2e-06 |
+| C_k333 | hse06 | -0.00443196 | -0.00440995 | +2.2e-05 | -0.00440271 | +2.9e-05 | +7.2e-06 |
+| MgO_k333 | pbe0 | +0.27005382 | +0.27005349 | -3.3e-07 | +0.27007272 | +1.9e-05 | +1.9e-05 |
+| MgO_k333 | hse06 | +0.22876483 | +0.22881796 | +5.3e-05 | +0.22883771 | +7.3e-05 | +2.0e-05 |
+| hBN_k661 | pbe0 | +0.01050458 | +0.01050371 | -8.7e-07 | +0.01060131 | +9.7e-05 | +9.8e-05 |
+| hBN_k661 | hse06 | +0.01110674 | +0.01111519 | +8.5e-06 | +0.01121085 | +1.0e-04 | +9.6e-05 |
+| O2_box | pbe0 | +0.04044334 | +0.04045604 | +1.3e-05 | +0.04050163 | +5.8e-05 | +4.6e-05 |
+| O2_box | hse06 | +0.03711984 | +0.03743523 | +3.2e-04 | +0.03747237 | +3.5e-04 | +3.7e-05 |
 
-With the atoms off its grid, QE's E_hyb - E_PBE of HSE06 rises by 2.5e-6 (Si 2x2x2) to 3.2e-4 Ry (O2), that of PBE0 changes by at most 1.3e-5 Ry (O2), and this code's HSE06 agrees with the moved QE as well as its PBE0 does (Si and C within 1.1e-5 Ry, MgO 1.9e-5, O2 2.6e-5; h-BN 9.3e-5, QE's cutoff error). This code evaluates the semilocal part at every point of its grid (which holds the atom at the origin
+With the atoms off its grid, QE's E_hyb - E_PBE of HSE06 rises by 2.5e-6 (Si 2x2x2) to 3.2e-4 Ry (O2), that of PBE0 changes by at most 1.3e-5 Ry (O2), and this code's HSE06 agrees with the moved QE as well as its PBE0 does (Si and C within 1.1e-5 Ry, MgO 2.0e-5, O2 3.7e-5; h-BN 9.6e-5, QE's cutoff error). This code evaluates the semilocal part at every point of its grid (which holds the atom at the origin
 too), with no skip where the gradient vanishes.
 
 ## Forces
 
 | functional | this code | QE | difference | hybrid - PBE: difference |
 |---|---|---|---|---|
-| pbe | -0.018053 | -0.01806913 | +1.6e-05 |  |
-| pbe0 | -0.018966 | -0.01898746 | +2.1e-05 | +5.3e-06 |
-| hse06 | -0.018875 | -0.01889558 | +2.1e-05 | +4.4e-06 |
+| pbe | -0.018054 | -0.01806913 | +1.5e-05 |  |
+| pbe0 | -0.018967 | -0.01898746 | +2.0e-05 | +5.3e-06 |
+| hse06 | -0.018876 | -0.01889558 | +2.0e-05 | +4.4e-06 |
 
 Atom 2 of `Si_disp_k222` (moved by +0.05 bohr along x), forces after the net force is set to zero, as QE's; this
-code prints them to 1e-6 Ry/bohr. The PBE forces of the two codes differ by 1.6e-5 Ry/bohr (grid against cutoff), the hybrid forces by 2.1e-5 Ry/bohr; the change of the force from PBE to the hybrid agrees with QE's to 5.3e-6 (PBE0) and 4.4e-6 Ry/bohr (HSE06). The exchange operator of norm-conserving pseudopotentials adds no
+code prints them to 1e-6 Ry/bohr. The PBE forces of the two codes differ by 1.5e-5 Ry/bohr (grid against cutoff), the hybrid forces by 2.0e-5 Ry/bohr; the change of the force from PBE to the hybrid agrees with QE's to 5.3e-6 (PBE0) and 4.4e-6 Ry/bohr (HSE06). The exchange operator of norm-conserving pseudopotentials adds no
 explicit force term (Hellmann-Feynman forces of the hybrid orbitals and density). Atom 1 sits exactly on a grid point;
 the gradient of its projectors there is the slope of the smooth `c r^l` of the table (`PARSEC_PROJECTOR_CENTER=auto`),
-so its force before the net force is removed, 0.01806358 Ry/bohr with PBE, agrees with central differences of the
-energy (SCF 1e-10 Ry, Fortran-derived routines, steps 1e-3 and 2e-3 bohr) within 2.3e-9 and 9.2e-9 Ry/bohr (PBE),
-1.2e-6 (PBE0) and 4.8e-7 Ry/bohr (HSE06). A step of 1e-4 bohr lies inside the first samples of the Si FHI table, which
-are 25 to 48 % above `c r`, and gives 8e-6 Ry/bohr less; with the gradient `nonloc.F90` forms at the point
-(`PARSEC_PROJECTOR_CENTER=tip`, the former forces: 0.01805567 Ry/bohr with PBE) it is the other way round; under
-`tip` the rows above read -0.018049, -0.018962 and -0.018870.
+so its force before the net force is removed, 0.01806459 Ry/bohr with PBE, agrees with central differences of the
+energy (SCF 1e-10 Ry, Fortran-derived routines, steps 1e-4, 1e-3 and 2e-3 bohr) within 1.6e-11, 2.2e-9 and 9.2e-9
+Ry/bohr (PBE), and within 1.2e-6 (PBE0) and 4.8e-7 Ry/bohr (HSE06) at all three steps. The step of 1e-4 bohr lies
+inside the first samples of the Si FHI table; since 23 November 2026 the reader continues the table below them
+(`PARSEC_FHI_ORIGIN=auto`), while the former reading (`PARSEC_FHI_ORIGIN=off`, the padding of pseudo.f90, 25 to 48 %
+above `c r` there) gives a slope 7.9e-6 (PBE), 7.8e-6 (PBE0) and 8.5e-6 Ry/bohr (HSE06) below the force at that step.
+With the gradient `nonloc.F90` forms at the point (`PARSEC_PROJECTOR_CENTER=tip`, the former forces: 0.01805669
+Ry/bohr with PBE) the force lies 7.9e-6 (PBE), 1.0e-5 (PBE0) and 9.4e-6 Ry/bohr (HSE06) below the slope at every step;
+under `tip` the rows above read -0.018050, -0.018963 and -0.018871 (A100, 23 November 2026).
 
 ## Error budget
 
@@ -249,49 +265,50 @@ are 25 to 48 % above `c r`, and gives 8e-6 Ry/bohr less; with the gradient `nonl
 | Fock loop | `Exx_Tolerance 1e-8 Ry` (estimated exchange error); QE: dexx <= 1e-10 Ry | the logs |
 | k-point mesh | none between the codes: the same mesh in both (the reference is QE's row at the same mesh and q+G = 0 treatment, not the converged limit) | |
 | q+G = 0 element | 1e-15 relative | unit test of the kernel against QE's `exxdiv` of every row |
-| Kleinman-Bylander quadrature | a constant offset of the totals (PBE table); in E_hyb - E_PBE up to ~2e-5 Ry for HF (`examples/0d_hybrid_functionals`) | QE with this code's E_l |
+| Kleinman-Bylander quadrature | none: both codes integrate E_l exactly (the former trapezoid: a constant offset of the totals, PBE level, and up to 1.1e-5 Ry in E_hyb - E_PBE, O2) | this code with `PARSEC_KB_QUADRATURE=trapezoid`; QE with those E_l |
 | h-BN box height (`*_periodic`) | 30.3 against 30.0 bohr: none for `gbx` and HSE (above) | QE at cell heights 20 to 60 bohr |
 
 ## Timings
 
 | input | GPUs | program (s) | SCF (s) | exchange (s) | solver (s) | pair solves | outer | peak GiB |
 |---|---|---|---|---|---|---|---|---|
-| Si_k222/pbe | 1 | 3.4 | 2.7 |  |  |  |  | 0.7 |
-| Si_k222/pbe0 | 1 | 6.7 | 6.1 | 0.27 | 0.08 | 6736 | 4 | 1.8 |
-| Si_k222/hse06 | 1 | 7.1 | 6.9 | 0.40 | 0.09 | 6736 | 4 | 1.8 |
-| Si_k222/hse06_default | 1 | 7.6 | 7.0 | 0.31 | 0.09 | 6736 | 4 | 1.8 |
-| Si_k222/hf | 1 | 8.5 | 7.8 | 0.49 | 0.14 | 11920 | 7 | 1.9 |
-| Si_k222/b3lyp | 1 | 7.5 | 6.9 | 0.38 | 0.10 | 8288 | 5 | 1.8 |
-| Si_k444/pbe | 1 | 17.7 | 16.9 |  |  |  |  | 1.6 |
-| Si_k444/pbe0 | 1 | 32.7 | 31.9 | 5.33 | 2.64 | 306432 | 5 | 2.8 |
-| Si_k444/hse06 | 1 | 28.9 | 28.2 | 4.44 | 2.14 | 249216 | 4 | 2.8 |
-| Si_k444/hse06_default | 1 | 29.6 | 28.7 | 4.40 | 2.17 | 249216 | 4 | 2.8 |
-| Si_k444/hf | 1 | 42.6 | 41.7 | 8.96 | 4.32 | 498432 | 8 | 3.0 |
-| Si_disp_k222/pbe | 1 | 3.7 | 2.9 |  |  |  |  | 0.7 |
-| Si_disp_k222/pbe0 | 1 | 7.8 | 6.8 | 0.42 | 0.21 | 6736 | 4 | 1.8 |
-| Si_disp_k222/hse06 | 1 | 7.5 | 6.6 | 0.26 | 0.09 | 6736 | 4 | 1.8 |
-| C_k333/pbe | 1 | 11.6 | 10.7 |  |  |  |  | 1.3 |
-| C_k333/pbe0 | 1 | 13.3 | 12.4 | 0.99 | 0.41 | 40102 | 4 | 2.2 |
-| C_k333/hse06 | 1 | 12.1 | 11.5 | 0.80 | 0.33 | 30872 | 3 | 2.2 |
-| MgO_k333/pbe | 1 | 36.9 | 35.6 |  |  |  |  | 1.9 |
-| MgO_k333/pbe0 | 1 | 35.5 | 34.3 | 1.04 | 0.51 | 40102 | 4 | 2.9 |
-| MgO_k333/hse06 | 1 | 32.5 | 31.3 | 0.90 | 0.39 | 30872 | 3 | 2.9 |
-| hBN_k661/pbe | 1 | 88.4 | 81.7 |  |  |  |  | 4.5 |
-| hBN_k661/pbe0 | 1 | 195.7 | 189.0 | 12.09 | 10.18 | 95664 | 5 | 7.2 |
-| hBN_k661/hse06 | 1 | 183.7 | 176.6 | 9.93 | 8.26 | 77800 | 4 | 7.2 |
-| hBN_k661/pbe0_periodic | 1 | 190.5 | 183.2 | 7.12 | 5.37 | 95664 | 5 | 6.8 |
-| hBN_k661/hse06_periodic | 1 | 180.6 | 173.6 | 5.70 | 4.37 | 77800 | 4 | 6.8 |
-| O2_box/pbe | 1 | 13.5 | 12.5 |  |  |  |  | 2.0 |
-| O2_box/pbe0 | 1 | 1183.2 | 1182.4 | 7.80 | 1.88 | 548 | 5 | 0.5 |
-| O2_box/hse06 | 1 | 1193.7 | 1192.7 | 6.14 | 1.48 | 447 | 4 | 0.5 |
+| Si_k222/pbe | 1 | 3.5 | 2.9 |  |  |  |  | 0.7 |
+| Si_k222/pbe0 | 1 | 7.3 | 6.6 | 0.27 | 0.09 | 6736 | 4 | 1.8 |
+| Si_k222/hse06 | 1 | 7.5 | 6.9 | 0.30 | 0.09 | 6736 | 4 | 1.8 |
+| Si_k222/hse06_default | 1 | 7.7 | 7.1 | 0.28 | 0.09 | 6736 | 4 | 1.8 |
+| Si_k222/hf | 1 | 8.5 | 7.9 | 0.47 | 0.14 | 11920 | 7 | 1.9 |
+| Si_k222/b3lyp | 1 | 7.7 | 7.0 | 0.32 | 0.10 | 8288 | 5 | 1.8 |
+| Si_k444/pbe | 1 | 18.4 | 17.5 |  |  |  |  | 1.6 |
+| Si_k444/pbe0 | 1 | 34.7 | 34.3 | 5.66 | 2.77 | 306432 | 5 | 2.8 |
+| Si_k444/hse06 | 1 | 30.9 | 30.1 | 4.59 | 2.25 | 249216 | 4 | 2.8 |
+| Si_k444/hse06_default | 1 | 30.0 | 29.6 | 4.61 | 2.26 | 249216 | 4 | 2.8 |
+| Si_k444/hf | 1 | 43.7 | 43.3 | 9.47 | 4.49 | 498432 | 8 | 3.0 |
+| Si_disp_k222/pbe | 1 | 4.0 | 3.1 |  |  |  |  | 0.7 |
+| Si_disp_k222/pbe0 | 1 | 7.8 | 6.9 | 0.41 | 0.22 | 6736 | 4 | 1.8 |
+| Si_disp_k222/hse06 | 1 | 8.2 | 7.4 | 0.37 | 0.12 | 6736 | 4 | 1.8 |
+| C_k333/pbe | 1 | 11.5 | 10.7 |  |  |  |  | 1.3 |
+| C_k333/pbe0 | 1 | 13.6 | 12.9 | 1.05 | 0.47 | 40102 | 4 | 2.2 |
+| C_k333/hse06 | 1 | 12.3 | 11.6 | 0.79 | 0.34 | 30872 | 3 | 2.2 |
+| MgO_k333/pbe | 1 | 36.6 | 35.7 |  |  |  |  | 1.9 |
+| MgO_k333/pbe0 | 1 | 35.1 | 34.2 | 1.03 | 0.53 | 40102 | 4 | 2.9 |
+| MgO_k333/hse06 | 1 | 31.9 | 31.1 | 0.80 | 0.40 | 30872 | 3 | 2.9 |
+| hBN_k661/pbe | 1 | 87.8 | 81.5 |  |  |  |  | 4.5 |
+| hBN_k661/pbe0 | 1 | 194.2 | 187.5 | 11.88 | 10.16 | 95664 | 5 | 7.2 |
+| hBN_k661/hse06 | 1 | 188.9 | 182.3 | 9.61 | 8.27 | 77800 | 4 | 7.2 |
+| hBN_k661/pbe0_periodic | 1 | 192.3 | 185.5 | 6.90 | 5.37 | 95664 | 5 | 6.8 |
+| hBN_k661/hse06_periodic | 1 | 184.1 | 177.5 | 5.72 | 4.35 | 77800 | 4 | 6.8 |
+| O2_box/pbe | 1 | 15.2 | 14.1 |  |  |  |  | 2.0 |
+| O2_box/pbe0 | 1 | 1176.5 | 1175.5 | 7.73 | 1.91 | 548 | 5 | 0.5 |
+| O2_box/hse06 | 1 | 1180.5 | 1179.5 | 6.32 | 1.56 | 447 | 4 | 0.5 |
 | Si64_gamma/pbe | 1 | 4.1 | 2.3 |  |  |  |  | 0.5 |
 | Si64_gamma/pbe0 | 1 | 22.4 | 20.6 | 1.25 | 0.34 | 67008 | 6 | 1.2 |
 | Si64_k222/pbe | 4 | 13.7 | 11.4 |  |  |  |  | 0.7 |
 | Si64_k222/pbe0 | 4 | 137.8 | 136.0 | 41.83 | 29.00 | 2918400 | 6 | 14.4 |
 
 Program wall time of `main.py` (first runs of each input, with the GPU kernels of the code compiled on the node by
-earlier runs, on an A100 node that other jobs shared: indicative; the logs of the k-point inputs and of `O2_box/pbe` of 22 November
-2026, those of the two O2 hybrids and of `Si64_gamma` of 21 November 2026), the
+discarded runs of each system at another grid spacing on the same GPU, four inputs side by side, one per GPU, on an
+A100 node that other jobs shared: indicative; the logs of 23 November 2026, those of `Si64_k222` of 22 November 2026
+and of `Si64_gamma` of 21 November 2026), the
 seconds of its SCF (PBE start and Fock loop), of the exchange builds (pair solves on the GPU and ACE; in the cuFFT
 solver alone), the pair solves, the outer iterations and the peak device memory (`acceleration/benchmarks/
-periodic_hybrid_run.py`). The exchange builds take 3 % (MgO, h-BN with the periodic kernel) to 17 % (Si 4x4x4; 21 % for HF) of the SCF, and 6 % and 31 % for Si64 at the Gamma point and on the 2x2x2 mesh; the rest is mostly the eigensolver of the k-points. Against the code of 21 November 2026 (the two trees side by side on one allocation) the k-point inputs take the same eigensolver steps in less time: Si 4x4x4 PBE 30.9 -> 17.9 s, PBE0 50.4 -> 33.1 s, h-BN PBE 220.4 -> 87.4 s. The sparse products of the Bloch Hamiltonians on the device in a fixed order (`PARSEC_ORDERED_SUMS=auto`) are faster (Si 4x4x4 PBE: the Chebyshev filter of the same 37,200 operator applications 8.9 s, against 19.7 s with `off`, which takes 30.2 s in all), and the preparation of the h-BN slab takes 6 s (38 s with `PARSEC_CONFINED_SETUP=readable`, 48 s before). The two O2 hybrids run the Fock loop on the host (the third route above): 1,180 to 1,190 s, against 14 s for the PBE input of the same cell on the GPU. Si64: at the Gamma point (68^3 points, 128 occupied states, 67,008 pair solves) PBE0 takes 22.4 s on one GPU in the 32 real sectors of the abelian group of the cell with the half-cell translations (a hybrid keeps no weighted sectors; SCF 20.6 s, 1.25 s of it in the exchange, and 1.2 GiB; in the runs of 20 November 2026 SCF 20.1 s against 34.6 s and 8.2 GiB on the full grid with `PARSEC_GAMMA_HYBRID_SECTORS=off` on the same node, the same energy to the printed digits), and PBE 4.1 s in the 10 weighted sectors of a subgroup of 32 of the 192 operations of the cell (README of the accelerated driver, "Translations by half the cell"; in the runs of 20 November 2026 4.9 s against 8.0 s and 4.1 GiB on the full grid (`PARSEC_PERIODIC_SYMMETRY=off`, the route of the log of 8 November 2026: 8.6 s, 4.3 GiB) on the same node, with the same energy to 1e-8 Ry (the 15.0 s of the log of 19 November 2026 included the compilation of the CUDA kernels of the sectors)). On the 2x2x2 mesh (64^3 points) PBE0 runs its PBE start on all 8 points of PARSEC 1.5's Gamma-centred mesh, each its own time-reversal partner, and, the start being an insulator, its Fock loop on the wedge of 4 points (`PARSEC_HYBRID_KPOINT_WEDGE`; since 19 November 2026 the last inner loop keeps the sectors, `PARSEC_KPOINT_SECTOR_LEVELS`): 2.9 million pair solves, 138 s on four GPUs, 42 s of it in the exchange, 14.4 GiB per GPU (the log of 19 November 2026 solved all 8 points throughout: 4.8 million pair solves, 375 s, 76 s in the exchange, 25.7 GiB; the same total energy to the printed digits); PBE solves its irreducible wedge of 4 points (Gamma, X, M and R, the density symmetrized), each split into the sectors of its little group (64 tasks; since 22 November 2026 the 32 of them that are images P_g u of solved sectors under operations of the little group are not solved, `PARSEC_KPOINT_SECTOR_CLASSES`), in 14 s (23 s in the log of 21 November 2026, which solved all 64). With the former mesh of this input (`PARSEC_MP_UNSHIFTED_MESH=port`, points at +-1/4) the code of 8 November 2026 took 168 s for PBE0 (4 time-reversal pairs, 2.4 million pair solves) and 129 s for PBE (all 8 points, without sectors). The same `Grid_Spacing` gives 68 points per side on the Gamma-point route and 64 on the k-point route.
+periodic_hybrid_run.py`). The exchange builds take 3 % (MgO, h-BN with the periodic kernel) to 17 % (Si 4x4x4; 22 % for HF) of the SCF, and 6 % and 31 % for Si64 at the Gamma point and on the 2x2x2 mesh; the rest is mostly the eigensolver of the k-points. Against the code of 21 November 2026 (the two trees side by side on one allocation) the k-point inputs take the same eigensolver steps in less time: Si 4x4x4 PBE 30.9 -> 17.9 s, PBE0 50.4 -> 33.1 s, h-BN PBE 220.4 -> 87.4 s. The sparse products of the Bloch Hamiltonians on the device in a fixed order (`PARSEC_ORDERED_SUMS=auto`) are faster (Si 4x4x4 PBE: the Chebyshev filter of the same 37,200 operator applications 8.9 s, against 19.7 s with `off`, which takes 30.2 s in all), and the preparation of the h-BN slab takes 6 s (38 s with `PARSEC_CONFINED_SETUP=readable`, 48 s before). The two O2 hybrids run the Fock loop on the host (the third route above): 1,177 to 1,181 s, against 15 s for the PBE input of the same cell on the GPU. Si64: at the Gamma point (68^3 points, 128 occupied states, 67,008 pair solves) PBE0 takes 22.4 s on one GPU in the 32 real sectors of the abelian group of the cell with the half-cell translations (a hybrid keeps no weighted sectors; SCF 20.6 s, 1.25 s of it in the exchange, and 1.2 GiB; in the runs of 20 November 2026 SCF 20.1 s against 34.6 s and 8.2 GiB on the full grid with `PARSEC_GAMMA_HYBRID_SECTORS=off` on the same node, the same energy to the printed digits), and PBE 4.1 s in the 10 weighted sectors of a subgroup of 32 of the 192 operations of the cell (README of the accelerated driver, "Translations by half the cell"; in the runs of 20 November 2026 4.9 s against 8.0 s and 4.1 GiB on the full grid (`PARSEC_PERIODIC_SYMMETRY=off`, the route of the log of 8 November 2026: 8.6 s, 4.3 GiB) on the same node, with the same energy to 1e-8 Ry (the 15.0 s of the log of 19 November 2026 included the compilation of the CUDA kernels of the sectors)). On the 2x2x2 mesh (64^3 points) PBE0 runs its PBE start on all 8 points of PARSEC 1.5's Gamma-centred mesh, each its own time-reversal partner, and, the start being an insulator, its Fock loop on the wedge of 4 points (`PARSEC_HYBRID_KPOINT_WEDGE`; since 19 November 2026 the last inner loop keeps the sectors, `PARSEC_KPOINT_SECTOR_LEVELS`): 2.9 million pair solves, 138 s on four GPUs, 42 s of it in the exchange, 14.4 GiB per GPU (the log of 19 November 2026 solved all 8 points throughout: 4.8 million pair solves, 375 s, 76 s in the exchange, 25.7 GiB; the same total energy to the printed digits); PBE solves its irreducible wedge of 4 points (Gamma, X, M and R, the density symmetrized), each split into the sectors of its little group (64 tasks; since 22 November 2026 the 32 of them that are images P_g u of solved sectors under operations of the little group are not solved, `PARSEC_KPOINT_SECTOR_CLASSES`), in 14 s (23 s in the log of 21 November 2026, which solved all 64). With the former mesh of this input (`PARSEC_MP_UNSHIFTED_MESH=port`, points at +-1/4) the code of 8 November 2026 took 168 s for PBE0 (4 time-reversal pairs, 2.4 million pair solves) and 129 s for PBE (all 8 points, without sectors). The same `Grid_Spacing` gives 68 points per side on the Gamma-point route and 64 on the k-point route.

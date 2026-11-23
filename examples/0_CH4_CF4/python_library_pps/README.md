@@ -67,7 +67,10 @@ cutoff radius of its channels (`PARSEC_PROJECTOR_TAIL=auto`). On the C, C-1s
 and F tables of these cases that changes the projectors by 1e-5 to 2e-5 of
 their size and the totals by 4e-8 to 8e-6 Ry (CF4 is converged to 5e-5 Ry);
 the binding energies move by at most 2e-4 eV, no digit of the table above.
-`PARSEC_PROJECTOR_TAIL=off` gives the former logs to every printed digit.
+`PARSEC_PROJECTOR_TAIL=off` gave the former logs to every printed digit (code
+of 22 November 2026; since 23 November 2026 together with
+`PARSEC_KB_QUADRATURE=trapezoid`, and `PARSEC_CA_CONTINUITY=off` for the CA
+cases).
 
 ## All-electron reference
 

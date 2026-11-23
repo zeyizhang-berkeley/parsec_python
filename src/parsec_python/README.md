@@ -359,7 +359,9 @@ applied, and from about 300 atoms the order rises as well (12 for C185H124,
 16 for C459H204, 34 for C5659H1132, 36 for C9449H1572); `0d_Si28H36` runs at
 order 10 with the tail. `Hartree_Boundary_Tolerance: off` restores PARSEC's
 boundary for every system, and a comparison with Fortran PARSEC of such a
-system needs that line. `parsec.out` states under "Real-space setup" the
+system needs that line (or `PARSEC_FORTRAN_NUMERICS=on`, which makes it the
+default of an input that gives its radius, beside PARSEC 1.5's other numerical
+rules). `parsec.out` states under "Real-space setup" the
 order in use, the estimate at `Solver_Lpole` and at that order, and whether
 the tail was applied. Its header echoes the three input values. The
 environment switches `PARSEC_HARTREE_BOUNDARY`, `_BOUNDARY_TOLERANCE`,
@@ -401,8 +403,11 @@ the truncation of a finite difference. That makes them consistent, not more
 accurate: the energy of the multipole boundary is itself an approximation, and
 the forces of the Poisson solution lie closer to those of the boundary summed
 directly (`Full_Hartree: true`) than the consistent ones, by up to 2e-4
-Ry/bohr in small spheres. The switch is therefore off by default; a larger
-sphere is the way to accurate forces (`Hartree/variational.py`, "Forces at a
+Ry/bohr in small spheres. The switch is therefore off by default for
+clusters; its default `slab` (since 2026-11-23) gives the stationary potential
+to a slab whose forces are computed, whose Poisson forces miss the slope of
+its energy by up to 5.8e-5 Ry/bohr where its density reaches the edge of the
+domain. A larger sphere is the way to accurate forces (`Hartree/variational.py`, "Forces at a
 fixed structure" in `FORCES_AND_RELAXATION.md`).
 
 ### Sphere radius left to the code
@@ -1474,7 +1479,7 @@ timings) are [`examples/0d_meta_gga`](../../examples/0d_meta_gga/README.md).
 
 | this code | libxc | difference |
 |---|---|---|
-| `ca` | `lda_x lda_c_pz` | none: round-off |
+| `ca` | `lda_x lda_c_pz_mod` (`lda_x lda_c_pz` under `PARSEC_CA_CONTINUITY=off` or `PARSEC_FORTRAN_NUMERICS=on`) | none: round-off (the continuous high-density coefficients of the default are those of `LDA_C_PZ_MOD`, Fortran PARSEC's four digits those of `LDA_C_PZ`) |
 | `pw92` (`pl`) | `lda_x lda_c_pw_mod` | Fortran PARSEC's digits of a few PW92 constants (6th to 9th digit) |
 | `pbe` | `gga_x_pbe gga_c_pbe` | the PW92 `A` of the correlation, `(1 - ln 2)/pi^2 = 0.0310906908` here, `0.0310907` in libxc: 3e-7 of the local correlation (H2 at h = 0.5 bohr: 1e-7 Ry) |
 | `pw91` | `gga_x_pw91 gga_c_pw91` | Fortran PARSEC's digits of a few constants |

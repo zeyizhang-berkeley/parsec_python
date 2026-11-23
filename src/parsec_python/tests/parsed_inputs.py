@@ -139,6 +139,9 @@ def reference_cache_key(problem, roots: dict[str, Path]) -> tuple[str, str]:
     environment = {
         name: value for name, value in os.environ.items() if name not in _KEY_SWITCHES
     }
+    # the stored records were made under the quadrature of the KB denominators of PARSEC 1.5 (the default before
+    # 2026-11-23), which the key leaves out
+    environment["PARSEC_KB_QUADRATURE"] = "trapezoid"
     with (
         patch.object(driver, "sha256", lambda: recorder),
         patch.dict(os.environ, environment, clear=True),

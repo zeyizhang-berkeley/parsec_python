@@ -93,6 +93,22 @@ repository root:
   examples\0_CH4_CF4\python_pbe\pseudopotentials\C-1s_POTRE.DAT
 ```
 
+The converter resamples the UPF mesh by cubic interpolation in log r. The
+files here were made again that way on 23 November 2026; before, they were
+the linear resampling of its first version (`--interpolation linear`),
+whose values between the points of the UPF mesh rippled: their fourth
+differences were as large as their second ones (pseudo wave functions and
+valence density; 0.15 to 0.27 of them for the C and F potentials), and the
+eigenvalues of the pseudo atom, with the screening potential of FHI98PP,
+were 0.06 (H) to 0.33 mRy (F) off those of the generator (the cubic files:
+within 2.1e-7 Ry). The four files agree with those of
+[`../../0d_xps_core_levels/pseudopotentials`](../../0d_xps_core_levels/README.md),
+generated from the inputs of the paper, to 1e-11 in every value (the last
+printed digit), apart from the name of the source in their second line. The UPF files of
+the ARES case are not part of the repository;
+[`../paper_pp_inputs`](../paper_pp_inputs/README.md) holds the FHI98PP
+inputs that regenerate them.
+
 The initial and final carbon pseudopotentials have different ionic charges,
 so their raw pseudopotential total energies do not share an energy zero.  Each
 species input therefore includes the FHI98PP all-electron-minus-pseudo atomic
@@ -114,8 +130,8 @@ Delta BE = BE(CF4) - BE(CH4).
 From any one of the four case directories:
 
 ```powershell
-..\..\..\..\..\..\..\.venv312\Scripts\python.exe `
-  ..\..\..\..\..\main.py parsec.in `
+..\..\..\..\..\.venv312\Scripts\python.exe `
+  ..\..\..\..\..\src\parsec_python\main.py parsec.in `
   --backend auto --symmetry auto --log parsec.out `
   --no-archive
 ```
@@ -138,38 +154,46 @@ reference-corrected all-electron values, in eV:
 
 | system | Python | ARES | Python - ARES |
 |---|---:|---:|---:|
-| CH4 IS | -1101.55954131 | -1101.48773900 | -0.07180231 |
-| CH4 FS_1s | -804.40558245 | -804.34015900 | -0.06542345 |
-| CF4 IS | -11909.77825593 | -11909.43066320 | -0.34759273 |
-| CF4 FS_1s | -11602.06985734 | -11601.71550480 | -0.35435254 |
+| CH4 IS | -1101.53972976 | -1101.48773900 | -0.05199076 |
+| CH4 FS_1s | -804.38248842 | -804.34015900 | -0.04232942 |
+| CF4 IS | -11909.65954868 | -11909.43066320 | -0.22888548 |
+| CF4 FS_1s | -11601.94393513 | -11601.71550480 | -0.22843033 |
 
 The physically relevant energy differences reproduce much more closely:
 
 | quantity | Python | ARES | Python - ARES |
 |---|---:|---:|---:|
-| BE(CH4) | 297.15395886 | 297.14758000 | +0.00637886 |
-| BE(CF4) | 307.70839859 | 307.71515840 | -0.00675981 |
-| CF4-CH4 shift | 10.55443973 | 10.56757840 | -0.01313867 |
+| BE(CH4) | 297.15724134 | 297.14758000 | +0.00966134 |
+| BE(CF4) | 307.71561355 | 307.71515840 | +0.00045515 |
+| CF4-CH4 shift | 10.55837221 | 10.56757840 | -0.00920619 |
 
 The larger offsets in individual absolute totals are systematic discretization
 and implementation differences.  They cancel within each matched ordinary/
-core-hole PP pair; the final chemical-shift disagreement is about 13 meV.
+core-hole PP pair; the final chemical-shift disagreement is about 9 meV.
+With the linearly resampled tables used before 23 November 2026 (the same
+code and defaults, measured on 23 November 2026) the totals are 0.019 (CH4
+IS) to 0.117 eV (CF4 FS_1s) lower, the binding energies 297.15419064 and
+307.70893835 eV and the shift 10.55474771 eV (13 meV below ARES); SCF
+iterations are the same.
 
-For this cold run (the kept logs, code of 20 November 2026 for FS_1s and of
-22 November 2026 for IS, one NVIDIA A100 per case), CH4 IS/FS used 28/21
-SCF iterations and CF4 IS/FS used 40/37.  CF4 wall times were 43/40 seconds.  Its dominant cost was the Hartree linear solve
-(15/14 seconds), followed by GPU diagonalization (12/12 seconds); PBE
-evaluation itself was not the dominant kernel. Since 2026-11-07 that linear
+For these first runs (the kept logs, of 23 November 2026, one NVIDIA A100
+per case and four cases side by side on a node, no symmetry cache, after one
+throwaway warm-up run on each GPU), CH4 IS/FS used 28/21 SCF iterations and
+CF4 IS/FS used 40/37.  CF4 wall times were 43/40 seconds.  Its dominant cost
+was the Hartree linear solve (15/14 seconds), followed by GPU diagonalization
+(12/11 seconds); PBE evaluation itself was not the dominant kernel. Since 2026-11-07 that linear
 solve runs on the GPU by default (`PARSEC_HARTREE_LINEAR_BACKEND`,
 `src/parsec_python/acceleration/Hartree/GPU_HARTREE.md`);
 `PARSEC_HARTREE_LINEAR_BACKEND=native` takes the host CG of the logs of
 1 September 2026, whose CF4 runs took 793/627 seconds on the tested hybrid
 machine (host CG 446/407 seconds, GPU diagonalization 225/111 seconds), with
-the same energies to the printed digits. The IS logs were run again when a
-`martins_new` projector became zero beyond the largest cutoff radius of its
-channels (`PARSEC_PROJECTOR_TAIL=auto`, since 22 November 2026): the carbon
-table of these inputs holds 7e-13 Ry beyond it, which changes a few
-eigenvalues of the SCF iterations in the tenth decimal and no energy.
+the same energies to the printed digits. A `martins_new` projector is zero
+beyond the largest cutoff radius of its channels (`PARSEC_PROJECTOR_TAIL=auto`,
+since 22 November 2026). The cubic files differ from their local potential by
+up to 2.6e-4 Ry (C, C-1s) and 7e-4 Ry (F) at the first one or two mesh points beyond
+that radius, where the interpolation reaches across it; with
+`PARSEC_PROJECTOR_TAIL=off` those points enter the projectors and the totals
+are 4.3e-6 (CH4 IS) to 8.8e-6 Ry (CF4 FS_1s) lower.
 
 ## B3LYP status
 

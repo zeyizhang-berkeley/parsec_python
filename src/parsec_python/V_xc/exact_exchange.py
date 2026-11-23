@@ -62,9 +62,13 @@ FRACTIONAL_TOLERANCE = 1.0e-8
 #: PARSEC 1.5's ``flevel.f90``).  In a gap that bisection stops at the first
 #: level whose count is within the tolerance, so the empty levels keep
 #: occupations anywhere between zero and about 1e-10 that the search does not
-#: resolve; each such orbital adds a Poisson solve per occupied orbital and
-#: changes the energy by less than 1e-10 Ry.  ``off``: the cut
-#: :data:`OCCUPATION_THRESHOLD` (1e-12), as before.
+#: resolve (under ``PARSEC_FERMI_GAP_ROOT=off``; its default places the level
+#: at the root of the count, where the lowest empty level holds about
+#: ``exp(-gap/2kT)``: above 1e-10 in a gap narrower than about 46 kT, below
+#: 1e-12 in one wider than about 55 kT); each
+#: such orbital adds a Poisson solve per occupied orbital and changes the
+#: energy by less than 1e-10 Ry.  ``off``: the cut :data:`OCCUPATION_THRESHOLD`
+#: (1e-12), as before.
 EXCHANGE_OCCUPATION_CUT_ENV = "PARSEC_EXCHANGE_OCCUPATION_CUT"
 
 

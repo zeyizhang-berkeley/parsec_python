@@ -43,7 +43,9 @@ reads the density back.
 SCF iterations from each start, measured on an A100 for four molecules of the
 [regression suite](../../../examples/ml_initial_density/README.md) (PBE,
 0.2 Å grid, 7 Å spheres for the small and 9 Å for the aromatic molecules,
-CHEBDAV, `2e-4 Ry`; the models predicted at the exact grid points):
+CHEBDAV, `2e-4 Ry`; the models predicted at the exact grid points; on
+2026-10-18, with the suite's former linearly resampled pseudopotential files,
+with which CH4 from SAD took 18 iterations, 17 with the current ones):
 
 | Molecule | SAD | ChargE3Net `qm9` | SCDP `fast` | SCDP `accurate` |
 |---|---:|---:|---:|---:|

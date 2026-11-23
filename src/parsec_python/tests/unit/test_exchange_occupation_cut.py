@@ -2,8 +2,10 @@
 
 In a gap the Fermi-level bisection stops wherever the electron count is within
 its tolerance (1e-10), so an empty level can keep an occupation between 1e-12
-and 1e-10.  With ``on`` (default) such orbitals carry no exact exchange; with
-``off`` the cut is 1e-12, as before.
+and 1e-10 (under ``PARSEC_FERMI_GAP_ROOT=off``; at the root of the count, its
+default, the lowest empty level holds about ``exp(-gap/2kT)``).  With
+``on`` (default) such orbitals carry no exact exchange; with ``off`` the cut
+is 1e-12, as before.
 """
 
 from __future__ import annotations
@@ -82,13 +84,25 @@ class SettingTests(unittest.TestCase):
             -0.1485366185, 0.0386746657, 0.1238278309, 0.1402783253, 0.1571645774, 0.2287693773,
             0.2461171193, 0.2826481553, 0.2968879961, 0.3201591045,
         ])
-        result = fermi_occupations(levels, 10.0, 1160.451812)
+        # The bisection's level (PARSEC_FERMI_GAP_ROOT=off).
+        with mock.patch.dict(os.environ, {"PARSEC_FERMI_GAP_ROOT": "off"}):
+            result = fermi_occupations(levels, 10.0, 1160.451812)
         self.assertAlmostEqual(result.fermi_level, -0.3494, places=4)
         self.assertTrue(np.all((result.occupations[5:7] > 1.0e-12) & (result.occupations[5:7] < 1.0e-10)))
         with _switch("off"):
             self.assertEqual(occupied_columns(result.occupations).size, 7)
         with _switch(None):
             self.assertEqual(occupied_columns(result.occupations).size, 5)
+        # At the root of the count (the default of PARSEC_FERMI_GAP_ROOT), 0.3 kT below the middle of the
+        # 70 kT gap (one filled level, an empty pair), the pair holds 4e-16 and 3e-16: five orbitals under
+        # either cut.
+        with mock.patch.dict(os.environ, {"PARSEC_FERMI_GAP_ROOT": "on"}):
+            root = fermi_occupations(levels, 10.0, 1160.451812)
+        self.assertAlmostEqual(root.fermi_level, -0.41019, places=5)
+        self.assertTrue(np.all(root.occupations[5:7] < 1.0e-15))
+        for value in ("off", None):
+            with _switch(value):
+                self.assertEqual(occupied_columns(root.occupations).size, 5)
 
 
 class ExchangeTests(unittest.TestCase):

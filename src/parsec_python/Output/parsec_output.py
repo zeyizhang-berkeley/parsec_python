@@ -1857,6 +1857,36 @@ def cubic_spline_setting_on() -> bool:
     return cubic_spline_default_setting() == "on"
 
 
+def fortran_numerics_lines() -> tuple[str, ...]:
+    """The line of parsec.out under ``PARSEC_FORTRAN_NUMERICS=on`` (the numerics of PARSEC 1.5 in one switch); nothing
+    under ``off``."""
+
+    from ..fortran_numerics import fortran_numerics_setting
+
+    if fortran_numerics_setting() != "on":
+        return ()
+    return (" Numerics of PARSEC 1.5 (PARSEC_FORTRAN_NUMERICS=on; a switch set in the environment wins)",)
+
+
+def kb_quadrature_lines(potential, local_l) -> tuple[str, ...]:
+    """The line of the atom data of parsec.out that names the quadrature of the Kleinman-Bylander denominators of a
+    species with projectors (``PARSEC_KB_QUADRATURE``); nothing under ``trapezoid`` (PARSEC 1.5's, the output of
+    before) or for a species without a nonlocal channel."""
+
+    from ..Pseudopotential.radial_quadrature import kb_quadrature_setting
+
+    setting = kb_quadrature_setting()
+    channels = getattr(potential, "channel_potentials", {}) or {}
+    local = local_l if local_l is not None else getattr(potential, "local_channel", None)
+    if setting == "trapezoid" or not hasattr(potential, "kb_quadrature") or not any(l != local for l in channels):
+        return ()
+    taken = potential.kb_quadrature()
+    if taken == "logmesh":
+        text = "logarithmic mesh" + (" (default)" if setting == "auto" else "")
+        return (f"  KB quadrature          : {text}; PARSEC_KB_QUADRATURE=trapezoid: pseudo.f90",)
+    return ("  KB quadrature          : trapezoid of pseudo.f90 (radii off the logarithmic mesh)",)
+
+
 class ParsecTextReporter:
     """Stateful writer for the subset of ``parsec.out`` Python can support.
 
@@ -2022,6 +2052,8 @@ class ParsecTextReporter:
             *_routines_lines(self.translation),
             # How the species without Cubic_Spline interpolate their tables (PARSEC_CUBIC_SPLINE_DEFAULT).
             *cubic_spline_default_lines(self.translation),
+            # The numerics of PARSEC 1.5 in one switch (PARSEC_FORTRAN_NUMERICS).
+            *fortran_numerics_lines(),
             "",
             " =================================================================",
             "",
@@ -2376,10 +2408,27 @@ class ParsecTextReporter:
                         f"  radial points/channels : {potential.radii.size}"
                         f" / {potential.number_of_channels}"
                     ),
+                    # PARSEC_FHI_ORIGIN=auto: the samples added below the first one of the file
+                    *(
+                        (
+                            f"  inner radial samples   : {potential.origin_samples} from"
+                            f" {potential.radii[0]:.3e} bohr"
+                            + (
+                                f" and the first {potential.origin_refit} of the file: even fit"
+                                if getattr(potential, "origin_refit", 0)
+                                else "; the samples of the file kept (C/r-like term next to the atom)"
+                            )
+                            + " (PARSEC_FHI_ORIGIN=off: none)",
+                        )
+                        if getattr(potential, "origin_samples", 0)
+                        else ()
+                    ),
                     (
                         f"  selected local channel : "
                         f"l={specification.local_angular_momentum}"
                     ),
+                    # Python addition: the quadrature of the KB denominators (PARSEC_KB_QUADRATURE)
+                    *kb_quadrature_lines(potential, specification.local_angular_momentum),
                     f" There are {len(atoms):6d} {symbol}  atoms",
                     " and their initial coordinates are:",
                     "",

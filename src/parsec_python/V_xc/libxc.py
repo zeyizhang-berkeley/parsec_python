@@ -72,7 +72,8 @@ returns its semilocal energy only) and the exact exchange comes from this
 code's Fock loop (:func:`libxc_hybrid_functional`), which PARSEC 1.5 omits.
 
 The libxc versions of the functionals of this code (``ca`` = LDA_X +
-LDA_C_PZ, ``pw92`` = LDA_X + LDA_C_PW_MOD, ``pbe`` = GGA_X_PBE + GGA_C_PBE,
+LDA_C_PZ_MOD, under ``PARSEC_CA_CONTINUITY=off`` LDA_X + LDA_C_PZ,
+``pw92`` = LDA_X + LDA_C_PW_MOD, ``pbe`` = GGA_X_PBE + GGA_C_PBE,
 ``pw91``, ``b3lyp``, ``pbe0`` = HYB_GGA_XC_PBEH, ``hse06``) are listed with
 their differences in :data:`OWN_FUNCTIONAL_COUNTERPARTS`.
 """
@@ -128,9 +129,11 @@ _FAMILY_ORDER = {"lda": 0, "gga": 1, "mgga": 2}
 #: The libxc spellings of the functionals of this code, and how they differ.
 OWN_FUNCTIONAL_COUNTERPARTS = {
     "ca": (
-        "libxc:lda_x+lda_c_pz",
-        "Ceperley-Alder/Perdew-Zunger: the same formulas; the digits of Fortran PARSEC's ca_lda "
-        "(V_xc.ca_lda) and libxc's LDA_C_PZ agree.",
+        "libxc:lda_x+lda_c_pz_mod",
+        "Ceperley-Alder/Perdew-Zunger: the same formulas; under the default PARSEC_CA_CONTINUITY=on the "
+        "high-density coefficients joined at r_s = 1 (V_xc.ca_lda), those of libxc's LDA_C_PZ_MOD; under off "
+        "(and PARSEC_FORTRAN_NUMERICS=on) the digits of Fortran PARSEC, those of libxc's LDA_C_PZ "
+        "(libxc:lda_x+lda_c_pz).",
     ),
     "pw92": (
         "libxc:lda_x+lda_c_pw_mod",

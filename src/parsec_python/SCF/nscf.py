@@ -60,6 +60,8 @@ from ..Occupations.fermi_dirac import (
     FERMI_COUNT_TOLERANCE,
     FERMI_EXPONENT_CUTOFF,
     FERMI_MAX_BISECTIONS,
+    fermi_gap_root_setting,
+    gap_fermi_level,
 )
 
 #: ``tempkry`` of ``const.f90``: Kelvin to Rydberg.
@@ -95,7 +97,10 @@ def fermi_level_from_levels(
     one channel of ``spinors`` single electrons too (``xele * nspin/2`` with
     ``nspin = 2``, ``mxwd = 2``).  The bisection starts from the bounds
     ``[min, max]`` of all levels with the guess ``max`` and stops when the
-    count is within 1e-10 of the target (PARSEC 1.5).
+    count is within 1e-10 of the target (PARSEC 1.5); in a gap whose count
+    leaves that level open, the root of the count replaces it under
+    ``PARSEC_FERMI_GAP_ROOT=on`` (default; see
+    :func:`parsec_python.Occupations.fermi_dirac.gap_fermi_level`).
     """
 
     channels = len(eigenvalues)
@@ -136,7 +141,7 @@ def fermi_level_from_levels(
         joined = np.concatenate(terms)
         count = float(np.cumsum(joined)[-1]) if joined.size else 0.0
         if abs(target - count) < _SMALL:
-            return float(fermi)
+            return _gap_root(pooled, target, temperature_kelvin, float(fermi))
         if count < target:
             lowest = fermi
         else:
@@ -145,6 +150,25 @@ def fermi_level_from_levels(
     raise FermiLevelError(
         f"Fermi level not found (flevel.f90 error 422); last guess {fermi:.4f} Ry"
     )
+
+
+def _gap_root(pooled, target: float, temperature_kelvin: float, level: float) -> float:
+    """``level`` of the bisection, or the root of the count in a gap (``PARSEC_FERMI_GAP_ROOT``).
+
+    ``pooled``: the sorted levels and k-point weights of each channel, as the
+    bisection counts them; the root replaces the level only where its count
+    stays within ``small``.
+    """
+
+    if fermi_gap_root_setting() != "on":
+        return level
+    values = np.concatenate([values for values, _ in pooled])
+    weights = np.concatenate([level_weights for _, level_weights in pooled])
+    root = gap_fermi_level(values, weights, target, KELVIN_TO_RYDBERG * float(temperature_kelvin), level, _SMALL)
+    if root is None:
+        return level
+    count = float(np.dot(weights, fixed_fermi_occupations(values, root, temperature_kelvin)))
+    return float(root) if abs(target - count) < _SMALL else level
 
 
 def fixed_fermi_occupations(

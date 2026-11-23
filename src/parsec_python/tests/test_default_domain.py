@@ -350,8 +350,11 @@ class RuleArithmeticTests(unittest.TestCase):
                 positions, symbols, tables, radius * domain.ANGSTROM
             )
             self.assertAlmostEqual(2.0 * wall / twice, 1.0, delta=5.0e-4)
-        # Carbon tetrafluoride of the examples: 9.172e-4, 1.743e-5 and
-        # 1.578e-2 Ry at 4.9 ang, the 6.335 ang of its input, and 4.0 ang.
+        # Carbon tetrafluoride of the examples: 9.127e-4, 1.731e-5 and
+        # 1.573e-2 Ry at 4.9 ang, the 6.335 ang of its input, and 4.0 ang
+        # (its tables resampled with cubic interpolation; the linear
+        # resampling before put 0.3 to 0.7 % more density in the tails:
+        # 9.172e-4, 1.743e-5 and 1.578e-2 Ry).
         text, folder = source_of(
             REPOSITORY / "examples/0_CH4_CF4/python_pbe/CF4/IS/parsec.in", None
         )
@@ -360,9 +363,9 @@ class RuleArithmeticTests(unittest.TestCase):
         positions = np.array([atom.position for atom in system.atoms])
         symbols = [atom.symbol for atom in system.atoms]
         for radius, twice in (
-            (4.9, 9.172e-4),
-            (6.334740118722521, 1.743e-5),
-            (4.0, 1.578e-2),
+            (4.9, 9.127e-4),
+            (6.334740118722521, 1.731e-5),
+            (4.0, 1.573e-2),
         ):
             wall, _parts = domain.wall_energy(
                 positions, symbols, tables, radius * domain.ANGSTROM

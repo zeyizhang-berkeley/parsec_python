@@ -334,7 +334,7 @@ def _kernel_constants() -> dict[str, float]:
         # ca_lda.py: np.pi * a0 with a0 = (4/(9 pi))**(1/3).
         "CA_PI_A0": np.pi * (4.0 / (9.0 * np.pi)) ** (1.0 / 3.0),
         "CA_GAMMA": ca_lda_spin._GAMMA,
-        # PARSEC_CA_CONTINUITY: PARSEC's high-density coefficients by default.
+        # PARSEC_CA_CONTINUITY: the continuous high-density coefficients by default, PARSEC's under off.
         **dict(zip(("CA_C3", "CA_C4", "CA_C5", "CA_CS", "CA_DS"), ca_lda.ca_high_density_coefficients())),
         "LB_TWO_BETA": 2.0 * lb.LB94_BETA,
         "LB_THREE_BETA": 3.0 * lb.LB94_BETA,

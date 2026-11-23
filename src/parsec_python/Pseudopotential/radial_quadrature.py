@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import numpy as np
 
+from ..fortran_numerics import switch_value
+
 
 def parsec_radial_integral(radii: np.ndarray, integrand: np.ndarray) -> float:
     """Integrate tabulated radial data with PARSEC's endpoint convention.
@@ -43,39 +45,62 @@ def parsec_radial_integral(radii: np.ndarray, integrand: np.ndarray) -> float:
 
 
 KB_QUADRATURE_ENV = "PARSEC_KB_QUADRATURE"
-KB_QUADRATURE_SETTINGS = ("trapezoid", "logmesh")
-KB_QUADRATURE_DEFAULT = "trapezoid"
+KB_QUADRATURE_SETTINGS = ("auto", "trapezoid", "logmesh")
+KB_QUADRATURE_DEFAULT = "auto"
+#: The largest relative deviation of a table's radii from the logarithmic mesh of its parameters for ``logmesh``.
+LOG_MESH_TOLERANCE = 1.0e-6
 
 
 def kb_quadrature_setting() -> str:
     """``PARSEC_KB_QUADRATURE``: the quadrature of the Kleinman-Bylander denominators ``integral u_l^2 (V_l - V_local)
     dr`` of the radial tables.
 
-    ``trapezoid`` (default): :func:`parsec_radial_integral`, the weights ``0.5*(r(i+1) - r(i-1))`` of ``pseudo.f90``.
-    On the logarithmic mesh ``r(i) = a*exp(b*i) - c`` of a table these weights are ``(r(i) + c)*sinh(b)``, the exact
-    Jacobian ``b*(r(i) + c)`` times ``sinh(b)/b = 1 + b^2/6``: every denominator comes out too large by ``b^2/6``
-    (2.6e-5 for the common ``b = 0.0125``), every projector too small by ``b^2/12``, and the nonlocal energy of an
-    occupied channel too small in magnitude by ``b^2/6`` of itself.  With ``Cubic_Spline`` this is the whole error of
-    the tables at their own sampling: +1.4e-3 Ry per atom for Au, +1.9e-3 for Ag, +1.5e-3 for Fe, +7.5e-4 for Cr (the
-    large KB energies of full d shells), 3e-5 to 5e-5 for H2O, Si and C, -2.6e-6 for Ge (KB integral of its s channel
-    0.09 Ry), against the limit of the same potentials sampled up to eight times more densely (A100, command line,
-    ``PARSEC_PROJECTOR_TAIL=auto``); PARSEC 1.5 has the same error.
+    ``trapezoid``: :func:`parsec_radial_integral`, the weights ``0.5*(r(i+1) - r(i-1))`` of ``pseudo.f90`` (PARSEC 1.5,
+    the default before 2026-11-23, and the value under ``PARSEC_FORTRAN_NUMERICS=on``).  On the logarithmic mesh
+    ``r(i) = a*exp(b*i) - c`` of a table these weights are ``(r(i) + c)*sinh(b)``, the exact Jacobian ``b*(r(i) + c)``
+    times ``sinh(b)/b = 1 + b^2/6``: every denominator comes out too large by ``b^2/6`` (2.6e-5 for the common
+    ``b = 0.0125``), every projector too small by ``b^2/12``, and the nonlocal energy of an occupied channel too small
+    in magnitude by ``b^2/6`` of itself.  With ``Cubic_Spline`` this is the whole error of the tables at their own
+    sampling: +1.4e-3 Ry per atom for Au, +1.9e-3 for Ag, +1.5e-3 for Fe, +7.5e-4 for Cr (the large KB energies of full
+    d shells), 3e-5 to 5e-5 for H2O, Si and C, -2.6e-6 for Ge (KB integral of its s channel 0.09 Ry), against the limit
+    of the same potentials sampled up to eight times more densely (A100, command line, ``PARSEC_PROJECTOR_TAIL=auto``);
+    PARSEC 1.5 has the same error.
 
-    ``logmesh`` (opt-in): the trapezoid rule in the mesh index with the exact Jacobian ``b*(r(i) + c)``, which for these
-    smooth integrands that vanish at both ends of the table is exact to the digits of the table; with ``Cubic_Spline``
-    the energies then equal those of the dense-table limit within 3e-7 Ry per atom on clusters and 2.2e-6 on cells.  A
-    table whose radii do not follow the logarithmic mesh of its parameters (radius by radius, to 1e-6 relative) is
-    refused under ``logmesh``.  Not the default: it moves the energy of
-    every run with an occupied nonlocal channel away from PARSEC 1.5 with the same table.  An unknown value is refused
-    when the projectors are prepared, before the SCF.
+    ``logmesh``: the trapezoid rule in the mesh index with the exact Jacobian ``b*(r(i) + c)``
+    (:func:`log_mesh_integral`), which for these smooth integrands that vanish at both ends of the table is exact to the
+    digits of the table; with ``Cubic_Spline`` the energies then equal those of the dense-table limit within 3e-7 Ry per
+    atom on clusters and 2.2e-6 on cells.  A table whose radii do not follow the logarithmic mesh of its parameters
+    (radius by radius, to 1e-6 relative, :func:`log_mesh_deviation`) is refused under ``logmesh``.
+
+    ``auto`` (default since 2026-11-23): ``logmesh`` for every table whose radii follow that mesh (every table of the
+    package but two synthetic six-point test tables), the trapezoid of ``pseudo.f90`` for any other, table by table
+    (:meth:`~.potre.ParsecPseudopotential.kb_quadrature`); parsec.out names the quadrature of each species with
+    projectors.  An unknown value is refused when the projectors are prepared, before the SCF.
     """
 
-    import os
-
-    value = os.environ.get(KB_QUADRATURE_ENV, KB_QUADRATURE_DEFAULT).strip().lower() or KB_QUADRATURE_DEFAULT
+    value = switch_value(KB_QUADRATURE_ENV, KB_QUADRATURE_DEFAULT)
     if value not in KB_QUADRATURE_SETTINGS:
         raise ValueError(f"{KB_QUADRATURE_ENV} must be one of {', '.join(KB_QUADRATURE_SETTINGS)}, not {value!r}")
     return value
+
+
+def log_mesh_deviation(radii: np.ndarray, radial_parameter_b: float, radial_offset: float) -> float:
+    """The largest relative deviation of ``radii`` from the logarithmic mesh ``r(i) = (r(1) + c)*exp(b*(i - 1)) - c``
+    of the parameters ``b`` and ``c``, compared radius by radius (differences of neighbouring radii would magnify the
+    rounding of the printed radii by about ``1/(2b)``); ``inf`` for parameters that define no such mesh or fewer than
+    three positive, increasing, finite radii."""
+
+    radial_grid = np.asarray(radii, dtype=float)
+    b = float(radial_parameter_b)
+    c = float(radial_offset)
+    if radial_grid.ndim != 1 or radial_grid.size < 3 or not np.all(np.isfinite(radial_grid)):
+        return float("inf")
+    if radial_grid[0] <= 0.0 or np.any(np.diff(radial_grid) <= 0.0):
+        return float("inf")
+    if not (b > 0.0 and np.isfinite(b) and c >= 0.0 and np.isfinite(c)):
+        return float("inf")
+    predicted = (radial_grid[0] + c) * np.exp(b * np.arange(radial_grid.size)) - c
+    return float(np.max(np.abs(radial_grid / predicted - 1.0)))
 
 
 def log_mesh_integral(radii: np.ndarray, integrand: np.ndarray, radial_parameter_b: float, radial_offset: float) -> float:
@@ -102,11 +127,8 @@ def log_mesh_integral(radii: np.ndarray, integrand: np.ndarray, radial_parameter
     c = float(radial_offset)
     if not (b > 0.0 and np.isfinite(b) and c >= 0.0 and np.isfinite(c)):
         raise ValueError(f"invalid logarithmic mesh parameters b={b!r}, c={c!r}")
-    # the mesh must be the one of its parameters: r(i) = (r(1) + c)*exp(b*(i - 1)) - c, compared radius by radius
-    # (differences of neighbouring radii would magnify the rounding of the printed radii by about 1/(2b))
-    predicted = (radial_grid[0] + c) * np.exp(b * np.arange(radial_grid.size)) - c
-    deviation = float(np.max(np.abs(radial_grid / predicted - 1.0)))
-    if not deviation <= 1.0e-6:
+    deviation = log_mesh_deviation(radial_grid, b, c)
+    if not deviation <= LOG_MESH_TOLERANCE:
         raise ValueError(
             f"{KB_QUADRATURE_ENV}=logmesh needs the logarithmic mesh r = a*exp(b*i) - c of the table's parameters "
             f"(b={b:.6g}, c={c:.6g}); its radii deviate from it by {deviation:.1e} (relative)"
@@ -123,6 +145,7 @@ def log_mesh_integral(radii: np.ndarray, integrand: np.ndarray, radial_parameter
 __all__ = [
     "KB_QUADRATURE_ENV",
     "kb_quadrature_setting",
+    "log_mesh_deviation",
     "log_mesh_integral",
     "parsec_radial_integral",
 ]

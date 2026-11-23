@@ -41,7 +41,7 @@ _AX = -0.738558766382022405884230032680836
 _FOUR_THIRDS = 4.0 / 3.0
 _GAMMA = 0.5198421
 # Unpolarized gas: high density (r_s < 1), then low density.  ``_C3``, ``_C4``, ``_CS`` and ``_DS`` are PARSEC's; an
-# evaluation takes those of PARSEC_CA_CONTINUITY (ca_lda.ca_high_density_coefficients), the same by default.
+# evaluation takes those of PARSEC_CA_CONTINUITY (ca_lda.ca_high_density_coefficients), the same under off.
 _C1, _C2, _C3, _C4 = 0.0622, 0.0960, 0.0040, 0.0232
 _G, _B1, _B2 = -0.2846, 1.0529, 0.3334
 # Fully polarized gas.

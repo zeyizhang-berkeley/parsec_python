@@ -109,7 +109,8 @@ reports what its sphere adds to the energy, estimated from the converged
 density. An input with a radius keeps its sphere. Its Hartree boundary
 values differ from PARSEC's, and from those of earlier versions of this
 code, where an estimate from the geometry says PARSEC's are inaccurate;
-`Hartree_Boundary_Tolerance: off` in the input restores them. With
+`Hartree_Boundary_Tolerance: off` in the input restores them
+(`PARSEC_FORTRAN_NUMERICS=on` too, with PARSEC 1.5's other numerical rules). With
 `PARSEC_DOMAIN_REPORT=0` in the environment its report leaves the estimates
 of the sphere out.
 See "Sphere radius left to the code" in
@@ -519,8 +520,10 @@ tables are interpolated with PARSEC's cubic spline, and the projectors of a
 table converted from UPF are zero beyond its cutoff radii, as in the UPF file:
 the energy is then a smooth function of the positions and the forces are its
 slope. `PARSEC_CUBIC_SPLINE_DEFAULT=off PARSEC_PROJECTOR_TAIL=off` (or
-`Cubic_Spline: .false.` where no table has such a tail) give the numbers of
-PARSEC 1.5's linear interpolation. Use `Correlation_Type: pbe` with
+`Cubic_Spline: .false.` where no table has such a tail) give PARSEC 1.5's
+linear interpolation, and `PARSEC_FORTRAN_NUMERICS=on` all of PARSEC 1.5's
+numerics at once (also its quadrature of the Kleinman-Bylander denominators
+and its CA correlation). Use `Correlation_Type: pbe` with
 the potentials of `PBE/` and `Correlation_Type: ca` with those of `CA/`; the
 self-consistent hybrid functionals (`pbe0`, `hse06`, `b3lyp`, `hf`, ...; see
 [the package guide](src/parsec_python/README.md#self-consistent-hybrid-functionals))

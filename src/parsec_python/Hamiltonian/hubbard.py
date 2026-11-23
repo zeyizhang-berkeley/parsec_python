@@ -195,8 +195,15 @@ def interpolate_hubbard_radial(
     inverse_a = 1.0 / potential.radial_parameter_a
     inverse_b = 1.0 / potential.radial_parameter_b
     # npt = idint(binv*log(one + ainv*rnorm)) + 1 is Fortran index npt,
-    # position npt - 1 here.
-    lower = np.floor(inverse_b * np.log(1.0 + inverse_a * clamped)).astype(np.int64)
+    # position npt - 1 here.  That is the index of the mesh r = a(exp(b(j-1)) - 1)
+    # of a Martins file; on the mesh r = a exp(b(j-1)) of an FHI table it picks the
+    # interval below the right one for a share of about a/(b r) of the distances
+    # (9.8 % in 0.05 to 1.5 bohr for carbon as the file gives it).  A table that
+    # PARSEC_FHI_ORIGIN=auto continued takes the interval of its own radii.
+    if getattr(potential, "origin_samples", 0):
+        lower = np.searchsorted(radii, clamped, side="right").astype(np.int64) - 1
+    else:
+        lower = np.floor(inverse_b * np.log(1.0 + inverse_a * clamped)).astype(np.int64)
     lower = np.clip(lower, 0, radii.size - 2)
     width = radii[lower + 1] - radii[lower]
     slope = (radial[lower + 1] - radial[lower]) / width

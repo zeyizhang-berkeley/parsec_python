@@ -496,9 +496,10 @@ class CommandLineSectorRelaxationTests(unittest.TestCase):
             self.assertEqual(np.asarray(sectors[1]["relaxation_positions"]).shape, (3, 8, 3))
             for key in ("relaxation_positions", "relaxation_final_positions", "relaxation_energies"):
                 np.testing.assert_allclose(sectors[1][key], full[1][key], rtol=0, atol=1e-6, err_msg=key)
+            # the files print six decimals: positions within 1e-6 can round to neighbouring last digits
             for name in ("atom.cor", "relax_restart.dat"):
                 np.testing.assert_allclose(
-                    _numbers(root / "sectors" / name)[0], _numbers(root / "full" / name)[0], rtol=0, atol=1e-6
+                    _numbers(root / "sectors" / name)[0], _numbers(root / "full" / name)[0], rtol=0, atol=1.5e-6
                 )
 
     def test_steepest_descent_keeps_the_atoms_the_group_fixes(self) -> None:

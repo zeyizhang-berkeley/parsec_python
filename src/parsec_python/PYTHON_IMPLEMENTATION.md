@@ -464,10 +464,12 @@ at the Gamma point and of the little groups of k-points
 The Python `shift` is independent of symmetry. This avoids copying PARSEC's
 `Ignore_Symmetry -> zero shift` coupling.
 
-### Cubic spline and projector tail by default
+### Accuracy defaults that differ from PARSEC 1.5
 
-Two defaults differ from PARSEC 1.5 for the sake of forces that follow the
-slope of the energy (`FORCES_AND_RELAXATION.md`, Forces):
+These defaults differ from PARSEC 1.5 for the sake of forces that follow the
+slope of the energy and of energies closer to the limit of their tables
+(`FORCES_AND_RELAXATION.md`, Forces; the switch table of
+`acceleration/README.md`):
 
 - A species without `Cubic_Spline` in the input takes PARSEC's cubic spline of
   its local potential, core density and projectors, as with
@@ -479,9 +481,31 @@ slope of the energy (`FORCES_AND_RELAXATION.md`, Forces):
   cutoff (`PARSEC_PROJECTOR_TAIL=auto`), as in the UPF file the table was
   converted from; PARSEC 1.5 keeps the tabulated difference up to `rcore`.
 
+- The Kleinman-Bylander denominators take the trapezoid rule in the index of
+  the logarithmic mesh with its exact Jacobian (`PARSEC_KB_QUADRATURE=auto`,
+  since 2026-11-23; a table off that mesh keeps PARSEC 1.5's weights
+  `0.5*(r(i+1) - r(i-1))`, which make every denominator too large by
+  `b^2/6`).
+- The Perdew-Zunger correlation of `Correlation_Type: ca` is continuous at
+  `r_s = 1` (`PARSEC_CA_CONTINUITY=on`, since 2026-11-23; PARSEC 1.5's
+  four-digit coefficients step there).
+- A slab whose forces are computed takes the Hartree potential that makes its
+  energy stationary (`PARSEC_HARTREE_VARIATIONAL=slab`, since 2026-11-23).
+- An FHI table is continued below its first radial sample (`0.00625/Z` bohr)
+  down to 1e-5 bohr with its even continuation, its first samples refitted
+  (`PARSEC_FHI_ORIGIN=auto`, since 2026-11-23); PARSEC 1.5 pads that
+  interval as for a POTRE table.
+- The Fermi level of a gapped system is the root of the electron count
+  (`PARSEC_FERMI_GAP_ROOT=on`, since 2026-11-23): the printed level and the
+  occupations of the empty levels, not the energy; PARSEC 1.5 reports the
+  level where its bisection stops, anywhere in the gap where the thermal
+  tails are below its tolerance.
+
 `PARSEC_CUBIC_SPLINE_DEFAULT=off PARSEC_PROJECTOR_TAIL=off` (or `Cubic_Spline:
-.false.` for every species, where no table has such a tail) reproduce the
-numbers of PARSEC 1.5's interpolation, those of this package before the change.
+.false.` for every species, where no table has such a tail) reproduce PARSEC
+1.5's interpolation; `PARSEC_FORTRAN_NUMERICS=on` gives every one of these
+rules PARSEC 1.5's value at once, with PARSEC's Hartree boundary values and its
+force rules next to an atom (a switch set in the environment wins).
 
 ### Eigensolver initialization
 

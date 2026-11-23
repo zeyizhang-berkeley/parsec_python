@@ -268,7 +268,9 @@ runs this moved the PBE totals by at most 4.2e-5 Ry and the refined totals by
 at most 6.9e-5 Ry (the SCF criterion is 5e-5 Ry); five printed binding
 energies and two printed atomic totals moved by 0.001 eV. With
 `PARSEC_PROJECTOR_TAIL=off`, 26 of the runs gave the earlier totals in all
-eight printed decimals.
+eight printed decimals (code of 22 November 2026; since 23 November 2026 the
+Kleinman-Bylander denominators take the exact quadrature of the logarithmic
+mesh, and `PARSEC_KB_QUADRATURE=trapezoid` is needed beside it).
 
 | run | grid points | occupied / computed states | SCF steps | SCF [s] | pair solves | refinement [s] | whole run [s] | host memory [GiB] |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
@@ -290,7 +292,14 @@ exceeds 1e-10, the electron-count tolerance of the Fermi search
 `off` the threshold is 1e-12; the search leaves the empty levels above a gap
 any occupation below 1e-10, so that some of them entered as well (CO 7
 orbitals for 5 and 28 pair solves for 15, P(CF3)3 903 for 820, H3O+(H2O)20
-3655 for 3570), with totals equal in every printed digit. 69 of the 208 runs
+3655 for 3570), with totals equal in every printed digit. Those tails come
+from where the bisection of the search stops in the gap; since 23 November
+2026 the Fermi level of a gap is the root of the electron count
+(`PARSEC_FERMI_GAP_ROOT`, default on), where the empty levels of these three
+hold far less (CO 4e-16), and the threshold 1e-12 then counts as the default
+does (CO 5 orbitals and 15 pair solves, P(CF3)3 820; the levels of the 208
+logs give 73,597 pair solves under 1e-12 against 74,367 with the bisection);
+the default threshold counts the same 72,446 under either placement. 69 of the 208 runs
 still count one to three empty levels whose occupation lies above 1e-10 at the
 Fermi temperature of the inputs (H3O+(H2O)20 with the hole: 85 orbitals for
 84).
@@ -298,8 +307,8 @@ Fermi temperature of the inputs (H3O+(H2O)20 with the hole: 85 orbitals for
 On a laptop with 32 logical cores, an RTX 5070 Laptop GPU with 8 GB and 32 GB
 of memory, the runs of the next table, the second state of the two water
 clusters and the 16 atoms gave the totals of the A100 runs made before
-22 November 2026 (now `PARSEC_PROJECTOR_TAIL=off`) in all eight printed
-decimals:
+22 November 2026 (now `PARSEC_PROJECTOR_TAIL=off PARSEC_KB_QUADRATURE=trapezoid`)
+in all eight printed decimals:
 
 | run | grid points | occupied / computed states | SCF steps | SCF [s] | pair solves | refinement [s] | whole run [s] | host memory [GiB] |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|

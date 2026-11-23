@@ -4,15 +4,18 @@
 measures the residual of each channel and ``totnrg.f90`` sums the band
 energy and the double-counting integrals over them.  The Fermi levels PARSEC
 printed for the levels of four of its spin-polarized runs are reproduced
-here; everything else is compared with the unpolarized routines, which two
+here (``PARSEC_FERMI_GAP_ROOT=off``; its default places the level of a gap at
+the root of the count); everything else is compared with the unpolarized routines, which two
 identical channels must reduce to.
 """
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 import tempfile
 import unittest
+from unittest import mock
 
 import numpy as np
 
@@ -60,8 +63,10 @@ FORTRAN_LEVELS = {
 
 class SpinFermiLevelTests(unittest.TestCase):
     def test_fermi_levels_of_fortran_runs(self) -> None:
+        # PARSEC_FERMI_GAP_ROOT=off: the bisection of flevel.f90, which stops anywhere in the gap
+        # where the count is within 1e-10, as PARSEC printed it.
         for name, (up, down, electrons, level, per_channel) in FORTRAN_LEVELS.items():
-            with self.subTest(system=name):
+            with self.subTest(system=name), mock.patch.dict(os.environ, {"PARSEC_FERMI_GAP_ROOT": "off"}):
                 result = spin_fermi_occupations(up, down, electrons, 80.0)
                 # Four decimals are printed.
                 self.assertAlmostEqual(result.fermi_level, level, delta=5.01e-5)
@@ -70,6 +75,26 @@ class SpinFermiLevelTests(unittest.TestCase):
                     result.net_magnetic_moment, per_channel[0] - per_channel[1]
                 )
                 self.assertAlmostEqual(result.electron_count, electrons, delta=1.0e-12)
+
+    def test_the_level_of_a_gap_is_the_root_of_the_count(self) -> None:
+        # PARSEC_FERMI_GAP_ROOT=on (default): the same levels, the root of the count, which for a
+        # highest filled level of degeneracy g_h and a lowest empty one of g_l far from the others is
+        # midgap + (kT/2) ln(g_h/g_l): the N atom has three filled and three empty partners at its gap
+        # (up p and down p), CH3 one each.
+        kbt = 6.33327186e-6 * 80.0
+        gaps = {"N atom": (-0.6001602286, -0.2684781120, 3, 3), "CH3": (-0.3623054688, -0.2118284016, 1, 1)}
+        for name, (up, down, electrons, level, per_channel) in FORTRAN_LEVELS.items():
+            highest, lowest, filled, empty = gaps[name]
+            with self.subTest(system=name), mock.patch.dict(os.environ, {"PARSEC_FERMI_GAP_ROOT": "on"}):
+                result = spin_fermi_occupations(up, down, electrons, 80.0)
+                expected = 0.5 * (highest + lowest) + 0.5 * kbt * np.log(filled / empty)
+                self.assertAlmostEqual(result.fermi_level, expected, delta=1.0e-14)
+                self.assertNotAlmostEqual(result.fermi_level, level, delta=1.0e-2)
+                self.assertEqual(result.electrons, per_channel)
+                self.assertEqual(result.electron_count, electrons)
+            with self.subTest(system=name, route="default"), mock.patch.dict(os.environ):
+                os.environ.pop("PARSEC_FERMI_GAP_ROOT", None)
+                self.assertEqual(spin_fermi_occupations(up, down, electrons, 80.0).fermi_level, result.fermi_level)
 
     def test_identical_channels_fill_like_one_unpolarized_channel(self) -> None:
         levels = np.array([-1.2, -0.61, -0.6, -0.59, -0.2, 0.1])

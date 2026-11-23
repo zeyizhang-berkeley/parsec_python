@@ -13,9 +13,11 @@ Kleinman-Bylander form with the same local channel (d) and one projector per l, 
 (`fhi2upf.x`); Mg and B carry their nonlinear core correction. The repository's
 `src/pp_generation/NCPPs/PBE/<E>/UPF/<e>_pbe_tm.UPF` hold the same tables (they differ in header attributes and the
 label of the unused d wavefunction); copy them into `qe/pseudo/`. The local potentials, projectors, pseudo-wavefunctions
-and core charges of the UPF files equal the FHI tables as this code reads them to 1e-15. The Kleinman-Bylander
-energies E_l differ by -0.9e-4 to -1.1e-4 relative (QE integrates them by Simpson's rule, this code, as PARSEC, by the
-trapezoid on the logarithmic mesh): a constant offset of the totals, which mostly cancels in E_hyb - E_PBE.
+and core charges of the UPF files equal the FHI tables as this code reads them to 1e-15. QE integrates the
+Kleinman-Bylander energies E_l by Simpson's rule, and the logs of `..` (23 November 2026) integrate them exactly on
+the logarithmic mesh (Simpson's value to 1e-12 relative). PARSEC's trapezoid on that mesh, with which the logs before
+that date were made (`PARSEC_KB_QUADRATURE=trapezoid`), gives E_l larger by 0.9e-4 to 1.1e-4 relative: a constant
+offset of the totals, which mostly cancels in E_hyb - E_PBE (`../README.md`, PBE level).
 
 ## Settings
 

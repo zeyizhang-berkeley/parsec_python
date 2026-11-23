@@ -140,10 +140,34 @@ def assert_matches_fortran(
     )
     if "fermi_level" in case:
         test.assertAlmostEqual(
-            result.fermi_level, case["fermi_level"], delta=PRINTED_FOUR_DECIMALS
+            result.fermi_level, fortran_fermi_level(case), delta=PRINTED_FOUR_DECIMALS
         )
     else:
         test.assertTrue(np.isnan(result.fermi_level))
+
+
+def fortran_fermi_level(case: dict) -> float:
+    """The Fermi level a run of this package gives for the Fortran levels of ``case``.
+
+    Fortran prints the level of its bisection, which in the gap of these
+    systems lies anywhere the electron count is within 1e-10; that is the
+    level under ``PARSEC_FERMI_GAP_ROOT=off``.  The default places it at the
+    root of the count, here that of the levels Fortran printed (Fermi_Temp of
+    the input, 80 K without one).
+    """
+
+    from parsec_python.Occupations import spin_fermi_occupations
+    from parsec_python.Occupations.fermi_dirac import fermi_gap_root_setting
+
+    if fermi_gap_root_setting() == "off":
+        return float(case["fermi_level"])
+    temperature = 80.0
+    for line in case["input"]:
+        key, _, value = line.partition(":")
+        if key.strip().lower() == "fermi_temp":
+            temperature = float(value.split()[0])
+    up, down = (np.sort(np.asarray(case["eigenvalues"][label], dtype=float)) for label in ("up", "down"))
+    return spin_fermi_occupations(up, down, float(sum(case["electrons"])), temperature).fermi_level
 
 
 def assert_forces_match(test, forces, case: dict, *, tolerance: float = FORCE_TOLERANCE) -> None:

@@ -62,7 +62,8 @@ class ProjectorTailSwitchTests(unittest.TestCase):
 class ProjectorTailTableTests(unittest.TestCase):
     def test_off_is_the_formula_of_pseudo_f90(self):
         potential = read_parsec_pseudopotential(_C_CONVERTED)
-        with _setting("off"):
+        # with the denominators of pseudo.f90 (PARSEC_KB_QUADRATURE=trapezoid)
+        with _setting("off"), mock.patch.dict(os.environ, {"PARSEC_KB_QUADRATURE": "trapezoid"}):
             for channel in (0, 1):
                 projector, sign = potential.radial_projector(channel, 2)
                 delta = potential.channel_potentials[channel] - potential.channel_potentials[2]

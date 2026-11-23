@@ -13,8 +13,8 @@ from ..SCF.symmetry_fields import SymmetrySCFReducer, SymmetryScalarField
 class NativeCALDAEvaluator:
     """Cache frozen NLCC density and evaluate CA-LDA in native float64 loops.
 
-    The C++ loops hold PARSEC's coefficients.  Under ``PARSEC_CA_CONTINUITY=on`` (read when the evaluator is made)
-    the points of ``r_s < 1`` take the change of the high-density coefficients on top of them
+    The C++ loops hold PARSEC's coefficients.  Under ``PARSEC_CA_CONTINUITY=on`` (the default; read when the
+    evaluator is made) the points of ``r_s < 1`` take the change of the high-density coefficients on top of them
     (:meth:`_continuous`), the energy weighted by the multiplicities of the orbits as the C++ loops weight it.
     """
 
@@ -96,16 +96,26 @@ class NativeCALDAEvaluator:
         from parsec_python.V_xc.ca_lda import ca_high_density_coefficients, ca_lda
 
         payload = self._evaluator.evaluate(valence)
-        potential = np.array(payload["potential"], dtype=np.float64)
-        epsilon = np.array(payload["energy_per_electron"], dtype=np.float64)
-        energy_density = np.array(payload["energy_density"], dtype=np.float64)
+        # the C++ loops return new arrays on every call: the change is made in place
+        potential = np.asarray(payload["potential"], dtype=np.float64)
+        epsilon = np.asarray(payload["energy_per_electron"], dtype=np.float64)
+        energy_density = np.asarray(payload["energy_density"], dtype=np.float64)
+        total = float(payload["total_energy"])
         density = valence + self._core
         critical = 0.75 / np.pi
-        ratio = density / critical
-        high = ratio > 1.0 + 1.0e-10
-        near = np.abs(ratio - 1.0) <= 1.0e-10
-        before = energy_density.copy() if np.any(high | near) else None
-        if np.any(high):
+        # the points that can lie at r_s <= 1 + 1e-10 (a superset), then the tests of every point on them alone
+        candidates = np.flatnonzero(density > critical * (1.0 - 2.0e-10))
+        if candidates.size == 0:
+            return {"potential": potential, "energy_per_electron": epsilon, "energy_density": energy_density,
+                    "total_energy": total}
+        ratio = density[candidates] / critical
+        high_mask = ratio > 1.0 + 1.0e-10
+        near_mask = np.abs(ratio - 1.0) <= 1.0e-10
+        changed = candidates[high_mask | near_mask]
+        before = energy_density[changed]
+        high = candidates[high_mask]
+        near = candidates[near_mask]
+        if high.size:
             on = ca_high_density_coefficients("on")
             off = ca_high_density_coefficients("off")
             dc3, dc4, dc5 = (on[i] - off[i] for i in range(3))
@@ -116,16 +126,14 @@ class NativeCALDAEvaluator:
             epsilon[high] += change
             potential[high] += change - (dc3 * log_r - dc5) * rs / 3.0
             energy_density[high] = rho * epsilon[high]
-        if np.any(near):
+        if near.size:
             exact = ca_lda(valence[near], self._volume_element, self._core[near])
             potential[near] = exact.potential
             epsilon[near] = exact.energy_per_electron
             energy_density[near] = exact.energy_density
-        total = float(payload["total_energy"])
-        if before is not None:
-            changed = high | near
+        if changed.size:
             weights = 1.0 if self._weights is None else self._weights[changed]
-            total += float(np.sum(weights * (energy_density[changed] - before[changed]))) * self._volume_element
+            total += float(np.sum(weights * (energy_density[changed] - before))) * self._volume_element
         return {
             "potential": potential,
             "energy_per_electron": epsilon,

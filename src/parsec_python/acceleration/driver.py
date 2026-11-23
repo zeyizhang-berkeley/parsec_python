@@ -220,6 +220,11 @@ def _reference_cache_key(
                 digest.update(
                     bytes((int(bool(specification.nonlinear_core_correction)),))
                 )
+                # PARSEC_FHI_ORIGIN=auto (samples below the first one of the file); off keeps the key of before
+                from ..Pseudopotential.fhipp import fhi_origin_setting
+
+                if fhi_origin_setting() != "off":
+                    digest.update(f"fhi-origin-{fhi_origin_setting()}".encode("ascii"))
         if getattr(problem.scf, "spin_polarized", False):
             # The starting polarization of the species shapes the starting
             # spin densities of the prepared system.  Nothing is hashed
@@ -3778,6 +3783,8 @@ def _variational_hartree(reference, solver, *, sector_worker: bool, is_periodic:
         return None, "not used (periodic cell)"
     if setting == "off":
         return None, "off (PARSEC_HARTREE_VARIATIONAL=off: the potential of the Poisson solve)"
+    if setting == "slab":
+        return None, "off (PARSEC_HARTREE_VARIATIONAL=slab: a cluster keeps the potential of the Poisson solve)"
     if not variational_hartree_applies(
         getattr(problem, "hartree", None),
         getattr(problem, "grid", None),

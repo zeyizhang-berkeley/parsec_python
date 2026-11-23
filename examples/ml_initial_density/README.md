@@ -18,10 +18,19 @@ Within each molecule, all three inputs use the same atoms, spherical domain,
 PBE H/C/N/O norm-conserving pseudopotentials, eigensolver, mixing, temperature,
 and convergence criterion. Only `Initial_Density` changes.
 
+The four files in `pseudopotentials/` are those of the library,
+`src/pp_generation/NCPPs/PBE/{H,C,N,O}/PARSEC` (Troullier–Martins potentials
+of FHI98PP, resampled from its UPF files by `src/tools/upf_to_parsec.py` with
+cubic interpolation in log r). Until 23 November 2026 they were the linear
+resampling of the same UPF files (`--interpolation linear`), whose values
+between the points of the UPF mesh rippled; the outputs and tables below are
+those of the cubic files.
+
 The canonical inputs use CHEBDAV degree 15 for the first nonlinear
 diagonalization and the existing GPU PARSEC `SUBSPACE` filter on every later
 SCF iteration. This was selected only after a 42-case comparison against
-CHEBFF; the former CHEBFF output is retained beside every current output.
+CHEBFF; the CHEBFF output of every input is kept beside it
+(`parsec_chebff.out`).
 
 The legacy model arrays are volume densities in `e/angstrom^3` on 70x70x70
 (7 Angstrom radius) or 90x90x90 (9 Angstrom radius) Cartesian lattices. Their
@@ -67,7 +76,7 @@ ml_initial_density/
       charge3net/parsec.out
   case_manifest.csv             source-grid and legacy-file provenance
   results_summary.csv           current CHEBDAV convergence/energy/timings
-  results_summary_chebff.csv    preserved CHEBFF baseline summary
+  results_summary_chebff.csv    CHEBFF convergence/energy/timings
   eigensolver_comparison.csv    controlled CHEBFF/CHEBDAV comparison
   chebdav_degree_ch4.csv        degree-15/degree-20 CH4 check
   prepare_small_molecule_cases.py
@@ -134,39 +143,64 @@ initial-density method, matching the convention used in Figure 5 of the paper.
 
 ## Results from the current code
 
-All 42 calculations converged. Iteration counts are:
+The outputs are first runs (no symmetry cache) of 23 November 2026, each on
+one NVIDIA A100 (80 GB) with 32 CPUs of a Perlmutter GPU node, four runs side
+by side on a node, after one throwaway warm-up run on each GPU; the outputs
+before were those of 2 September 2026 on a laptop GPU (RTX 5070 Laptop). All
+42 calculations converged. Iteration counts are:
 
 | Molecule | SAD | SCDP | ChargE3Net | Final-energy spread (meV) |
 |---|---:|---:|---:|---:|
 | C10H8 | 13 | 10 | 8 | 0.044 |
-| C2H2 | 13 | 8 | 10 | 0.002 |
+| C2H2 | 13 | 8 | 8 | 0.003 |
 | C2H4 | 13 | 9 | 8 | 0.003 |
-| C2H6 | 16 | 15 | 13 | 0.001 |
+| C2H6 | 16 | 15 | 13 | <0.001 |
 | C3H8O | 13 | 14 | 18 | 0.007 |
-| C6H6 | 14 | 10 | 11 | 0.002 |
+| C6H6 | 14 | 10 | 11 | 0.003 |
 | CH3CH2CH2OH | 19 | 14 | 18 | <0.001 |
 | CH3CH2OCH3 | 12 | 13 | 19 | 0.012 |
 | CH3CH2OH | 15 | 12 | 17 | <0.001 |
-| CH3CHOHCH3 | 19 | 19 | 20 | <0.001 |
+| CH3CHOHCH3 | 19 | 17 | 20 | <0.001 |
 | CH3CN | 16 | 12 | 12 | 0.001 |
-| CH4 | 18 | 12 | 9 | 0.002 |
+| CH4 | 17 | 12 | 9 | 0.002 |
 | CO2 | 10 | 12 | 11 | <0.001 |
 | H2O | 13 | 12 | 13 | <0.001 |
 
-The mean CHEBDAV iteration counts are 14.57 (SAD), 12.29 (SCDP), and
-13.36 (ChargE3Net), compared with CHEBFF's 21.14, 22.50, and 22.21. The
-controlled audit found CHEBDAV faster in 40/42 calculations and reduced its
-summed solver time from 439.85 to 328.56 seconds (1.34x speedup). The two
-exceptions were SAD cases whose reduced iteration count did not repay the
-more expensive first eigensolve. Degree 20 did not improve the CH4 result, so
-the source-valid minimum degree 15 is used.
+The mean CHEBDAV iteration counts are 14.50 (SAD), 12.14 (SCDP), and
+13.21 (ChargE3Net), compared with CHEBFF's 21.00, 22.00, and 22.07. On the
+A100 a run takes 2 to 4 seconds: CHEBDAV was faster in 22 of the 42
+calculations, and the summed solver time was 115.41 seconds against
+116.15 seconds for CHEBFF (1.01x). A second run of all 84 inputs on the
+same day gave 22 of 42 and 114.50 against 115.26 seconds. Per input the two
+solvers differ by -0.9 to +0.7 seconds, more than repeated runs of the same
+input (0.18 s standard deviation of their difference), and the differences
+nearly cancel in the sum. On the laptop GPU of the first audit CHEBDAV was faster
+in 40/42 calculations and reduced the summed solver time from 439.85 to
+328.56 seconds (1.34x); the two exceptions were SAD cases whose reduced
+iteration count did not repay the more expensive first eigensolve. Degree 20
+saved one SAD iteration for CH4 (16 against 17) and no other, so the
+source-valid minimum degree 15 is used.
 
-The maximum final-energy spread among the three starts is now
-`3.23e-6 Ry = 0.044 meV`, well below the `2e-4 Ry` SCF criterion. The largest
-CHEBDAV-versus-CHEBFF final-energy difference was `4.423e-5 Ry`, also below
+The maximum final-energy spread among the three starts is
+`3.21e-6 Ry = 0.044 meV`, well below the `2e-4 Ry` SCF criterion. The largest
+CHEBDAV-versus-CHEBFF final-energy difference was `4.429e-5 Ry`, also below
 that criterion. Detailed results are in `results_summary.csv` and
-`eigensolver_comparison.csv`; each `parsec_chebff.out` is the preserved
-baseline corresponding to the current `parsec.out`.
+`eigensolver_comparison.csv` (its CHEBDAV columns are the runs of
+`parsec.out`); each `parsec_chebff.out` is the CHEBFF run corresponding to
+the current `parsec.out`.
+
+Against all 84 runs with the former files on the same code and defaults
+(23 November 2026), the cubic pseudopotential files (see "What is held
+fixed") raise every total energy by 1.05e-3 Ry (H2O) to 1.16e-2 Ry (C10H8),
+1.05e-3 to 1.6e-3 Ry per C, N or O atom (the hydrogen file is purely local
+and changed little), and change two CHEBDAV iteration counts (CH4 SAD 18 to
+17, CH3CHOHCH3 SCDP 19 to 17) and one CHEBFF count (CH3CN ChargE3Net 24 to
+25). The other changes against the outputs of 2 September (C2H2 ChargE3Net
+with CHEBDAV, 10 to 8; C2H2 and CO2 with CHEBFF) come with the former files
+too on the current code, whose energies with those files lie 3.2e-5 (CH4) to
+3.4e-4 Ry (C10H8) above the former ones by the defaults of 23 November 2026
+(for these PBE inputs, the Kleinman-Bylander quadrature on the logarithmic
+mesh).
 
 ## Why CHEBDAV reveals the ML benefit
 
@@ -180,8 +214,10 @@ CHEBFF intentionally performs a fixed amount of approximate first-filter
 work without accepting individual Ritz pairs by residual. CHEBDAV spends more
 time building and residual-testing a better first eigensubspace. For these
 ML-density tests, that additional first-step work prevents eigensolver error
-from obscuring differences in the starting Kohn--Sham potential; fewer later
-SCF/subspace iterations more than recover its cost in nearly every case.
+from obscuring differences in the starting Kohn--Sham potential. On the
+laptop GPU of the first audit the fewer later SCF/subspace iterations
+recovered its cost in nearly every case; on an A100, where these runs take
+seconds, the two about balance.
 
 ## Stored and direct predictions
 
@@ -192,8 +228,11 @@ grid (by 0.087 Å in y for water), so they are imported by linear
 interpolation, which lowers the density peaks near the nuclei (water,
 ChargE3Net: 1.007 instead of 1.123 e/bohr³ at the maximum, 5.9 % L1
 difference). Predicting at the exact grid points with `ml_density.py predict`
-changed the SCF iterations as follows (A100, 2026-10-18; final energies
-within 1.1e-6 Ry of SAD):
+changed the SCF iterations as follows (A100, 2026-10-18, with the linearly
+resampled pseudopotential files of that time; final energies within 1.1e-6 Ry
+of SAD; the direct predictions need the model environments and were not
+repeated with the cubic files, with which the stored starts of these four
+molecules take the iterations of the table above, CH4 SAD 17 instead of 18):
 
 | Molecule | SAD | ChargE3Net stored / direct | SCDP fast stored / direct | SCDP accurate, direct |
 |---|---:|---:|---:|---:|

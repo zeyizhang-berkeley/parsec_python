@@ -47,9 +47,9 @@ in `../python_pbe`, and `analyze.py` reads it where the first is absent:
 | `parsec_gpu_hartree.out` | `parsec_gpu_hartree_python.out` | the command below with `PARSEC_HARTREE_LINEAR_BACKEND=cupy` (Poisson solves on the GPU, the default since 2026-11-07); all four cases |
 | `parsec.out` | `parsec_python.out` | the command below with `PARSEC_HARTREE_LINEAR_BACKEND=native` (Poisson solves on the CPU, the default before 2026-11-07); all four cases |
 
-The kept logs are of 20 November 2026, those of the IS cases of 22 November
-2026, one NVIDIA A100 per run ("Time and
-memory" below). Until then CF4 FS_1s had no CPU-solver log: its run of
+The kept logs are of 23 November 2026, when the pseudopotential files were
+resampled again (`../python_pbe/README.md`), one NVIDIA A100 per run ("Time
+and memory" below). Until 20 November 2026 CF4 FS_1s had no CPU-solver log: its run of
 11 October 2026 on a laptop was stopped during its refinement, when other
 jobs on the machine had slowed its CPU Poisson solves to more than a minute
 each.
@@ -83,8 +83,8 @@ the refined total, and the two reference-corrected all-electron totals that
 the binding energies are built from:
 
 ```text
-PBE all-electron total (as above)           :         -80.96249697 [Ry]
-B3LYP-refined all-electron total            :         -81.00433296 [Ry]
+PBE all-electron total (as above)           :         -80.96104086 [Ry]
+B3LYP-refined all-electron total            :         -81.00287497 [Ry]
 ```
 
 `analyze.py` reads the `[Ry]` lines and converts with the CODATA Rydberg
@@ -144,55 +144,55 @@ to the eight printed decimals in Rydberg. Energies in eV:
 
 | case | quantity | Python | ARES | Python - ARES |
 |---|---|---:|---:|---:|
-| CH4 IS | PBE XC | -86.294958 | -85.779604 | -0.5154 |
-| CH4 IS | B3LYP XC | -86.864166 | -86.339786 | -0.5244 |
-| CH4 IS | refined total | -220.394718 | -220.322634 | -0.0721 |
-| CH4 IS | refined all-electron total | -1102.120096 | -1102.047921 | -0.0722 |
-| CH4 FS_1s | PBE XC | -98.041687 | -97.676314 | -0.3654 |
-| CH4 FS_1s | B3LYP XC | -98.506197 | -98.151206 | -0.3550 |
-| CH4 FS_1s | refined total | -322.239361 | -322.190689 | -0.0487 |
-| CH4 FS_1s | refined all-electron total | -804.863773 | -804.815051 | -0.0487 |
-| CF4 IS | PBE XC | -552.749338 | -549.927090 | -2.8222 |
-| CF4 IS | B3LYP XC | -555.384879 | -552.472080 | -2.9128 |
-| CF4 IS | refined total | -2784.218005 | -2783.874322 | -0.3437 |
-| CF4 IS | refined all-electron total | -11912.320243 | -11911.975615 | -0.3446 |
-| CF4 FS_1s | PBE XC | -558.349554 | -555.693413 | -2.6561 |
-| CF4 FS_1s | B3LYP XC | -560.262708 | -557.528220 | -2.7345 |
-| CF4 FS_1s | refined total | -2874.890602 | -2874.549938 | -0.3407 |
-| CF4 FS_1s | refined all-electron total | -11603.891874 | -11603.550306 | -0.3416 |
+| CH4 IS | PBE XC | -86.292505 | -85.779604 | -0.5129 |
+| CH4 IS | B3LYP XC | -86.861687 | -86.339786 | -0.5219 |
+| CH4 IS | refined total | -220.374881 | -220.322634 | -0.0522 |
+| CH4 IS | refined all-electron total | -1102.100259 | -1102.047921 | -0.0523 |
+| CH4 FS_1s | PBE XC | -98.040415 | -97.676314 | -0.3641 |
+| CH4 FS_1s | B3LYP XC | -98.504940 | -98.151206 | -0.3537 |
+| CH4 FS_1s | refined total | -322.216283 | -322.190689 | -0.0256 |
+| CH4 FS_1s | refined all-electron total | -804.840695 | -804.815051 | -0.0256 |
+| CF4 IS | PBE XC | -552.746340 | -549.927090 | -2.8193 |
+| CF4 IS | B3LYP XC | -555.381336 | -552.472080 | -2.9093 |
+| CF4 IS | refined total | -2784.098753 | -2783.874322 | -0.2244 |
+| CF4 IS | refined all-electron total | -11912.200991 | -11911.975615 | -0.2254 |
+| CF4 FS_1s | PBE XC | -558.349877 | -555.693413 | -2.6565 |
+| CF4 FS_1s | B3LYP XC | -560.262726 | -557.528220 | -2.7345 |
+| CF4 FS_1s | refined total | -2874.764376 | -2874.549938 | -0.2144 |
+| CF4 FS_1s | refined all-electron total | -11603.765647 | -11603.550306 | -0.2153 |
 
 The binding energies, `BE = E_AE(FS_1s) - E_AE(IS)`:
 
 | quantity | Python | ARES | Python - ARES | paper | experiment |
 |---|---:|---:|---:|---:|---:|
-| PP-PBE BE(CH4) | 297.1516 | 297.1476 | 0.0040 | 297.146 | 290.80 |
-| PP-PBE BE(CF4) | 307.7060 | 307.7151 | -0.0091 | 307.715 | 301.85 |
-| PP-PBE CF4-CH4 shift | 10.5544 | 10.5675 | -0.0132 | 10.569 | 11.05 |
-| PP-PBE(B3LYP) BE(CH4) | 297.2563 | 297.2329 | 0.0235 | 297.232 | 290.80 |
-| PP-PBE(B3LYP) BE(CF4) | 308.4284 | 308.4253 | 0.0031 | 308.425 | 301.85 |
-| PP-PBE(B3LYP) CF4-CH4 shift | 11.1720 | 11.1924 | -0.0204 | 11.193 | 11.05 |
+| PP-PBE BE(CH4) | 297.1549 | 297.1476 | 0.0073 | 297.146 | 290.80 |
+| PP-PBE BE(CF4) | 307.7132 | 307.7151 | -0.0019 | 307.715 | 301.85 |
+| PP-PBE CF4-CH4 shift | 10.5583 | 10.5675 | -0.0093 | 10.569 | 11.05 |
+| PP-PBE(B3LYP) BE(CH4) | 297.2596 | 297.2329 | 0.0267 | 297.232 | 290.80 |
+| PP-PBE(B3LYP) BE(CF4) | 308.4353 | 308.4253 | 0.0100 | 308.425 | 301.85 |
+| PP-PBE(B3LYP) CF4-CH4 shift | 11.1758 | 11.1924 | -0.0167 | 11.193 | 11.05 |
 | B3LYP correction of BE(CH4) | 0.1047 | 0.0853 | 0.0194 | | |
-| B3LYP correction of BE(CF4) | 0.7224 | 0.7102 | 0.0122 | | |
+| B3LYP correction of BE(CF4) | 0.7221 | 0.7102 | 0.0120 | | |
 
 "ARES" is the supplied `b3lyp` tree, "paper" the production runs behind the
 paper as `../0_ARES_CH4_CF4/test_CH4_CF4/README.md` tabulates them.
 
-The PBE binding energies agree with ARES within 9 meV, as in `../python_pbe`.
-The refined ones agree within 24 meV and the CF4-CH4 shift within 21 meV;
-against experiment the shift is +0.12 eV here and +0.14 eV in ARES, where
-PBE gives -0.50 eV and -0.48 eV.
+The PBE binding energies agree with ARES within 7.3 meV, as in `../python_pbe`.
+The refined ones agree within 27 meV and the CF4-CH4 shift within 17 meV;
+against experiment the shift is +0.13 eV here and +0.14 eV in ARES, where
+PBE gives -0.49 eV and -0.48 eV. With the linearly resampled pseudopotential
+files used before 23 November 2026 (`../python_pbe/README.md`; the same code
+and defaults, measured on 23 November 2026) the refined totals are 0.019 to
+0.118 eV lower and the refined binding energies 297.2566 and 308.4289 eV
+(shift 11.1724 eV).
 
 ## Time and memory
 
 First calculations (no symmetry cache, no restart) in double precision with
-the code of 20 November 2026 (the IS rows: 22 November 2026, when a
-`martins_new` projector became zero beyond the largest cutoff radius of its
-channels, `PARSEC_PROJECTOR_TAIL=auto`, which changes a few eigenvalues of the
-SCF iterations in the tenth decimal and no energy; the CH4 IS rows also with
-the exchange occupation cut below) on one NVIDIA A100 (80 GB)
-per run, each run with 32 CPUs of a Perlmutter GPU node (28 threads) and four
-runs side by side on the node; the CPU-solver run of CF4 IS had its node to
-itself, the other three GPUs idle. "Refinement" is `Time for energy
+the code of 23 November 2026 on one NVIDIA A100 (80 GB) per run, each run
+with 32 CPUs of a Perlmutter GPU node (28 threads) and four runs side by side
+on the node, after one throwaway warm-up run on each GPU; the two CPU-solver
+runs of CF4 shared a node, the other two GPUs idle. "Refinement" is `Time for energy
 refinement` of the log, "host memory" the high-water mark of the process at
 the end of the run.
 
@@ -202,10 +202,10 @@ densities; the default since 2026-11-07):
 
 | case | grid points | SCF steps | SCF [s] | occupied orbitals | pair solves | refinement [s] | s per pair | whole run [s] | host memory [GiB] |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| CH4 IS | 539,152 | 28 | 4.0 | 4 | 10 | 0.9 | 0.066 | 7.4 | 2.22 |
-| CH4 FS_1s | 539,152 | 21 | 3.2 | 4 | 10 | 0.8 | 0.060 | 6.5 | 2.23 |
-| CF4 IS | 3,103,688 | 40 | 33.1 | 16 | 136 | 60.0 | 0.425 | 103.4 | 9.26 |
-| CF4 FS_1s | 3,103,688 | 37 | 31.8 | 16 | 136 | 62.0 | 0.439 | 103.5 | 9.26 |
+| CH4 IS | 539,152 | 28 | 4.0 | 4 | 10 | 0.8 | 0.061 | 7.6 | 2.21 |
+| CH4 FS_1s | 539,152 | 21 | 3.2 | 4 | 10 | 0.8 | 0.060 | 6.7 | 2.22 |
+| CF4 IS | 3,103,688 | 40 | 33.3 | 16 | 136 | 59.6 | 0.422 | 102.2 | 9.27 |
+| CF4 FS_1s | 3,103,688 | 37 | 31.0 | 16 | 136 | 59.6 | 0.422 | 99.7 | 9.25 |
 
 The default settings before 2026-11-07, now
 `PARSEC_HARTREE_LINEAR_BACKEND=native` (the same conjugate gradients in
@@ -213,19 +213,23 @@ C++/OpenMP on 28 threads):
 
 | case | grid points | SCF steps | SCF [s] | occupied orbitals | pair solves | refinement [s] | s per pair | whole run [s] | host memory [GiB] |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| CH4 IS | 539,152 | 28 | 18.7 | 4 | 10 | 4.4 | 0.423 | 26.4 | 2.13 |
-| CH4 FS_1s | 539,152 | 21 | 13.2 | 4 | 10 | 4.1 | 0.389 | 19.4 | 2.14 |
-| CF4 IS | 3,103,688 | 40 | 475.0 | 16 | 136 | 1302.4 | 9.560 | 1784.3 | 8.63 |
-| CF4 FS_1s | 3,103,688 | 37 | 445.6 | 16 | 136 | 1328.9 | 9.752 | 1781.8 | 8.66 |
+| CH4 IS | 539,152 | 28 | 18.7 | 4 | 10 | 4.7 | 0.443 | 25.8 | 2.12 |
+| CH4 FS_1s | 539,152 | 21 | 13.3 | 4 | 10 | 4.3 | 0.403 | 19.4 | 2.10 |
+| CF4 IS | 3,103,688 | 40 | 458.2 | 16 | 136 | 1309.2 | 9.607 | 1773.8 | 8.73 |
+| CF4 FS_1s | 3,103,688 | 37 | 406.8 | 16 | 136 | 1284.8 | 9.429 | 1698.3 | 8.71 |
 
-The first empty level of CH4 IS keeps an occupation between 1e-12 and
-1e-10 at the Fermi temperature of the input. The exact exchange leaves out
+Where the Fermi search stopped by bisection (`PARSEC_FERMI_GAP_ROOT=off`),
+the first empty level of CH4 IS kept an occupation between 1e-12 and 1e-10
+at the Fermi temperature of the input (1.4e-12). The exact exchange leaves out
 orbitals whose occupation is within the electron-count tolerance of the
 Fermi search, 1e-10 (`PARSEC_EXCHANGE_OCCUPATION_CUT`, default on since
 22 November 2026), so CH4 IS counts four occupied orbitals and 10 pairs;
-with `off` (the former threshold 1e-12) it counts five and 15, with the
-same energies to the printed digits. On the GPU a pair solve on the CF4 grid takes 0.42 to 0.44 s, on
-the CPU 9.6 to 9.8 s. The logs of 11 October 2026 came from a laptop (32 logical
+with `off` (the former threshold 1e-12) it counted five and 15, with the
+same energies to the printed digits. Since 23 November 2026 the Fermi level
+of the gap is the root of the electron count (`PARSEC_FERMI_GAP_ROOT`,
+default on), 45 kT below the empty level, which then holds nothing: four
+orbitals and 10 pairs under either threshold. On the GPU a pair solve on the CF4 grid takes 0.42 s, on
+the CPU 9.4 to 9.6 s. The logs of 11 October 2026 came from a laptop (32 logical
 cores, RTX 5070 Laptop GPU with 8 GB, 32 GB of memory): CF4 IS took 680 s
 with the GPU solver (1.5 s per pair) and a CPU solve 8.5 to 8.8 s there,
 with the same iteration counts and the same energies.
@@ -240,9 +244,9 @@ its logs).
 What the refinement adds to the host memory is the orbitals: for CF4 the 65
 states come to the host once (1.5 GiB) and the 16 occupied ones are copied
 (0.4 GiB). The logs print the high-water mark of the process before that
-download and after the refinement: it rose by 0.65 to 0.8 GiB for CF4 (GPU
-solver 8.59 to 9.28 GiB, CPU solver 7.89 to 8.69 GiB for CF4 IS) and by
-0.04 GiB at most for CH4. On the laptop GPU memory peaked at 2.2 to 2.3 GiB
+download and after the refinement: it rose by 0.65 to 0.88 GiB for CF4 (GPU
+solver 8.59 to 9.27 GiB, CPU solver 7.85 to 8.73 GiB for CF4 IS) and by
+0.05 GiB at most for CH4. On the laptop GPU memory peaked at 2.2 to 2.3 GiB
 (CH4) and at 7.7 of the 8.0 GiB of the card (CF4, mostly the memory pool of
 the eigensolver); the GPU pair solver holds 0.5 GiB of it for CF4.
 

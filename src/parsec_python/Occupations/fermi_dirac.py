@@ -3,8 +3,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 
 import numpy as np
+from scipy.special import expit
+
+from ..fortran_numerics import switch_value
 
 BOLTZMANN_RYDBERG_PER_KELVIN = 6.33327186e-6
 
@@ -16,6 +20,164 @@ BOLTZMANN_RYDBERG_PER_KELVIN = 6.33327186e-6
 FERMI_EXPONENT_CUTOFF = 36.7
 FERMI_COUNT_TOLERANCE = 1.0e-10
 FERMI_MAX_BISECTIONS = 1000
+
+#: ``PARSEC_FERMI_GAP_ROOT``: where the Fermi level falls in a gap.  The bisection of
+#: ``flevel.f90`` (and of every search of this package) stops at the first level whose
+#: electron count is within :data:`FERMI_COUNT_TOLERANCE` of the target.  In a gap the count
+#: differs from the target only by the thermal tails, the electrons in the empty levels and
+#: the holes in the filled ones, and wherever both are below the tolerance the count is met:
+#: the level found can lie anywhere in that part of the gap, set by the bracket and the
+#: levels the search was given.  ``on`` (default) places it at a root instead
+#: (:func:`gap_fermi_level`): where the levels below the level found hold the target count
+#: within the tolerance and the tails there are so small that the tolerance leaves the level
+#: undetermined by more than :data:`FERMI_GAP_RESOLUTION` kT, the level becomes the one root
+#: of "electrons above = holes below", the count of that filling of whole levels (a target
+#: within the tolerance of such a filling but not equal to it, which no physical input has,
+#: is taken as the filling); that root is ``midgap + (kT/2) ln(g_h/g_l)`` for a highest filled
+#: level of degeneracy (weight) ``g_h`` and a lowest empty one of ``g_l`` far from the others,
+#: and the occupations are those of that level.  Metals and gaps of a few kT, whose count fixes
+#: the level, keep the level of the bisection bit for bit.  ``off``: the level of the
+#: bisection everywhere, as before.
+FERMI_GAP_ROOT_ENV = "PARSEC_FERMI_GAP_ROOT"
+#: The uncertainty (in kT) of a level found by the count tolerance from which the level is
+#: placed at the root: the count changes by ``tails/kT`` per Ry in a gap, so the tolerance
+#: leaves ``tolerance/tails`` kT open, more than ``FERMI_GAP_RESOLUTION`` kT where the tails
+#: are below ``tolerance/FERMI_GAP_RESOLUTION`` (1e-4 of a level at the tolerance 1e-10).
+FERMI_GAP_RESOLUTION = 1.0e-6
+#: Levels farther than this (in kT) from the edge of their side of the gap hold less than
+#: ``exp(-60) = 9e-27`` of the edge level's tail each (times the ratio of their weights) and
+#: are left out of the root: a million of them move it by 1e-20 kT.
+_GAP_ROOT_WINDOW = 60.0
+
+
+def fermi_gap_root_setting() -> str:
+    """``on`` (default) or ``off``, from ``PARSEC_FERMI_GAP_ROOT`` (``off`` under ``PARSEC_FORTRAN_NUMERICS=on`` where
+    the switch is not set, :func:`~parsec_python.fortran_numerics.switch_value`); another value is an error."""
+
+    value = switch_value(FERMI_GAP_ROOT_ENV, "on")
+    if value not in ("on", "off"):
+        raise ValueError(f"{FERMI_GAP_ROOT_ENV} must be on or off, got {value!r}")
+    return value
+
+
+def _log_sum_exp(values: np.ndarray) -> float:
+    top = float(np.max(values))
+    return top + math.log(float(np.sum(np.exp(values - top))))
+
+
+def gap_fermi_level(
+    eigenvalues: np.ndarray,
+    weights: np.ndarray | None,
+    target: float,
+    kbt: float,
+    level: float,
+    count_tolerance: float = FERMI_COUNT_TOLERANCE,
+) -> float | None:
+    """The root of the electron count in the gap that holds ``level``, or ``None``.
+
+    ``eigenvalues`` (any order) with ``weights`` (one per level, ``None``: one each) are the
+    levels of a Fermi-level search whose weighted occupations add up to ``target``;
+    ``level`` (Ry) is the level its bisection found, ``kbt`` the temperature (Ry).  The
+    levels below ``level`` must hold ``target`` within ``count_tolerance`` and the thermal
+    tails at ``level``, ``A = sum_above w f`` and ``B = sum_below w (1 - f)``, must be below
+    ``count_tolerance / FERMI_GAP_RESOLUTION``: the count ``target + A - B`` then leaves the
+    level open by more than ``FERMI_GAP_RESOLUTION`` kT.  Otherwise (a metal, a partly
+    filled level, a gap of a few kT, a level on an eigenvalue) the result is ``None``.  The
+    root solves ``ln A(mu) = ln B(mu)`` with the exact Fermi function (no cut-off at
+    ``FERMI_EXPONENT_CUTOFF``, sums of logarithms, so that a gap of any width has its root)
+    by Newton steps kept inside a bracket, to a few units in the last place.  It is the root
+    of the count of the filling of the levels below ``level`` (``sum_below w``), which a target
+    within the tolerance of it but not equal to it is taken for.  The same levels and the same
+    ``level`` give the same root on every process.
+    """
+
+    values = np.asarray(eigenvalues, dtype=np.float64).reshape(-1)
+    held = (
+        np.ones_like(values)
+        if weights is None
+        else np.asarray(weights, dtype=np.float64).reshape(-1)
+    )
+    level = float(level)
+    kbt = float(kbt)
+    if held.shape != values.shape or not (kbt > 0.0) or not np.isfinite(level):
+        return None
+    counted = held > 0.0
+    values, held = values[counted], held[counted]
+    below = values < level
+    above = values > level
+    if not below.any() or not above.any() or np.any(values == level):
+        return None
+    if abs(float(np.sum(held[below])) - float(target)) > count_tolerance:
+        return None
+    scaled = (values - level) / kbt
+    near = np.abs(scaled) < 100.0  # a level farther holds less than exp(-100) of a tail
+    tails = float(
+        np.dot(held[near & above], expit(-scaled[near & above]))
+        + np.dot(held[near & below], expit(scaled[near & below]))
+    )
+    if not tails * FERMI_GAP_RESOLUTION < count_tolerance:
+        return None
+
+    lowest_empty = float(np.min(values[above]))
+    highest_filled = float(np.max(values[below]))
+    upper = above & (values - lowest_empty <= _GAP_ROOT_WINDOW * kbt)
+    lower = below & (highest_filled - values <= _GAP_ROOT_WINDOW * kbt)
+    empty, empty_log_weights = values[upper], np.log(held[upper])
+    filled, filled_log_weights = values[lower], np.log(held[lower])
+
+    def balance(mu: float) -> tuple[float, float]:
+        """``ln A - ln B`` at ``mu`` and its derivative (1/Ry, positive)."""
+
+        x_empty = (empty - mu) / kbt
+        x_filled = (filled - mu) / kbt
+        terms_empty = empty_log_weights - np.logaddexp(0.0, x_empty)  # ln(w f)
+        terms_filled = filled_log_weights - np.logaddexp(0.0, -x_filled)  # ln(w (1 - f))
+        log_empty = _log_sum_exp(terms_empty)
+        log_filled = _log_sum_exp(terms_filled)
+        slope = (
+            float(np.dot(np.exp(terms_empty - log_empty), expit(x_empty)))
+            + float(np.dot(np.exp(terms_filled - log_filled), expit(-x_filled)))
+        ) / kbt
+        return log_empty - log_filled, slope
+
+    low, high = highest_filled, lowest_empty
+    step = kbt
+    for _ in range(64):
+        if balance(low)[0] < 0.0:
+            break
+        low -= step
+        step *= 2.0
+    else:
+        return None
+    step = kbt
+    for _ in range(64):
+        if balance(high)[0] > 0.0:
+            break
+        high += step
+        step *= 2.0
+    else:
+        return None
+    mu = level if low < level < high else 0.5 * (low + high)
+    for _ in range(200):
+        value, slope = balance(mu)
+        if value == 0.0:
+            break
+        if value < 0.0:
+            low = mu
+        else:
+            high = mu
+        trial = mu - value / slope if slope > 0.0 and np.isfinite(slope) else float("nan")
+        # converged before the bracket is consulted: a step of a few units in the last place lands on
+        # the end of the bracket that ``mu`` has just become
+        if np.isfinite(trial) and abs(trial - mu) <= 4.0 * float(np.spacing(max(abs(mu), abs(trial)))):
+            mu = trial
+            break
+        if not low < trial < high:
+            trial = 0.5 * (low + high)
+            if trial in (low, high):
+                break
+        mu = trial
+    return float(mu) if np.isfinite(mu) else None
 
 
 @dataclass(frozen=True)
@@ -61,6 +223,10 @@ def fermi_occupations(
     ``degeneracy * sum_i w_i f_i``.  ``None`` (the default) is the unweighted
     count of every existing caller, computed exactly as before; see
     :func:`weighted_fermi_occupations`.
+
+    At a finite temperature the level is that of the bisection, or, in a gap whose
+    count does not fix it, the root of the count (``PARSEC_FERMI_GAP_ROOT``,
+    :func:`gap_fermi_level`).
     """
     if weights is not None:
         return weighted_fermi_occupations(
@@ -180,8 +346,15 @@ def fermi_occupations(
     else:
         raise RuntimeError("Fermi-level bisection did not reach the electron-count tolerance")
 
+    fermi_level = float(0.5 * (lower + upper))
+    if fermi_gap_root_setting() == "on":
+        root = gap_fermi_level(eigenvalues, None, target, kbt, fermi_level, count_tolerance)
+        if root is not None:
+            at_root = _fermi_function(eigenvalues, root, kbt)
+            if abs(float(np.sum(at_root)) - target) <= count_tolerance:
+                fermi_level, occupations = root, at_root
     return OccupationResult(
-        fermi_level=float(0.5 * (lower + upper)),
+        fermi_level=fermi_level,
         occupations=occupations,
         electron_count=float(degeneracy * np.sum(occupations)),
     )
@@ -208,7 +381,8 @@ def weighted_fermi_occupations(
     :data:`FERMI_COUNT_TOLERANCE`).  The bisection is the one of
     :func:`fermi_occupations` (bracket ``[e_min - 36 kT, e_max + 36 kT]``,
     midpoints), so equal weights ``w`` give the levels of
-    ``fermi_occupations(..., degeneracy=degeneracy*w)`` to round-off.  At zero
+    ``fermi_occupations(..., degeneracy=degeneracy*w)`` to round-off, and the
+    level in a gap is the root of the count as there (``PARSEC_FERMI_GAP_ROOT``).  At zero
     temperature the levels are filled in order, a group of degenerate levels
     sharing one fractional occupation.  The returned occupations are the
     ``f_i`` in ``[0, 1]``, without the weights.
@@ -314,8 +488,15 @@ def weighted_fermi_occupations(
     else:
         raise RuntimeError("Fermi-level bisection did not reach the electron-count tolerance")
 
+    fermi_level = float(0.5 * (lower + upper))
+    if fermi_gap_root_setting() == "on":
+        root = gap_fermi_level(eigenvalues, weights, target, kbt, fermi_level, count_tolerance)
+        if root is not None:
+            at_root = _fermi_function(eigenvalues, root, kbt)
+            if abs(float(np.dot(weights, at_root)) - target) <= count_tolerance:
+                fermi_level, occupations = root, at_root
     return OccupationResult(
-        fermi_level=float(0.5 * (lower + upper)),
+        fermi_level=fermi_level,
         occupations=occupations,
         electron_count=float(degeneracy * np.dot(weights, occupations)),
     )
@@ -353,8 +534,11 @@ def density_from_orbitals(
 
 __all__ = [
     "BOLTZMANN_RYDBERG_PER_KELVIN",
+    "FERMI_GAP_ROOT_ENV",
     "OccupationResult",
     "density_from_orbitals",
+    "fermi_gap_root_setting",
     "fermi_occupations",
+    "gap_fermi_level",
     "weighted_fermi_occupations",
 ]

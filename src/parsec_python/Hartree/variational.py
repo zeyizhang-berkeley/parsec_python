@@ -56,7 +56,8 @@ Each SCF step solves one more Poisson problem (``u``, from the extrapolation
 of the two before, to the accuracy of the solve of ``V_H``) and evaluates the
 transposed multipole map, a solid-harmonic series, at the points of the
 fields.  ``PARSEC_HARTREE_VARIATIONAL`` selects it
-(:func:`hartree_variational_setting`); it is off by default.  The change is
+(:func:`hartree_variational_setting`); clusters keep the potential of the
+Poisson solve by default.  The change is
 negligible where the density at the sphere is (the forces of H2O at the
 radius of the default rule moved by 1e-9 Ry/bohr, of Na2 in a sphere of 12
 bohr by 3e-8), so ``auto`` takes it only where the first solve of a structure
@@ -71,10 +72,11 @@ Hartree potential (:func:`electrostatic_hartree`): the archive, the cube
 files and the files of a frozen-density embedding hold the potential of the
 Poisson solve, the effective potentials of the SCF the one it ran with.
 
-A slab whose forces are computed takes the same potential under ``on`` and
-``auto`` with the sheet sums of its boundary values in place of the multipole
-series (:class:`ConfinedVariationalHartree`; no tail, no estimate); a wire
-keeps the Poisson solution.
+A slab whose forces are computed takes the same potential under ``slab``
+(the default since 2026-11-23), ``on`` and ``auto`` with the sheet sums of its
+boundary values in place of the multipole series
+(:class:`ConfinedVariationalHartree`; no tail, no estimate); a wire keeps the
+Poisson solution.
 """
 
 from __future__ import annotations
@@ -82,25 +84,31 @@ from __future__ import annotations
 from contextlib import nullcontext
 from dataclasses import dataclass, replace
 import math
-import os
 from time import perf_counter
 
 import numpy as np
 
+from ..fortran_numerics import switch_value
 from ..Laplacian import second_derivative_coefficients
 
 
 HARTREE_VARIATIONAL_SWITCH = "PARSEC_HARTREE_VARIATIONAL"
-HARTREE_VARIATIONAL_VALUES = ("auto", "on", "off")
+HARTREE_VARIATIONAL_VALUES = ("slab", "auto", "on", "off")
+HARTREE_VARIATIONAL_DEFAULT = "slab"
 #: ``auto``: the force change (Ry/bohr), estimated at the first density of a
 #: structure, from which a run takes V' (:meth:`VariationalHartree._decide`).
 VARIATIONAL_FORCE_THRESHOLD = 3.0e-7
 
 
 def hartree_variational_setting() -> str:
-    """``PARSEC_HARTREE_VARIATIONAL``: ``off`` (the default), ``auto`` or ``on``.
+    """``PARSEC_HARTREE_VARIATIONAL``: ``slab`` (the default), ``auto``, ``on`` or ``off``.
 
-    ``off``: the potential of the Poisson solve, as PARSEC.  ``auto``: the
+    ``off``: the potential of the Poisson solve, as PARSEC, everywhere (the
+    default before 2026-11-23, and the value under
+    ``PARSEC_FORTRAN_NUMERICS=on``).  ``slab`` (default since 2026-11-23): a
+    slab whose forces are computed takes the potential of its sheet sums
+    (:class:`ConfinedVariationalHartree`), clusters keep the potential of the
+    Poisson solve, bit for bit that of ``off``.  ``auto``: the
     Hartree potential of :mod:`this module <parsec_python.Hartree.variational>`
     in a cluster calculation with a multipole boundary whose forces are
     computed (a relaxation, molecular dynamics, manual movements without
@@ -112,11 +120,11 @@ def hartree_variational_setting() -> str:
     of the Poisson solve, bit for bit that of ``off``.  ``on``: in every such
     cluster calculation, without the estimate.  A slab whose forces are
     computed takes the potential of its sheet sums under ``on`` and ``auto``
-    alike, without an estimate (:class:`ConfinedVariationalHartree`); a wire
-    keeps the Poisson solution.  An unknown value is refused.
+    alike, without an estimate (:class:`ConfinedVariationalHartree`), as under
+    ``slab``; a wire keeps the Poisson solution.  An unknown value is refused.
     """
 
-    value = os.environ.get(HARTREE_VARIATIONAL_SWITCH, "off").strip().lower() or "off"
+    value = switch_value(HARTREE_VARIATIONAL_SWITCH, HARTREE_VARIATIONAL_DEFAULT)
     if value not in HARTREE_VARIATIONAL_VALUES:
         raise ValueError(
             f"{HARTREE_VARIATIONAL_SWITCH}={value!r}: expected one of "
@@ -137,7 +145,7 @@ def variational_hartree_applies(settings, grid_settings, *, forces_wanted: bool,
     """
 
     setting = hartree_variational_setting() if setting is None else setting
-    if setting == "off":
+    if setting in ("off", "slab"):
         return False
     if getattr(grid_settings, "domain_shape", None) != "sphere":
         return False
@@ -1037,10 +1045,10 @@ class ConfinedVariationalHartree:
 def confined_variational_hartree_for(problem, plan, negative_laplacian):
     """The :class:`ConfinedVariationalHartree` of a prepared slab, or ``None`` where it does not apply.
 
-    ``PARSEC_HARTREE_VARIATIONAL`` ``on`` or ``auto`` (an unknown value is refused here, before the SCF), a slab
-    (``Boundary_Conditions: slab``; a wire keeps the Poisson solution) whose forces are computed
-    (:attr:`parsec_python.models.SinglePointInput.forces_wanted`), on the sheet sums of the Fortran-derived routines.
-    ``auto`` takes it there without an estimate (one more solve per Hartree solve of a slab).
+    ``PARSEC_HARTREE_VARIATIONAL`` ``slab`` (the default), ``auto`` or ``on`` (an unknown value is refused here,
+    before the SCF), a slab (``Boundary_Conditions: slab``; a wire keeps the Poisson solution) whose forces are
+    computed (:attr:`parsec_python.models.SinglePointInput.forces_wanted`), on the sheet sums of the Fortran-derived
+    routines.  Each value takes it there without an estimate (one more solve per Hartree solve of a slab).
     """
 
     setting = hartree_variational_setting()

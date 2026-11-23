@@ -2,18 +2,20 @@
 
 ``pseudo.f90`` integrates ``u_l^2 (V_l - V_local)`` with the weights ``0.5*(r(i+1) - r(i-1))``.  On the logarithmic
 mesh ``r(i) = a*exp(b*i) - c`` of a table they are ``sinh(b)/b`` times the exact Jacobian ``b*(r(i) + c)``, so every
-denominator is too large by ``b^2/6``.  ``logmesh`` (opt-in) takes the trapezoid rule in the mesh index with the exact
-Jacobian.  Checked here (CPU):
+denominator is too large by ``b^2/6``.  ``logmesh`` takes the trapezoid rule in the mesh index with the exact Jacobian;
+``auto`` (the default since 2026-11-23) takes it table by table where the radii follow the mesh.  Checked here (CPU):
 
 * the values of the switch (an unknown value is refused);
 * ``log_mesh_integral`` integrates ``r^2 exp(-r)`` to the last digits on a Martins mesh and on a pure
   exponential (FHI) mesh, where ``parsec_radial_integral`` is ``b^2/6`` too large;
-* ``trapezoid`` (default) gives the projectors of ``pseudo.f90`` bit for bit; ``logmesh`` scales every projector by
+* ``trapezoid`` gives the projectors of ``pseudo.f90`` bit for bit; ``logmesh`` scales every projector by
   ``sqrt(D_trapezoid/D_logmesh) = 1 + b^2/12`` (the denominators of the tests' Ag table move by ``b^2/6``), the
   spin-orbit pair and the derivative table with them;
 * a table whose radii are not the mesh of its parameters is refused under ``logmesh``, radius by radius: the
   ``MARTINS_WANG`` table of the tests, whose eight printed digits follow its mesh within 3.1e-7, is accepted;
-* the resident set-up key changes only under ``logmesh``.
+* ``auto`` gives the bits of ``logmesh`` for a table on its mesh and those of ``trapezoid`` for one off it (the
+  synthetic six-point table of the tests), and parsec.out names the quadrature of each species with projectors;
+* the resident set-up key keeps its value under ``trapezoid`` only.
 """
 
 from __future__ import annotations
@@ -22,6 +24,7 @@ import hashlib
 import os
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 import numpy as np
@@ -50,8 +53,8 @@ class KbQuadratureSettingTests(unittest.TestCase):
     def test_values(self) -> None:
         with mock.patch.dict(os.environ):
             os.environ.pop(KB_QUADRATURE_ENV, None)
-            self.assertEqual(kb_quadrature_setting(), "trapezoid")
-        for value in ("trapezoid", "logmesh", " LogMesh "):
+            self.assertEqual(kb_quadrature_setting(), "auto")
+        for value in ("trapezoid", "logmesh", " LogMesh ", "auto"):
             with _env(value):
                 self.assertEqual(kb_quadrature_setting(), value.strip().lower())
         with _env("exact"):
@@ -82,10 +85,9 @@ class LogMeshIntegralTests(unittest.TestCase):
 
 
 class KbQuadratureProjectorTests(unittest.TestCase):
-    def test_default_is_pseudo_f90(self) -> None:
+    def test_trapezoid_is_pseudo_f90(self) -> None:
         potential = read_parsec_pseudopotential(_AG)
-        with mock.patch.dict(os.environ):
-            os.environ.pop(KB_QUADRATURE_ENV, None)
+        with _env("trapezoid"):
             projector, sign = potential.radial_projector(2, 0)
         delta_v = potential.channel_potentials[2] - potential.channel_potentials[0]
         wave = potential.radial_wavefunctions[2]
@@ -94,8 +96,44 @@ class KbQuadratureProjectorTests(unittest.TestCase):
         expected[:8] = expected[16]
         np.testing.assert_array_equal(projector, expected)
         self.assertEqual(sign, float(np.sign(denominator)))
+
+    def test_auto_takes_logmesh_on_the_mesh_and_the_trapezoid_off_it(self) -> None:
+        from parsec_python.Output.parsec_output import kb_quadrature_lines
+
+        silver = read_parsec_pseudopotential(_AG)
+        synthetic = read_parsec_pseudopotential(_H_SYNTHETIC)
+        self.assertTrue(silver.on_log_mesh)
+        self.assertFalse(synthetic.on_log_mesh)
+        integrand = np.exp(-synthetic.radii)
+        with mock.patch.dict(os.environ):
+            os.environ.pop(KB_QUADRATURE_ENV, None)
+            self.assertEqual((silver.kb_quadrature(), synthetic.kb_quadrature()), ("logmesh", "trapezoid"))
+            default = silver.radial_projector(2, 0)
+            default_so = silver.spin_orbit_projectors(2, 0)
+            default_slope = radial_projector_with_derivative(silver, 2, 0)
+            default_synthetic = synthetic.kb_denominator(integrand)
+            (line,) = kb_quadrature_lines(silver, 0)
+            self.assertIn("logarithmic mesh (default)", line)
+            (line,) = kb_quadrature_lines(synthetic, 0)
+            self.assertIn("trapezoid of pseudo.f90", line)
+        with _env("logmesh"):
+            self.assertEqual(silver.kb_quadrature(), "logmesh")
+            np.testing.assert_array_equal(silver.radial_projector(2, 0)[0], default[0])
+            for mine, theirs in zip(silver.spin_orbit_projectors(2, 0), default_so):
+                np.testing.assert_array_equal(mine, theirs)
+            for mine, theirs in zip(radial_projector_with_derivative(silver, 2, 0), default_slope):
+                np.testing.assert_array_equal(mine, theirs)
+            (line,) = kb_quadrature_lines(silver, 0)
+            self.assertIn("PARSEC_KB_QUADRATURE=trapezoid", line)
         with _env("trapezoid"):
-            np.testing.assert_array_equal(potential.radial_projector(2, 0)[0], projector)
+            self.assertEqual(synthetic.kb_denominator(integrand), default_synthetic)
+            self.assertEqual(kb_quadrature_lines(silver, 0), ())
+        # PARSEC 1.5's quadrature under the umbrella; a species without a nonlocal channel prints nothing
+        with mock.patch.dict(os.environ, {"PARSEC_FORTRAN_NUMERICS": "on"}):
+            os.environ.pop(KB_QUADRATURE_ENV, None)
+            self.assertEqual(silver.kb_quadrature(), "trapezoid")
+        local_only = SimpleNamespace(channel_potentials={0: None}, kb_quadrature=lambda: "logmesh")
+        self.assertEqual(kb_quadrature_lines(local_only, 0), ())
 
     def test_logmesh_scales_projectors(self) -> None:
         potential = read_parsec_pseudopotential(_AG)
@@ -152,9 +190,7 @@ class KbQuadratureProjectorTests(unittest.TestCase):
 
 
 class KbQuadratureSetupKeyTests(unittest.TestCase):
-    def test_key_changes_only_under_logmesh(self) -> None:
-        from types import SimpleNamespace
-
+    def test_key_keeps_its_value_under_trapezoid_only(self) -> None:
         from parsec_python.acceleration.V_ion.setup_options import hash_pseudopotential_setup
 
         specification = SimpleNamespace(old_interpolation=False, has_fourier_filter=False)
@@ -167,6 +203,8 @@ class KbQuadratureSetupKeyTests(unittest.TestCase):
 
         self.assertEqual(key("trapezoid"), hashlib.sha256().hexdigest())
         self.assertNotEqual(key("logmesh"), hashlib.sha256().hexdigest())
+        self.assertNotEqual(key("auto"), hashlib.sha256().hexdigest())
+        self.assertNotEqual(key("auto"), key("logmesh"))
 
 
 if __name__ == "__main__":

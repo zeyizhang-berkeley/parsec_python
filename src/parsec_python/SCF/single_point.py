@@ -1110,7 +1110,11 @@ def _require_core_radius_support(
     distances up to it.  A builder that takes the next radial sample instead,
     the rule of a ``MARTINS_NEW`` file, adds grid points and reports nothing:
     for a radius inside the projector the total energy of a five-atom
-    cluster moved by 2e-2 Ry.  Such an operator is refused here.
+    cluster moved by 2e-2 Ry.  Such an operator is refused here.  With
+    ``Double_Grid_Order`` ``N > 1`` a coarse point carries the projector when
+    one of its fine points (up to ``(N-1)/N h`` along each axis) lies within
+    the radius (``nonloc.F90``, :func:`parsec_python.V_ion.double_grid.
+    double_grid_support`): the distance checked is that of its nearest fine point.
     """
 
     limited = {
@@ -1120,6 +1124,12 @@ def _require_core_radius_support(
     }
     if not limited:
         return
+    order = int(getattr(getattr(grid, "settings", None), "double_grid_order", 1) or 1)
+    displacements = None
+    if order > 1:
+        from ..V_ion.double_grid import double_grid_points
+
+        displacements, _ = double_grid_points(order, float(grid.spacing))
     matrix = operator.projectors
     for column, (atom_index, _, _) in enumerate(operator.labels):
         radius = limited.get(atom_index)
@@ -1128,10 +1138,14 @@ def _require_core_radius_support(
         rows = matrix.indices[matrix.indptr[column] : matrix.indptr[column + 1]]
         if rows.size == 0:
             continue
-        distance = np.linalg.norm(
-            grid.coordinates[rows] - np.asarray(atoms[atom_index].position),
-            axis=1,
-        )
+        relative = grid.coordinates[rows] - np.asarray(atoms[atom_index].position)
+        if displacements is None:
+            distance = np.linalg.norm(relative, axis=1)
+        else:
+            # the nearest fine point of each coarse point (double_grid_support)
+            distance = np.min(
+                np.linalg.norm(relative[:, None, :] + displacements[None, :, :], axis=2), axis=1
+            )
         if float(np.max(distance)) > radius * (1.0 + 1.0e-12):
             raise RuntimeError(
                 f"the projector builder placed {atoms[atom_index].symbol} "

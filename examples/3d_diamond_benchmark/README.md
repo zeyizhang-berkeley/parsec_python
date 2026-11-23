@@ -32,7 +32,10 @@ half the cell), divided into its symmetry sectors; with k-points the ranks form 
 The defaults that matter for bulk cells (since November 2026): the later-SCF filter takes PARSEC 1.5's smart lower
 bound, and the local potential has PARSEC 1.5's zero average (with the energy's `E_alpha`) and the
 exchange-correlation potential its zero average (`Zero_Average_Vxc`). Total energies are those of the earlier
-convention; eigenvalues and the Fermi level are now those of Fortran PARSEC 1.5.
+convention; eigenvalues are now those of Fortran PARSEC 1.5. So is the Fermi level wherever the count of electrons
+fixes it; in a gap Fortran prints the level where its bisection stops, anywhere the thermal tails are below its
+tolerance of 1e-10, and this code the root of the count (`PARSEC_FERMI_GAP_ROOT`, default `on`; `off` keeps the level
+of the bisection).
 
 ## Running
 
@@ -383,7 +386,8 @@ the sectors agree with one sector of the identity (`PARSEC_PERIODIC_SYMMETRY=off
 
 With the projector tail rule of 22 November 2026 (code of that day, one node of four A100) Gamma n = 6 gives
 -11.4039329 and 2x2x2 n = 6 -11.4039107 Ry/atom, 1.1e-7 Ry/atom above the table, in 7 and 8 SCF steps as with
-`PARSEC_PROJECTOR_TAIL=off`, which gives the values of the table to every digit.
+`PARSEC_PROJECTOR_TAIL=off`, which gave the values of the table to every digit (since 23 November 2026 together
+with `PARSEC_KB_QUADRATURE=trapezoid`).
 
 A Gamma-centred m x m x m mesh on an n-cell supercell samples the same k-points as the Gamma point of the
 (m n)-cell supercell, but the k-point runs discretize the Bloch operator `-(grad + ik)^2` on u, which differs from

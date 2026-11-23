@@ -19,18 +19,24 @@ not involved -- run from a directory containing only `parsec_fortran.in`
 renamed to `parsec.in` plus the two POTRE files.)
 
 PARSEC.py values from `src/parsec_python/reference_main.py parsec.in`, code
-of 22 November 2026 on the CPU of an A100 node. The input gives no
+of 23 November 2026 on the CPU of an A100 node. The input gives no
 `Cubic_Spline` lines, so PARSEC.py interpolates both tables by cubic splines,
 its default since 22 November 2026, where Fortran PARSEC interpolates
-linearly. With `PARSEC_CUBIC_SPLINE_DEFAULT=off PARSEC_PROJECTOR_TAIL=off`
-(linear tables) the run compares as follows. Converged
+linearly, and since 23 November 2026 it normalizes the Kleinman-Bylander
+projectors by the quadrature of the logarithmic mesh and takes the CA
+coefficients that make the correlation continuous at `r_s = 1`. With
+`PARSEC_FORTRAN_NUMERICS=on` (PARSEC 1.5's numerics: linear
+tables, its Kleinman-Bylander quadrature and CA coefficients; code of 23
+November 2026, the same numbers as `PARSEC_CUBIC_SPLINE_DEFAULT=off
+PARSEC_PROJECTOR_TAIL=off` gave on 22 November) the run compares as follows. Converged
 scalar-relativistic (pre-SOC) spin-polarized total energy: Fortran
 -68.32490203 Ry vs PARSEC.py -68.32490805 Ry (6.0e-6 Ry). Converged
 perturbative-SOC state 1 eigenvalue/<S_z>: Fortran -0.818415 Ry / 0.9779 vs
-PARSEC.py -0.818297 Ry / 0.9778. With the default cubic splines PARSEC.py
-gives -68.31472374 Ry (1.02e-2 Ry above, the difference between the two
-interpolations, mostly of the Au table) and -0.818330 Ry / 0.9780 for
-state 1. States inside tightly-spaced
+PARSEC.py -0.818297 Ry / 0.9778. With the defaults PARSEC.py gives
+-68.31648177 Ry (8.4e-3 Ry above: +1.02e-2 Ry from the cubic splines, mostly
+of the Au table, and -1.8e-3 Ry from the quadrature of the projector norms
+and the CA coefficients) and -0.818339 Ry / 0.9780 for state 1. States
+inside tightly-spaced
 near-degenerate multiplets (Au's d-manifold) show larger <S_z> spread
 between the two codes, expected basis-sensitivity rather than a
 discrepancy.

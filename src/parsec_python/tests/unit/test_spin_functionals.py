@@ -18,7 +18,9 @@ PARSEC) 0.0310907.
 
 from __future__ import annotations
 
+import os
 import unittest
+from unittest import mock
 
 import numpy as np
 
@@ -125,7 +127,9 @@ class LibxcPointwiseTests(unittest.TestCase):
     def test_local_spin_density_functional(self) -> None:
         up, down, _, _ = _points()
         energy, potential_up, potential_down = _libxc("lda_x", "lda_c_pz")
-        result = ca_lda_spin(up, down, 1.0)
+        # libxc's LDA_C_PZ has PARSEC's four-digit coefficients (PARSEC_CA_CONTINUITY=off)
+        with mock.patch.dict(os.environ, {"PARSEC_CA_CONTINUITY": "off"}):
+            result = ca_lda_spin(up, down, 1.0)
         # Rydberg here, Hartree in libxc.
         np.testing.assert_allclose(result.energy_density, 2.0 * energy, rtol=1.0e-10)
         np.testing.assert_allclose(result.potential_up, 2.0 * potential_up, rtol=1.0e-10)

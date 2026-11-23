@@ -111,9 +111,9 @@ def wire_slab_gaussian_setting() -> str:
     the radial tables keep the skip.  ``off``: the skip of ``forcloc.f90`` for every term, bit for bit as before.
     """
 
-    import os
+    from ..fortran_numerics import switch_value
 
-    value = os.environ.get(WIRE_SLAB_GAUSSIAN_ENV, "auto").strip().lower() or "auto"
+    value = switch_value(WIRE_SLAB_GAUSSIAN_ENV, "auto")
     if value not in ("auto", "off"):
         raise ValueError(f"{WIRE_SLAB_GAUSSIAN_ENV} must be auto or off, not {value!r}")
     return value
@@ -145,9 +145,9 @@ def wire_slab_gaussian_force_setting() -> str:
     ``PARSEC_WIRE_SLAB_GAUSSIAN=off`` (the skip of ``forcloc.f90``) keeps the gradient form.
     """
 
-    import os
+    from ..fortran_numerics import switch_value
 
-    value = os.environ.get(WIRE_SLAB_GAUSSIAN_FORCE_ENV, "auto").strip().lower() or "auto"
+    value = switch_value(WIRE_SLAB_GAUSSIAN_FORCE_ENV, "auto")
     if value not in ("auto", "gradient"):
         raise ValueError(f"{WIRE_SLAB_GAUSSIAN_FORCE_ENV} must be auto or gradient, not {value!r}")
     return value

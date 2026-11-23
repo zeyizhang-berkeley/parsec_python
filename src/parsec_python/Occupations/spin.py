@@ -13,8 +13,12 @@ The level is found by the bisection of ``flevel.f90``, statement by
 statement: it starts at the highest eigenvalue of both channels, with the
 lowest and highest eigenvalues as bounds, and stops when the electron count
 is within ``1e-10`` (the limits of PARSEC 1.5, ``utilities/flevel.f90:43-51``;
-the previous tree had ``1e-12``).  Between two levels of a gapped system the level is
-not unique, and this is the value PARSEC reports.
+the previous tree had ``1e-12``).  Between two levels of a gapped system the level
+that meets the count is not unique, and the bisection's is the value PARSEC reports;
+under ``PARSEC_FERMI_GAP_ROOT=on`` (default) a level whose count leaves it open in a gap
+becomes the root of the count there
+(:func:`parsec_python.Occupations.fermi_dirac.gap_fermi_level`), and ``off`` keeps
+PARSEC's.
 
 A negative ``Fermi_Temp`` takes the occupations of both channels from
 ``occup.in`` (``initial.f90``): a section per channel, up first.  The n-th
@@ -34,7 +38,9 @@ from .fermi_dirac import (
     FERMI_COUNT_TOLERANCE,
     FERMI_EXPONENT_CUTOFF,
     FERMI_MAX_BISECTIONS,
+    fermi_gap_root_setting,
     fermi_occupations,
+    gap_fermi_level,
 )
 from .fixed import ELECTRON_COUNT_TOLERANCE
 
@@ -183,9 +189,37 @@ def spin_fermi_occupations(
             f"channels cannot hold {electron_count:g} electrons with an empty "
             "state above them; increase States_Num"
         )
+    level = _gap_root(up, down, None, electron_count, temperature_kelvin, level, beta)
     return _result(
         level, _fermi_function(up, level, beta), _fermi_function(down, level, beta)
     )
+
+
+def _gap_root(up, down, weights, electron_count, temperature_kelvin, level, beta) -> float:
+    """``level`` of the bisection, or the root of the count in a gap (``PARSEC_FERMI_GAP_ROOT``).
+
+    The levels of both channels form one list (one Fermi level, each state one
+    electron, ``weights`` per state or ``None``); the root replaces the level
+    only where its count stays within ``COUNT_TOLERANCE``.
+    """
+
+    if fermi_gap_root_setting() != "on":
+        return level
+    values = np.concatenate((up, down))
+    held = None if weights is None else np.concatenate(weights)
+    root = gap_fermi_level(
+        values,
+        held,
+        electron_count,
+        BOLTZMANN_RYDBERG_PER_KELVIN * float(temperature_kelvin),
+        level,
+        COUNT_TOLERANCE,
+    )
+    if root is None:
+        return level
+    filled = _fermi_function(values, root, beta)
+    count = float(np.sum(filled) if held is None else np.dot(held, filled))
+    return root if abs(electron_count - count) < COUNT_TOLERANCE else level
 
 
 def _channel_weights(weights, up: np.ndarray, down: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -278,6 +312,7 @@ def weighted_spin_fermi_occupations(
             f"channels cannot hold {electron_count:g} electrons with an empty "
             "state above them; increase States_Num"
         )
+    level = _gap_root(up, down, (weights_up, weights_down), electron_count, temperature_kelvin, level, beta)
     return result(level, _fermi_function(up, level, beta), _fermi_function(down, level, beta))
 
 

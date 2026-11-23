@@ -85,7 +85,7 @@ class SwitchTests(unittest.TestCase):
     def test_where_it_applies(self) -> None:
         with _switch("off"):
             self.assertIsNone(prepare_wire_slab_single_point(_problem()).hartree_variational)
-        for value in ("on", "auto"):
+        for value in ("on", "auto", "slab", ""):
             with _switch(value):
                 self.assertIsInstance(prepare_wire_slab_single_point(_problem()).hartree_variational,
                                       ConfinedVariationalHartree)

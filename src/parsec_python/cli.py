@@ -2429,11 +2429,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     from parsec_python.V_xc.exact_exchange import exchange_occupation_cut_setting
     # PARSEC_FOCK_DIIS_TAIL: the orbitals the window of the outer DIIS of a Fock loop stores (SCF/fock_diis.py)
     from parsec_python.SCF.fock_diis import fock_diis_tail_setting
+    # PARSEC_FERMI_GAP_ROOT: the Fermi level of a gap (Occupations/fermi_dirac.py)
+    from parsec_python.Occupations.fermi_dirac import fermi_gap_root_setting
 
     try:
         close_multiplet_setting()
         exchange_occupation_cut_setting()
         fock_diis_tail_setting()
+        fermi_gap_root_setting()
     except ValueError as error:
         print(f"Input error: {error}", file=sys.stderr)
         return 2

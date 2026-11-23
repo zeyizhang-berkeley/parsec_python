@@ -3,8 +3,9 @@
 PARSEC 1.5 (``exc.f90``, ``corca_nspn`` and ``corlsd_ca``) takes the four digits of Perdew and Zunger's paper, with
 which the two forms of the correlation energy per electron differ by 6.41e-5 Ry at ``r_s = 1``: the total energy steps
 by ``(3/(4 pi)) 6.41e-5 h^3`` Ry whenever the density of a grid point crosses ``3/(4 pi)`` e/bohr^3.  ``on`` joins the
-forms with continuous values and slopes (libxc's ``LDA_C_PZ_MOD``); ``off``, the default, keeps PARSEC's numbers bit
-for bit.  The NumPy functionals, the C++ evaluator of the clusters and the CUDA kernels follow the switch alike.
+forms with continuous values and slopes (libxc's ``LDA_C_PZ_MOD``; the default since 2026-11-23); ``off`` keeps
+PARSEC's numbers bit for bit.  The NumPy functionals, the C++ evaluator of the clusters and the CUDA kernels follow the
+switch alike.
 """
 
 from __future__ import annotations
@@ -63,7 +64,9 @@ def _densities(count=400, seed=5):
 class SettingTests(unittest.TestCase):
     def test_values(self) -> None:
         with mock.patch.dict(os.environ, {CA_CONTINUITY_ENV: ""}):
-            self.assertEqual(ca_continuity_setting(), "off")
+            self.assertEqual(ca_continuity_setting(), "on")
+            self.assertEqual(ca_high_density_coefficients(), ca_high_density_coefficients("on"))
+        with mock.patch.dict(os.environ, {CA_CONTINUITY_ENV: "off"}):
             self.assertEqual(ca_high_density_coefficients(), (0.004, 0.0232, 0.0192, 0.0014, -0.0096))
         for value in ("on", " ON "):
             with mock.patch.dict(os.environ, {CA_CONTINUITY_ENV: value}):
@@ -225,6 +228,55 @@ class ClusterEvaluatorCorrectionTests(unittest.TestCase):
             expected = float(np.dot(np.ones_like(rho) if multiplicities is None else multiplicities,
                                     reference.energy_density)) * volume
             self.assertAlmostEqual(payload["total_energy"], expected, delta=1.0e-12 * abs(expected))
+
+    def test_the_candidate_points_give_the_bits_of_a_scan_of_every_point(self) -> None:
+        """The correction finds its points among those above (1 - 2e-10) 3/(4 pi): the same bits as the tests of every
+        point (the evaluator before 2026-11-23)."""
+
+        from parsec_python.acceleration.V_xc.native_ca_lda import NativeCALDAEvaluator
+
+        def every_point(evaluator, valence):
+            payload = evaluator._evaluator.evaluate(valence)
+            potential, epsilon, energy = (np.array(payload[name]) for name in
+                                          ("potential", "energy_per_electron", "energy_density"))
+            density = valence + evaluator._core
+            ratio = density / CRITICAL
+            high, near = ratio > 1.0 + 1.0e-10, np.abs(ratio - 1.0) <= 1.0e-10
+            before = energy.copy()
+            on, off = ca_high_density_coefficients("on"), ca_high_density_coefficients("off")
+            dc3, dc4, dc5 = (on[i] - off[i] for i in range(3))
+            rs = np.cbrt(CRITICAL / density[high])
+            change = (dc3 * np.log(rs) - dc4) * rs
+            epsilon[high] += change
+            potential[high] += change - (dc3 * np.log(rs) - dc5) * rs / 3.0
+            energy[high] = density[high] * epsilon[high]
+            if np.any(near):
+                exact = ca_lda(valence[near], evaluator._volume_element, evaluator._core[near])
+                potential[near], epsilon[near], energy[near] = (exact.potential, exact.energy_per_electron,
+                                                                 exact.energy_density)
+            changed = high | near
+            weights = 1.0 if evaluator._weights is None else evaluator._weights[changed]
+            total = float(payload["total_energy"]) + float(
+                np.sum(weights * (energy[changed] - before[changed]))) * evaluator._volume_element
+            return potential, epsilon, energy, total
+
+        random = np.random.default_rng(29)
+        for trial in range(6):
+            rho = CRITICAL * np.exp(random.uniform(-8.0, 2.5, 5000))
+            rho[:12] = CRITICAL * (1.0 + random.uniform(-3.0e-10, 3.0e-10, 12))
+            core = (trial % 2) * 0.01 * CRITICAL * np.exp(random.uniform(-8.0, 2.0, rho.size))
+            multiplicities = random.integers(1, 9, rho.size).astype(float) if trial % 3 else None
+            evaluator = object.__new__(NativeCALDAEvaluator)
+            evaluator._core, evaluator._volume_element, evaluator._weights = core, 0.17, multiplicities
+            evaluator._evaluator = _ParsecLoops(core, 0.17, multiplicities)
+            with mock.patch.dict(os.environ, {CA_CONTINUITY_ENV: "on"}):
+                payload = evaluator._continuous(rho)
+                reference = every_point(evaluator, rho)
+            for value, expected in zip(
+                (payload["potential"], payload["energy_per_electron"], payload["energy_density"]), reference[:3]
+            ):
+                self.assertTrue(np.array_equal(value, expected))
+            self.assertEqual(payload["total_energy"], reference[3])
 
 
 def _native():

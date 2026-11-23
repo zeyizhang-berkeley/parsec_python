@@ -2233,6 +2233,10 @@ def _run(
         from parsec_python.SCF.fock_diis import fock_diis_tail_setting
 
         fock_diis_tail_setting()
+        # PARSEC_FERMI_GAP_ROOT: the Fermi level of a gap
+        from parsec_python.Occupations.fermi_dirac import fermi_gap_root_setting
+
+        fermi_gap_root_setting()
         # PARSEC_KPOINT_WAVEFUNCTIONS and PARSEC_GAMMA_PARSEC_DAT (parsec.dat of the k-point loops)
         from parsec_python.Output.parsec_dat import validate_settings as validate_parsec_dat_settings
 

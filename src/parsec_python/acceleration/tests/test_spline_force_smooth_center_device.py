@@ -48,7 +48,10 @@ _CUBE = 6.3 * np.eye(3)
 
 
 def _load(specifications):
-    return load_pseudopotentials(specifications, xc_functional="pbe", check_correlation=False)
+    # the carbon FHI table as the file gives it (PARSEC_FHI_ORIGIN=off: first sample 1.04e-3 bohr), whose padded first
+    # interval the rule reaches; under auto, the default, the reader continues it to 1e-5 bohr
+    with mock.patch.dict(os.environ, {"PARSEC_FHI_ORIGIN": "off"}):
+        return load_pseudopotentials(specifications, xc_functional="pbe", check_correlation=False)
 
 
 def _near(grid, guess, offset):

@@ -72,6 +72,7 @@ class SpinOrbitProjectorConstructionTests(unittest.TestCase):
         the shape/finiteness checks above would not.
         """
         from parsec_python.Pseudopotential.radial_quadrature import (
+            log_mesh_integral,
             parsec_radial_integral,
         )
 
@@ -84,9 +85,14 @@ class SpinOrbitProjectorConstructionTests(unittest.TestCase):
 
             def _independent_normalize(v_j: np.ndarray) -> np.ndarray:
                 delta_v = v_j - local_v
-                denominator = parsec_radial_integral(
-                    radii, radial_wave * radial_wave * delta_v
-                )
+                # the quadrature the table takes under PARSEC_KB_QUADRATURE (pseudo.f90's weights under trapezoid)
+                integrand = radial_wave * radial_wave * delta_v
+                if self.potential.kb_quadrature() == "logmesh":
+                    denominator = log_mesh_integral(
+                        radii, integrand, self.potential.radial_parameter_b, self.potential.radial_offset
+                    )
+                else:
+                    denominator = parsec_radial_integral(radii, integrand)
                 projector = delta_v * radial_wave / radii
                 projector /= np.sqrt(abs(denominator))
                 if projector.size > 16:

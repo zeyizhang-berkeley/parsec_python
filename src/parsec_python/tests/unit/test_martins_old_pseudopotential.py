@@ -13,8 +13,10 @@ from __future__ import annotations
 from dataclasses import replace
 import math
 from pathlib import Path
+import os
 import tempfile
 import unittest
+from unittest import mock
 
 import numpy as np
 
@@ -170,11 +172,14 @@ class FortranReportTests(unittest.TestCase):
         np.testing.assert_array_equal(
             old.valence_density, valence_density_table(new, read_from_file=False)
         )
-        for angular_momentum in (0, 2):
-            np.testing.assert_array_equal(
-                old.radial_projector(angular_momentum, 1)[0],
-                new.radial_projector(angular_momentum, 1)[0],
-            )
+        # the denominators of pseudo.f90: the exact quadrature of PARSEC_KB_QUADRATURE takes the parameters of the
+        # mesh, which the two layouts give to twelve digits (below)
+        with mock.patch.dict(os.environ, {"PARSEC_KB_QUADRATURE": "trapezoid"}):
+            for angular_momentum in (0, 2):
+                np.testing.assert_array_equal(
+                    old.radial_projector(angular_momentum, 1)[0],
+                    new.radial_projector(angular_momentum, 1)[0],
+                )
         # The derived grid parameters are those of the file header to the
         # twelve digits the radii are stored with.
         self.assertAlmostEqual(

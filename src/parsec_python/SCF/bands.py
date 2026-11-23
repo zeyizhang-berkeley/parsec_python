@@ -69,9 +69,9 @@ def band_convergence_setting() -> str:
     cycles keeps its levels bit for bit.  ``off``: the fixed cycles, PARSEC 1.5's ``calc_bands`` with its CHEBFF
     default ``Diag_Tolerance -1``, as before (1000 diamond atoms: largest residual 0.10 Ry at the 3 cycles)."""
 
-    import os
+    from ..fortran_numerics import switch_value
 
-    value = os.environ.get(BAND_CONVERGENCE_SWITCH, "auto").strip().lower() or "auto"
+    value = switch_value(BAND_CONVERGENCE_SWITCH, "auto")
     if value not in ("auto", "off"):
         raise ValueError(f"{BAND_CONVERGENCE_SWITCH} must be auto or off, not {value!r}")
     return value
@@ -100,9 +100,9 @@ def band_buffer_setting() -> float | None:
     converge them slowly; a number in ``(0, 2]``: that fraction; ``off``: ``Subspace_Buffer_Size``, as before and as
     PARSEC 1.5's ``calc_bands`` (``nstate + winsize``).  Returns the fraction, ``None`` for ``off``."""
 
-    import os
+    from ..fortran_numerics import switch_value
 
-    value = os.environ.get(BAND_BUFFER_SWITCH, "auto").strip().lower() or "auto"
+    value = switch_value(BAND_BUFFER_SWITCH, "auto")
     if value == "off":
         return None
     if value == "auto":

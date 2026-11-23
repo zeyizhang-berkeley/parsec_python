@@ -82,7 +82,7 @@
 // V_xc/ca_lda_spin.py
 #define CA_GAMMA @CA_GAMMA@
 // V_xc/ca_lda.py ca_high_density_coefficients (PARSEC_CA_CONTINUITY; PARSEC's 0.004, 0.0232, 0.0192, 0.0014, -0.0096
-// by default): the coefficients of r_s ln r_s and r_s of the high-density Perdew-Zunger forms
+// under off): the coefficients of r_s ln r_s and r_s of the high-density Perdew-Zunger forms
 #define CA_C3 @CA_C3@
 #define CA_C4 @CA_C4@
 #define CA_C5 @CA_C5@

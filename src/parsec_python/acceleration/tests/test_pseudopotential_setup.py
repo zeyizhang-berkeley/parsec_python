@@ -14,9 +14,11 @@ from __future__ import annotations
 from dataclasses import replace
 from hashlib import sha256
 from pathlib import Path
+import os
 import tempfile
 from types import SimpleNamespace
 import unittest
+from unittest import mock
 
 import numpy as np
 
@@ -421,9 +423,14 @@ class BackendDetailTests(unittest.TestCase):
 class CacheKeyTests(unittest.TestCase):
     def test_only_the_option_adds_to_the_key(self) -> None:
         default = SpeciesPotential(DATA / "spin_ca_O_POTRE.DAT", 1)
+        # the quadrature of the KB denominators enters the key except under PARSEC 1.5's (PARSEC_KB_QUADRATURE)
+        with mock.patch.dict(os.environ, {"PARSEC_KB_QUADRATURE": "trapezoid"}):
+            digest = sha256()
+            hash_pseudopotential_setup(digest, default)
+        self.assertEqual(digest.hexdigest(), sha256().hexdigest())
         digest = sha256()
         hash_pseudopotential_setup(digest, default)
-        self.assertEqual(digest.hexdigest(), sha256().hexdigest())
+        self.assertNotEqual(digest.hexdigest(), sha256().hexdigest())
         with tempfile.TemporaryDirectory() as directory:
             directory = Path(directory)
 

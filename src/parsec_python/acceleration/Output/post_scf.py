@@ -122,7 +122,12 @@ def band_hand_over(system, result):
     and the Fermi level of those levels as the SCF loop finds it on the full grid
     (:func:`parsec_python.Occupations.fermi_occupations` without weights): the levels past
     ``States_Num`` move the bracket of its bisection, which in a gap moves the level found by up
-    to the gap.  A result of the full grid, or of sectors whose list holds that count (whose Fermi
+    to the gap under ``PARSEC_FERMI_GAP_ROOT=off``.  Its default places the level of a gap at the
+    root of the count, which the levels past ``States_Num`` move by their thermal tails, and by
+    ``(kT/2) ln(g_full/g_kept)`` where ``States_Num`` cuts partners of the lowest empty level (a
+    six-fold level cut to 3 or 1: 0.35 or 0.90 kT): the level of the full grid's own list, which
+    holds the same ``States_Num`` levels.  A result of the
+    full grid, or of sectors whose list holds that count (whose Fermi
     level with weights is that of the full grid's list), is returned as it is.
     """
 

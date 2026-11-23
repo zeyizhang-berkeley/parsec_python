@@ -1776,6 +1776,10 @@ def execute(args, cp, comm, MPI, initialization_seconds, initial_affinity=None):
     from parsec_python.SCF.fock_diis import fock_diis_tail_setting
 
     fock_diis_tail_setting()
+    # PARSEC_FERMI_GAP_ROOT (Occupations/fermi_dirac.py) likewise: every rank places the Fermi level alike.
+    from parsec_python.Occupations.fermi_dirac import fermi_gap_root_setting
+
+    fermi_gap_root_setting()
     use_symmetry, symmetry_note = symmetry_decision(translation)
     # Whether the atoms stay in the point group of the first structure, which Ignore_Symmetry does not tell.
     # The command line may overrule that keyword, but not a run that leaves the group.

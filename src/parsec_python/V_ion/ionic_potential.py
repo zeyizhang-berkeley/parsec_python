@@ -101,11 +101,13 @@ def load_pseudopotentials(
     (:func:`parsec_python.V_xc.libxc.libxc_pseudopotential_functional`); a
     file of another label is used with a warning.
     """
+    from ..Pseudopotential.fhipp import fhi_origin_setting
     from ..Pseudopotential.potre import projector_tail_setting
     from ..V_xc.libxc import is_libxc_functional
 
     # an unknown value is refused here, before any projector is built
     projector_tail_setting()
+    fhi_origin_setting()
     libxc = is_libxc_functional(xc_functional)
     result: dict[str, ParsecPseudopotential] = {}
     hybrid_labels = hybrid_pseudopotential_labels(xc_functional.strip().lower())
@@ -892,7 +894,8 @@ PROJECTOR_CENTER_ENV = "PARSEC_PROJECTOR_CENTER"
 #: Bohr: under ``PARSEC_PROJECTOR_CENTER=auto`` the gradient of a projector at a grid point closer to its atom than this
 #: is evaluated at this distance (:func:`projector_gradient_distance`).  Every projector table of the package follows
 #: its ``c r^l`` from here on.  Next to the origin the POTRE tables are flat out to at most 2.7e-4 bohr, and the first
-#: eight samples of the FHI tables, out to 2.5e-3 bohr (Li), lie 25 to 48 % above ``c r`` for a p channel.
+#: eight samples of the FHI tables, out to 2.5e-3 bohr (Li), lie 25 to 48 % above ``c r`` for a p channel (as the file
+#: gives them; a table continued by ``PARSEC_FHI_ORIGIN=auto`` takes twice its 17th sample instead).
 PROJECTOR_GRADIENT_FLOOR = 3.0e-3
 
 
@@ -906,7 +909,8 @@ def projector_center_setting() -> str:
     PARSEC 1.5 there: within :data:`PROJECTOR_GRADIENT_FLOOR` of the atom they are evaluated at that distance
     (:func:`projector_gradient_distance`), which is the gradient of the smooth ``c r^l`` the table follows.  The tables
     are not ``c r^l`` next to the origin (Au ``l = 1``: ``w`` about -6.7e-6 out to 7e-6 bohr, then -0.9045 ``r``; the
-    first eight samples of an FHI table lie 25 to 48 % above ``c r``), so the value ``w(rs(2))/rs(2)`` that
+    first eight samples of an FHI table as the file gives it lie 25 to 48 % above ``c r``; under the default
+    ``PARSEC_FHI_ORIGIN=auto`` the reader continues it to 1e-5 bohr), so the value ``w(rs(2))/rs(2)`` that
     ``nonloc.F90`` forms at the point is about 19 times the slope of a p projector on a POTRE table (350 times for d)
     and 1.48 times on an FHI table: the exact derivative for displacements within ``rs(2)`` (4e-7 to 2e-3 bohr), but
     not the slope of the energy over the steps a relaxation takes.
@@ -924,9 +928,9 @@ def projector_center_setting() -> str:
     double grid, the spin-orbit projectors) take ``rs(2)`` under ``auto`` and ``tip``.
     """
 
-    import os
+    from ..fortran_numerics import switch_value
 
-    value = os.environ.get(PROJECTOR_CENTER_ENV, "auto").strip().lower() or "auto"
+    value = switch_value(PROJECTOR_CENTER_ENV, "auto")
     if value not in ("auto", "tip", "off"):
         raise ValueError(f"{PROJECTOR_CENTER_ENV} must be auto, tip or off, not {value!r}")
     return value
@@ -952,9 +956,20 @@ def projector_gradient_distance(radius, potential) -> np.ndarray:
     its slope taken at ``c``, ``w(c) (dY/du - u (u . dY/du))/c + w'(c) Y(u) u`` is the gradient of ``c_l r^l Y_l`` for
     a table that follows ``c_l r^l`` at ``c`` (for ``l <= 2`` exactly, also with the ``3 z^2 - 1`` form of the
     harmonics), and it joins the gradient at the true distance continuously at ``|d| = c``.
+
+    A table continued to 1e-5 bohr by ``PARSEC_FHI_ORIGIN=auto`` (``origin_samples``) takes ``2 r(17)``, twice its 17th
+    sample (about 3e-5 bohr; within it the values of ``pseudo.f90``'s first eight samples, ``vw(j) = vw(2*mor)``):
+    beyond it the gradient is the exact derivative of the projector the energy samples.  Its s projector is not
+    ``c0 + c2 r^2`` out to 3e-3 bohr to the accuracy a force needs (``w'(r)/r`` varies there, by FHI98PP's start in
+    the first samples of the file and in the finer generation by its own structure), and with the continuation of
+    the first form (a power law below the first sample) the gradient at 3e-3 bohr missed the slope of the energy
+    over converged steps by up to 2.0e-5 Ry/bohr (O2, an atom 1e-3 bohr from a grid point).
     """
 
-    return np.maximum(radius, max(float(potential.radii[0]), PROJECTOR_GRADIENT_FLOOR))
+    floor = PROJECTOR_GRADIENT_FLOOR
+    if getattr(potential, "origin_samples", 0) and potential.radii.size > 17:
+        floor = 2.0 * float(potential.radii[16])
+    return np.maximum(radius, max(float(potential.radii[0]), floor))
 
 
 def projector_gradient_clamp(radius, potential, setting: str) -> np.ndarray:

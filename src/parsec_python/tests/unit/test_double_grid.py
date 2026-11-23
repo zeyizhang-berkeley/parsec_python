@@ -352,6 +352,35 @@ class OldInterpolationTests(unittest.TestCase):
         )
 
 
+class CoreRadiusGuardTests(unittest.TestCase):
+    """The check of a substituted projector builder against ``Core_Cutoff_Radius`` (FHI and old Martins species) with
+    the double grid: a coarse point carries the projector when one of its fine points lies within the radius."""
+
+    def test_double_grid_reach(self) -> None:
+        from parsec_python.SCF.single_point import _require_core_radius_support
+
+        table = Path(__file__).resolve().parents[4] / "examples" / "3d_hybrid_functionals" / "C_FHIPP.DAT"
+        species = {
+            "C": SpeciesPotential(
+                table, 2, use_spline=True, pseudopotential_format="fhipp", number_of_channels=3,
+                electrons_per_orbital=(2.0, 2.0, 0.0), core_cutoff_radius=1.6,
+            )
+        }
+        potentials = load_pseudopotentials(species, xc_functional="pbe", check_correlation=False)
+        atoms = [Atom("C", np.array([0.013, -0.021, 0.007]))]
+        settings = GridSettings(spacing=0.25, radius=4.0, expansion_order=8)
+        fine = build_cluster_grid(replace(settings, double_grid_order=3))
+        operator = build_nonlocal_projectors(fine, atoms, potentials, species)
+        rows = operator.projectors.indices
+        reach = float(np.max(np.linalg.norm(fine.coordinates[rows] - atoms[0].position, axis=1)))
+        self.assertGreater(reach, potentials["C"].projector_support_radius)
+        _require_core_radius_support(operator, fine, atoms, potentials)
+        # the same operator on a grid without the double grid reaches too far
+        coarse = build_cluster_grid(settings)
+        with self.assertRaisesRegex(RuntimeError, "beyond the core radius"):
+            _require_core_radius_support(operator, coarse, atoms, potentials)
+
+
 class CoreDensityCheckTests(unittest.TestCase):
     def test_corecd_sign_check(self) -> None:
         values = np.array([0.0, 0.2, 1.0])

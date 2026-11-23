@@ -614,8 +614,15 @@ sum_i f_i = Ne/2
 ```
 
 Each `f_i` lies in `[0,1]`; the factor two for spin degeneracy is applied
-elsewhere. The bisection count tolerance is `1e-12`, maximum iterations 100,
-and exponent cutoff 35.
+elsewhere. The bisection count tolerance is `1e-10`, maximum iterations 1000,
+and exponent cutoff 36.7 (`flevel.f90:43-51` of PARSEC 1.5; the tree before
+had `1e-12`, 100 and 35). The bisection stops at the first level whose count
+is within the tolerance, so inside a gap, where the count differs from
+`Ne/2` only by the thermal tails, the level it reports can lie anywhere the
+tails stay below the tolerance. This port places such a level at the root of
+the count, `midgap + (kB T/2) ln(g_h/g_l)` for a highest filled level of
+degeneracy `g_h` and a lowest empty one of `g_l`
+(`PARSEC_FERMI_GAP_ROOT=on`, the default; `off` keeps the bisection's level).
 
 A negative `Fermi_Temp` replaces the search by the occupations of the file
 `occup.in` (`initial.f90:461-523`). Each spin channel has a section there: a
@@ -790,7 +797,8 @@ hence the path of the SCF loop and not its fixed point.
 2. `flevel.f90` finds **one** Fermi level for both channels by the same
    bisection, with `sum_s sum_i f_s,i = N_e` and `f` in `[0, 1]`. It starts
    at the highest eigenvalue with the lowest and highest as bounds, so the
-   level it reports inside a gap is a property of that bisection. The
+   level it reports inside a gap is a property of that bisection (this port
+   reports the root of the count there, see "Occupations and density"). The
    electrons of a channel are `totel(s) = sum_i f_s,i`; the net magnetic
    moment is `totel(up) - totel(down)` Bohr magnetons.
 3. `newrho.F90` builds `rho_s = h^-3 sum_i f_s,i |psi_s,i|^2` (its factor

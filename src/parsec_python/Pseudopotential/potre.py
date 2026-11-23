@@ -9,12 +9,19 @@ by the rest of the Python solver.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from functools import cached_property
 from pathlib import Path
 import re
 
 import numpy as np
 
-from .radial_quadrature import kb_quadrature_setting, log_mesh_integral, parsec_radial_integral
+from .radial_quadrature import (
+    LOG_MESH_TOLERANCE,
+    kb_quadrature_setting,
+    log_mesh_deviation,
+    log_mesh_integral,
+    parsec_radial_integral,
+)
 from .radial_spline import ParsecRadialSpline
 
 
@@ -53,9 +60,9 @@ def projector_tail_setting() -> str:
     decides the same.
     """
 
-    import os
+    from ..fortran_numerics import switch_value
 
-    value = os.environ.get(PROJECTOR_TAIL_ENV, PROJECTOR_TAIL_DEFAULT).strip().lower() or PROJECTOR_TAIL_DEFAULT
+    value = switch_value(PROJECTOR_TAIL_ENV, PROJECTOR_TAIL_DEFAULT)
     if value not in ("auto", "off"):
         raise ValueError(f"{PROJECTOR_TAIL_ENV} must be auto or off, not {value!r}")
     return value
@@ -135,6 +142,11 @@ class ParsecPseudopotential:
     # previous tree stored the projector itself there).  Same keys as
     # ``filtered_projectors``; empty for an unfiltered potential.
     filtered_projector_slopes: dict[int, np.ndarray] = field(default_factory=dict)
+    # The samples the reader added below the first sample of the file (``PARSEC_FHI_ORIGIN=auto`` for an FHIPP
+    # table, :func:`parsec_python.Pseudopotential.fhipp.fhi_origin_setting`); 0 for a table as its file gives it.
+    origin_samples: int = 0
+    # The samples of the file the reader replaced by their even fit (``PARSEC_FHI_ORIGIN=auto``); 0 otherwise.
+    origin_refit: int = 0
 
     @property
     def radial_offset(self) -> float:
@@ -202,11 +214,30 @@ class ParsecPseudopotential:
             return difference
         return np.where(beyond, 0.0, difference)
 
+    @cached_property
+    def on_log_mesh(self) -> bool:
+        """Whether the radii follow the logarithmic mesh of the table's parameters to
+        :data:`~.radial_quadrature.LOG_MESH_TOLERANCE` (:func:`~.radial_quadrature.log_mesh_deviation`)."""
+
+        deviation = log_mesh_deviation(self.radii, self.radial_parameter_b, self.radial_offset)
+        return bool(deviation <= LOG_MESH_TOLERANCE)
+
+    def kb_quadrature(self) -> str:
+        """``"logmesh"`` or ``"trapezoid"``: the quadrature of this table's Kleinman-Bylander denominators under
+        ``PARSEC_KB_QUADRATURE`` (:func:`~.radial_quadrature.kb_quadrature_setting`); ``auto`` takes ``logmesh`` where
+        the radii follow the logarithmic mesh (:attr:`on_log_mesh`), the trapezoid of ``pseudo.f90`` elsewhere.  A
+        property of the file, so every process of a run decides the same."""
+
+        setting = kb_quadrature_setting()
+        if setting == "auto":
+            return "logmesh" if self.on_log_mesh else "trapezoid"
+        return setting
+
     def kb_denominator(self, integrand: np.ndarray) -> float:
         """``integral integrand dr`` of a Kleinman-Bylander denominator (``u_l^2 (V_l - V_local)`` on the radii) by the
-        quadrature of :func:`~.radial_quadrature.kb_quadrature_setting` (``PARSEC_KB_QUADRATURE``)."""
+        quadrature of :meth:`kb_quadrature` (``PARSEC_KB_QUADRATURE``)."""
 
-        if kb_quadrature_setting() == "trapezoid":
+        if self.kb_quadrature() == "trapezoid":
             return parsec_radial_integral(self.radii, integrand)
         return log_mesh_integral(self.radii, integrand, self.radial_parameter_b, self.radial_offset)
 

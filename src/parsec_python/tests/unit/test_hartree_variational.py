@@ -182,12 +182,12 @@ class PotentialTests(unittest.TestCase):
 
 class SwitchTests(unittest.TestCase):
     def test_values(self) -> None:
-        for value, expected in (("", "off"), ("auto", "auto"), (" ON ", "on"), ("off", "off")):
+        for value, expected in (("", "slab"), ("auto", "auto"), (" ON ", "on"), ("off", "off"), ("Slab", "slab")):
             with _switch(value):
                 self.assertEqual(hartree_variational_setting(), expected)
         with _unset():
-            self.assertEqual(hartree_variational_setting(), "off")
-            # off by default, also where auto would take it
+            self.assertEqual(hartree_variational_setting(), "slab")
+            # a cluster keeps the Poisson solution by default (slab), also where auto would take V'
             self.assertIsNone(prepare_single_point(_na2(forces_wanted=True)).hartree_variational)
         with _switch("bogus"), self.assertRaisesRegex(ValueError, HARTREE_VARIATIONAL_SWITCH):
             prepare_single_point(_na2())
@@ -198,6 +198,7 @@ class SwitchTests(unittest.TestCase):
             ("auto", _na2(forces_wanted=False), False),
             ("on", _na2(forces_wanted=False), True),
             ("off", _na2(forces_wanted=True), False),
+            ("slab", _na2(forces_wanted=True), False),
         )
         for value, problem, applies in cases:
             with self.subTest(value=value, forces=problem.forces_wanted), _switch(value):
