@@ -595,7 +595,8 @@ class DevicePeriodicPairSolvers:
         fallback = int(paths.get("pool-fallback", 0))
         translations = int(paths.get("translations", 0))
         unfit = int(paths.get("translations-unfit", 0))
-        builds = fallback + translations + int(paths.get("pool", 0))
+        # ("tiles": the sector tiles the MPI runner keeps for a channel of few sectors, SCF/hybrid_mpi.py)
+        builds = fallback + translations + int(paths.get("pool", 0)) + int(paths.get("tiles", 0))
         if fallback > 0:
             # PARSEC_CUPY_EXCHANGE_POOL=auto: builds of sector orbitals whose full-grid block did not fit its device
             text += (
@@ -627,8 +628,10 @@ class DevicePeriodicPairSolvers:
     def record_path(self, path: str) -> None:
         """Count a build that took ``path``: ``"translations"`` (the classes of the half-cell translations of sector
         orbitals), ``"pool"`` (their pooled full-grid block) or ``"pool-fallback"`` (their sector tiles: the block did
-        not fit), ``"full"`` (the tiles of one block); ``"translations-unfit"`` beside ``"pool"`` or
-        ``"pool-fallback"``: the coset blocks of the translation classes did not fit."""
+        not fit), ``"full"`` (the tiles of one block); ``"translations-unfit"`` beside ``"pool"``,
+        ``"pool-fallback"`` or ``"tiles"``: the coset blocks of the translation classes did not fit; ``"tiles"``:
+        the sector tiles the MPI runner keeps for a channel of fewer sectors than its floor of the full-grid block
+        (``SCF/hybrid_mpi.MPI_POOL_MIN_SECTORS``), a build with no text of its own."""
 
         with self._lock:
             self._paths[str(path)] += 1

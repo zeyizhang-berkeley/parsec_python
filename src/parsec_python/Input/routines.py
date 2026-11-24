@@ -363,6 +363,91 @@ def symmetry_keyword_routines_setting() -> str:
     return value
 
 
+#: The keywords of the files a run reads or writes, which PARSEC 1.5 reads into its output and start settings alone
+#: (``usrinputfile.F90``: ``Save_Wfn_Bands`` into ``elec_st%nsave``/``indxsave``, which only ``wfnsave`` reads;
+#: ``Restart_Run`` into ``istart``, after which ``restart_run.F90`` reads ``parsec.dat`` on the grid the input builds;
+#: the ``nscf_*`` keywords of a non-self-consistent run from that file; ``Output_Eigenvalues``, ``Output_Data``,
+#: ``Output_File_Name``, ``Output_Grid_Data`` and the ``Save_Intermediate_*`` files).  None of them changes the grid,
+#: the potentials or the solvers there, and the output and restart code of this port (``Output/``,
+#: ``SCF/restart.py``, ``SCF/nscf.py``) serves both sets of routines.  Under ``PARSEC_FILE_KEYWORD_ROUTINES=neutral``
+#: (the default since 2026-11-23) they choose nothing, as :data:`NEUTRAL_KEYS`: a restart or a non-self-consistent
+#: run builds the grid of the run that wrote its ``parsec.dat`` (the input of that run plus ``Restart_Run``), and a
+#: run gives the same energy with and without its output keywords.  ``fortran`` restores the former choice, in which
+#: each of them at a value that acts moved a periodic input to the Fortran-derived routines: their grid (the counts
+#: ``adjust_step`` makes commensurate with the space group's translations) and their local potential, so that a
+#: ``Save_Wfn_Bands`` block moved the total of a Si8 2 x 2 x 2 mesh at 0.45 bohr from -63.68951445 to -63.68574864
+#: Ry (22 -> 20 points a side), a ``Restart_Run`` or an ``nscf_kpoints`` run of that cell's ``parsec.dat`` stopped
+#: with error 364 (another grid), and where the grids agreed a restart of a weighted sodium cell ended 7.8e-5 Ry off
+#: the run that wrote the file.  The forces and ionic loops of spinor orbitals keep the former choice under
+#: ``neutral`` too (:func:`file_keywords_choose_nothing`): Andrew Grieder's spinor backend takes no restart potential
+#: and writes no file of an SCF iteration; and so do ``Save_Intermediate_*`` with any forces or moves
+#: (:data:`INTERMEDIATE_FILE_KEYWORDS`), which his periodic backend does not write either.
+FILE_KEYWORDS = frozenset(
+    {
+        "restart_run",
+        "nscf_states_num",
+        "nscf_kpoint_unit",
+        "nscf_fermi_level",
+        "output_data",
+        "output_eigenvalues",
+        "output_file_name",
+        "output_grid_data",
+        "save_intermediate_eigenvalues",
+        "save_intermediate_charge_density",
+    }
+)
+FILE_BLOCK_KEYS = frozenset({"save_wfn_bands", "nscf_kpoints", "nscf_kgrid", "nscf_kgrid_shift"})
+#: The keywords of the files of every SCF iteration, which the forces and ionic loops of Andrew Grieder's routines do
+#: not write: with forces, a relaxation or molecular dynamics they keep choosing the Fortran-derived routines.
+INTERMEDIATE_FILE_KEYWORDS = frozenset({"save_intermediate_eigenvalues", "save_intermediate_charge_density"})
+FILE_KEYWORD_ROUTINES_ENV = "PARSEC_FILE_KEYWORD_ROUTINES"
+
+
+def _ionic(scalar) -> bool:
+    """Whether an input asks for forces or an ionic loop: a ``Minimization``, ``Molecular_Dynamics``,
+    ``Skip_Force: .false.`` or ``Calculate_Force: .true.`` (``Input.parsec_input._small15_forces_requested``)."""
+
+    moves = any(text.strip().strip("'\"").lower() not in ("none", "") for text in _texts(scalar, "minimization"))
+    forces = _is_true("calculate_force", scalar) or any(
+        _logical(text) is False for text in _texts(scalar, "skip_force")
+    )
+    return bool(moves or forces or _is_true("molecular_dynamics", scalar))
+
+
+def _spinor_ionic(scalar) -> bool:
+    """Whether an input asks for the forces or an ionic loop of spinor orbitals (``SO_from_scratch``, ``SCF_SO`` or
+    ``Non_Collinear_Magnetism`` with :func:`_ionic`; ``Input.parsec_input._routines_choice_matters``).  Andrew
+    Grieder's spinor backend of those runs takes no restart potential and writes no file of an SCF iteration
+    (``Relaxation/backend.py``, ``spinor_backend``), so the keywords of the files keep choosing the Fortran-derived
+    routines there."""
+
+    spinor = any(_is_true(key, scalar) for key in ("so_from_scratch", "scf_so", "non_collinear_magnetism"))
+    return bool(spinor and _ionic(scalar))
+
+
+def file_keywords_choose_nothing(scalar) -> bool:
+    """Whether the keywords of the files (:data:`FILE_KEYWORDS`, :data:`FILE_BLOCK_KEYS`) choose no routines for an
+    input: ``PARSEC_FILE_KEYWORD_ROUTINES=neutral`` and not the forces or an ionic loop of spinor orbitals
+    (:func:`_spinor_ionic`)."""
+
+    return file_keyword_routines_setting() == "neutral" and not _spinor_ionic(scalar)
+
+
+def file_keyword_routines_setting() -> str:
+    """``PARSEC_FILE_KEYWORD_ROUTINES``: ``neutral`` (the default) or ``fortran`` (:data:`FILE_KEYWORDS`,
+    :data:`FILE_BLOCK_KEYS`).
+
+    The parser reads it for every input, so that a wrong value stops before the SCF.
+    """
+
+    import os
+
+    value = os.environ.get(FILE_KEYWORD_ROUTINES_ENV, "neutral").strip().lower() or "neutral"
+    if value not in ("neutral", "fortran"):
+        raise ValueError(f"{FILE_KEYWORD_ROUTINES_ENV} must be neutral or fortran, got {value!r}")
+    return value
+
+
 @dataclass(frozen=True)
 class RoutineChoice:
     """The routines of one calculation.
@@ -505,10 +590,13 @@ def bulk_default_features(
 
     * their general grid (non-orthogonal lattice vectors, or sides without one common grid spacing) in a scalar
       unpolarized Gamma-point run: the reference CLI against his accelerated oblique path (fcc Si16 on an A100:
-      418 against 15.9 s);
+      418 against 15.9 s; measured when the command line handed every cell on that grid to the reference solver,
+      as it still does under ``PARSEC_GENERAL_GRID_ACCELERATED=off``; the choice is kept since that grid runs on
+      the accelerated driver too, so that no routine set changes under an input);
     * the Gamma point named as a one-point k-point sampling: the reference k-point solver against his
       accelerated Gamma path;
-    * forces on their general grid: their readable local force (0.7-30 s per evaluation against 0.13-1.7 s);
+    * forces on their general grid: their readable local force (0.7-30 s per evaluation against 0.13-1.7 s; the
+      same remark);
     * the forces and ionic loops of spinor orbitals: his are 30-150 times faster per force evaluation.
     """
 
@@ -900,11 +988,20 @@ def decide_routines(
     start = RoutineChoice(requested=requested)
     # the symmetry keywords of the sectors choose nothing (PARSEC_SYMMETRY_KEYWORD_ROUTINES=neutral)
     symmetry_keys = SYMMETRY_KEYWORDS if symmetry_keyword_routines_setting() == "neutral" else frozenset()
+    # nor do the keywords of the files a run reads or writes (PARSEC_FILE_KEYWORD_ROUTINES=neutral)
+    neutral_files = file_keywords_choose_nothing(scalar)
+    file_keys = FILE_KEYWORDS if neutral_files else frozenset()
+    if _ionic(scalar):
+        # the forces and ionic loops of Andrew Grieder's periodic backend write no file of an SCF iteration
+        # (Relaxation/backend.periodic_backend): Save_Intermediate_* keep choosing the Fortran-derived routines there
+        file_keys = file_keys - INTERMEDIATE_FILE_KEYWORDS
+    file_blocks = FILE_BLOCK_KEYS if neutral_files else frozenset()
     unknown = sorted(
         key
         for key in scalar
         if key != KEYWORD
-        and key not in DEFAULT_SPECIES_KEYS | DEFAULT_GLOBAL_KEYS | NEUTRAL_KEYS | SMALL15_SHARED_KEYS | symmetry_keys
+        and key
+        not in DEFAULT_SPECIES_KEYS | DEFAULT_GLOBAL_KEYS | NEUTRAL_KEYS | SMALL15_SHARED_KEYS | symmetry_keys | file_keys
         # a label written at a value that has no effect chooses nothing (NO_EFFECT)
         and not has_no_effect(key, scalar, blocks)
         # nor one the default routines read for this input (DEFAULT_CONDITIONAL_KEYS)
@@ -915,7 +1012,7 @@ def decide_routines(
         f"{key} = {' / '.join(_texts(scalar, key))}" if key in NO_EFFECT else key for key in unknown
     ]
     unknown += [
-        f"begin {key}" for key in sorted(blocks) if key not in DEFAULT_BLOCK_KEYS | NEUTRAL_BLOCK_KEYS
+        f"begin {key}" for key in sorted(blocks) if key not in DEFAULT_BLOCK_KEYS | NEUTRAL_BLOCK_KEYS | file_blocks
     ]
     if unknown:
         return start.with_reason(
@@ -939,6 +1036,12 @@ __all__ = [
     "DEFAULT_CONDITIONAL_KEYS",
     "DEFAULT_GLOBAL_KEYS",
     "DEFAULT_SPECIES_KEYS",
+    "FILE_BLOCK_KEYS",
+    "FILE_KEYWORDS",
+    "INTERMEDIATE_FILE_KEYWORDS",
+    "FILE_KEYWORD_ROUTINES_ENV",
+    "file_keyword_routines_setting",
+    "file_keywords_choose_nothing",
     "KEYWORD",
     "NEUTRAL_BLOCK_KEYS",
     "NEUTRAL_KEYS",

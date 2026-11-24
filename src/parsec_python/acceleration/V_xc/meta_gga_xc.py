@@ -129,10 +129,17 @@ class DeviceMetaGGAOnOrbits:
     and the gradient of the core density at the values is added to ``g``.
     The orbit values of a group with operations that exchange axes (signed
     permutations) take the host path: the stencil's reflection signs do not
-    carry their fluxes.
+    carry their fluxes.  ``permutations`` admits them where the fields are
+    those of weighted sectors (``PARSEC_ORBITAL_GROUP_META_GGA``): the stencil
+    then reads the flux of a point from its representative through the
+    operation table of the GGA kernels (``device_xc._StencilGeometry``, an
+    operation index per point), as the device GGA of those sectors does.
     """
 
-    def __init__(self, evaluator, grid, *, reducer=None, device_id: int = 0, core_density=None, spin: bool = False) -> None:
+    def __init__(
+        self, evaluator, grid, *, reducer=None, device_id: int = 0, core_density=None, spin: bool = False,
+        permutations: bool = False,
+    ) -> None:
         import numpy as np
 
         from ..backends.cupy import require_cupy
@@ -155,7 +162,7 @@ class DeviceMetaGGAOnOrbits:
         self._core_device = None
         reduction = None if reducer is None else reducer.reduction
         operations = getattr(reduction, "operations", None)
-        if operations is not None and not all(
+        if operations is not None and not permutations and not all(
             np.array_equal(operation, np.diag(np.diag(operation))) for operation in np.asarray(operations)
         ):
             raise ValueError("the device meta-GGA evaluation takes groups of reflections")

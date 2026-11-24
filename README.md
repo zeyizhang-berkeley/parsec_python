@@ -1213,8 +1213,25 @@ non-self-consistent run, `Output_Data: .true.`, which are the lines PARSEC 1.5's
 their defaults. A value that acts still chooses the Fortran-derived routines, and the warning names it
 (`input option(s) mixing_restart_factor = 0.1 (read by the Fortran-derived routines only)`). Before 4 November 2026 writing `Convergence_Criterion_Approach`, `Chebyshev_Filtering`,
 `Maximum_Matvec`, `Fix_Number_Eigenvalues`, `MPI_Groups`, `Exp_Comm` or `Max_Lap_Buffers` moved a periodic input to the
-Fortran-derived routines (Si8 at h 0.45: 1.3 mRy at the Gamma point, 3.8 mRy on a 2x2x2 grid, from the routines). A
-Restart_Run, NSCF or DOS input runs on the Fortran-derived routines, so the SCF that writes its `parsec.dat`
+Fortran-derived routines (Si8 at h 0.45: 1.3 mRy at the Gamma point, 3.8 mRy on a 2x2x2 grid, from the routines).
+The keywords of the files a run reads or writes choose nothing either since 23 November 2026
+(`PARSEC_FILE_KEYWORD_ROUTINES=neutral`; `Input/routines.py` `FILE_KEYWORDS`): `Save_Wfn_Bands`, `Restart_Run`,
+the `nscf_*` keywords of a non-self-consistent run, `Output_Eigenvalues`, `Output_Data`, `Output_File_Name`,
+`Output_Grid_Data` and `Save_Intermediate_*`, which PARSEC 1.5 reads into its output and start settings alone, so
+that a run keeps the routines and grid of its input with or without them (and its energy, but on the supercell route
+below) and a restart or NSCF run of the input that wrote
+`parsec.dat` builds its grid (`fortran` restores the former choice, in which they moved a periodic input to the
+Fortran-derived routines, whose grid can differ: Si8 at h 0.45 on a 2x2x2 grid 22 points a side, 20 on theirs).
+They keep choosing those routines for the forces and ionic loops of spinor orbitals, and `Save_Intermediate_*` for
+any run with forces or moves: the ionic backends of the default routines take no restart potential (spinors) and
+write no file of an SCF iteration. Where the default route solves a mesh as its supercell
+(`PARSEC_KPOINT_SUPERCELL=auto`), a `Save_Wfn_Bands` list, `Restart_Run` and NSCF keep the k-points, whose energy
+differs from the supercell's by the difference of the two kinetic forms (within `PARSEC_KPOINT_SUPERCELL_TOLERANCE`;
+Si8 2x2x2 at h 0.22 5.9e-9 Ry), and a restart from the supercell's file takes a few iterations to the k-point energy.
+A file the Fortran-derived routines wrote (before 23 November 2026 also for these keywords) restarts with
+`PARSEC_FILE_KEYWORD_ROUTINES=fortran` or `Use_Fortran_Routines: .true.`: on the default routines its grid can differ
+(error 364, whose message says so where the file holds the grid those routines build for the input).
+A DOS input (`Create_DOS`) still runs on the Fortran-derived routines, so the SCF that writes its `parsec.dat`
 should run on them too (a file of another grid is refused).
 
 The grids of the Fortran-derived routines are PARSEC's (1.5): along every lattice vector the largest even number

@@ -5,10 +5,11 @@ interpolation and in ``ylm_real`` / ``ylm_cplx`` (``rnorm = max(|d|, rrmin)``), 
 gradients alike.  Up to 2026-11-20 the projectors of this port divided the harmonics by ``min(rs(2), 1e-6 bohr)``
 (the double grid and the spin-orbit projectors by ``|d|``), so between 1e-6 bohr and ``rs(2)`` a projector had the full
 ``w(rs(2))`` along the direction of the atom, and the gradient of a cell's nonlocal forces grew as ``w(rs(2))/|d|`` up
-to ``w(rs(2))/1e-6``: an atom within round-off of a grid point got 0.1 to 0.75 Ry/bohr from that one point.  Under
-``auto`` (the default) and ``tip`` every builder divides the values by ``rs(2)``.  The tables are flat next to the
-origin, so the gradient ``nonloc.F90`` forms there (``tip``) is about 19 times the slope of a p projector over any
-larger step; ``auto`` takes the gradient of every point within 3e-3 bohr at that distance.  Checked here (CPU):
+to ``w(rs(2))/1e-6``: an atom within round-off of a grid point got up to about 1.2 Ry/bohr from that one point (spin
+C7N cell, carbon POTRE).  Under ``auto`` (the default) and ``tip`` every builder divides the values by ``rs(2)``.  The
+tables are flat next to the origin, so the gradient ``nonloc.F90`` forms there (``tip``) is about 19 times the slope
+of a p projector over any larger step; ``auto`` takes the gradient of every point within 3e-3 bohr at that distance.
+Checked here (CPU):
 
 * the switch, its values and its validation before the SCF;
 * the projector of a point within ``rs(2)`` is ``sqrt(dV) w(rs(2)) Y(d/rs(2))``, continuous down to the atom;

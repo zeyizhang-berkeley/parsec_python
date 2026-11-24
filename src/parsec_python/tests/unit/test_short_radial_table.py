@@ -60,6 +60,34 @@ Correlation_Type: ca
 """
 
 
+FCC_H2 = """\
+Periodic_System: .true.
+Boundary_Conditions: bulk
+begin Cell_Shape
+  0.0  3.0  3.0
+  3.0  0.0  3.0
+  3.0  3.0  0.0
+end Cell_Shape
+Coordinate_Unit: Cartesian_Bohr
+Grid_Spacing: 0.42
+Expansion_Order: 4
+Correlation_Type: ca
+States_Num: 6
+Fermi_Temp: 300.0
+Convergence_Criterion: 1.0e-10
+Diag_Tolerance: 1.0e-11
+Max_Iter: 120
+Skip_Force: .false.
+{routines}Atom_Types_Num: 1
+Atom_Type: H
+Local_Component: s
+begin Atom_Coord
+  {first}
+  1.470000  1.710000  1.560000
+end Atom_Coord
+"""
+
+
 def _forces(text: str) -> np.ndarray:
     """The last total force table of parsec.out (Ry/bohr), one row per atom."""
 
@@ -126,6 +154,35 @@ class ShortRadialTableTests(unittest.TestCase):
         np.testing.assert_allclose(accelerated, reference, atol=2.0e-6)
         # The two atoms feel opposite forces along the bond.
         np.testing.assert_allclose(reference[0], -reference[1], atol=1.0e-6)
+
+    def test_cell_forces_with_the_short_table_on_both_routine_sets(self) -> None:
+        # A cell keeps forcloc.f90's rule out of its local forces: the default routines switch to the Coulomb slope
+        # where the sampled potential does (rs(ns-1) = 1.6 bohr), as the Fortran-derived ones always did.  Before
+        # 2026-11-23 every grid point took 2 Z/r**2 there (Fx -0.0993 against the slope -0.0178 of the energy on this
+        # fcc cell) and an atom on a grid point gave NaN.
+        from parsec_python.cli import main as reference_main
+        from parsec_python.acceleration.cli import main as accelerated_main
+
+        for first in ("0.150000 0.120000 0.090000", "0.0 0.0 0.0"):
+            tables = {}
+            for label, routines, run in (
+                ("default", "", reference_main),
+                ("fortran", "Use_Fortran_Routines: .true.\n", reference_main),
+                ("accelerated", "", accelerated_main),
+            ):
+                with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
+                    directory = Path(folder)
+                    shutil.copy(DATA / "H_POTRE.DAT", directory / "H_POTRE.DAT")
+                    (directory / "parsec.in").write_text(FCC_H2.format(routines=routines, first=first), encoding="utf-8")
+                    with redirect_stdout(StringIO()), redirect_stderr(StringIO()) as error:
+                        code = run([str(directory / "parsec.in"), "--quiet", "--no-archive"])
+                    self.assertEqual(code, 0, error.getvalue())
+                    tables[label] = _forces((directory / "parsec.out").read_text())
+            with self.subTest(first=first):
+                self.assertEqual(tables["default"].shape, (2, 3))
+                self.assertTrue(np.all(np.isfinite(tables["default"])))
+                np.testing.assert_allclose(tables["default"], tables["fortran"], atol=2.0e-6)
+                np.testing.assert_allclose(tables["accelerated"], tables["default"], atol=2.0e-6)
 
 
 if __name__ == "__main__":

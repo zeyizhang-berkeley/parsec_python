@@ -118,8 +118,13 @@ def check_restart_file(
     spin_count: int,
     complex_wavefunctions: bool,
     spinors: bool = False,
+    fortran_counts=None,
 ) -> bool:
     """The sanity checks of ``restart_run.F90``; returns ``ixtrpflg``.
+
+    ``fortran_counts``: a function that gives the points along the lattice vectors of the grid the Fortran-derived
+    routines build for the input of this run (:func:`fortran_routine_counts`), asked for only where the grid of the
+    file differs from this run's (error 364), so that the message can say that the file is one of those routines.
 
     Raises :class:`RestartError` with PARSEC's error number where the file
     belongs to another kind of calculation or another grid.  ``spinors``
@@ -186,7 +191,8 @@ def check_restart_file(
         if np.max(np.abs(np.asarray(data.step) - steps)) > RESTART_TOLERANCE:
             raise RestartError(
                 f"the grid spacing of parsec.dat {np.asarray(data.step).tolist()} "
-                f"differs from that of this run {steps.tolist()}" + _grid_difference(data, grid, steps),
+                f"differs from that of this run {steps.tolist()}"
+                + _grid_difference(data, grid, steps, fortran_counts),
                 364,
             )
         stored = np.asarray(data.periodic.lattice_vectors)
@@ -230,12 +236,19 @@ def check_restart_file(
     return not same_radius
 
 
-def _grid_difference(data: ParsecDat, grid, steps: np.ndarray) -> str:
+def _grid_difference(data: ParsecDat, grid, steps: np.ndarray, fortran_counts=None) -> str:
     """Why a periodic restart builds another grid than the file's, and what keeps one grid (error 364).
 
     The counts of both grids along the lattice vectors, the rule of this run's grid (the Fortran-derived routines,
-    which ``Restart_Run`` selects, with the fractional translations of the space group that ``adjust_step`` makes the
-    counts commensurate with; or this port's default routines) and the spacing that gives this run's counts.
+    with the fractional translations of the space group that ``adjust_step`` makes the counts commensurate with; or
+    this port's default routines) and the spacing that gives this run's counts.  ``Restart_Run`` chooses no routines
+    under ``PARSEC_FILE_KEYWORD_ROUTINES=neutral`` (the default), so a restart of the input that wrote the file builds
+    its grid; under ``fortran`` it selects the Fortran-derived ones, whose grid can differ from that of the default
+    routines (the case this message was written for).  A file those routines wrote (an input that chose them; before
+    2026-11-23 also the first run's ``Restart_Run``, ``nscf_*`` or output keywords; ``PARSEC_FILE_KEYWORD_ROUTINES=
+    fortran``) and that a run of the default routines reads: the message names the switch and
+    ``Use_Fortran_Routines: .true.``, and says so where ``fortran_counts()`` (the counts those routines build for this
+    input) are the file's.
     """
 
     lengths = np.linalg.norm(np.asarray(grid.cell.lattice_vectors, dtype=float), axis=1)
@@ -249,9 +262,14 @@ def _grid_difference(data: ParsecDat, grid, steps: np.ndarray) -> str:
         for direction in (getattr(settings, "fractional_translations", ()) or ())
     ]
     if fortran:
+        from ..Input.routines import file_keyword_routines_setting
+
         rule = (
             "this run builds the grid of the Fortran-derived routines (adjust_step of inipbc.f90; Restart_Run "
             "selects these routines)"
+            if file_keyword_routines_setting() == "fortran"
+            # (PARSEC_FILE_KEYWORD_ROUTINES=neutral: the input chose them, not Restart_Run)
+            else "this run builds the grid of the Fortran-derived routines (adjust_step of inipbc.f90)"
         )
         if any(translations):
             rule += (
@@ -268,12 +286,65 @@ def _grid_difference(data: ParsecDat, grid, steps: np.ndarray) -> str:
             "the run that writes it with the routines of this one (Use_Fortran_Routines: "
             f"{'.true.' if fortran else '.false.'}) builds it"
         )
-    return (
+    text = (
         f": parsec.dat holds {stored_counts} points along the lattice vectors, this run {counts}; {rule}, and the run "
         "that wrote the file built another one (the other routine set, or a symmetry search that kept the identity "
         f"alone, whose grid takes no translation). Write the file on this run's grid ({remedy}) or restart with the "
         "input of the run that wrote it"
     )
+    if fortran:
+        return text
+    # a file of the Fortran-derived routines read on the default routines (PARSEC_FILE_KEYWORD_ROUTINES=neutral): the
+    # input of its run chose those routines, or its keywords of the files did before 2026-11-23
+    theirs = None
+    if fortran_counts is not None:
+        try:
+            theirs = fortran_counts()
+        except Exception:  # noqa: BLE001 - a hint of the message only
+            theirs = None
+    switch = "PARSEC_FILE_KEYWORD_ROUTINES=fortran or Use_Fortran_Routines: .true."
+    if theirs is not None and [int(value) for value in theirs] == stored_counts:
+        return (
+            f": parsec.dat holds {stored_counts} points along the lattice vectors, this run {counts}; {rule}. The "
+            "file's are the counts the Fortran-derived routines build for this input: it is one of theirs (written "
+            "before 2026-11-23, when Restart_Run, the nscf keywords and the output keywords chose those routines, or "
+            f"under PARSEC_FILE_KEYWORD_ROUTINES=fortran); restart it with {switch}, or write it on this run's grid "
+            f"({remedy})"
+        )
+    return text + (
+        "; a file of the Fortran-derived routines (written before 2026-11-23, when Restart_Run, the nscf keywords and "
+        f"the output keywords chose them) restarts with {switch}"
+    )
+
+
+def fortran_routine_counts(translation):
+    """The points along the lattice vectors of the grid the Fortran-derived routines build for the input of
+    ``translation`` (its input parsed as with ``Use_Fortran_Routines: .true.``), ``None`` for an input already on
+    those routines, a cluster, a wire or slab, or where that parse or count fails.  The hint of the message of error
+    364 (:func:`check_restart_file`), asked for only there."""
+
+    import warnings
+
+    choice = getattr(translation, "routines", None)
+    cell = getattr(translation.problem, "periodic_cell", None)
+    if choice is None or choice.fortran or cell is None or int(getattr(cell, "dimensions", 3) or 3) != 3:
+        return None
+    try:
+        from ..Grid.pbc import fortran_grid_counts
+        from ..Input.parsec_input import _parse_parsec_input
+        from ..Input.routines import RoutineChoice
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            theirs = _parse_parsec_input(
+                translation.source,
+                pseudopotential_directory=getattr(translation, "pseudopotential_directory", None),
+                routines=RoutineChoice(fortran=True, requested=True),
+            )
+        counts, _ = fortran_grid_counts(theirs.problem.periodic_cell, theirs.problem.grid)
+        return [int(value) for value in counts]
+    except Exception:  # noqa: BLE001 - a hint of the message only
+        return None
 
 
 def restart_fields(
@@ -283,8 +354,11 @@ def restart_fields(
     spin_count: int,
     complex_wavefunctions: bool = False,
     spinors: bool = False,
+    fortran_counts=None,
 ) -> RestartFields:
     """Check ``data`` and put its potentials and densities on ``grid``.
+
+    ``fortran_counts``: see :func:`check_restart_file`.
 
     A spin-orbit file gives the potentials and densities of its two spin
     components (``vold(:,1:2)``, ``rho(:,2:3)``).
@@ -296,6 +370,7 @@ def restart_fields(
         spin_count=spin_count,
         complex_wavefunctions=complex_wavefunctions,
         spinors=spinors,
+        fortran_counts=fortran_counts,
     )
     if spinors:
         spin_count = 2
@@ -459,6 +534,7 @@ def load_restart(
     spin_count: int | None = None,
     complex_wavefunctions: bool = False,
     spinors: bool = False,
+    fortran_counts=None,
 ) -> tuple[RestartFields, SCFWarmStart]:
     """Read ``path`` and return its fields and the warm start of ``system``.
 
@@ -479,6 +555,7 @@ def load_restart(
         spin_count=spin_count,
         complex_wavefunctions=complex_wavefunctions,
         spinors=spinors,
+        fortran_counts=fortran_counts,
     )
     if spinors:
         if fields.extrapolate:

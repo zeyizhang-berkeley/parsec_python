@@ -341,6 +341,7 @@ def threaded_short_range_local_potential(grid, atoms, potentials, specifications
     from scipy.special import erf
 
     from parsec_python.V_ion.wire_slab import ShortRangeLocalPotential, gaussian_width
+    from parsec_python.Pseudopotential.local_filter import filtered_local_reach
 
     from .periodic_setup_fortran import _ordered_results, setup_threads
 
@@ -360,7 +361,8 @@ def threaded_short_range_local_potential(grid, atoms, potentials, specifications
         position = np.asarray(atom.position, dtype=np.float64)
         if specification.use_spline and atom.symbol not in splines:
             splines[atom.symbol] = potential.local_potential_spline(specification.local_angular_momentum, padding)
-        for translation in grid.compensation_image_translations(position, sigma):
+        reach = filtered_local_reach(potential, specification.local_angular_momentum)
+        for translation in grid.compensation_image_translations(position, sigma, reach):
             items.append((atom.symbol, charge, sigma, density_factor, position + translation))
 
     def work(item):

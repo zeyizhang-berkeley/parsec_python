@@ -59,7 +59,17 @@ from parsec_python.models import (
 DATA = Path(__file__).resolve().parents[2] / "tests" / "data"
 _SLAB_WIRE = "PARSEC_SLAB_WIRE_SECTORS"
 _OBLIQUE = "PARSEC_OBLIQUE_SECTORS"
+_GENERAL_GRID = "PARSEC_GENERAL_GRID_ACCELERATED"
 _ON = {_SLAB_WIRE: "auto", _OBLIQUE: "auto"}
+#: hcp Mg (FHI: the Fortran-derived routines, whose grid of this oblique cell is Fortran's general grid)
+_HCP_MG_FHI = (
+    "Boundary_Conditions: bulk\nPeriodic_System: .true.\nbegin Cell_Shape\n  6.06 0.0 0.0\n"
+    "  -3.03 5.2481139279 0.0\n  0.0 0.0 9.83\nend Cell_Shape\nLattice_Vector_Scale: 1.0 bohr\n"
+    "Grid_Spacing: 0.6\nExpansion_Order: 8\nStates_Num: 4\nCoordinate_Unit: Cartesian_Bohr\n"
+    "Atom_Types_Num: 1\nAtom_Type: Mg\nPseudopotential_Format: fhipp\nPotential_Num: 3\nLocal_Component: d\n"
+    "Core_Cutoff_Radius: 2.6\nbegin Electron_Per_Orbital\n2 0 0\nend Electron_Per_Orbital\n"
+    "begin Atom_Coord\n  0.0 3.4987 2.4575\n  3.03 1.7494 7.3725\nend Atom_Coord\n"
+)
 
 
 def _confined(periodicity, vectors, *, radius=4.0, spacing=0.5, order=4):
@@ -148,11 +158,19 @@ def _operations(reduction):
 
 class SwitchTests(unittest.TestCase):
     def test_the_switches(self) -> None:
-        for name, setting in ((_SLAB_WIRE, slab_wire_sectors_setting), (_OBLIQUE, oblique_sectors_setting)):
+        # (the wire and slab sectors and the oblique ones are the default since 2026-11-23; the test package turns
+        # the oblique ones off for the other modules: acceleration/tests/__init__.py)
+        for name, setting, default in (
+            (_SLAB_WIRE, slab_wire_sectors_setting, "auto"),
+            (_OBLIQUE, oblique_sectors_setting, "auto"),
+        ):
             with self.subTest(name=name):
-                for value, expected in (("", "off"), ("auto", "auto"), (" OFF ", "off"), ("Auto", "auto")):
+                for value, expected in (("", default), ("auto", "auto"), (" OFF ", "off"), ("Auto", "auto")):
                     with mock.patch.dict(os.environ, {name: value}):
                         self.assertEqual(setting(), expected)
+                with mock.patch.dict(os.environ):
+                    os.environ.pop(name, None)
+                    self.assertEqual(setting(), default)
                 with mock.patch.dict(os.environ, {name: "on"}), self.assertRaises(ValueError):
                     setting()
 
@@ -267,6 +285,63 @@ class WireSlabDetectionTests(unittest.TestCase):
                     except (TypeError, ValueError):
                         continue
                     self.assertIn(reason, periodic_sector_refusal(changed, features=True))
+
+    def test_the_floor_of_a_wire_or_slab(self) -> None:
+        # PARSEC_PERIODIC_SECTOR_FLOOR=auto: a wire or slab keeps the full grid below WIRE_SLAB_FLOOR_ENTRIES (the
+        # points of its slab times states), a bulk cell below 2^24; an integer or off applies to both
+        from parsec_python.acceleration import driver
+        from parsec_python.acceleration.SCF.gamma_hybrid_route import periodic_grid_points
+
+        problem = _hydrogen_problem(2, [Atom("H", (0.0, 0.0, 0.7)), Atom("H", (0.0, 0.0, -0.7))])
+        with mock.patch.dict(os.environ, {**_ON, "PARSEC_PERIODIC_SECTOR_FLOOR": "auto"}):
+            rows = periodic_grid_points(problem)
+            below, floor, switch = driver._cell_below_sector_floor(
+                problem, None, spin_polarized=False, floor=driver.periodic_sector_floor_setting(), spin_floor=0
+            )
+            self.assertEqual(floor, driver.WIRE_SLAB_FLOOR_ENTRIES)
+            self.assertEqual(below, (rows, 2))
+            self.assertEqual(switch, "PARSEC_PERIODIC_SECTOR_FLOOR")
+            self.assertEqual(driver._cell_sector_floor(problem, 1 << 24), driver.WIRE_SLAB_FLOOR_ENTRIES)
+        for raw, expected in (("off", 0), (str(2 * rows - 1), 2 * rows - 1), (str(2 * rows + 1), 2 * rows + 1)):
+            with self.subTest(raw=raw), mock.patch.dict(os.environ, {**_ON, "PARSEC_PERIODIC_SECTOR_FLOOR": raw}):
+                below, floor, _ = driver._cell_below_sector_floor(
+                    problem, None, spin_polarized=False, floor=driver.periodic_sector_floor_setting(), spin_floor=0
+                )
+                self.assertEqual(floor, expected)
+                self.assertEqual(below is not None, 2 * rows < expected)
+
+    def test_the_sectors_a_wire_or_slab_takes(self) -> None:
+        # PARSEC_PERIODIC_SECTOR_FLOOR=auto: at least WIRE_SLAB_MINIMUM_SECTORS solved sectors of at least
+        # WIRE_SLAB_SECTOR_ENTRIES grid points x states each; nothing refused under an integer, off, MPI or for a bulk cell
+        from types import SimpleNamespace
+
+        from parsec_python.acceleration import driver
+
+        problem = _hydrogen_problem(2, [Atom("H", (0.0, 0.0, 0.7)), Atom("H", (0.0, 0.0, -0.7))])
+        per_sector = driver.WIRE_SLAB_SECTOR_ENTRIES
+        minimum = driver.WIRE_SLAB_MINIMUM_SECTORS
+        self.assertEqual(driver.WIRE_SLAB_FLOOR_ENTRIES, per_sector * minimum)
+
+        def shortfall(rows, sectors, environment=None, mpi_context=None, case=problem):
+            with mock.patch.dict(os.environ, {**_ON, "PARSEC_PERIODIC_SECTOR_FLOOR": "auto", **(environment or {})}):
+                return driver._wire_slab_sector_shortfall(
+                    case, SimpleNamespace(size=rows), SimpleNamespace(group_order=sectors), mpi_context
+                )
+
+        rows_for = lambda sectors, factor=1.0: int(np.ceil(factor * per_sector * sectors / 2))  # noqa: E731 (2 states)
+        self.assertIsNone(shortfall(rows_for(minimum), minimum))
+        self.assertIsNone(shortfall(rows_for(32), 32))
+        self.assertIn("PARSEC_PERIODIC_SECTOR_FLOOR", shortfall(rows_for(32, 0.9), 32))
+        # one or two sectors (and fewer than the minimum) stay on the full grid whatever their size
+        for sectors in range(1, minimum):
+            with self.subTest(sectors=sectors):
+                self.assertIsNotNone(shortfall(rows_for(sectors, 100.0), sectors))
+        for environment in ({"PARSEC_PERIODIC_SECTOR_FLOOR": "off"}, {"PARSEC_PERIODIC_SECTOR_FLOOR": "16777216"}):
+            with self.subTest(environment=environment):
+                self.assertIsNone(shortfall(rows_for(2, 0.1), 2, environment))
+        self.assertIsNone(shortfall(rows_for(2, 0.1), 2, mpi_context=object()))
+        bulk = SimpleNamespace(grid=SimpleNamespace(periodicity=3), scf=problem.scf)
+        self.assertIsNone(shortfall(rows_for(2, 0.1), 2, case=bulk))
 
 
 def _hexagonal_cell(a=6.06, c=9.83, digits=10):
@@ -537,22 +612,15 @@ class ObliqueFrameTests(unittest.TestCase):
         self.assertIn("symmetric only to 2e-05 bohr", note)
 
     def test_the_command_line_refuses_an_unknown_value_before_the_hand_over(self) -> None:
-        # a cell on the general grid of the Fortran-derived routines goes to the reference solver: the switches are
-        # read before that
+        # a cell on the general grid of the Fortran-derived routines goes to the reference solver under
+        # PARSEC_GENERAL_GRID_ACCELERATED=off: the switches are read before that
         import contextlib
         import io
 
         from parsec_python.acceleration.cli import main
 
-        text = (
-            "Boundary_Conditions: bulk\nPeriodic_System: .true.\nbegin Cell_Shape\n  6.06 0.0 0.0\n"
-            "  -3.03 5.2481139279 0.0\n  0.0 0.0 9.83\nend Cell_Shape\nLattice_Vector_Scale: 1.0 bohr\n"
-            "Grid_Spacing: 0.6\nExpansion_Order: 8\nStates_Num: 4\nCoordinate_Unit: Cartesian_Bohr\n"
-            "Atom_Types_Num: 1\nAtom_Type: Mg\nPseudopotential_Format: fhipp\nPotential_Num: 3\nLocal_Component: d\n"
-            "Core_Cutoff_Radius: 2.6\nbegin Electron_Per_Orbital\n2 0 0\nend Electron_Per_Orbital\n"
-            "begin Atom_Coord\n  0.0 3.4987 2.4575\n  3.03 1.7494 7.3725\nend Atom_Coord\n"
-        )
-        for name in (_OBLIQUE, _SLAB_WIRE):
+        text = _HCP_MG_FHI
+        for name in (_OBLIQUE, _SLAB_WIRE, _GENERAL_GRID):
             with self.subTest(name=name), tempfile.TemporaryDirectory() as folder:
                 path = _input(Path(folder), text, [("Mg_FHIPP.DAT", "Mg_FHIPP.DAT")])
                 errors = io.StringIO()
@@ -561,6 +629,88 @@ class ObliqueFrameTests(unittest.TestCase):
                     code = main([str(path)])
                 self.assertEqual(code, 2)
                 self.assertIn(name, errors.getvalue())
+
+    def test_which_cells_take_the_frame_below_the_floor(self) -> None:
+        # the forces and moves of a cell whose sectors are those of the frame of its grid indices keep the full grid
+        # below the floor of the sectors (the full grid they had before PARSEC_OBLIQUE_SECTORS=auto was the default);
+        # those of a box keep their sectors (sector_forces)
+        from parsec_python.Input import parse_parsec_input
+        from parsec_python.acceleration.driver import _cell_below_sector_floor, _index_frame_cell
+
+        a = 10.26
+        species = {"Si": SpeciesPotential(path=DATA / "Si_POTRE.DAT", local_angular_momentum=0)}
+        atoms = [Atom("Si", (0.0, 0.0, 0.0)), Atom("Si", (a / 4, a / 4, a / 4))]
+        fcc = SinglePointInput(
+            atoms=atoms, pseudopotentials=species, grid=PeriodicGridSettings(spacing=0.6, expansion_order=8),
+            periodic_cell=PeriodicCell(np.array([[0.0, a / 2, a / 2], [a / 2, 0.0, a / 2], [a / 2, a / 2, 0.0]])),
+            scf=SCFSettings(number_of_states=8),
+        )
+        cube = replace(fcc, periodic_cell=PeriodicCell(np.diag([a, a, a])))
+        tetragonal = replace(fcc, periodic_cell=PeriodicCell(np.diag([a, a, 1.1 * a])))
+        with tempfile.TemporaryDirectory() as folder, warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            hcp = parse_parsec_input(_input(Path(folder), _HCP_MG_FHI, [("Mg_FHIPP.DAT", "Mg_FHIPP.DAT")])).problem
+            text = _HCP_MG_FHI.replace("  -3.03 5.2481139279 0.0", "  0.0 6.06 0.0")
+            general = parse_parsec_input(_input(Path(folder), text, [("Mg_FHIPP.DAT", "Mg_FHIPP.DAT")])).problem
+        self.assertTrue(_index_frame_cell(fcc))
+        self.assertTrue(_index_frame_cell(hcp))
+        self.assertTrue(_index_frame_cell(general))  # (the general grid of a diagonal cell of unequal steps)
+        self.assertFalse(_index_frame_cell(cube))
+        self.assertFalse(_index_frame_cell(tetragonal))  # (the default routines: per-axis steps, no frame)
+        floor = 2**24
+        for problem, frame in ((fcc, True), (hcp, True), (cube, False)):
+            with self.subTest(frame=frame):
+                below, _, _ = _cell_below_sector_floor(
+                    problem, None, spin_polarized=False, floor=floor, spin_floor=0,
+                    sector_forces=not _index_frame_cell(problem),
+                )
+                self.assertEqual(below is not None, frame)
+
+    def test_the_command_line_routes_a_cell_on_the_general_grid(self) -> None:
+        # PARSEC_GENERAL_GRID_ACCELERATED=auto: a Gamma-point cell on Fortran's general grid runs on the accelerated
+        # driver; off, an MPI run and the inputs not validated there keep the reference solver
+        from parsec_python.Input import parse_parsec_input
+        from parsec_python.acceleration.SCF.periodic_routes import (
+            GENERAL_GRID_FEATURE,
+            general_grid_accelerated_setting,
+        )
+        from parsec_python.acceleration.cli import _reference_only_features
+
+        for value, expected in (("", "auto"), (" OFF ", "off"), ("Auto", "auto")):
+            with mock.patch.dict(os.environ, {_GENERAL_GRID: value}):
+                self.assertEqual(general_grid_accelerated_setting(), expected)
+        with mock.patch.dict(os.environ, {_GENERAL_GRID: "on"}), self.assertRaises(ValueError):
+            general_grid_accelerated_setting()
+
+        def features(text, environment=None, mpi=False, device=True):
+            with tempfile.TemporaryDirectory() as folder, warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                translation = parse_parsec_input(_input(Path(folder), text, [("Mg_FHIPP.DAT", "Mg_FHIPP.DAT")]))
+            self.assertTrue(translation.routines.fortran)
+            with mock.patch.dict(os.environ, environment or {}), mock.patch(
+                "parsec_python.acceleration.Parallel.mpi.requested", return_value=mpi
+            ):
+                return _reference_only_features(
+                    translation, accelerated_backend_selected=False, general_grid_on_device=device
+                )
+
+        forces = _HCP_MG_FHI.replace("Atom_Types_Num:", "Calculate_Force: .true.\nAtom_Types_Num:")
+        self.assertEqual(features(_HCP_MG_FHI), [])
+        self.assertEqual(features(forces), [])
+        self.assertEqual(features(forces, {_GENERAL_GRID: "off"}), [GENERAL_GRID_FEATURE])
+        # (an MPI run and the CPU backends keep the reference solver, and say why)
+        self.assertEqual(features(forces, mpi=True)[-1:], ["a periodic cell on Fortran's general grid in an MPI run (--mpi)"])
+        cpu = features(forces, device=False)
+        self.assertEqual(len(cpu), 1)
+        self.assertIn("general grid on a CPU backend", cpu[0])
+        bands = _HCP_MG_FHI + "begin bandstruc\n1 0 0 0 0.5 0 0 G-M\nend bandstruc\n"
+        # (a band structure follows the accelerated SCF; under off the cell goes to the reference solver)
+        self.assertEqual(features(bands), [])
+        self.assertEqual(features(bands, {_GENERAL_GRID: "off"}), [GENERAL_GRID_FEATURE])
+        restart = _HCP_MG_FHI.replace("Atom_Types_Num:", "Restart_Run: .true.\nAtom_Types_Num:")
+        self.assertTrue(any("Restart_Run" in item and "general grid" in item for item in features(restart)))
+        spin = _HCP_MG_FHI.replace("Atom_Types_Num:", "Spin_Polarization: .true.\nAtom_Types_Num:")
+        self.assertTrue(any("spin" in item and "general grid" in item for item in features(spin)))
 
 
 _SLAB_INPUT = """\
@@ -692,6 +842,59 @@ class SectorSCFTests(unittest.TestCase):
                         self.assertIn("frame of the grid indices", dict(result.backend.details)["symmetry_detection"])
                     forces[route] = driver.compute_forces(system, result, symmetrize=operations is not None).symmetrized
         self.assertGreater(float(np.max(np.abs(forces["off"]))), 1.0e-3)
+        np.testing.assert_allclose(forces["auto"], forces["off"], rtol=0.0, atol=1.0e-8)
+
+    def test_the_forces_of_a_cell_on_the_general_grid(self) -> None:
+        # tetragonal Si8 (FHI: Fortran's general grid, sides of different steps) with an atom moved along x: the
+        # accelerated forces of the full grid (which raised NotImplementedError before 2026-11-23) are those of the
+        # reference solver, and the forces of the sectors of the frame those of the full grid
+        from parsec_python.Forces import compute_periodic_forces
+        from parsec_python.Input import parse_parsec_input
+        from parsec_python.SCF import prepare_periodic_single_point, run_scf
+        from parsec_python.acceleration import driver
+        from parsec_python.acceleration.Forces.sector_symmetry import sector_symmetry_operations
+
+        a, c = 10.26, 11.2
+        fractions = [(0, 0, 0), (0, 0.5, 0.5), (0.5, 0, 0.5), (0.5, 0.5, 0)]
+        fractions += [(x + 0.25, y + 0.25, z + 0.25) for x, y, z in fractions]
+        positions = [np.array([x * a, y * a, z * c]) for x, y, z in fractions]
+        positions[0] = positions[0] + np.array([0.05, 0.0, 0.0])
+        text = (
+            "Boundary_Conditions: bulk\nPeriodic_System: .true.\nbegin Cell_Shape\n"
+            f"  {a} 0.0 0.0\n  0.0 {a} 0.0\n  0.0 0.0 {c}\nend Cell_Shape\nLattice_Vector_Scale: 1.0 bohr\n"
+            "Grid_Spacing: 0.5\nExpansion_Order: 12\nStates_Num: 22\nConvergence_Criterion: 1.0e-10\n"
+            "Diag_Tolerance: 1.0e-10\nFermi_Temp: 300.0\nCorrelation_Type: ca\nEigensolver: chebdav\n"
+            "Coordinate_Unit: Cartesian_Bohr\nAtom_Types_Num: 1\nAtom_Type: Si\nPseudopotential_Format: fhipp\n"
+            "Potential_Num: 3\nLocal_Component: d\nCore_Cutoff_Radius: 2.1\nbegin Electron_Per_Orbital\n2 2 0\n"
+            "end Electron_Per_Orbital\nbegin Atom_Coord\n"
+            + "".join("  " + " ".join(f"{v:.10f}" for v in p) + "\n" for p in positions)
+            + "end Atom_Coord\n"
+        )
+        # (the three-channel Si table of the hybrid examples)
+        table = Path(__file__).resolve().parents[4] / "examples" / "3d_hybrid_functionals" / "Si_FHIPP.DAT"
+        forces, energies = {}, {}
+        with tempfile.TemporaryDirectory() as folder, warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            shutil.copy(table, Path(folder) / "Si_FHIPP.DAT")
+            problem = parse_parsec_input(_input(Path(folder), text, [])).problem
+            self.assertTrue(getattr(problem.grid, "fortran_routines", False))
+            for route in ("off", "auto"):
+                with mock.patch.dict(os.environ, {_OBLIQUE: route, "PARSEC_PERIODIC_SECTOR_FLOOR": "off"}):
+                    system = driver.prepare_single_point(problem, backend="cupy", sector_forces=True)
+                    self.assertTrue(getattr(system.grid, "is_general_periodic", False))
+                    result = driver.run_scf(system)
+                    operations = sector_symmetry_operations(system)
+                    self.assertEqual(operations is not None, route == "auto")
+                    energies[route] = float(result.energies.total)
+                    forces[route] = driver.compute_forces(system, result).symmetrized
+            reference = prepare_periodic_single_point(problem)
+            outcome = run_scf(reference)
+            energies["reference"] = float(outcome.energies.total)
+            forces["reference"] = compute_periodic_forces(reference, outcome).symmetrized
+        self.assertGreater(float(np.max(np.abs(forces["off"]))), 1.0e-3)
+        self.assertAlmostEqual(energies["off"], energies["reference"], delta=1.0e-8)
+        self.assertAlmostEqual(energies["auto"], energies["off"], delta=1.0e-8)
+        np.testing.assert_allclose(forces["off"], forces["reference"], rtol=0.0, atol=1.0e-7)
         np.testing.assert_allclose(forces["auto"], forces["off"], rtol=0.0, atol=1.0e-8)
 
 

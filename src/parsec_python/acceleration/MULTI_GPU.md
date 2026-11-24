@@ -399,6 +399,26 @@ run on several nodes takes the decisions of one node.
   the operator are sums over the owners' sectors that the root adds in the
   order of one process. The window of the outer DIIS keeps its copies on the
   owners; only its small matrices come to the root.
+- The sector orbitals of a periodic cell at the Gamma point take the routes
+  of one process instead (since 2026-11-23, `PARSEC_MPI_EXCHANGE_POOL=auto`;
+  `off` keeps the tiles above): every owner broadcasts every column of its
+  sectors, and every rank gathers all of them on its home device into the
+  coset blocks of their half-cell translations
+  (`Hamiltonian/exchange_translations.py`) or, for a channel of at least 32
+  sectors, into one full-grid block, where those fit the free memory of every
+  rank; the replicas go once the copy is made. Every rank holds a whole copy
+  of the gathered orbitals and their `W` (2 x 8 N M / |T| bytes for the coset
+  blocks, 2 x 8 N M for the full-grid block), so a channel of fewer sectors
+  without translation classes keeps the tiles above, where the block paid
+  nothing on the measured cells (2 to 16 sectors) and took up to 9 GiB more
+  per GPU (diamond 512 atoms with a moved atom). A build below the floor of one
+  process (1e9 pair-density points) runs whole on the home device of every
+  rank, so every owner folds `W` into its sectors from its own copy with no
+  message (the bits of one process); a larger build divides its tiles among
+  the GPUs of all ranks, and the folded parts of `W` go to the owners as
+  above. The occupied build keeps the gathered blocks for the completion of
+  every column, which forms only the empty columns. A small build of the one
+  sector of the identity runs on its owner's GPU alone.
 - Orbitals travel as device arrays where Cray MPICH takes them: the runner
   sets `MPICH_GPU_SUPPORT_ENABLED=1` before `MPI_Init` for an input with a
   hybrid `Correlation_Type`; `PARSEC_MPI_EXCHANGE_TRANSPORT=host` stages
@@ -1837,13 +1857,23 @@ and under `off` (one eigensolver GPU, the pair tiles on all of them). Since
 2026-11-22 the MPI runner runs the SCF of such a cell as well
 (`driver._mpi_periodic_hybrid`): the same sectors above the same floor, each basis
 on one GPU of its rank, the sector of the identity on the root's first GPU below
-it, and the pair tiles of every build on every GPU of every rank with the cuFFT
-pair solver of the cell (the tiles of the sectors; the translation classes of one
-process are not built there, so a cell that fits one node is faster in `main.py`:
-Si64 PBE0 24.4 s of SCF in one process, 42.4 s on one rank of four GPUs, 12.2 s on
-four ranks, the same energy; diamond 512 atoms PBE0 25.6 s in one process, 62.9 s
-on four ranks, 33.5 s on two nodes of four ranks); its forces and moves stay with
-`main.py`. With k-points or
+it, the exchange with the cuFFT pair solver of the cell. Until 2026-11-23 the
+pair tiles of the sectors ran on every GPU of every rank, slower than the
+translation classes of one process (Si64 PBE0 24.4 s of SCF in one process,
+42.4 s on one rank of four GPUs); since then every rank gathers the sectors
+into the coset blocks of their half-cell translations or (from 32 sectors)
+into one full-grid block as one process does, a copy on every rank
+(`PARSEC_MPI_EXCHANGE_POOL=auto`, "Hybrid functionals
+on several nodes"), and a small build of the sector of the identity stays on
+its GPU. First runs on one node of 4 A100, tiles -> classes: Si64 PBE0 on one
+rank of four GPUs 52.2 -> 34.2 s of SCF (35.0 s in `main.py`, the same
+energy, eigenvalues and density to the last bit), on four ranks 20.6 -> 16.6
+s; MgO 64 atoms PBE0 on one rank 97.8 -> 47.3 s (48.0 s in `main.py`, the same
+bits), on four ranks 35.7 -> 21.3 s; diamond 512 atoms PBE0 on four ranks 74.0
+-> 21.5 s against 36.0 s in `main.py` and on four nodes of four ranks 28.6 ->
+16.2 s, the same energy (the GPU peak rises by 0.33 GiB on four ranks: every
+rank holds a copy of the coset blocks and their `W`). Its forces and moves
+stay with `main.py`. With k-points or
 spin the k-point pool
 deals the k-points (and spin channels) to one worker per GPU, each keeping its
 k-points' orbitals, `W` and `xi` on its device; the pair tiles of a build go

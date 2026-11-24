@@ -5,10 +5,11 @@ the input Fortran PARSEC was run with (``Spin_Polarization: .true.``) and
 what its ``parsec.out`` reports for the last SCF step: the energy terms, the
 levels and occupations of each spin channel, the electrons per channel, the
 Fermi level and the force tables.  The pseudopotentials are files of the test
-data: ``spin_*_POTRE.DAT`` are the potentials of the library under
-``src/pp_generation`` as the Fortran runs read them (written while the
-converter still resampled linearly), the others belong to a core-corrected
-case.
+data: ``spin_*_POTRE.DAT`` are copies of potentials of the library under
+``src/pp_generation`` (its UPF files converted with the cubic resampling of
+``src/tools/upf_to_parsec.py``), kept here so that a later change of the
+library does not move the Fortran numbers; the others belong to a
+core-corrected case.
 
 The helpers write such an input with its files into a directory and compare
 a result of this package with the Fortran numbers.  Two solutions that

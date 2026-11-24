@@ -14,3 +14,8 @@ os.environ.setdefault("PARSEC_SECTOR_OVERHEAD", "off")
 # the one GPU of small periodic sector bases (PARSEC_PERIODIC_SECTOR_DEVICES) is off here unless a test sets it;
 # test_periodic_sector_devices.py checks the default.
 os.environ.setdefault("PARSEC_PERIODIC_SECTOR_DEVICES", "all")
+# Their oblique cells (hexagonal, primitive fcc, the general grid of the Fortran-derived routines) keep the full grid
+# they were written for: the sectors of the frame of their grid indices (PARSEC_OBLIQUE_SECTORS, auto by default since
+# 2026-11-23), which the floor being off here would give every such cell, are off here unless a test sets them;
+# test_lowdim_sectors.py checks the default and runs them.
+os.environ.setdefault("PARSEC_OBLIQUE_SECTORS", "off")

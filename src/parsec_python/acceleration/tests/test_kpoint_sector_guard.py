@@ -196,6 +196,38 @@ class GuardTestsOnMadeUpLevels(unittest.TestCase):
         self.assertIsNone(light.fractional_report(levels, filled))
         self.assertAlmostEqual(light.fractional_measure(levels, filled), report.largest / 27, delta=1e-15)
 
+    def test_fractional_degenerate_levels_of_one_sector(self) -> None:
+        # PARSEC_SPIN_GUARD_DOUBLETS on the k-point sectors: a half-filled pair of one sector (sector 1, the e_g pair of
+        # Oh in one sector of the commuting involutions) passes test 3 and is reported by its own check, with the
+        # weight of the k-point; partners in two sectors are test 3's; integer pairs and split levels are not reported
+        levels = [np.array([-1.0, -0.5, -0.5, 0.2, 0.3])]
+        owners = np.array([0, 1, 1, 2, 3])
+        kept = {0: (owners, np.arange(5))}
+        half = [np.array([1.0, 0.5, 0.5, 0.0, 0.0])]
+        solver = _guard_solver([_Plan(4)], [1.0], kept)
+        self.assertIsNone(solver.fractional_report(levels, half))
+        report = solver.sector_doublet_report(levels, half)
+        self.assertIsNotNone(report)
+        self.assertTrue(report.doublet)
+        self.assertAlmostEqual(report.largest, 0.5, delta=1e-15)
+        self.assertEqual(len(report.lines), 1)
+        self.assertIn("2 levels", report.lines[0])
+        self.assertIn("of sector 1", report.lines[0])
+        from parsec_python.acceleration.SCF.spin_sectors import SECTOR_DOUBLET_REASON
+
+        self.assertEqual(report.reason, SECTOR_DOUBLET_REASON)
+        self.assertIsNone(solver.sector_doublet_report(levels, [np.array([1.0, 1.0, 1.0, 0.0, 0.0])]))
+        split = [np.array([-1.0, -0.5, -0.4, 0.2, 0.3])]
+        self.assertIsNone(solver.sector_doublet_report(split, half))
+        across = {0: (np.array([0, 1, 2, 2, 3]), np.arange(5))}
+        self.assertIsNone(_guard_solver([_Plan(4)], [1.0], across).sector_doublet_report(levels, half))
+        self.assertIsNotNone(_guard_solver([_Plan(4)], [1.0], across).fractional_report(levels, half))
+        # w_k min(f, 1 - f): 1/27 of a half-filled pair is below the tolerance, 1/8 above it
+        self.assertIsNone(_guard_solver([_Plan(4)], [1.0 / 27], kept).sector_doublet_report(levels, half))
+        self.assertIsNotNone(_guard_solver([_Plan(4)], [1.0 / 8], kept).sector_doublet_report(levels, half))
+        # nor on a task whose sectors assume nothing
+        self.assertIsNone(_guard_solver([_Plan(4, assumed=False)], [1.0], kept).sector_doublet_report(levels, half))
+
     def test_the_densities_against_the_operations_of_the_cell(self) -> None:
         # the silicon cube at the Gamma point alone, no symmetrized density: every operation of the cell is assumed,
         # and a density that breaks them is measured (a symmetric one is not)

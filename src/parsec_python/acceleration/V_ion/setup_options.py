@@ -75,16 +75,30 @@ def setup_option_details(problem, selection) -> tuple[tuple[str, str], ...]:
                 "applied by the readable periodic preparation (fourier_f.f90)",
             )
         )
+    if specifications:
+        from parsec_python.Pseudopotential.local_filter import local_filter_setting
+
+        if local_filter_setting() != "off":
+            details.append(
+                (
+                    "local_potential_filter",
+                    "the local potential tables Fourier-filtered to the grid, Coulomb tail exact (PARSEC_LOCAL_FILTER)",
+                )
+            )
     return tuple(details)
 
 
 def hash_pseudopotential_setup(digest, specification: SpeciesPotential) -> None:
     """Add the non-default set-up options of one species to ``digest``."""
 
+    from parsec_python.Pseudopotential.local_filter import local_filter_setting
     from parsec_python.Pseudopotential.radial_quadrature import kb_quadrature_setting
 
     if kb_quadrature_setting() != "trapezoid":
         digest.update(f"kb-quadrature-{kb_quadrature_setting()}".encode("utf-8"))
+    if local_filter_setting() != "off":
+        # the local potential tables filtered to the grid (PARSEC_LOCAL_FILTER); off keeps the key of before
+        digest.update(f"local-filter-{local_filter_setting()}".encode("utf-8"))
     if getattr(specification, "old_interpolation", False):
         digest.update(b"old-interpolation")
     if getattr(specification, "has_fourier_filter", False):

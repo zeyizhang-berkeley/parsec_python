@@ -41,6 +41,30 @@ shared orbits.  ``g'_a`` of sector orbitals on those orbits is
 ``(d/h^3) sum_n f_n 2 x_w (B x)_w / |O_w|``.  The fields leave and enter as
 Cartesian components at the representatives (:class:`OrbitVectorFields`).
 
+Weighted sectors (``PARSEC_ORBITAL_GROUP_META_GGA``).  The one-dimensional
+sectors of a subgroup ``H`` of the point group ``G`` with weights
+(:class:`..Symmetry.axis_reflection.PointGroupReduction`) have operations
+that exchange axes (S4 of D2d), with no common eigenvectors: a derivative of
+a sector function lies in no sector of ``H``.  Its Cartesian components at
+the representatives of every orbit of ``H`` hold it, since ``q(h r) =
+lambda(h) q(r)`` gives ``(G q)(h r) = lambda(h) O_h (G q)(r)``; so
+
+``B_{lambda,c}[w', w] = sum_{j in O_w} G_c[rep(w'), j] phase_lambda(j) sqrt(m_w' / m_w)``
+
+(every orbit ``w'`` of ``H`` a row, no phase on it,
+:func:`reduce_to_orbits`) gives ``x^T U^T H_tau U x = sum_c sum_w' vtau_w'
+(B_c x)_w'^2``, an identity of quadratic forms and so of the matrices, and the
+orbital form's ``P`` restricts the sector to its own orbits.  ``tau`` and
+``g`` of the solved states (their occupations carry the weights) are then
+invariant and turning fields of ``H`` and are averaged over ``G`` as the
+density is: ``tau`` over the right cosets ``c`` (the average over each orbit
+of ``G`` where the fields keep one value per orbit of ``G``), and
+``g_G(r) = (1/[G:H]) sum_c O_c^T g(c r)``, with ``g(h r_w) = O_h g(r_w)``
+(:class:`WeightedOrbitMaps`).  For a level of ``G`` held by states of total
+weight ``d`` these are the sums over all its partners (Schur's
+orthogonality), so ``vtau`` and ``W`` keep every operation of ``G`` and the
+term commutes with it.
+
 Each bound term reports Gershgorin's bound of its eigenvalues
 (``spectral_margin``), which the filter's upper bound takes in
 (:func:`parsec_python.acceleration.Eigensolvers.spectral_bounds.with_orbital_term`):
@@ -127,8 +151,43 @@ def reduce_between_sectors(decomposition, matrix: sp.csr_matrix, source: int, ta
     ``sqrt(m_w')`` times its value at the representative row.
     """
 
+    return _reduce_rows(decomposition, matrix, source, decomposition.sector_orbit_indices(target))
+
+
+#: The target of a :class:`SectorDerivative` of weighted sectors: the Cartesian component at every orbit.
+ALL_ORBITS = -1
+
+
+def weighted_sectors(decomposition) -> bool:
+    """Whether ``decomposition`` holds the weighted sectors of a subgroup (a :class:`PointGroupReduction`)."""
+
+    from ..Symmetry.axis_reflection import PointGroupReduction
+
+    return decomposition is not None and isinstance(getattr(decomposition, "reduction", None), PointGroupReduction)
+
+
+def reduce_to_orbits(decomposition, matrix: sp.csr_matrix, source: int) -> sp.csr_matrix:
+    """``M U_source`` at the representatives of every orbit, each row times ``sqrt(m_w')`` (weighted sectors).
+
+    ``B[w', w] = sum_{j in O_w} M[rep(w'), j] phase_source(j) sqrt(m_w' / m_w)`` for every orbit ``w'`` of the
+    reduction: where ``M`` is a Cartesian derivative, the component of a vector field that turns with the
+    operations (see the module).
+    """
+
+    size = int(decomposition.wedge_size)
+    return _reduce_rows(decomposition, matrix, source, np.arange(size, dtype=np.int64))
+
+
+def target_orbit_indices(decomposition, target: int) -> np.ndarray:
+    """The orbits of the rows of a derivative into ``target`` (a sector, or :data:`ALL_ORBITS`)."""
+
+    if target == ALL_ORBITS:
+        return np.arange(int(decomposition.wedge_size), dtype=np.int64)
+    return decomposition.sector_orbit_indices(target)
+
+
+def _reduce_rows(decomposition, matrix: sp.csr_matrix, source: int, target_orbits: np.ndarray) -> sp.csr_matrix:
     reduction = decomposition.reduction
-    target_orbits = decomposition.sector_orbit_indices(target)
     selected = sp.csr_matrix(matrix)[reduction.representative_rows[target_orbits], :].tocoo()
     column_orbits = reduction.full_to_wedge[selected.col]
     columns = decomposition.orbit_to_sector[source, column_orbits]
@@ -164,6 +223,8 @@ def sector_derivatives(grid, decomposition, representations=None, *, check: bool
     gradient = grid_gradient(grid).matrices
     if decomposition is None:
         return {None: tuple(SectorDerivative(sp.csr_matrix(matrix), None) for matrix in gradient)}
+    if weighted_sectors(decomposition):
+        return _weighted_sector_derivatives(gradient, decomposition, representations, check=check)
     directions, characters = derivative_directions(decomposition.reduction)
     rotated = []
     for axis in range(3):
@@ -198,6 +259,136 @@ def sector_derivatives(grid, decomposition, representations=None, *, check: bool
             pieces.append(SectorDerivative(matrix, target))
         result[int(representation)] = tuple(pieces)
     return result
+
+
+def _weighted_sector_derivatives(gradient, decomposition, representations, *, check: bool) -> dict:
+    """``{representation: (SectorDerivative x 3)}`` of weighted sectors: the Cartesian derivatives at every orbit."""
+
+    reduction = decomposition.reduction
+    rows = np.asarray(reduction.representative_rows, dtype=np.int64)
+    roots = np.sqrt(np.asarray(reduction.multiplicities, dtype=np.float64))
+    wanted = range(decomposition.representation_count) if representations is None else representations
+    rng = np.random.default_rng(20261123)
+    matrices = [sp.csr_matrix(matrix) for matrix in gradient]
+    result = {}
+    for representation in wanted:
+        pieces = []
+        vector = expanded = None
+        if check:
+            vector = rng.standard_normal(decomposition.sector_size(representation))
+            expanded = decomposition.expand_vector(vector, representation)
+        for matrix in matrices:
+            reduced = reduce_to_orbits(decomposition, matrix, representation)
+            if check:
+                expected = (matrix @ expanded)[rows] * roots
+                error = float(np.max(np.abs(reduced @ vector - expected), initial=0.0))
+                if error > 1e-10 * max(1.0, float(np.max(np.abs(expected), initial=0.0))):
+                    raise RuntimeError(f"the derivative of weighted sector {representation} is not exact ({error:.2e})")
+            pieces.append(SectorDerivative(reduced, ALL_ORBITS))
+        result[int(representation)] = tuple(pieces)
+    return result
+
+
+class WeightedOrbitMaps:
+    """The fields of the meta-GGA term of weighted sectors between the orbits of ``H`` and the layout of the SCF.
+
+    ``reduction`` is the :class:`..Symmetry.axis_reflection.PointGroupReduction` of the sectors (``H`` with the
+    operations of ``G`` and its right coset representatives ``c``), ``fields`` the reduction of the SCF's scalar
+    fields: the orbits of ``G`` (:class:`..Symmetry.field_orbits.FieldOrbitReduction`, ``PARSEC_SECTOR_FIELD_GROUP=full``)
+    or those of ``H`` (``subgroup``).  Vector fields are Cartesian components at the representatives
+    (:class:`OrbitVectorFields`).
+
+    * :meth:`scalar_to_subgroup`, :meth:`vector_to_subgroup`: ``vtau`` and ``W`` (invariant, turning with ``G``) at
+      the representatives of ``H``: ``W(r_w) = O_k W(r_W)`` with ``k`` the operation of ``G`` that carries the
+      representative of the orbit ``W`` of ``G`` onto ``r_w``.
+    * :meth:`scalar_average`, :meth:`vector_average`: ``tau`` and ``g`` of the solved states (invariant, turning with
+      ``H``) averaged over ``G`` at the representatives of the layout: ``f_G = (1/[G:H]) sum_c f(c r)`` and
+      ``g_G(r) = (1/[G:H]) sum_c O_c^T g(c r)``, ``g(h r_w) = O_h g(r_w)``.
+    """
+
+    def __init__(self, grid, reduction, fields) -> None:
+        from ..Symmetry.axis_reflection import _grid_row_mapping_operation
+
+        self.reduction = reduction
+        self.fields = fields
+        self.full_layout = fields is not reduction
+        if self.full_layout and getattr(fields, "subgroup", None) is not reduction:
+            raise ValueError("the fields of weighted sectors keep the orbits of G or of its solved subgroup")
+        subgroup_vectors = orbit_vector_fields(grid, reduction)
+        subgroup_rows = np.asarray(reduction.representative_rows, dtype=np.int64)
+        # The distinct signed permutations of the products below (at most 48) and an index per entry.
+        self._table: list[np.ndarray] = []
+        self._codes: dict[bytes, int] = {}
+        if self.full_layout:
+            field_vectors = orbit_vector_fields(grid, fields)
+            self.subgroup_to_field = np.asarray(fields.subgroup_to_field, dtype=np.int64)
+            operations = np.rint(field_vectors.operations).astype(np.int8)
+            carried = field_vectors.operation_of_row[subgroup_rows].astype(np.int64)
+            self._to_subgroup = self._encode(operations[carried])
+        layout_rows = np.asarray(fields.representative_rows, dtype=np.int64)
+        coset_operations = np.asarray(reduction.coset_operations, dtype=np.int8)
+        translations = getattr(reduction, "coset_translations", None)
+        subgroup_operations = np.rint(subgroup_vectors.operations).astype(np.int8)
+        orbits, codes = [], []
+        for index, operation in enumerate(coset_operations):
+            images = _grid_row_mapping_operation(
+                grid, operation, 1.0e-10, selected_rows=layout_rows,
+                translation=None if translations is None else translations[index],
+            )
+            if images is None:
+                raise RuntimeError("a coset representative of the point group does not map the grid")
+            images = np.asarray(images, dtype=np.int64)
+            orbits.append(np.asarray(reduction.full_to_wedge, dtype=np.int64)[images])
+            within = subgroup_operations[subgroup_vectors.operation_of_row[images].astype(np.int64)]
+            # O_c^T O_h for every representative of the layout.
+            codes.append(self._encode(np.einsum("ji,rjk->rik", operation.astype(np.int64), within.astype(np.int64))))
+        self._coset_orbits = orbits
+        self._coset_codes = codes
+        self.table = np.stack(self._table).astype(np.float64)
+
+    def _encode(self, matrices: np.ndarray) -> np.ndarray:
+        matrices = np.asarray(matrices, dtype=np.int8)
+        codes = np.empty(matrices.shape[0], dtype=np.int16)
+        unique, inverse = np.unique(matrices.reshape(matrices.shape[0], 9), axis=0, return_inverse=True)
+        for position, row in enumerate(unique):
+            key = row.tobytes()
+            if key not in self._codes:
+                self._codes[key] = len(self._table)
+                self._table.append(row.reshape(3, 3).copy())
+            codes[np.asarray(inverse).reshape(-1) == position] = self._codes[key]
+        return codes
+
+    def _turned(self, codes: np.ndarray, components: np.ndarray, out: np.ndarray) -> None:
+        """``out[:, i] += table[codes[i]] @ components[:, i]``."""
+
+        for code in np.unique(codes):
+            selected = codes == code
+            out[:, selected] += self.table[int(code)] @ components[:, selected]
+
+    def scalar_to_subgroup(self, values) -> np.ndarray:
+        values = np.asarray(values, dtype=np.float64)
+        return np.ascontiguousarray(values[self.subgroup_to_field]) if self.full_layout else values
+
+    def vector_to_subgroup(self, components) -> np.ndarray:
+        components = np.asarray(components, dtype=np.float64)
+        if not self.full_layout:
+            return components
+        result = np.zeros((3, self.subgroup_to_field.size), dtype=np.float64)
+        self._turned(self._to_subgroup, components[:, self.subgroup_to_field], result)
+        return result
+
+    def scalar_average(self, values) -> np.ndarray:
+        values = np.asarray(values, dtype=np.float64)
+        if self.full_layout:
+            return self.fields.from_subgroup(values)
+        return self.reduction.symmetrize_values(values)
+
+    def vector_average(self, components) -> np.ndarray:
+        components = np.asarray(components, dtype=np.float64)
+        result = np.zeros((3, self._coset_orbits[0].size), dtype=np.float64)
+        for orbits, codes in zip(self._coset_orbits, self._coset_codes):
+            self._turned(codes, components[:, orbits], result)
+        return result / float(len(self._coset_orbits))
 
 
 class OrbitVectorFields:
@@ -748,6 +939,8 @@ class DeviceMetaGGA:
         self.directions = np.eye(3)
         self.statistics = dict(build_seconds=0.0, bind_seconds=0.0, tau_seconds=0.0, tau_calls=0, binds=0)
         self._bound_none = True
+        # Weighted sectors: the maps between the orbits of their subgroup and the layout of the fields.
+        self.weighted_maps: WeightedOrbitMaps | None = None
 
     def operators(self) -> dict:
         """The device operators that hold the term: representation (``None``: full grid) -> operator."""
@@ -786,12 +979,17 @@ class DeviceMetaGGA:
         decomposition = None if self.sectors is None else self.sectors.decomposition
         wanted = [representation for representation in operators if representation is not None]
         derivatives = sector_derivatives(self.grid, decomposition, wanted if decomposition is not None else None)
-        if decomposition is not None:
+        if weighted_sectors(decomposition):
+            # Cartesian components at every orbit of the subgroup (see the module).
+            if self.reducer is None:
+                raise NotImplementedError("the meta-GGA term of weighted sectors needs the fields on orbits")
+            self.weighted_maps = WeightedOrbitMaps(self.grid, decomposition.reduction, self.reducer.reduction)
+        elif decomposition is not None:
             self.directions = derivative_directions(decomposition.reduction)[0]
         for representation, operator in operators.items():
             pieces = derivatives[representation]
             orbits = [
-                None if item.target is None else decomposition.sector_orbit_indices(item.target) for item in pieces
+                None if item.target is None else target_orbit_indices(decomposition, item.target) for item in pieces
             ]
             source = None if representation is None else decomposition.sector_orbit_indices(representation)
             device_id = int(operator.effective_potential.device.id)
@@ -852,8 +1050,14 @@ class DeviceMetaGGA:
             components = np.stack([self._values(component) for component in gradient_flux])
             if components.shape != (3, values.size):
                 raise ValueError("W needs three components in the layout of vtau")
-            # Along the derivative directions: W'_a = sum_c Q[c, a] W_c.
-            rotated = np.ascontiguousarray(self.directions.T @ components)
+            if self.weighted_maps is not None:
+                # Cartesian components at the representatives of the subgroup.
+                rotated = np.ascontiguousarray(self.weighted_maps.vector_to_subgroup(components))
+            else:
+                # Along the derivative directions: W'_a = sum_c Q[c, a] W_c.
+                rotated = np.ascontiguousarray(self.directions.T @ components)
+        if self.weighted_maps is not None:
+            values = self.weighted_maps.scalar_to_subgroup(values)
         uploaded: dict[int, Any] = {}
         for representation, operator in self.operators().items():
             term = self.terms[representation]
@@ -889,6 +1093,12 @@ class DeviceMetaGGA:
 
         if isinstance(wavefunctions, CuPySymmetryOrbitals):
             tau, along = self._sector_tau(cp, wavefunctions, occupations, gradient)
+            maps = self.weighted_maps
+            if maps is not None:
+                # The partners that no sector holds: the averages over the full group (see the module).
+                tau = maps.scalar_average(tau)
+                if gradient:
+                    along = maps.vector_average(along)
             tau = factor * tau
             if gradient:
                 cartesian = self.directions @ (gradient_factor * along)
@@ -965,7 +1175,7 @@ class DeviceMetaGGA:
                     for axis, (orbits, values) in enumerate(zip(term.shared_orbits, products)):
                         along[axis, orbits] += cp.asnumpy(values) / multiplicities[orbits]
                 for target, values in zip(term.targets, sums):
-                    orbits = decomposition.sector_orbit_indices(target)
+                    orbits = target_orbit_indices(decomposition, target)
                     wedge[orbits] += cp.asnumpy(values) / multiplicities[orbits]
         return wedge, along
 
@@ -975,13 +1185,18 @@ __all__ = [
     "DeviceKineticTerm",
     "DeviceMetaGGA",
     "HostKineticHamiltonian",
+    "ALL_ORBITS",
     "OrbitVectorFields",
     "SectorDerivative",
+    "WeightedOrbitMaps",
     "cartesian_operations",
     "derivative_directions",
     "orbit_vector_fields",
     "reduce_between_sectors",
+    "reduce_to_orbits",
     "sector_derivatives",
+    "target_orbit_indices",
+    "weighted_sectors",
 ]
 
 

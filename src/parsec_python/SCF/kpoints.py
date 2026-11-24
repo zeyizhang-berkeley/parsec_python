@@ -94,6 +94,7 @@ from .meta_gga_periodic import bloch_orbital_fields, kpoint_meta_gga_loop, symme
 from .kpoints_soc import _eigval_settings
 from .orbital_density import weighted_square_sum
 from .stage_timer import StageTimer, solver_residual_max
+from .filter_degree import LaterFilterDegree
 from ..models import (
     RunTimings,
     SCFIteration,
@@ -131,6 +132,18 @@ def _sectors_take_hubbard(hubbard, *, spin: bool) -> bool:
 
     value = kpoint_sector_ldau_setting()
     return value == "spin" or (value == "on" and not spin)
+
+
+def _sectors_take_meta(meta) -> bool:
+    """Whether a meta-GGA loop (``meta`` not ``None``) may take the sectors of its k-points
+    (``PARSEC_KPOINT_SECTOR_META_GGA``, ``auto`` by default: the orbital term and ``tau`` reduced to the sectors); a loop
+    of another functional may (the switch is read only for a meta-GGA)."""
+
+    if meta is None:
+        return True
+    from ..acceleration.Hamiltonian.sector_bloch_meta_gga import kpoint_sector_meta_gga_setting
+
+    return kpoint_sector_meta_gga_setting() == "auto"
 
 
 def _fock_loops_guarded() -> bool:
@@ -544,14 +557,16 @@ def run_scf_kpoints(
         )
 
     # What a solver that splits the k-points into the sectors of their little groups needs
-    # (acceleration/SCF/kpoint_sectors.py): a loop without meta-GGA or fixed occupations, with LDA+U under
-    # PARSEC_KPOINT_SECTOR_LDAU=on (opt-in; its projectors reduced to the rows of each sector), and with refined levels only under
+    # (acceleration/SCF/kpoint_sectors.py): a loop without fixed occupations, with LDA+U under
+    # PARSEC_KPOINT_SECTOR_LDAU=on (opt-in; its projectors reduced to the rows of each sector), with a meta-GGA under
+    # PARSEC_KPOINT_SECTOR_META_GGA=auto (the default; its orbital term and tau reduced to the sectors,
+    # acceleration/Hamiltonian/sector_bloch_meta_gga.py), and with refined levels only under
     # PARSEC_KPOINT_SECTOR_LEVELS=auto (the forces, kept orbitals and states and the exchange of a hybrid go through
     # its orbitals on the whole grid; the level passes solve the sectors, which hold the levels of the k-point).
     sector_geometry = None
     if (
         _sectors_take_hubbard(hubbard, spin=False)
-        and meta is None
+        and _sectors_take_meta(meta)
         and settings.fixed_occupations is None
         and _sectors_take_levels(warm_start)
     ):
@@ -572,6 +587,15 @@ def run_scf_kpoints(
             # the nonlocal force takes ``atoms=`` (those of some orbits only, turned onto the others by the sectors)
             "force_atoms": True,
         }
+        if meta is not None:
+            # tau = w_k (2/2h^3) sum_n f_n |(G + ik) u_n|^2 (and g of the orbital form) of the states of a sector
+            sector_geometry["meta_fields"] = lambda task: (
+                weighting.of_k(task) * 0.5 * 2.0 / float(system.grid.volume_element),
+                "tau",
+                "tau_gradient" if meta.orbital_gradient else None,
+            )
+            # the first derivatives of the Bloch Hamiltonians (G of (G + ik))
+            sector_geometry["meta_derivatives"] = tuple(system.gradient)
         if hubbard is not None:
             # the occupation matrices of the states of a sector, with the LDA+U projectors reduced to its rows
             sector_geometry["hubbard_part"] = lambda task, projectors, vectors, occupations, xp=np: {
@@ -612,6 +636,7 @@ def run_scf_kpoints(
     level_tolerance = getattr(warm_start, "level_tolerance", None)
     filter_degree = system.input.eigensolver.filter_degree
     minimum_filter_degree = max(10, system.input.eigensolver.filter_degree_delta + 1)
+    degree_schedule = LaterFilterDegree.for_loop(filter_degree, minimum_filter_degree)
     # Dynamic_Diag_Tol: 0.1 for the first iteration (parsec.F90:1106-1111).
     dynamic_tolerance = system.input.eigensolver.dynamic_tolerance
     diagonalization_tolerance = first_diagonalization_tolerance(system.input.eigensolver)
@@ -799,6 +824,8 @@ def run_scf_kpoints(
             first_k_count = eigenvalues_by_k[0].size
             iteration_record = SCFIteration(
                 iteration=iteration,
+                # PARSEC_FILTER_DEGREE_STALL: the NOTE of a restoration (once)
+                filter_degree_note=degree_schedule.take_note(),
                 weighted_residual=metrics.weighted,
                 plain_residual=metrics.plain,
                 eigen_residual_max=residual_max,
@@ -856,20 +883,21 @@ def run_scf_kpoints(
                 refining = True
                 continue
             input_potential = mixed_potential
-            if (
-                iteration > settings.degree_decrease_after
-                and metrics.weighted
-                < (
+            # PARSEC_FILTER_DEGREE_STALL (SCF/filter_degree.py): the degree lowered near convergence, and the
+            # starting degree back where the loop stalls after that
+            filter_degree = degree_schedule.after_iteration(
+                iteration,
+                metrics.weighted,
+                (
                     # A loop criterion of the ionic loop (Relaxation_SCF_Upscale) gives
                     # 100 times that criterion, unless the input writes
                     # Convergence_Criterion_Approach, which holds as in every other loop.
                     settings.approach_criterion
                     if convergence_criterion is None or settings.convergence_criterion_approach is not None
                     else 100.0 * criterion
-                )
-                and filter_degree > minimum_filter_degree
-            ):
-                filter_degree -= 1
+                ),
+                settings.degree_decrease_after,
+            )
             if selected_residual < (
                 criterion if warm_start is None else loop_criterion(warm_start, criterion, first_residual)
             ):
@@ -1055,6 +1083,8 @@ def run_scf_kpoints_spin_polarized(
                 reason=report.reason,
                 measure=report.measure,
                 route="kpoint",
+                # fractional degenerate levels of one sector under PARSEC_SPIN_GUARD_DOUBLETS=stop
+                doublet=bool(getattr(report, "doublet", False)),
             )
         )
     result = _spin_kpoint_loop(system, k_points, weights, allow_sectors=False, **arguments)
@@ -1300,11 +1330,12 @@ def _spin_kpoint_loop(
     # k-point share its sectors (both spin densities are symmetrized over the same group).  Not with the fixed
     # occupations of occup.in, as in run_scf_kpoints: they fill the levels in order of energy, and partners of a
     # degenerate level that lie in different sectors could be filled unequally, a density the orbit means of the
-    # sector Hamiltonians cannot follow.  Refined levels as in run_scf_kpoints (PARSEC_KPOINT_SECTOR_LEVELS).
+    # sector Hamiltonians cannot follow.  Refined levels and a meta-GGA as in run_scf_kpoints
+    # (PARSEC_KPOINT_SECTOR_LEVELS, PARSEC_KPOINT_SECTOR_META_GGA).
     sector_geometry = None
     if (
         _sectors_take_hubbard(hubbard, spin=True)
-        and meta is None
+        and _sectors_take_meta(meta)
         and settings.fixed_occupations is None
         and allow_sectors
         and _sectors_take_levels(warm_start)
@@ -1323,6 +1354,19 @@ def _spin_kpoint_loop(
             else (lambda task: 0.5 * float(exchange_term.spin_weight) * weighting.of_k(task % n_kpoints)),
             "k_of_task": np.tile(np.arange(n_kpoints, dtype=np.int64), 2),
         }
+        if meta is not None:
+            # tau and g of a channel (one electron per state) of the states of a sector
+            def meta_fields(task):
+                spin_index, k_index = divmod(task, n_kpoints)
+                name = "up" if spin_index == 0 else "down"
+                return (
+                    weighting.of_k(k_index) * 0.5 * 1.0 / float(system.grid.volume_element),
+                    "tau_" + name,
+                    ("tau_gradient_" + name) if meta.orbital_gradient else None,
+                )
+
+            sector_geometry["meta_fields"] = meta_fields
+            sector_geometry["meta_derivatives"] = tuple(system.gradient)
         if hubbard is not None:
             # PARSEC_KPOINT_SECTOR_LDAU=spin: the occupation matrices of the states of a sector of either channel
             def hubbard_part(task, projectors, vectors, occupations, xp=np):
@@ -1361,6 +1405,7 @@ def _spin_kpoint_loop(
     level_tolerance = getattr(warm_start, "level_tolerance", None)
     filter_degree = system.input.eigensolver.filter_degree
     minimum_filter_degree = max(10, system.input.eigensolver.filter_degree_delta + 1)
+    degree_schedule = LaterFilterDegree.for_loop(filter_degree, minimum_filter_degree)
     # Dynamic_Diag_Tol: 0.1 for the first iteration (parsec.F90:1106-1111).
     dynamic_tolerance = system.input.eigensolver.dynamic_tolerance
     diagonalization_tolerance = first_diagonalization_tolerance(system.input.eigensolver)
@@ -1678,6 +1723,8 @@ def _spin_kpoint_loop(
                 first_k = eigenvalues_by_spin_k[0][0].size
                 record = SpinPolarizedSCFIteration(
                     iteration=iteration,
+                    # PARSEC_FILTER_DEGREE_STALL: the NOTE of a restoration (once)
+                    filter_degree_note=degree_schedule.take_note(),
                     weighted_residual=metrics.weighted,
                     plain_residual=metrics.plain,
                     energies=energies,
@@ -1772,12 +1819,11 @@ def _spin_kpoint_loop(
                 continue
             input_potential_up = mixed_combined[:n_grid]
             input_potential_down = mixed_combined[n_grid:]
-            if (
-                iteration > settings.degree_decrease_after
-                and metrics.weighted < settings.approach_criterion
-                and filter_degree > minimum_filter_degree
-            ):
-                filter_degree -= 1
+            # PARSEC_FILTER_DEGREE_STALL (SCF/filter_degree.py): the degree lowered near convergence, and the
+            # starting degree back where the loop stalls after that
+            filter_degree = degree_schedule.after_iteration(
+                iteration, metrics.weighted, settings.approach_criterion, settings.degree_decrease_after
+            )
             if met:
                 converged = True
                 break
@@ -1800,6 +1846,35 @@ def _spin_kpoint_loop(
                 guard_values["kpoint_guard_fractional_share"] = guard.fractional_measure(by_task, occupations_by_task)
             if report is None and settings.fixed_occupations is None:
                 report = guard.fractional_report(by_task, occupations_by_task)
+            if report is None and settings.fixed_occupations is None and not fock_loop:
+                # Fractional degenerate levels of one sector, which test 3 does not count (PARSEC_SPIN_GUARD_DOUBLETS,
+                # as on the abelian sectors of a cluster or a Gamma cell): note keeps the result and says so, stop
+                # sends the loop to one task per k-point, off does not look.
+                from ..acceleration.SCF.spin_sectors import spin_guard_doublets_setting
+
+                doublet_mode = spin_guard_doublets_setting()
+                found = (
+                    guard.sector_doublet_report(by_task, occupations_by_task)
+                    if doublet_mode != "off"
+                    else None
+                )
+                if found is not None and doublet_mode == "stop":
+                    report = found
+                elif found is not None and callback is not None:
+                    from ..models import SpinSectorFallbackRecord
+
+                    callback(
+                        SpinSectorFallbackRecord(
+                            stage="the SCF loop",
+                            largest_fractional_occupation=found.largest,
+                            tolerance=found.tolerance,
+                            multiplets=tuple(found.lines),
+                            reason=found.reason,
+                            measure=found.measure,
+                            route="kpoint_doublet",
+                            doublet=True,
+                        )
+                    )
             if fock_loop:
                 # what the tests measured at the end of this inner loop of the Fock loop (the last guarded loop's
                 # values reach the result of the Fock loop: run_periodic_hybrid_scf)

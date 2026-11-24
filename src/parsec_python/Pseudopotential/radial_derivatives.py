@@ -150,7 +150,7 @@ def linear_local_potential_slope(
     """
 
     radius = np.asarray(distances, dtype=float)
-    values = potential.channel_potentials[local_l]
+    values = potential.local_channel_potential(local_l)
     radii = potential.radii
     result = np.zeros_like(radius)
     inside = radius < potential.interpolation_cutoff
@@ -233,7 +233,7 @@ def local_potential_derivative_table(
 
     potential.validate_local_channel(local_l)
     radii = potential.radii
-    table = log_grid_derivative(potential, potential.channel_potentials[local_l])
+    table = log_grid_derivative(potential, potential.local_channel_potential(local_l))
     _, stop = _stencil_range(radii.size)
     table[stop:] = 2.0 * potential.ionic_charge / (radii[stop:] * radii[stop:])
     if not getattr(potential, "origin_samples", 0):
@@ -483,6 +483,7 @@ def evaluate_local_potential_derivative(
     direct: bool = False,
     center: float = 0.0,
     slopes: str = "tabulated",
+    tail: float | None = None,
 ) -> np.ndarray:
     """dV_local/dr at ``distances`` with the rules of ``forcloc.f90``.
 
@@ -492,9 +493,15 @@ def evaluate_local_potential_derivative(
     PARSEC's linear interpolation of ``r**2 * dV/dr``; ``direct``
     interpolates ``dV/dr`` itself (``Old_Interpolation_Format``,
     ``forcloc.f90:201-203``); with ``use_spline`` it is the derivative of
-    the padded cubic spline of the potential, whichever of the two is set.
+    the padded cubic spline of the potential, whichever of the two is set,
+    and ``2*Z/r**2`` from the spline's own cutoff on where that lies closer
+    (:meth:`~parsec_python.Pseudopotential.ParsecPseudopotential.local_spline_cutoff`, ``PARSEC_SPLINE_COULOMB_TAIL``).
     ``center`` (:func:`smooth_center_radius`, ``PARSEC_SPLINE_FORCE_CENTER=auto``): the distances below it take the
     slope of the smooth behaviour, ``s(center) d/center`` (:func:`with_smooth_center`).
+    ``tail`` replaces ``rs(npoint-6)`` as the radius of the Coulomb tail: the local forces of the default routines of a
+    cell pass ``rs(ns-1)``, where :meth:`ParsecPseudopotential.local_potential` itself switches to ``-2 Z/r``, so that
+    they differentiate the potential they sample (a table of fewer than eight samples puts ``rs(npoint-6)`` at or
+    inside its first sample, :func:`tail_start_radius`, which gave every point the Coulomb slope).
 
     ``slopes="interpolant"`` (:func:`linear_slope_setting`) replaces the two
     linear branches by the slope of the potential the energy samples
@@ -516,6 +523,7 @@ def evaluate_local_potential_derivative(
                 spline_padding_width=spline_padding_width,
                 direct=direct,
                 slopes=slopes,
+                tail=tail,
             ),
             distances,
             center,
@@ -527,7 +535,14 @@ def evaluate_local_potential_derivative(
         return linear_local_potential_slope(potential, radius, local_l, direct=direct)
     # forcloc.f90:180-188: a point closer than rs(2) is skipped before the
     # tail test (which matters only where the tail starts inside rs(2)).
-    tail = (radius >= tail_start_radius(potential)) & (radius >= radii[0])
+    # rs(npoint-6) of forcloc.f90 (clusters, wires, slabs), or the radius the caller passes (``tail``: rs(ns-1) for the
+    # default routines of a cell, where the sampled potential becomes -2 Z/r)
+    start = tail_start_radius(potential) if tail is None else float(tail)
+    if use_spline:
+        # the slope of the potential the energy samples: -2 Z/r from the spline's cutoff (PARSEC_SPLINE_COULOMB_TAIL;
+        # rs(ns-1) under off, so that the minimum keeps the radius above)
+        start = min(start, potential.local_spline_cutoff(local_l))
+    tail = (radius >= start) & (radius >= radii[0])
     result[tail] = 2.0 * potential.ionic_charge / (radius[tail] * radius[tail])
     inner = (radius >= radii[0]) & ~tail
     if not np.any(inner):
@@ -537,7 +552,7 @@ def evaluate_local_potential_derivative(
         if spline_padding_width is None:
             raise ValueError("spline_padding_width is required when use_spline=True")
         spline = ParsecRadialSpline.from_positive_grid(
-            radii, potential.channel_potentials[local_l], spline_padding_width
+            radii, potential.local_channel_potential(local_l), spline_padding_width
         )
         result[inner] = spline_derivative(spline, sample)
         return result
@@ -560,6 +575,7 @@ def evaluate_density_derivative(
     spline_padding_width: int | None = None,
     center: float = 0.0,
     slopes: str = "tabulated",
+    tail: float | None = None,
 ) -> np.ndarray:
     """d(rho_atom)/dr at ``distances`` with the rules of ``forcloc.f90``.
 
@@ -567,7 +583,9 @@ def evaluate_density_derivative(
     outwards; linear interpolation of the derivative table in between, or
     the derivative of the padded cubic spline of ``density``.  ``center`` as in
     :func:`evaluate_local_potential_derivative` (the core density; the valence density of the self-consistency term
-    is called without it), not applied under ``slopes="interpolant"`` without a spline.
+    is called without it), not applied under ``slopes="interpolant"`` without a spline.  ``tail`` replaces
+    ``rs(npoint-6)`` (the core density of the default routines of a cell: ``rs(ns-1)``, where the sampled density is
+    dropped; see :func:`evaluate_local_potential_derivative`).
 
     ``slopes="interpolant"`` (:func:`linear_slope_setting`, no spline): the
     slope of the linear interpolant of ``density`` that
@@ -585,6 +603,7 @@ def evaluate_density_derivative(
                 use_spline=use_spline,
                 spline_padding_width=spline_padding_width,
                 slopes=slopes,
+                tail=tail,
             ),
             distances,
             center,
@@ -597,7 +616,8 @@ def evaluate_density_derivative(
         if np.any(inside):
             result[inside] = interpolant_slope(radius[inside], radii, np.asarray(density, dtype=float))
         return result
-    inner = (radius >= radii[0]) & (radius < tail_start_radius(potential))
+    start = tail_start_radius(potential) if tail is None else float(tail)
+    inner = (radius >= radii[0]) & (radius < start)
     if not np.any(inner):
         return result
     sample = radius[inner]

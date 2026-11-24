@@ -1311,8 +1311,10 @@ def solve_column_eigval(
         if converge_first:
             relative = float(settings.chebdav.convergence_tolerance if tolerance is None else tolerance)
             if max_extra_cycles is None:
-                env = os.environ.get("PARSEC_KPOINT_EXTRA_CYCLES", "").strip()
-                max_extra_cycles = int(env) if env.isdigit() else 24
+                # PARSEC_KPOINT_EXTRA_CYCLES (default 24): an invalid value is an error, as on the host solver
+                from parsec_python.Eigensolvers.eigval import first_solve_extra_cycles
+
+                max_extra_cycles = first_solve_extra_cycles()
             extra = int(max_extra_cycles)
         saved = None
         if start is not None:

@@ -195,6 +195,36 @@ def _cluster_operations(translation):
         else tuple(problem.atoms)
     )
     return atom_symmetry_operations(atoms)
+
+
+def _cell_operation_orders(translation) -> tuple[int, int] | None:
+    """``(operations, kept)`` of a periodic cell whose ``Move_Flag`` fixes atoms: the order of the space group of its
+    atoms (rotations, each with its translation; ``symmetries.f90``'s search, :func:`find_space_group`, or that of a
+    wire or slab, :func:`find_wire_slab_space_group`) and that of the subgroup that maps the fixed atoms onto fixed
+    atoms (the search with the fixed atoms as a species of their own, :func:`atoms_with_fixed_species`, as the k-point
+    wedge of such a relaxation takes it).  ``None`` where a search fails (the caller counts the operations of a
+    cluster)."""
+
+    from ..Grid.space_group import atoms_with_fixed_species, find_space_group, find_wire_slab_space_group
+
+    problem = translation.problem
+    cell = problem.periodic_cell
+    atoms = tuple(problem.atoms)
+    try:
+        lattice = np.asarray(cell.lattice_vectors, dtype=np.float64)
+        labelled = atoms_with_fixed_species(atoms, translation.movable)
+        periodicity = int(getattr(cell, "dimensions", 3) or 3)
+        if periodicity == 3:
+            return find_space_group(lattice, atoms).order, find_space_group(lattice, labelled).order
+        radius = float(problem.grid.confinement_radius)
+        return (
+            find_wire_slab_space_group(lattice, periodicity, radius, atoms)[0].order,
+            find_wire_slab_space_group(lattice, periodicity, radius, labelled)[0].order,
+        )
+    except (ValueError, TypeError, AttributeError):
+        return None
+
+
 def _restart_orientation(translation, restart: RelaxRestart, name: str):
     """The frame of a ``relax_restart.dat`` against ``PARSEC_STANDARD_ORIENTATION``.
 
@@ -242,6 +272,22 @@ def symmetry_decision(translation) -> tuple[bool, str | None]:
     of the operations that respect the flags where that subgroup is more than
     the identity and ``PARSEC_MOVE_FLAG_SUBGROUP=auto`` (the note says so), and
     uses no symmetry otherwise (:func:`move_flag_subgroup_setting`).
+
+    The decision takes the point operations of the positions about the
+    (recentred) origin, those of a cluster (:func:`_cluster_operations`).  For
+    a periodic cell (the Fortran-derived routines and their slabs, whose
+    translations keep ``use_symmetry``) the note counts the operations of the
+    cell instead (:func:`_cell_operation_orders`: its space group and the
+    subgroup that maps the fixed atoms onto fixed atoms, which its sectors,
+    k-point wedge and ionic loop keep under ``PARSEC_MOVE_FLAG_SUBGROUP=auto``),
+    since 2026-11-23; before, it counted those of the positions, which ignore
+    the lattice (the 8-atom silicon cube with its sixth atom fixed: "4 of the 6
+    symmetry operations ... the subgroup of the 2", where its space group has
+    48 rotations and that atom keeps 24; with its first atom fixed, which keeps
+    24 as well, no note at all).  Only the note changed: a cell whose fixed
+    atoms leave none of the operations of the positions but the identity still
+    uses no symmetry, as before (the cube with its second and eighth atoms
+    fixed, which keep 12 operations of the cell).
     """
 
     if translation.ignore_symmetry:
@@ -252,12 +298,41 @@ def symmetry_decision(translation) -> tuple[bool, str | None]:
         return True, None
     operations = _cluster_operations(translation)
     kept = operations_preserving(operations, translation.movable)
+    subgroup_rule = bool(_optimizer_fixes_atoms(translation) and move_flag_subgroup_setting() == "auto")
+    keeps_subgroup = len(kept) > 1 and subgroup_rule
+    use = len(kept) == len(operations) or keeps_subgroup
+    movable = getattr(translation, "movable", None)
+    cell = (
+        _cell_operation_orders(translation)
+        if getattr(translation.problem, "periodic_cell", None) is not None
+        and movable is not None
+        and not all(bool(flag) for flag in movable)
+        else None
+    )
+    if cell is not None:
+        # a periodic cell: the note counts the operations of its space group (the decision is that of before)
+        total, held = cell
+        if held == total and use:
+            # the flags respect the group of the cell: nothing to say
+            return True, None
+        if held != total:
+            broken = (
+                f"Move_Flag fixes atoms that {total - held} of the {total} operations of the space group of the cell "
+                "exchange with movable ones; "
+            )
+            if not use:
+                return False, broken + "the relaxation uses no symmetry."
+            if subgroup_rule:
+                # (the subgroup a cell keeps under auto: its sectors, k-point wedge and ionic loop take the fixed atoms
+                # as a species of their own, symmetry_fixed_atoms, Input.parsec_input._move_flag_space_group)
+                return True, broken + (
+                    f"the relaxation keeps the subgroup of the {held} operations that map the fixed atoms onto fixed "
+                    f"atoms ({MOVE_FLAG_SUBGROUP_SWITCH}=auto)."
+                    if held > 1
+                    else f"no other operation maps the fixed atoms onto fixed atoms ({MOVE_FLAG_SUBGROUP_SWITCH}=auto)."
+                )
     if len(kept) != len(operations):
-        if (
-            len(kept) > 1
-            and _optimizer_fixes_atoms(translation)
-            and move_flag_subgroup_setting() == "auto"
-        ):
+        if keeps_subgroup:
             return True, (
                 f"Move_Flag fixes atoms that {len(operations) - len(kept)} of the {len(operations)} symmetry "
                 "operations of the structure exchange with movable ones; the relaxation keeps the subgroup of "

@@ -22,9 +22,10 @@ admissible operations restricted to the ``W`` above (``index_frame_operations`` 
 the grid itself: only the rows enter them.  The operations of the reduction are the ``W``: the Cartesian ones are
 ``S W S^-1`` (:meth:`IndexFrame.cartesian`).
 
-``PARSEC_OBLIQUE_SECTORS=auto`` takes such a frame for a bulk cell at the Gamma point (the default routines' grid
-along the lattice vectors, the general grid of the Fortran-derived routines) and, with ``PARSEC_SLAB_WIRE_SECTORS=auto``,
-for a wire or slab whose periodic vectors are not along the axes; ``off`` (the default) keeps them on the full grid.
+``PARSEC_OBLIQUE_SECTORS=auto`` (the default since 2026-11-23) takes such a frame for a bulk cell at the Gamma point
+(the default routines' grid along the lattice vectors, the general grid of the Fortran-derived routines) and, with
+``PARSEC_SLAB_WIRE_SECTORS=auto``, for a wire or slab whose periodic vectors are not along the axes; ``off`` keeps them
+on the full grid.
 """
 
 from __future__ import annotations
@@ -43,12 +44,13 @@ _WEIGHT_TOLERANCE = 1.0e-9
 
 
 def oblique_sectors_setting() -> str:
-    """``PARSEC_OBLIQUE_SECTORS``: ``off`` (default) keeps a cell whose lattice vectors are not along the Cartesian axes
-    (and a wire or slab of that kind) at the Gamma point on the full grid, as before; ``auto`` solves it in the
-    sectors of the operations that map its grid and finite-difference operators onto themselves
-    (:class:`IndexFrame`)."""
+    """``PARSEC_OBLIQUE_SECTORS``: ``auto`` (the default since 2026-11-23; opt-in from 2026-11-22) solves a cell whose
+    lattice vectors are not along the Cartesian axes, or a cell on the general grid of the Fortran-derived routines,
+    at the Gamma point in the sectors of the operations that map its grid and finite-difference operators onto
+    themselves (:class:`IndexFrame`; a wire or slab of that kind with ``PARSEC_SLAB_WIRE_SECTORS=auto``), from the
+    floor of ``PARSEC_PERIODIC_SECTOR_FLOOR`` on; ``off`` keeps every such cell on the full grid, as before."""
 
-    value = os.environ.get(_SWITCH, "off").strip().lower() or "off"
+    value = os.environ.get(_SWITCH, "auto").strip().lower() or "auto"
     if value not in {"auto", "off"}:
         raise ValueError(f"{_SWITCH} must be auto or off, not {value!r}")
     return value

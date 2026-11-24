@@ -10,7 +10,14 @@
 * the orbital form of the density gradient: the first-order term of ``W`` in
   the sectors and on the full grid, ``g`` of sector orbitals, the vector
   fields at the orbit representatives, the device functional and the host one
-  on orbits; Gershgorin's bound of the term holds its eigenvalues.
+  on orbits; Gershgorin's bound of the term holds its eigenvalues;
+* weighted sectors (Td, D4h and C4v on grids with and without points on the
+  symmetry elements): the derivatives at every orbit give ``U^T H_tau U`` with
+  the orbital form at round-off, ``tau`` and ``g`` of sector orbitals averaged
+  over the full group are the averages of their expansions over its
+  operations, on the orbits of the full group and of the subgroup; on a
+  device the term and its sums, and the device functional on the orbits of a
+  group that exchanges axes is the host functional.
 """
 
 from __future__ import annotations
@@ -67,6 +74,58 @@ def _cases():
             yield f"{molecule} shift {shift[0]}", grid, _decomposition(grid, molecule, signed)
 
 
+_WEIGHTED_MOLECULES = {
+    "Td": [("C", (0.0, 0.0, 0.0))]
+    + [("H", (1.2 * x, 1.2 * y, 1.2 * z)) for x, y, z in ((1, 1, 1), (1, -1, -1), (-1, 1, -1), (-1, -1, 1))],
+    "D4h": [("N", (0.0, 0.0, -1.04)), ("N", (0.0, 0.0, 1.04))],
+    "C4v": [("C", (0.0, 0.0, -1.0)), ("O", (0.0, 0.0, 1.13))],
+}
+
+
+def _weighted_cases():
+    """Weighted sectors (``PointGroupReduction``) of Td, D4h and C4v, with the layouts of ``G`` and of ``H``."""
+
+    from parsec_python.acceleration.Symmetry import PointGroupReduction, detect_point_group_reduction
+    from parsec_python.acceleration.Symmetry.field_orbits import field_orbit_reduction
+
+    for molecule, shift in (("Td", (0.5, 0.5, 0.5)), ("Td", (0.0, 0.0, 0.0)), ("D4h", (0.5, 0.5, 0.5)),
+                            ("C4v", (0.0, 0.0, 0.5))):
+        grid = _grid(shift)
+        atoms = [Atom(symbol, position) for symbol, position in _WEIGHTED_MOLECULES[molecule]]
+        reduction = detect_point_group_reduction(grid, atoms, SignedPermutationReduction.detect(grid, atoms))
+        assert isinstance(reduction, PointGroupReduction)
+        decomposition = ReflectionRepresentationDecomposition.build(grid, reduction)
+        positions = np.array([position for _, position in _WEIGHTED_MOLECULES[molecule]], dtype=float)
+        yield f"{molecule} shift {shift}", grid, decomposition, positions, field_orbit_reduction(reduction)
+
+
+def _group_fields(grid, positions):
+    """A positive field and a turning vector field of the atoms (invariant and equivariant under their group)."""
+
+    vtau = 0.3 + 0.1 * np.cos(np.linalg.norm(grid.coordinates, axis=1))
+    flux = np.zeros((3, grid.size))
+    for position in positions:
+        offset = grid.coordinates - position
+        vtau = vtau + 0.2 * np.exp(-np.sum(offset**2, axis=1))
+        flux += (offset * np.exp(-0.5 * np.sum(offset**2, axis=1))[:, None]).T
+    return vtau, flux
+
+
+def _full_group_average(grid, reduction, scalar, vector):
+    """``(1/|G|) sum_g f(g r)`` and ``(1/|G|) sum_g O_g^T v(g r)`` over the operations of the full group."""
+
+    from parsec_python.acceleration.Symmetry.axis_reflection import _grid_row_mapping_operation
+
+    operations = np.asarray(reduction.full_operations)
+    scalar_average = np.zeros_like(scalar)
+    vector_average = np.zeros_like(vector)
+    for operation in operations:
+        images = _grid_row_mapping_operation(grid, operation, 1.0e-10)
+        scalar_average += scalar[images]
+        vector_average += operation.astype(float).T @ vector[:, images]
+    return scalar_average / len(operations), vector_average / len(operations)
+
+
 class SectorReductionTests(unittest.TestCase):
     def test_directions_are_common_eigenvectors(self) -> None:
         grid = _grid((0.5, 0.5, 0.5))
@@ -108,6 +167,178 @@ class SectorReductionTests(unittest.TestCase):
                 np.testing.assert_allclose(
                     tau_wedge[decomposition.reduction.full_to_wedge], tau_full, rtol=1e-11, atol=1e-12 * tau_full.max()
                 )
+
+
+class WeightedSectorTests(unittest.TestCase):
+    def test_term_tau_and_gradient_of_weighted_sectors(self) -> None:
+        # B_c at every orbit of H: sum_c B_c^T vtau B_c + P^T 2W_c B_c + B_c^T 2W_c P is U^T of the full-grid term
+        # with the orbital form; tau and g of the sector orbitals (H-orbit sums) averaged over G are the averages of
+        # those of the expansions over the operations of G, at the representatives of either layout; vtau and W of
+        # the layout reach the representatives of H.
+        from parsec_python.V_xc.meta_gga import orbital_density_gradient
+        from parsec_python.acceleration.Hamiltonian.meta_gga_device import (
+            ALL_ORBITS,
+            WeightedOrbitMaps,
+            target_orbit_indices,
+        )
+
+        for label, grid, decomposition, positions, fields in _weighted_cases():
+            with self.subTest(label):
+                reduction = decomposition.reduction
+                gradient = grid_gradient(grid)
+                vtau, flux = _group_fields(grid, positions)
+                flux = 0.4 * flux
+                full = KineticPotentialOperator(gradient, vtau, gradient_flux=flux)
+                rows = np.asarray(reduction.representative_rows)
+                multiplicities = reduction.multiplicities.astype(float)
+                rng = np.random.default_rng(4)
+                weights = np.array([1.0, 0.4])
+                tau_wedge = np.zeros(reduction.wedge_size)
+                g_wedge = np.zeros((3, reduction.wedge_size))
+                tau_full = np.zeros(grid.size)
+                g_full = np.zeros((3, grid.size))
+                for representation, pieces in sector_derivatives(grid, decomposition).items():
+                    source = decomposition.sector_orbit_indices(representation)
+                    block = rng.standard_normal((source.size, 2))
+                    reduced = np.zeros_like(block)
+                    for axis, piece in enumerate(pieces):
+                        self.assertEqual(piece.target, ALL_ORBITS)
+                        orbits = target_orbit_indices(decomposition, piece.target)
+                        values = piece.matrix @ block
+                        doubled = 2.0 * flux[axis, rows[orbits]][:, None]
+                        within = np.zeros_like(values)
+                        within[source] = block
+                        reduced += piece.matrix.T @ (vtau[rows[orbits]][:, None] * values + doubled * within)
+                        reduced += (doubled * values)[source]
+                        tau_wedge[orbits] += (values * values) @ weights / multiplicities[orbits]
+                        g_wedge[axis, source] += (block * values[source]) @ weights / multiplicities[source]
+                    expanded = np.column_stack([decomposition.expand_vector(column, representation) for column in block.T])
+                    expected = np.column_stack(
+                        [decomposition.reduce_vector(column, representation) for column in full.apply(expanded).T]
+                    )
+                    np.testing.assert_allclose(reduced, expected, rtol=0, atol=1e-12 * np.max(np.abs(expected)))
+                    tau_full += kinetic_energy_density(expanded, weights, gradient, 1.0, degeneracy=2.0)
+                    g_full += orbital_density_gradient(expanded, weights, gradient, 1.0, degeneracy=1.0)
+                tau_average, g_average = _full_group_average(grid, reduction, tau_full, g_full)
+                for layout in (fields, reduction):
+                    maps = WeightedOrbitMaps(grid, reduction, layout)
+                    at = np.asarray(layout.representative_rows)
+                    np.testing.assert_allclose(
+                        maps.scalar_average(tau_wedge), tau_average[at], rtol=0, atol=1e-13 * tau_average.max()
+                    )
+                    np.testing.assert_allclose(
+                        maps.vector_average(2.0 * g_wedge), g_average[:, at], rtol=0,
+                        atol=1e-13 * np.max(np.abs(g_average)),
+                    )
+                    np.testing.assert_allclose(maps.scalar_to_subgroup(vtau[at]), vtau[rows], rtol=0, atol=1e-15)
+                    np.testing.assert_allclose(maps.vector_to_subgroup(flux[:, at]), flux[:, rows], rtol=0, atol=1e-15)
+
+
+@unittest.skipUnless(cupy_available(), "CuPy is not available")
+class DeviceWeightedTests(unittest.TestCase):
+    def test_device_term_of_weighted_sectors(self) -> None:
+        # The device term of a weighted sector with the orbital form is the host one, its sums those of the host,
+        # and its Gershgorin bound holds its eigenvalues.
+        import cupy as cp
+
+        from parsec_python.acceleration.Hamiltonian.meta_gga_device import DeviceKineticTerm, target_orbit_indices
+
+        for label, grid, decomposition, positions, _ in _weighted_cases():
+            with self.subTest(label):
+                reduction = decomposition.reduction
+                gradient = grid_gradient(grid)
+                vtau, flux = _group_fields(grid, positions)
+                flux = 0.4 * flux
+                full = KineticPotentialOperator(gradient, vtau, gradient_flux=flux)
+                rows = np.asarray(reduction.representative_rows)
+                multiplicities = reduction.multiplicities.astype(float)
+                rng = np.random.default_rng(6)
+                weights = np.array([1.0, 0.4])
+                for representation, pieces in sector_derivatives(grid, decomposition).items():
+                    source = decomposition.sector_orbit_indices(representation)
+                    orbits = [target_orbit_indices(decomposition, piece.target) for piece in pieces]
+                    term = DeviceKineticTerm(cp, pieces, orbits, 0, source_orbits=source)
+                    term.bind(cp.asarray(vtau[rows]), [cp.asarray(row) for row in flux[:, rows]])
+                    block = rng.standard_normal((source.size, 2))
+                    expanded = np.column_stack([decomposition.expand_vector(column, representation) for column in block.T])
+                    expected = np.column_stack(
+                        [decomposition.reduce_vector(column, representation) for column in full.apply(expanded).T]
+                    )
+                    applied = cp.asnumpy(term.apply(cp.asarray(block)))
+                    np.testing.assert_allclose(applied, expected, rtol=0, atol=1e-11 * np.max(np.abs(expected)))
+                    dense = np.column_stack(
+                        [cp.asnumpy(term.apply(cp.asarray(column))) for column in np.eye(source.size)]
+                    )
+                    self.assertGreaterEqual(term.spectral_margin, np.max(np.abs(np.linalg.eigvalsh(dense))) - 1e-10)
+                    sums, products = term.kinetic_sums(cp.asarray(block), weights, gradient=True)
+                    tau = sum(cp.asnumpy(value) for value in sums) / multiplicities
+                    host = sum(((piece.matrix @ block) ** 2) @ weights for piece in pieces) / multiplicities
+                    np.testing.assert_allclose(tau, host, rtol=0, atol=1e-12 * host.max())
+                    for piece, shared, values in zip(pieces, term.shared_orbits, products):
+                        np.testing.assert_array_equal(shared, source)
+                        expected_products = (block * (piece.matrix @ block)[source]) @ weights
+                        np.testing.assert_allclose(cp.asnumpy(values), expected_products, rtol=0,
+                                                   atol=1e-12 * np.max(np.abs(expected_products)))
+
+    def test_device_functional_on_the_orbits_of_a_group_that_exchanges_axes(self) -> None:
+        # The fields of weighted sectors on the orbits of G (Td: S4 exchanges x and y): the device functional with
+        # the operation table (permutations) is the host functional of the full grid, in the orbital and the density
+        # forms, unpolarized and spin, with a core density; without ``permutations`` the evaluator refuses the group.
+        import cupy as cp  # noqa: F401
+
+        from parsec_python.V_xc.meta_gga import meta_gga_xc, meta_gga_xc_spin
+        from parsec_python.V_xc.scan import NativeScan
+        from parsec_python.acceleration.Hamiltonian.meta_gga_device import OrbitVectorFields
+        from parsec_python.acceleration.SCF.symmetry_fields import SymmetrySCFReducer
+        from parsec_python.acceleration.V_xc.meta_gga_xc import DeviceMetaGGAOnOrbits
+
+        functional = NativeScan()
+        for label, grid, decomposition, positions, fields in _weighted_cases():
+            if not label.startswith("Td"):
+                continue
+            with self.subTest(label):
+                reducer = SymmetrySCFReducer(fields)
+                rows = np.asarray(fields.representative_rows)
+                vectors = OrbitVectorFields(grid, fields)
+                density = 1e-9 + sum(0.6 * np.exp(-0.9 * np.sum((grid.coordinates - p) ** 2, axis=1)) for p in positions)
+                core = sum(0.2 * np.exp(-2.5 * np.sum((grid.coordinates - p) ** 2, axis=1)) for p in positions[:1])
+                gradient = grid_gradient(grid)
+                orbital = 0.9 * gradient.apply(density)
+                tau = 0.3 * density + np.sum(orbital**2, axis=0) / (8.0 * density) * 1.05
+                with self.assertRaises(ValueError):
+                    DeviceMetaGGAOnOrbits(functional, grid, reducer=reducer, core_density=core)
+                device = DeviceMetaGGAOnOrbits(functional, grid, reducer=reducer, core_density=core, permutations=True)
+                field = lambda values: reducer.field(np.ascontiguousarray(values[rows]))  # noqa: E731
+                wedge = lambda value: np.asarray(reducer.wedge_values(value))  # noqa: E731
+                for given in (orbital, None):
+                    reference = meta_gga_xc(functional, density, tau, grid, core, density_gradient=given)
+                    result = device(
+                        field(density), tau=field(tau),
+                        density_gradient=None if given is None else tuple(field(row) for row in given),
+                    )
+                    self.assertAlmostEqual(result.total_energy, reference.total_energy, delta=1e-11)
+                    for left, right in ((result.potential, reference.potential),
+                                        (result.kinetic_potential, reference.kinetic_potential)):
+                        np.testing.assert_allclose(wedge(left), right[rows], rtol=0, atol=1e-10 * np.max(np.abs(right)))
+                    if given is not None:
+                        flux = vectors.expand(np.stack([wedge(component) for component in result.gradient_flux]))
+                        np.testing.assert_allclose(flux, reference.gradient_flux, rtol=0, atol=1e-10)
+                        np.testing.assert_allclose(wedge(result.core_potential), reference.core_potential[rows], rtol=0,
+                                                   atol=1e-10 * np.max(np.abs(reference.core_potential)))
+                up, down = 0.6 * density, 0.4 * density
+                reference = meta_gga_xc_spin(functional, up, down, 0.6 * tau, 0.4 * tau, grid, core,
+                                             density_gradients=(0.6 * orbital, 0.4 * orbital))
+                spin = DeviceMetaGGAOnOrbits(functional, grid, reducer=reducer, core_density=core, spin=True,
+                                             permutations=True)
+                result = spin(field(up), field(down), tau_up=field(0.6 * tau), tau_down=field(0.4 * tau),
+                              density_gradients=tuple(tuple(field(row) for row in g) for g in (0.6 * orbital, 0.4 * orbital)))
+                self.assertAlmostEqual(result.total_energy, reference.total_energy, delta=1e-11)
+                for left, right in ((result.potential_up, reference.potential_up),
+                                    (result.potential_down, reference.potential_down),
+                                    (result.core_potential, reference.core_potential)):
+                    np.testing.assert_allclose(wedge(left), right[rows], rtol=0, atol=1e-10 * np.max(np.abs(right)))
+                flux = vectors.expand(np.stack([wedge(component) for component in result.gradient_flux_up]))
+                np.testing.assert_allclose(flux, reference.gradient_flux_up, rtol=0, atol=1e-10)
 
 
 @unittest.skipUnless(cupy_available(), "CuPy is not available")

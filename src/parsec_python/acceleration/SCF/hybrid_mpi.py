@@ -37,6 +37,24 @@ bohr, ``q = sqrt(h^3) psi``, ``W = V_x Psi``, ``M = -Psi^T W = L L^T``,
   (:class:`DistributedOccupiedBlock`); the small matrices of the extrapolation
   come to the root.
 
+The sector orbitals of a periodic cell take the route of one process instead
+(``PARSEC_MPI_EXCHANGE_POOL=auto``, the default since 2026-11-23,
+:func:`mpi_exchange_pool_setting`): every rank receives every column of every
+sector and gathers them on its home device (the device of the channel's first
+sector) into the coset blocks of their half-cell translations
+(:mod:`..Hamiltonian.exchange_translations`) or into one full-grid block
+(:func:`~..Hamiltonian.exchange_device._apply_pooled_exchange`), as
+:func:`~..Hamiltonian.exchange_device.apply_device_exchange` takes them where
+they fit the devices of every rank; the full-grid block only for a channel of
+at least :data:`MPI_POOL_MIN_SECTORS` sectors (every rank holds a whole copy
+of the gathered orbitals and their ``W``), fewer sectors keep the tiles
+below.  A small build (that of one process on
+one device) runs whole on the home device of every rank, so each owner folds
+``W`` into its sectors with no message; a larger one divides its tiles among
+the GPUs of all ranks, and the folded parts of ``W`` go to the owners as
+above.  The one sector of the identity of a small build runs on its owner's
+device alone, as one process takes it.
+
 Arrays travel as device buffers where the MPI library takes them
 (``MPICH_GPU_SUPPORT_ENABLED=1``, which the runner sets for a hybrid input
 before ``MPI_Init``) and through the host otherwise
@@ -64,7 +82,10 @@ import numpy as np
 from parsec_python.SCF.fock_diis import OccupiedBlock, orthonormal_complement, window_occupation_floor
 from parsec_python.V_xc.exact_exchange import exchange_occupation_threshold
 
+from ..Hamiltonian import exchange_device as _exchange_device
+from ..Hamiltonian import exchange_translations as _exchange_translations
 from ..Hamiltonian.exchange_device import (
+    POOL_MEMORY_MARGIN,
     ChannelOrbitals,
     DeviceCompressedExchange,
     DeviceExchangeApplication,
@@ -75,6 +96,8 @@ from ..Hamiltonian.exchange_device import (
     parity_context,
     parity_tile_bytes,
     plan_exchange,
+    pooled_exchange_applies,
+    require_exchange_memory,
     run_exchange_tiles,
     sector_exchange_energies,
     touched_blocks,
@@ -84,6 +107,83 @@ from .hybrid import DeviceExchange, DeviceFockEngine, DeviceFockOperator
 
 #: The tag of the exchange's point-to-point messages (on a communicator of their own).
 _TAG = 3141
+
+MPI_POOL_SETTING = "PARSEC_MPI_EXCHANGE_POOL"
+
+
+def mpi_exchange_pool_setting() -> str:
+    """``PARSEC_MPI_EXCHANGE_POOL``: ``auto`` (default, since 2026-11-23) or ``off``.
+
+    ``auto``: a build of ``W`` of the sector orbitals of a periodic cell takes the route of one process
+    (:func:`~..Hamiltonian.exchange_device.apply_device_exchange`): the coset blocks of the half-cell translations
+    of the sectors (``PARSEC_CUPY_EXCHANGE_TRANSLATIONS``) or, for a channel of at least :data:`MPI_POOL_MIN_SECTORS`
+    sectors, one full-grid block (``PARSEC_CUPY_EXCHANGE_POOL``), gathered on the home device of every rank (a whole
+    copy on each) where they fit the devices of every rank (else the tiles of the sectors); a small build runs whole
+    on every rank's home device, a larger one divides its tiles among the GPUs of all ranks
+    (:meth:`MPIExchangeService._apply_gathered`).  A small build of the one sector of the identity runs on
+    its owner's device alone, as in one process (:meth:`MPIExchangeService._apply_owner_alone`).  ``off``: the tiles
+    of the sectors on every GPU of every rank, as before.  A wrong value is refused when the exchange of the ranks is
+    set up (:func:`mpi_device_exchange_for`, before the SCF).
+    """
+
+    value = os.environ.get(MPI_POOL_SETTING, "auto").strip().lower() or "auto"
+    if value not in {"auto", "off"}:
+        raise ValueError(f"{MPI_POOL_SETTING} must be auto or off, not {value!r}")
+    return value
+
+
+#: The channels of at least this many sectors take the full-grid block of one process on the ranks (every rank holds
+#: a copy of the block and its ``W``); fewer sectors keep the tiles of the sectors
+#: (``MPIExchangeService._gathered_route``; measured on A100 first runs: no gain from 2 to 16 sectors for up to 9 GiB
+#: more per GPU, 11 % at 32 and 36 % at 64).
+MPI_POOL_MIN_SECTORS = 32
+
+
+class _Shape:
+    """A stand-in for the orbitals of a sector that only names their shape (the memory estimates of one process
+    read ``OrbitalSector.rows``, which another rank's sector without replica cannot give)."""
+
+    def __init__(self, rows: int, columns: int) -> None:
+        self.shape = (int(rows), int(columns))
+
+
+def _shaped(orbitals: ChannelOrbitals) -> ChannelOrbitals:
+    """``orbitals`` whose every sector names its rows (those of its expansion), for the memory estimates."""
+
+    from dataclasses import replace as _replace
+
+    sectors = tuple(
+        _replace(sector, vectors=_Shape(sector.expansion.rows, max(1, int(sector.local.size))))
+        for sector in orbitals.sectors
+    )
+    return ChannelOrbitals(sectors, orbitals.occupations, orbitals.spin_weight, orbitals.full_size,
+                           orbitals.volume_element)
+
+
+@dataclass
+class _GatheredBuild:
+    """The gathered orbitals of a build of :meth:`MPIExchangeService._apply_gathered` on one rank.
+
+    ``kind`` is ``translations`` (``channel`` a :class:`~..Hamiltonian.exchange_translations.TranslationChannel` of
+    the coset blocks, ``context`` its :class:`~..Hamiltonian.exchange_translations.TranslationContext`) or ``pool``
+    (``channel`` the one full-grid block of every state, ``context`` ``None``), on ``home``.  ``inner`` is the
+    application of ``channel`` of the occupied columns that the completion of every column takes over (this rank's
+    part of ``W`` where the tiles were divided among the ranks); ``columns`` maps each block column to its sector
+    index and the position in that sector (``(sectors, positions)`` per block).
+    """
+
+    kind: str
+    channel: ChannelOrbitals
+    context: Any
+    home: int
+    columns: list
+    inner: Any = None
+
+    def release(self) -> None:
+        if self.inner is not None:
+            self.inner.applied[:] = [None] * len(self.inner.applied)
+        for block in self.channel.sectors:
+            block.vectors = None
 
 
 def exchange_transport() -> str:
@@ -786,6 +886,17 @@ class MPIExchangeService:
         import threading
 
         started = perf_counter()
+        if mpi_exchange_pool_setting() == "auto":
+            # The routes of one process (PARSEC_MPI_EXCHANGE_POOL): the gathered orbitals of a periodic cell's
+            # sectors, or the small build of one sector on its owner's device; the input decides alike everywhere.
+            entry = self.objects[int(payload["channel"])]
+            known = None if payload.get("known") is None else self.objects[int(payload["known"])]
+            columns = str(payload["columns"])
+            if self._owner_alone(entry, known, columns):
+                return self._apply_owner_alone(payload, entry, known)
+            route = self._gathered_route(entry, known, columns)
+            if route is not None:
+                return self._apply_gathered(payload, entry, known, *route)
         entry, known, plan, parity, assigned, touched = self._local(self._plan, payload)
         self.solvers.record_path("full" if parity is None else "parity")
         orbitals = entry.orbitals
@@ -921,6 +1032,474 @@ class MPIExchangeService:
             columns=application.columns,
             occupied=tuple(plan.occupied),
         )
+
+    # ----- the routes of one process (PARSEC_MPI_EXCHANGE_POOL) --------------------
+
+    def _numbers(self, orbitals, plan, application, gathered, known_energy):
+        """What the root returns to the engine for a build (the others ``None``): ``E_x`` summed in sector order."""
+
+        if self.rank != 0:
+            return None
+        energy = 0.0
+        if known_energy is None:
+            values = {}
+            for item, _seconds in gathered:
+                values.update(item)
+            for index in sorted(values):
+                energy += values[index]
+            energy *= 0.5 * orbitals.spin_weight
+        return dict(
+            energy=float(energy),
+            pair_solves=int(plan.pair_solves),
+            poisson_seconds=float(max(seconds for _item, seconds in gathered)),
+            columns=application.columns,
+            occupied=tuple(plan.occupied),
+        )
+
+    def _owner_alone(self, entry, known, columns: str) -> bool:
+        """Whether a build is a small build of one sector (the identity of a cell below the floor of the sectors):
+        one process takes it on the device of its orbitals alone (``DeviceFockEngine._devices``, ``small_build`` of
+        the cuFFT pair solver of a cell)."""
+
+        orbitals = entry.orbitals
+        small = getattr(self.solvers, "small_build", None)
+        if len(orbitals.sectors) != 1 or not callable(small):
+            return False
+        return bool(small(orbitals, columns=columns, known=known))
+
+    def _apply_owner_alone(self, payload, entry, known):
+        """``W`` of a small build of one sector on its owner's device alone (:meth:`_owner_alone`).
+
+        No replica, no tile on another rank and no sum: the owner forms ``W`` (or completes ``known``) with the tiles
+        of one process on the sector's device; the other ranks agree on the outcome and keep no ``W``.
+        """
+
+        from ..backends.cupy import require_cupy
+
+        cp, _ = require_cupy()
+        started = perf_counter()
+        orbitals = entry.orbitals
+        sector = orbitals.sectors[0]
+        owner = int(entry.owners[0])
+        device = int(sector.device)
+        columns = str(payload["columns"])
+        self.solvers.record_path("full")
+        plan = plan_exchange(orbitals, self.solvers.batch_size, columns=columns, known=known)
+
+        def check() -> None:
+            if self.rank == owner and known is None:
+                require_exchange_memory(orbitals, self.solvers, (device,), parity=None)
+
+        self._local(check)  # a refusal leaves the known application where it was, on every rank
+        if known is not None:
+            self.objects.pop(int(payload["known"]))  # consumed by the completion (as in one process)
+        self._timed("apply_plan", started)
+        stage = perf_counter()
+
+        def build():
+            if self.rank != owner:
+                return [None], {}, {}
+            if known is not None:
+                applied = known.applied
+            else:
+                with cp.cuda.Device(device):
+                    applied = [cp.zeros((int(sector.expansion.rows), int(sector.local.size)), dtype=cp.float64,
+                                        order="F")]
+            timing = run_exchange_tiles(
+                orbitals, self.solvers, plan, assign_tiles(plan.tiles, (device,)), applied, parity=None
+            )
+            energies = sector_exchange_energies(orbitals, applied) if known is None else {}
+            return applied, timing, energies
+
+        applied, timing, energies = self._local(build)
+        self._timed("apply_tiles", stage)
+        if self.rank == owner:
+            self.pair_solves += int(plan.pair_solves)
+            self.tile_seconds += float(sum(timing.values()))
+        gathered = self.comm.gather((energies, max(timing.values(), default=0.0)), root=0)
+        application = DeviceExchangeApplication(
+            orbitals=orbitals,
+            applied=applied,
+            columns=plan.done() if known is None else tuple(sorted(set(known.columns) | set(plan.done()))),
+            occupied=plan.occupied,
+            energy=0.0 if known is None else float(known.energy),
+            pair_solves=int(plan.pair_solves + (0 if known is None else known.pair_solves)),
+            poisson_seconds=0.0,
+            seconds=0.0,
+        )
+        self.objects[int(payload["id"])] = application
+        return self._numbers(orbitals, plan, application, gathered, None if known is None else known.energy)
+
+    def _replica_bytes(self, entry) -> dict[int, int]:
+        """Device bytes of the replicas a gathered build makes on this rank: every column of every other rank's
+        sector that it does not hold yet, with the columns it holds (the new replica replaces the old one)."""
+
+        needed: dict[int, int] = {}
+        if self.size == 1:
+            return needed
+        for index, sector in enumerate(entry.orbitals.sectors):
+            if entry.owners[index] == self.rank:
+                continue
+            count = int(sector.local.size)
+            have = entry.shipped.get(index, np.zeros(0, dtype=np.int64))
+            missing = count - int(np.unique(have).size)
+            if missing <= 0:
+                continue
+            current = 0 if sector.vectors is None else int(sector.vectors.shape[1])
+            needed[int(sector.device)] = needed.get(int(sector.device), 0) + 8 * int(sector.expansion.rows) * (
+                current + missing
+            )
+        return needed
+
+    @staticmethod
+    def _fits(counts: dict, extra: dict) -> bool:
+        """Whether ``counts`` and ``extra`` (bytes by device) and the margin of one process fit what every device has
+        free now (:func:`~..Hamiltonian.exchange_device.pooled_exchange_fits`)."""
+
+        for device in sorted(set(counts) | set(extra)):
+            available, total = _exchange_device._device_memory(int(device))
+            needed = int(counts.get(device, 0)) + int(extra.get(device, 0))
+            if needed + POOL_MEMORY_MARGIN * float(total) > float(available):
+                return False
+        return True
+
+    def _gathered_route(self, entry, known, columns: str):
+        """The route of one process for a build of the sector orbitals of a periodic cell, the same on every rank:
+        ``("translations", context)``, ``("pool", None)`` or ``None`` (the tiles of the sectors).
+
+        As :func:`~..Hamiltonian.exchange_device.apply_device_exchange`: a completion takes the route of its occupied
+        build; another build takes the coset blocks of the half-cell translations of the sectors where they and
+        their build fit the devices of every rank (with the replicas of the other ranks' sectors this rank makes),
+        else the one full-grid block where the channel has at least :data:`MPI_POOL_MIN_SECTORS` sectors and the
+        block fits every rank, else the tiles.  Unlike one process, every rank holds a whole copy of the gathered
+        orbitals and their ``W``, so the full-grid block (``2 x 8 N M`` bytes per rank) is kept for the channels whose
+        many small sector tiles it pays for.  The builds are counted by path on the pair solvers (``translations``,
+        ``translations-unfit``, ``pool``, ``pool-fallback`` as in one process; ``tiles``: the sector tiles of a
+        channel below that floor).
+        """
+
+        orbitals = entry.orbitals
+        if not pooled_exchange_applies(orbitals, self.solvers):
+            return None
+        record = self.solvers.record_path
+        pooled = len(orbitals.sectors) >= int(MPI_POOL_MIN_SECTORS)
+        if known is not None:
+            build = getattr(known, "pooled", None)
+            if isinstance(build, _GatheredBuild):
+                record(build.kind)
+                return build.kind, build.context
+            record("pool-fallback" if pooled else "tiles")
+            return None
+
+        def decide():
+            context = _exchange_translations.translation_context(orbitals, self.solvers)
+            shaped = _shaped(orbitals)
+            extra = self._replica_bytes(entry)
+            translations = context is not None and self._fits(
+                _exchange_translations.translation_exchange_bytes(
+                    shaped, context, self.solvers, self.devices, columns=columns
+                ),
+                extra,
+            )
+            pool = self._fits(
+                _exchange_device.pooled_exchange_bytes(shaped, self.solvers, self.devices, columns=columns), extra
+            )
+            return context, (context is not None, bool(translations), bool(pool))
+
+        context, vote = self._local(decide)
+        votes = self.comm.allgather(vote)
+        if all(item[0] for item in votes):
+            if all(item[1] for item in votes):
+                record("translations")
+                return "translations", context
+            record("translations-unfit")
+        if not pooled:
+            record("tiles")
+            return None
+        if all(item[2] for item in votes):
+            record("pool")
+            return "pool", None
+        record("pool-fallback")
+        return None
+
+    def _drop_replicas(self, entry) -> None:
+        """Let the replicas of the other ranks' sectors go (a gathered build holds its own copy of them).
+
+        Every rank forgets what was shipped of every sector, its own included, so that a later build of the channel
+        that needs replicas broadcasts them again from their owners: the ranks keep the same record of the
+        broadcasts (:meth:`_prepare_replicas`)."""
+
+        from ..backends.cupy import require_cupy
+
+        cp, _ = require_cupy()
+        for device in self.devices:
+            cp.cuda.Device(device).synchronize()
+        for index, sector in enumerate(entry.orbitals.sectors):
+            entry.shipped.pop(index, None)
+            if entry.owners[index] == self.rank:
+                continue
+            sector.vectors = None
+            sector.local = np.full(int(sector.local.size), -1, dtype=np.int64)
+
+    def _gather_orbitals(self, entry, kind: str, context) -> _GatheredBuild:
+        """Every sector's orbitals (the replicas in place) gathered on the home device: the coset blocks of
+        ``context`` or the full-grid block, as one process gathers them."""
+
+        from ..backends.cupy import require_cupy
+
+        cp, _ = require_cupy()
+        orbitals = entry.orbitals
+        home = int(orbitals.sectors[0].device)
+        maps = []
+        if kind == "translations":
+            channel = _exchange_translations._coset_channel(cp, orbitals, context, home)
+            for block in channel.sectors:
+                width = int(block.local.size)
+                maps.append((np.full(width, -1, dtype=np.int64), np.full(width, -1, dtype=np.int64)))
+            for index, sector in enumerate(orbitals.sectors):
+                number, offset = channel.members[index]
+                count = int(sector.local.size)
+                maps[number][0][offset : offset + count] = index
+                maps[number][1][offset : offset + count] = np.arange(count, dtype=np.int64)
+        else:
+            channel = _exchange_device._pooled_orbitals(cp, orbitals, home)
+            count = int(orbitals.state_count)
+            sectors, positions = np.full(count, -1, dtype=np.int64), np.full(count, -1, dtype=np.int64)
+            for index, sector in enumerate(orbitals.sectors):
+                sectors[sector.states] = index
+                positions[sector.states] = np.arange(int(sector.local.size), dtype=np.int64)
+            maps.append((sectors, positions))
+        return _GatheredBuild(kind, channel, context, home, maps)
+
+    def _small_gathered(self, build: _GatheredBuild, columns: str, inner_known) -> bool:
+        """Whether a gathered build is small, so that one process runs it on its home device alone
+        (``exchange_translations.translation_devices``, ``exchange_device._pooled_devices``)."""
+
+        if build.kind == "translations":
+            pairs = _exchange_translations._build_pairs(build.channel, columns, inner_known)
+            return pairs * float(build.context.coset_rows) < float(_exchange_translations.SMALL_BUILD_POINTS)
+        return bool(self.solvers.small_build(build.channel, columns=columns, known=inner_known))
+
+    @staticmethod
+    def _fold_gathered(cp, build: _GatheredBuild, blocks, orbitals, index: int, positions: np.ndarray, device: int):
+        """``W_G`` of the columns ``positions`` of sector ``index`` folded from the gathered ``W`` (``blocks``, on the
+        home device) as one process folds it, F order on ``device``."""
+
+        positions = np.asarray(positions, dtype=np.int64)
+        contiguous = OrbitalSector._contiguous(positions)
+        with cp.cuda.Device(build.home):
+            if build.kind == "translations":
+                number, offset = build.channel.members[index]
+                block = blocks[number]
+                if contiguous:
+                    view = block[:, offset + int(positions[0]) : offset + int(positions[-1]) + 1]
+                else:
+                    view = block[:, cp.asarray(offset + positions)]
+                _gather, _weights, entries, weights = build.context.sectors[index].arrays(cp)
+                part = cp.asfortranarray(view[entries, :])
+                part *= weights[:, None]
+            else:
+                states = np.asarray(orbitals.sectors[index].states, dtype=np.int64)[positions]
+                part = orbitals.sectors[index].expansion.fold(cp, blocks[0][:, cp.asarray(states)])
+            cp.cuda.get_current_stream().synchronize()
+        if int(part.device.id) != int(device):
+            with cp.cuda.Device(int(device)):
+                moved = cp.empty(part.shape, dtype=cp.float64, order="F")
+                moved.data.copy_from_device(part.data, part.nbytes)
+            part = moved
+        return part
+
+    @staticmethod
+    def _place(cp, target, positions: np.ndarray, part) -> None:
+        """``target[:, positions] = part`` on the device of ``target``."""
+
+        with cp.cuda.Device(int(target.device.id)):
+            if OrbitalSector._contiguous(positions):
+                target[:, int(positions[0]) : int(positions[-1]) + 1] = part
+            else:
+                target[:, cp.asarray(positions)] = part
+            cp.cuda.get_current_stream().synchronize()
+
+    def _apply_gathered(self, payload, entry, known, kind: str, context):
+        """``W`` of a channel of a periodic cell's sector orbitals through the gathered orbitals of one process.
+
+        Every rank receives every column of every other rank's sector (a build that is not a completion) and gathers
+        all of them on its home device (:meth:`_gather_orbitals`): the coset blocks of the half-cell translations
+        (``kind`` ``translations``, :mod:`..Hamiltonian.exchange_translations`) or the full-grid block (``pool``).
+        The tiles of that channel are those of one process (:func:`plan_exchange`); a small build
+        (:meth:`_small_gathered`) runs whole on the home device of every rank, so every rank holds the whole ``W``
+        and each owner folds its sectors from it; a larger one divides its tiles among the GPUs of all ranks, each
+        rank folds its part of ``W`` into the sectors its tiles touched and sends those of the other ranks' sectors
+        to their owners, which add them in rank order.  ``E_x`` is summed over the owners' sectors in sector order.
+        An application of the occupied columns keeps the gathered orbitals and their ``W`` for the completion of
+        every column, which consumes them and forms only the empty columns, as in one process.
+        """
+
+        from ..backends.cupy import require_cupy
+
+        cp, _ = require_cupy()
+        started = perf_counter()
+        orbitals = entry.orbitals
+        columns = str(payload["columns"])
+        owned = [index for index, owner in enumerate(entry.owners) if owner == self.rank]
+        if known is not None:
+            build = known.pooled
+            known.pooled = None
+            inner_known = build.inner
+            build.inner = None
+            self.objects.pop(int(payload["known"]))  # consumed by the completion (as in one process)
+        else:
+            wanted = {
+                index: np.arange(int(sector.local.size), dtype=np.int64)
+                for index, sector in enumerate(orbitals.sectors)
+            }
+            records = self._local(self._prepare_replicas, entry, wanted)
+            stage = perf_counter()
+            self._collective(self._broadcast_replicas, entry, records)
+            self._timed("apply_replicas", stage)
+            build = self._local(self._gather_orbitals, entry, kind, context)
+            if self.size > 1:
+                # (once every rank holds its gathered copy: the ranks keep the same record of what was shipped)
+                self._drop_replicas(entry)
+            records = None  # (it holds the replicas too: they go now, not after the build)
+            inner_known = None
+        channel = build.channel
+        plan = plan_exchange(channel, self.solvers.batch_size, columns=columns, known=inner_known)
+        small = self._small_gathered(build, columns, inner_known)
+        if small:
+            assigned = {(self.rank, build.home): assign_tiles(plan.tiles, (build.home,))[build.home]}
+            local = {build.home: assigned[(self.rank, build.home)]}
+        else:
+            assigned = assign_tiles(plan.tiles, self.global_devices)
+            local = {device: assigned[(self.rank, device)] for device in self.devices}
+        divided = not small and self.size > 1
+        if kind == "translations":
+            label = getattr(self.solvers, "note_translations", None)
+            if callable(label):
+                label(build.context.label)
+        else:
+            # (one process counts the build of the full-grid block as a build of the full grid too)
+            self.solvers.record_path("full")
+        self._timed("apply_plan", started)
+        stage = perf_counter()
+
+        def tiles():
+            if inner_known is not None:
+                blocks = inner_known.applied
+            else:
+                blocks = []
+                with cp.cuda.Device(build.home):
+                    for block in channel.sectors:
+                        blocks.append(
+                            cp.zeros((int(block.rows), int(block.local.size)), dtype=cp.float64, order="F")
+                        )
+            timing = run_exchange_tiles(channel, self.solvers, plan, local, blocks, parity=build.context)
+            return blocks, timing
+
+        blocks, timing = self._local(tiles)
+        self._timed("apply_tiles", stage)
+        self.pair_solves += int(sum(tile.pairs for work in local.values() for tile in work))
+        self.tile_seconds += float(sum(timing.values()))
+        stage = perf_counter()
+        # The states this build formed: every one it plans, but those of the known application.
+        formed = np.zeros(orbitals.state_count, dtype=bool)
+        formed[np.asarray(plan.done(), dtype=np.int64)] = True
+        if inner_known is not None:
+            formed[np.asarray(inner_known.columns, dtype=np.int64)] = False
+        # Positions of each sector whose W the tiles of every rank formed (a divided build: sent to the owners).
+        positions_of: dict = {}
+        if divided:
+            for rank in range(self.size):
+                work = [tile for (owner, _device), items in assigned.items() if owner == rank for tile in items]
+                for block_index in sorted(touched_blocks(work)):
+                    block = plan.blocks[block_index]
+                    sectors, positions = build.columns[int(block.sector)]
+                    picked, where = sectors[block.positions], positions[block.positions]
+                    for index in np.unique(picked):
+                        positions_of.setdefault((rank, int(index)), []).extend(
+                            int(value) for value in where[picked == index]
+                        )
+
+        def fold():
+            if known is not None:
+                applied = known.applied
+            else:
+                applied = [None] * len(orbitals.sectors)
+                for index in owned:
+                    sector = orbitals.sectors[index]
+                    with cp.cuda.Device(sector.device):
+                        applied[index] = cp.zeros(
+                            (int(sector.expansion.rows), int(sector.local.size)), dtype=cp.float64, order="F"
+                        )
+            for index in owned:
+                sector = orbitals.sectors[index]
+                positions = np.flatnonzero(formed[sector.states])
+                if positions.size:
+                    part = self._fold_gathered(cp, build, blocks, orbitals, index, positions, int(sector.device))
+                    self._place(cp, applied[index], positions, part)
+                    del part
+            sends = []
+            for index, sector in enumerate(orbitals.sectors):
+                if entry.owners[index] == self.rank or (self.rank, index) not in positions_of:
+                    continue
+                positions = np.unique(np.asarray(positions_of[(self.rank, index)], dtype=np.int64))
+                with cp.cuda.Device(sector.device):
+                    partial = cp.zeros(
+                        (int(sector.expansion.rows), int(sector.local.size)), dtype=cp.float64, order="F"
+                    )
+                part = self._fold_gathered(cp, build, blocks, orbitals, index, positions, int(sector.device))
+                self._place(cp, partial, positions, part)
+                del part
+                sends.append((entry.owners[index], partial, positions))
+            sends.sort(key=lambda item: item[0])
+            return applied, sends
+
+        applied, sends = self._local(fold)
+        if divided:
+            receives = []
+            for index in owned:
+                for rank in range(self.size):
+                    if rank == self.rank or (rank, index) not in positions_of:
+                        continue
+                    positions = np.unique(np.asarray(positions_of[(rank, index)], dtype=np.int64))
+                    receives.append((rank, applied[index], positions))
+            self._collective(self.transport.reduce_to_owners, sends, receives)
+        del sends
+        self._timed("apply_reduce", stage)
+        stage = perf_counter()
+        keep = columns == "occupied"
+        if keep:
+            build.inner = DeviceExchangeApplication(
+                orbitals=channel,
+                applied=blocks,
+                columns=plan.done(),
+                occupied=plan.occupied,
+                energy=0.0,
+                pair_solves=int(plan.pair_solves),
+                poisson_seconds=0.0,
+                seconds=0.0,
+            )
+        else:
+            blocks[:] = [None] * len(blocks)
+            build.release()
+        energies = (
+            self._local(sector_exchange_energies, orbitals, applied, set(owned)) if known is None else {}
+        )
+        gathered = self.comm.gather((energies, max(timing.values(), default=0.0)), root=0)
+        application = DeviceExchangeApplication(
+            orbitals=orbitals,
+            applied=applied,
+            columns=plan.done(),
+            occupied=plan.occupied,
+            energy=0.0 if known is None else float(known.energy),
+            pair_solves=int(plan.pair_solves + (0 if inner_known is None else inner_known.pair_solves)),
+            poisson_seconds=0.0,
+            seconds=0.0,
+            pooled=build if keep else None,
+        )
+        self.objects[int(payload["id"])] = application
+        self._timed("apply_energy", stage)
+        return self._numbers(orbitals, plan, application, gathered, None if known is None else known.energy)
 
     def _build_bytes(self, entry, wanted, touched_sectors, known, parity) -> dict[int, int]:
         """The device bytes a build holds on this rank, per device (:meth:`_require_memory`).
@@ -1761,6 +2340,8 @@ def mpi_device_exchange_for(exchange: DeviceExchange, context, sectors, referenc
         raise NotImplementedError(
             "the exchange of a hybrid on several MPI ranks needs the symmetry-sector eigensolver"
         )
+    # PARSEC_MPI_EXCHANGE_POOL: a wrong value is refused on every rank before the SCF.
+    mpi_exchange_pool_setting()
     mpi_exchange = MPIDeviceExchange(
         context=context,
         service=None,
@@ -1790,8 +2371,10 @@ __all__ = [
     "MPIExchangeService",
     "MPIFockEngine",
     "MPIFockOperator",
+    "MPI_POOL_SETTING",
     "column_runs",
     "exchange_chunk_bytes",
     "exchange_transport",
     "mpi_device_exchange_for",
+    "mpi_exchange_pool_setting",
 ]

@@ -18,7 +18,9 @@ linearly (``r**2 * dV/dr`` for the potential).  For a species with
 ``Cubic_Spline`` the slopes of the potential and of the core density are the
 derivatives of PARSEC's padded cubic splines (``splint``): a point at or
 beyond the first radial sample lies between two samples, so the kernel needs
-the values and the second derivatives of the spline at the samples only.
+the values and the second derivatives of the spline at the samples only; the
+potential slope is the Coulomb one from the spline's cutoff
+(``PARSEC_SPLINE_COULOMB_TAIL``) where that lies closer.
 
 The numbers differ from the readable routine by the order of the sums only.
 
@@ -113,17 +115,19 @@ void local_force_chunks(
     const double* c_table = core_table + table_offsets[kind];
     const double* c_second = core_second + table_offsets[kind];
     const int samples = table_counts[kind];
-    const double scale_a = parameters[10 * kind + 0];
-    const double scale_b = parameters[10 * kind + 1];
-    const double inner = parameters[10 * kind + 2];
-    const double tail = parameters[10 * kind + 3];
-    const double two_z = parameters[10 * kind + 4];
-    const bool has_core = parameters[10 * kind + 5] != 0.0;
-    const bool splined = parameters[10 * kind + 6] != 0.0;
+    const double scale_a = parameters[11 * kind + 0];
+    const double scale_b = parameters[11 * kind + 1];
+    const double inner = parameters[11 * kind + 2];
+    const double tail = parameters[11 * kind + 3];
+    const double two_z = parameters[11 * kind + 4];
+    const bool has_core = parameters[11 * kind + 5] != 0.0;
+    const bool splined = parameters[11 * kind + 6] != 0.0;
     // PARSEC_SPLINE_FORCE_CENTER=auto: within smooth (0: none) the slopes over r of the smooth behaviour
-    const double smooth = parameters[10 * kind + 7];
-    const double smooth_local = parameters[10 * kind + 8];
-    const double smooth_core = parameters[10 * kind + 9];
+    const double smooth = parameters[11 * kind + 7];
+    const double smooth_local = parameters[11 * kind + 8];
+    const double smooth_core = parameters[11 * kind + 9];
+    // a spline's potential slope is 2 Z/r^2 from here (PARSEC_SPLINE_COULOMB_TAIL; tail where it is off)
+    const double coulomb = parameters[11 * kind + 10];
     const double ax = positions[3 * atom + 0];
     const double ay = positions[3 * atom + 1];
     const double az = positions[3 * atom + 2];
@@ -161,8 +165,12 @@ void local_force_chunks(
                 const double left = (r_table[index + 1] - r) / width;
                 const double lower = (3.0 * left * left - 1.0) / 6.0 * width;
                 const double upper = (3.0 * step * step - 1.0) / 6.0 * width;
-                potential_slope = (l_table[index + 1] - l_table[index]) / width
-                    - lower * l_second[index] + upper * l_second[index + 1];
+                if (r >= coulomb) {
+                    potential_slope = two_z / (r * r);
+                } else {
+                    potential_slope = (l_table[index + 1] - l_table[index]) / width
+                        - lower * l_second[index] + upper * l_second[index + 1];
+                }
                 if (has_core) {
                     core_slope = (c_table[index + 1] - c_table[index]) / width
                         - lower * c_second[index] + upper * c_second[index + 1];
@@ -204,7 +212,7 @@ _COMPILED_DIRECT: dict[int, object] = {}
 
 
 def _direct_kernel_source() -> str:
-    """``local_force_chunks`` with a per-species flag ``parameters[11*kind+10]``.
+    """``local_force_chunks`` with a per-species flag ``parameters[12*kind+11]``.
 
     A flagged species (``Old_Interpolation_Format`` without cubic spline)
     takes the potential slope from the linear interpolation of ``dV/dr``
@@ -216,9 +224,9 @@ def _direct_kernel_source() -> str:
     replacements = (
         ("void local_force_chunks(", "void local_force_chunks_direct("),
         (
-            "    const bool splined = parameters[10 * kind + 6] != 0.0;\n",
-            "    const bool splined = parameters[10 * kind + 6] != 0.0;\n"
-            "    const bool direct = parameters[10 * kind + 10] != 0.0;\n",
+            "    const bool splined = parameters[11 * kind + 6] != 0.0;\n",
+            "    const bool splined = parameters[11 * kind + 6] != 0.0;\n"
+            "    const bool direct = parameters[11 * kind + 11] != 0.0;\n",
         ),
         (
             "                potential_slope = (l_table[index]\n"
@@ -233,8 +241,8 @@ def _direct_kernel_source() -> str:
         if source.count(old) != 1:
             raise RuntimeError(f"the local force kernel source changed near {old!r}")
         source = source.replace(old, new)
-    # Eleven parameters per species.
-    return source.replace("parameters[10 * kind + ", "parameters[11 * kind + ")
+    # Twelve parameters per species.
+    return source.replace("parameters[11 * kind + ", "parameters[12 * kind + ")
 
 
 def _kernel(cp, direct: bool = False):
@@ -311,9 +319,9 @@ def cupy_local_forces(
         has_core = tables.core_density_derivative is not None
         zeros = np.zeros_like(samples)
         if specification.use_spline:
-            local_values = potential.channel_potentials[
+            local_values = potential.local_channel_potential(
                 specification.local_angular_momentum
-            ]
+            )
             local_table.append(local_values)
             local_second.append(
                 ParsecRadialSpline.from_positive_grid(
@@ -370,18 +378,24 @@ def cupy_local_forces(
                         spline_padding_width=half_width,
                     )[0]
                 ) / smooth
+        tail = tail_start_radius(potential)
         parameters.append(
             [
                 potential.radial_parameter_a,
                 potential.radial_parameter_b,
                 samples[0],
-                tail_start_radius(potential),
+                tail,
                 2.0 * potential.ionic_charge,
                 1.0 if has_core else 0.0,
                 1.0 if specification.use_spline else 0.0,
                 smooth,
                 smooth_local,
                 smooth_core,
+                # the potential slope of a spline is 2 Z/r^2 from its cutoff (PARSEC_SPLINE_COULOMB_TAIL), the rule
+                # of radial_derivatives.evaluate_local_potential_derivative; the density slopes keep ``tail``
+                min(tail, potential.local_spline_cutoff(specification.local_angular_momentum))
+                if specification.use_spline
+                else tail,
             ]
         )
     use_direct = any(direct)

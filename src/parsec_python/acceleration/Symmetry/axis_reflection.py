@@ -90,13 +90,15 @@ _SLAB_WIRE_SWITCH = "PARSEC_SLAB_WIRE_SECTORS"
 
 
 def slab_wire_sectors_setting() -> str:
-    """``PARSEC_SLAB_WIRE_SECTORS``: ``off`` (default) keeps a wire or slab (``Boundary_Conditions: wire`` or ``slab``
-    on the Fortran-derived routines) at the Gamma point on the full grid, as before; ``auto`` gives one whose periodic
-    vectors lie along the Cartesian axes the sectors of its point group about the origin (:func:`confined_grid`): the
-    signed permutations that map its atoms modulo the periodic lattice and its grid (the cylinder or slab of points)
-    onto themselves, the mirror ``z -> -z`` of a slab among them."""
+    """``PARSEC_SLAB_WIRE_SECTORS``: ``auto`` (the default since 2026-11-23) gives a wire or slab
+    (``Boundary_Conditions: wire`` or ``slab`` on the Fortran-derived routines) whose periodic vectors lie along the
+    Cartesian axes the sectors of its point group about the origin (:func:`confined_grid`): the signed permutations
+    that map its atoms modulo the periodic lattice and its grid (the cylinder or slab of points) onto themselves, the
+    mirror ``z -> -z`` of a slab among them, where the driver's route and size floor take it
+    (``driver._wire_slab_sector_refusal``); ``off`` keeps every wire or slab at the Gamma point on the full grid, as
+    before."""
 
-    value = os.environ.get(_SLAB_WIRE_SWITCH, "off").strip().lower() or "off"
+    value = os.environ.get(_SLAB_WIRE_SWITCH, "auto").strip().lower() or "auto"
     if value not in {"auto", "off"}:
         raise ValueError(f"{_SLAB_WIRE_SWITCH} must be auto or off, not {value!r}")
     return value

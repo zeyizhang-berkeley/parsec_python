@@ -321,10 +321,13 @@ Not currently supported as production physics:
 PARSEC's restart files are read: `parsec.dat` (`Restart_Run`, `nscf_kpoints`),
 `wfn.dat` (`Restart_From_Wfndat`, orbitals included), `relax_restart.dat` and
 `mdinit.dat`. A periodic restart builds the grid of its own input; where that
-is not the grid of `parsec.dat` (`Restart_Run` selects the Fortran-derived
-routines, whose counts the fractional translations of the space group divide,
-and an SCF whose symmetry check kept the identity alone, or the default
-routines, may have written the file on another count), PARSEC's error 364
+is not the grid of `parsec.dat` (another input wrote the file, or, under
+`PARSEC_FILE_KEYWORD_ROUTINES=fortran`, `Restart_Run` and the `nscf_*` keywords
+select the Fortran-derived routines, whose counts the fractional translations
+of the space group divide, and an SCF whose symmetry check kept the identity
+alone, or the default routines, may have written the file on another count;
+under `neutral`, the default since 2026-11-23, they choose no routines and the
+restart of the input that wrote the file builds its grid), PARSEC's error 364
 names both grids and what writes the file on the restart's grid: its spacing
 where its steps are equal (silicon cube at 0.45 bohr: 22 points stored, 20
 built; the first run at 0.513 bohr restarts), else the restart's routines in
@@ -2275,7 +2278,10 @@ Eigensolver and SCF controls (`Input/solver_options.py`, measured in the 1.5 rou
 - The later-SCF Chebyshev degree may be lowered by one at the end of every iteration after the fourth (PARSEC 1.5's
   `iter > 4`; before 4 November 2026 after the fifth). `Chebyshev_Degree_Decrease_After: 5` (an extension of this port) gives the earlier rule bit
   for bit; `Convergence_Criterion_Approach` (default 100 x `Convergence_Criterion`; 1.5's is 2 x) sets the SRE below
-  which it happens.
+  which it happens. 1.5 never raises the degree again within the loop, nor does this port by default; the opt-in
+  `PARSEC_FILTER_DEGREE_STALL=auto` (since 23 November 2026) gives a loop that goes twenty iterations without
+  halving its weighted SRE after the first drop its starting degree back, which rescues loops that stall there
+  (the broken-symmetry O2 pair of the consistency matrix) but lengthens some loops that converge without it.
 - The default eigensolver stays CHEBDAV (1.5's is CHEBFF): CHEBFF is faster on the large clusters, whose inputs
   write it, and slower or less accurate at the same criterion on Si28H36 and on periodic cells.
 - Opt-in labels of 1.5: `Vector_Rng_Seed` (start vectors of the first solve; -1 a seed from the clock, named in a

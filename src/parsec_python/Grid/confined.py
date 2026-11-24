@@ -198,7 +198,7 @@ class ConfinedPeriodicGrid(GeneralPeriodicGrid):
         return integers.astype(np.float64) @ self.periodic_lattice_vectors
 
     def compensation_image_translations(
-        self, position: np.ndarray, width: float
+        self, position: np.ndarray, width: float, reach: float = 0.0
     ) -> np.ndarray:
         """Fortran's images of an atom for the Gaussian-compensated local terms.
 
@@ -206,7 +206,9 @@ class ConfinedPeriodicGrid(GeneralPeriodicGrid):
         forces) sum ``|m_i| <= nint(6*sigma/|a_i|) + 1`` cells around the atom.
         The atom is first brought into the cell (``-1/2 <= f_i < 1/2``) by
         whole lattice vectors, which leaves Fortran's set unchanged for an
-        atom already inside it.
+        atom already inside it.  ``reach`` (bohr, the Coulomb onset of a local
+        table filtered by ``PARSEC_LOCAL_FILTER``; 0 otherwise) raises the
+        count to ``ceil(reach/|a_i| + 1/2)`` where that is larger.
         """
 
         fraction = self.fractional_coordinates(position)[0]
@@ -214,6 +216,8 @@ class ConfinedPeriodicGrid(GeneralPeriodicGrid):
         for axis in range(self.periodicity):
             length = float(np.linalg.norm(self.cell.lattice_vectors[axis]))
             count = int(np.floor(6.0 * width / length + 0.5)) + 1
+            if reach > 0.0:
+                count = max(count, int(np.ceil(reach / length + 0.5)))
             centre = -int(np.floor(fraction[axis] + 0.5))
             ranges.append(np.arange(centre - count, centre + count + 1))
         mesh = np.meshgrid(*ranges, indexing="ij")

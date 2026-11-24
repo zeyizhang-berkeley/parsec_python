@@ -22,7 +22,8 @@ here, after the accelerated SCF, with the readable post-processing of the refere
 
 Everything else these features combine with stays on the reference solver by name
 (:func:`acceleration.cli._reference_only_features`): k-point SCFs (whose eigensolves already run on
-the device workers), spin and spin-orbit bands, LDA+U, wires and slabs, Fortran's general grid, the
+the device workers), spin and spin-orbit bands, LDA+U, wires and slabs, Fortran's general grid where
+``PARSEC_GENERAL_GRID_ACCELERATED`` leaves it to the reference solver (``off``, ``--mpi``, the CPU backends), the
 periodic DOS (it needs k-points), and the DOS under ``--mpi``.  Under ``--mpi`` every rank runs the
 accelerated SCF of a Gamma cell (the SCF of one process), and the band k-points are dealt to the ranks
 (``PARSEC_MPI_ACCELERATED_BANDS=auto``; ``off`` runs such an input on the reference solver, as before).

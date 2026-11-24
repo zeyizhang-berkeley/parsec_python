@@ -62,6 +62,8 @@ class FastPeriodicLocalForceTests(unittest.TestCase):
     def setUp(self) -> None:
         # the dense reference potential: the fast one is installed when the acceleration package is imported
         self.addCleanup(setattr, ewald, "_local_potential_provider", ewald._local_potential_provider)
+        # (and whether it returns the converged sum, which set_local_potential_provider(None) clears)
+        self.addCleanup(setattr, ewald, "_provider_converged_for", ewald._provider_converged_for)
         ewald.set_local_potential_provider(None)
 
     def _compare(self, cell: str, shift: str, symbol: str, path: Path, core: bool, use_spline: bool = False) -> None:

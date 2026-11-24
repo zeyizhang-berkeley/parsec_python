@@ -418,9 +418,12 @@ class MovedAtomTests(unittest.TestCase):
                     forces.total,
                     warm.energies.total,
                     driver.compute_forces(moved, warm, symmetrize=False).total,
+                    (result.iterations, warm.iterations),
                 )
         sector, grid = outcomes["on"], outcomes["auto"]
-        self.assertAlmostEqual(sector[0], grid[0], delta=1e-9)
+        # The sector keeps the states of the full grid (PARSEC_IDENTITY_SECTOR_STATES): the same SCF steps.
+        self.assertEqual(sector[4], grid[4])
+        self.assertAlmostEqual(sector[0], grid[0], delta=1e-10)
         np.testing.assert_allclose(sector[1], grid[1], rtol=0, atol=1e-7)
         self.assertAlmostEqual(sector[2], grid[2], delta=1e-8)
         np.testing.assert_allclose(sector[3], grid[3], rtol=0, atol=1e-6)

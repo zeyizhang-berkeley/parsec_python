@@ -51,7 +51,10 @@ default; :meth:`SectorKPointSolver._refit`), its Ritz states cut to their lowest
 so cut that later falls short grows by its estimated deficit (the rule of the Gamma sectors).  A k-point
 whose sectors would not halve its work (``sum n_s M_s^2 <= N M^2 / 2``) stays one task, and so do the k-points
 of a basis of fewer than ``2^24`` entries (``N M``, 268 MB of complex vectors): their eigenproblems do not fill a
-device, and more of them would add the cost of the tasks (the 4631 k-points of an 8-atom cube with a 21^3 mesh).
+device, and more of them would add the cost of the tasks (the 4631 k-points of an 8-atom cube with a 21^3 mesh).  A
+meta-GGA whose tasks the solver of one task per k-point would deal over more than one device takes ``2^25``
+(:data:`_META_MINIMUM_ENTRIES`): the sectors of one process do not scale with its devices, and below it their
+orbital terms cost more than that division of the k-points.
 
 The density of a sector, ``|U v|^2``, is ``q_s / m_w`` on the rows of the orbit ``w`` of its column ``s``
 (``q = sum_n f_n |v_n|^2``, ``m_w`` the orbit size): expanded on the host and summed by the job of the driver.
@@ -73,10 +76,21 @@ the class is the mean of the images of its density (the weighted sectors of a cl
 on the real characters of ``H_k``).  A sector that such an antiunitary maps onto itself with ``A^2 = 1`` has a real
 structure, and with ``PARSEC_KPOINT_SECTOR_REAL=auto`` it is solved on real blocks (:mod:`.kpoint_real_forms`).
 
+At a k-point other than Gamma (not at the pairs of a time-reversal invariant point in the Bloch form above; such a
+point in the default gradient form is a k-point like any other) a largest abelian subgroup of ``G_k`` with complex
+characters is a candidate as well (``PARSEC_KPOINT_SECTOR_CHARACTERS=complex``, the default since 2026-11-23,
+:mod:`..Symmetry.complex_sectors`), and the group whose sectors with their classes take the less work is solved.  On a
+threefold axis without the translations of a supercell (a defect cell) its sectors of a third of the rows replace the
+halves of the involutions; in a perfect supercell an abelian group with elements of order four can save a little on
+the points of a fourfold axis (the 2 x 2 x 2 silicon cube at ``(0, 0, 1/3)``, ``(0, 0, 1/4)`` and ``(0, 0, 1/2)``, the
+3 x 3 x 3 diamond cube at ``(0, 0, 1/3)``).  ``real`` keeps the involutions alone.
+
 The k-point SCF of a bulk orthorhombic cell takes it, scalar or spin-polarized, with the exchange of a hybrid, forces
-and kept orbitals, and LDA+U of unpolarized orbitals under ``PARSEC_KPOINT_SECTOR_LDAU=on`` (opt-in), without
-meta-GGA or the fixed occupations of ``occup.in`` (the driver then gives the job its
-``geometry``); ``PARSEC_KPOINT_SECTORS=off`` keeps one task per k-point, bit for bit as before, and
+and kept orbitals, LDA+U of unpolarized orbitals under ``PARSEC_KPOINT_SECTOR_LDAU=on`` (opt-in) and a meta-GGA under
+``PARSEC_KPOINT_SECTOR_META_GGA=auto`` (the default since 2026-11-23: the orbital term and ``tau`` reduced to the
+sectors, :mod:`..Hamiltonian.sector_bloch_meta_gga`, :class:`SectorMetaBlochHamiltonian`; no conjugate pairs, real
+forms or complex characters in such a loop), without the fixed occupations of ``occup.in`` (the driver then gives the
+job its ``geometry``); ``PARSEC_KPOINT_SECTORS=off`` keeps one task per k-point, bit for bit as before, and
 ``PARSEC_HYBRID_KPOINT_SECTORS=on`` (opt-in) splits the k-points of the loops of a hybrid's Fock loop at any size
 (:func:`hybrid_kpoint_sectors_setting`, :data:`ANY_SIZE_KEY`).  The loop with refined
 levels (the last inner loop of the Fock loop of a hybrid with the adaptive inner criterion or the outer DIIS) takes it
@@ -144,6 +158,9 @@ _SWITCH = "PARSEC_KPOINT_SECTORS"
 _STATES_KEY = "kpoint_sectors"
 # the key of the plans of the sectors in a caller's cache of the structure (the projector cache of the k-point loops)
 _CACHE_KEY = "kpoint_sector_plans"
+# the prefix of the names of the parts of a sector that hold tau and g of a meta-GGA on the orbits of its k-point
+# ("<prefix>:<task>:tau", "<prefix>:<task>:gradient")
+_META_KEY = "kpoint_sector_meta"
 # states of a sector expanded to the whole grid at once for its extras (the forces)
 _FORCE_COLUMNS = 32
 _MARGIN_SWITCH = "PARSEC_KPOINT_SECTOR_MARGIN"
@@ -163,6 +180,10 @@ _ATTEMPTS = 4
 _WORK_FRACTION = 0.5
 # the smallest basis of a k-point (rows times states) that is split
 _MINIMUM_ENTRIES = 1 << 24
+# the same for a meta-GGA whose k-points would be dealt over more than one device (plan_sectors): A100, four GPUs of one
+# process, SCAN 2 x 2 x 2, the sectors against one task per k-point: C64 at 18.8 M entries 25.0 against 18.5 s, 28.9 M
+# 32.1 against 30.6 s, 38.5 M 36.6 against 40.2 s; Si64 24.6 M 31.3 against 38.9 s, 36.7 M 39.4 against 53.7 s
+_META_MINIMUM_ENTRIES = 1 << 25
 # guards the cache the k-points of one structure share (KPointSectors._shared)
 _SHARED_LOCK = threading.Lock()
 
@@ -1231,6 +1252,34 @@ class SectorBlochHamiltonian(KPointKohnShamHamiltonian):
     device_csr = True
 
 
+@dataclass(frozen=True)
+class SectorMetaBlochHamiltonian(SectorBlochHamiltonian):
+    """:class:`SectorBlochHamiltonian` with the orbital term of a meta-GGA reduced to the sector
+    (:class:`..Hamiltonian.sector_bloch_meta_gga.SectorKineticTerm`, ``PARSEC_KPOINT_SECTOR_META_GGA``): the host
+    product adds it, the device converter takes it as the operator's orbital term, and its Gershgorin bound is the
+    filter's margin."""
+
+    sector_kinetic: Any = None
+
+    def apply(self, vectors: np.ndarray) -> np.ndarray:
+        block = np.asarray(vectors, dtype=np.complex128)
+        single = block.ndim == 1
+        if single:
+            block = block[:, None]
+        result = KPointKohnShamHamiltonian.apply(self, block) + self.sector_kinetic.apply(block)
+        return result[:, 0] if single else result
+
+    @property
+    def spectral_margin(self) -> float:
+        return float(self.sector_kinetic.spectral_margin)
+
+    def as_linear_operator(self):
+        operator = KPointKohnShamHamiltonian.as_linear_operator(self)
+        # the eigensolvers' spectral bounds read it (orbital_term_margin)
+        operator.spectral_margin = self.spectral_margin
+        return operator
+
+
 def _materialized(laplacian):
     """``laplacian`` as a matrix: the deferred stencil of a Gamma cell (the band k-points after its SCF in sectors,
     ``SCF/band_sectors.py``) materialized, any other operator as it is."""
@@ -1253,6 +1302,9 @@ class KPointSectors:
         self._lock = threading.Lock()
         # by sector: (kinetic, projectors, empty stand-in of the real stencils), built for the sectors asked for
         self._static: dict[int, tuple] = {}
+        # {"bloch": whether the kinetic terms of _static were made from a Bloch Laplacian} (hamiltonian; shared with
+        # the twins as _static is)
+        self._static_form: dict[str, bool] = {}
         self._potential: tuple[Any, np.ndarray | None] = (None, None)
         self._exchange: dict[int, tuple] = {}  # by sector: (exchange term of the whole grid, its reduction)
         # by sector: (LDA+U projectors of the whole grid, U^H P), shared by the channels of the k-point (twin)
@@ -1282,6 +1334,9 @@ class KPointSectors:
         # .kpoint_real_forms; set by plan_sectors), None where every sector is complex; their static real parts
         self.real_forms: dict | None = None
         self._real_static: dict[int, tuple] = {}
+        # the orbit values of vtau and W' of a meta-GGA for the task's Hamiltonians: (fields of the whole grid, values)
+        # (PARSEC_KPOINT_SECTOR_META_GGA, _sector_kinetic)
+        self._meta_fields: tuple[Any, Any] = (None, None)
 
     @property
     def order(self) -> int:
@@ -1424,6 +1479,7 @@ class KPointSectors:
         other.counts = list(self.counts)
         other._potential = (None, None)
         other._exchange = {}
+        other._meta_fields = (None, None)
         return other
 
     def _gather(self, sector: int) -> sp.csr_matrix:
@@ -1590,6 +1646,117 @@ class KPointSectors:
             self._potential = (potential, means)
         return means
 
+    def meta_geometry(self, sector: int, gradient):
+        """The static part of the orbital term of a meta-GGA in ``sector``
+        (:class:`..Hamiltonian.sector_bloch_meta_gga.SectorMetaGeometry`) for the first-derivative matrices
+        ``gradient`` of the Hamiltonians, made once for the k-points of a structure that share this decomposition."""
+
+        return self.meta_derivatives(gradient).sector(int(sector))
+
+    def meta_derivatives(self, gradient):
+        """What the sectors of this decomposition share for the orbital term of a meta-GGA
+        (:class:`..Hamiltonian.sector_bloch_meta_gga.DecompositionDerivatives`), made once per structure."""
+
+        from ..Hamiltonian.sector_bloch_meta_gga import DecompositionDerivatives
+
+        key = ("meta_derivatives", id(self.decomposition))
+        anchors = tuple(gradient)
+        with _SHARED_LOCK:
+            entry = self._shared.get(key)
+            if (
+                entry is None
+                or entry["decomposition"] is not self.decomposition
+                or any(a is not b for a, b in zip(entry["gradient"], anchors))
+            ):
+                entry = {"decomposition": self.decomposition, "gradient": anchors, "lock": threading.Lock(), "value": None}
+                self._shared[key] = entry
+        with entry["lock"]:
+            if entry["value"] is None:
+                entry["value"] = DecompositionDerivatives(self.decomposition, anchors)
+            return entry["value"]
+
+    def _sector_kinetic(self, sector: int, full):
+        """The orbital term of ``full`` (a Bloch Hamiltonian with ``kinetic_potential``) reduced to ``sector``; the
+        orbit values of its fields are made once per task and step (the caller holds the lock)."""
+
+        from ..Hamiltonian.sector_bloch_meta_gga import SectorKineticTerm, sector_kinetic_fields
+
+        geometry = self.meta_geometry(sector, full.gradient)
+        vtau = full.kinetic_potential
+        fluxes = getattr(full, "gradient_flux", None)
+        anchors = (vtau,) + (() if fluxes is None else tuple(fluxes))
+        cached, fields = self._meta_fields
+        if cached is None or len(cached) != len(anchors) or any(a is not b for a, b in zip(cached, anchors)):
+            fields = sector_kinetic_fields(
+                self.decomposition, geometry.directions, geometry.character_sectors, vtau, fluxes
+            )
+            # the arrays are held, so that their identities are not reused by others while cached
+            self._meta_fields = (anchors, fields)
+        return SectorKineticTerm(geometry, self.k_point, fields)
+
+    def kinetic_density(
+        self, sector: int, vectors, occupations, scale: float, derivatives, *, members=(), gradient=False, xp=np
+    ):
+        """``(tau, g)`` on the whole grid of the states of ``sector`` (``vectors``, sector rows by states, on the host
+        or a device; ``occupations`` per column), ``g`` the orbital density gradient ``(3, n)`` where ``gradient``
+        (else ``None``).  ``scale`` is ``w_k d / (2 h^3)``, ``derivatives`` the first-derivative matrices of the
+        Hamiltonians; ``members`` the sectors of the class of ``sector`` that are not solved (their states the images
+        :meth:`member_block`, the occupations of the class summed onto ``sector``, the mean over the class as
+        :meth:`class_density`)."""
+
+        wedge, along = self.kinetic_orbit_sums(
+            sector, vectors, occupations, scale, derivatives, members=members, gradient=gradient, xp=xp
+        )
+        return self.expanded_kinetic(wedge, along, derivatives)
+
+    def kinetic_orbit_sums(
+        self, sector: int, vectors, occupations, scale: float, derivatives, *, members=(), gradient=False, xp=np
+    ):
+        """What :meth:`kinetic_density` expands: ``tau`` on the orbits of the decomposition and (``gradient``) the
+        components ``g'_a`` along the derivative directions on the orbits (at their representatives, ``None``
+        without), scaled; the sums of the sectors of a k-point add on the orbits and are expanded once
+        (:meth:`expanded_kinetic`)."""
+
+        from ..Hamiltonian.sector_bloch_meta_gga import sector_orbital_sums
+
+        decomposition = self.decomposition
+        wedge = np.zeros(decomposition.wedge_size, dtype=np.float64)
+        along = np.zeros((3, decomposition.wedge_size), dtype=np.float64) if gradient else None
+        for current in [int(sector)] + [int(member) for member in members]:
+            block = vectors if current == int(sector) else self.member_block(current, vectors, xp)
+            geometry = self.meta_geometry(current, derivatives)
+            squares, products = sector_orbital_sums(
+                geometry, geometry.k_shifts(self.k_point), block, occupations, xp, gradient=gradient
+            )
+            for axis in range(3):
+                orbits = geometry.target_orbits[axis]
+                wedge[orbits] += squares[axis] / self._multiplicities[orbits]
+                if gradient:
+                    shared = geometry.shared[axis]
+                    orbits = geometry.source_orbits if shared is None else shared[2]
+                    along[axis, orbits] += products[axis] / self._multiplicities[orbits]
+        count = float(1 + len(members))
+        wedge *= float(scale) / count
+        if along is not None:
+            along *= 4.0 * float(scale) / count
+        return wedge, along
+
+    def expanded_kinetic(self, wedge, along, derivatives):
+        """``(tau, g)`` on the whole grid of the orbit sums of :meth:`kinetic_orbit_sums` (``g`` Cartesian, ``(3, n)``,
+        the orbit value of ``g'_a`` times ``chi_a`` of each row; ``None`` without ``along``)."""
+
+        decomposition = self.decomposition
+        full_to_wedge = decomposition.reduction.full_to_wedge
+        tau = np.asarray(wedge, dtype=np.float64)[full_to_wedge]
+        if along is None:
+            return tau, None
+        geometry = self.meta_derivatives(derivatives)
+        components = np.empty((3, full_to_wedge.size), dtype=np.float64)
+        for axis in range(3):
+            phases = np.asarray(decomposition.phases[geometry.character_sectors[axis]], dtype=np.float64)
+            components[axis] = phases * np.asarray(along[axis], dtype=np.float64)[full_to_wedge]
+        return tau, geometry.directions @ components
+
     def hamiltonian(self, sector: int, full, wanted=None) -> KPointKohnShamHamiltonian:
         """The Hamiltonian of ``sector`` from the Bloch Hamiltonian ``full`` of the whole grid.
 
@@ -1618,7 +1785,22 @@ class KPointSectors:
             with self._lock:
                 reduced = self._reduced_hubbard(sector, term.projectors)
             return BlochHubbardHamiltonian(base, HubbardOperator(reduced, term.potentials))
+        meta = getattr(full, "kinetic_potential", None) is not None
+        if meta and (self.partners is not None or (self.real_forms and sector in self.real_forms)):
+            raise RuntimeError(
+                "the orbital term of a meta-GGA is not reduced to the conjugate pairs or real forms of the sectors"
+            )
+        bloch = getattr(full, "bloch_laplacian", None) is not None
         with self._lock:
+            # the kinetic form of the static terms (the Bloch Laplacian or -nabla^2 - 2ik.grad + |k|^2): a meta-GGA's
+            # first iteration has no orbital term and may take the Bloch form (PARSEC_KPOINT_KINETIC=auto, trim),
+            # its later ones the gradient form: the static terms of the other form are made again (shared with the
+            # twins, as the dict of the form)
+            built = self._static_form.get("bloch")
+            if built is not None and built != bloch:
+                self._static.clear()
+                self._real_static.clear()
+            self._static_form["bloch"] = bloch
             if sector not in self._static:
                 self._build_static(full, range(self.order) if wanted is None else set(wanted) | {sector})
             kinetic, projectors, empty = self._static[sector]
@@ -1626,7 +1808,20 @@ class KPointSectors:
             real = None
             if self.real_forms and sector in self.real_forms:
                 real = self._real_parts(sector, kinetic, projectors)
+            # a meta-GGA: (B_a + i k'_a)^H vtau (B_a + i k'_a) (+ the first-order term) on the rows of the sector
+            # (PARSEC_KPOINT_SECTOR_META_GGA, ..Hamiltonian.sector_bloch_meta_gga)
+            orbital = self._sector_kinetic(sector, full) if meta else None
         orbits = self.decomposition.sector_orbit_indices(sector)
+        if orbital is not None:
+            return SectorMetaBlochHamiltonian(
+                empty,
+                (empty,) * 3,
+                np.ascontiguousarray(means[orbits]),
+                projectors,
+                self.k_point,
+                bloch_laplacian=kinetic,
+                sector_kinetic=orbital,
+            )
         hamiltonian = SectorBlochHamiltonian(
             empty,
             (empty,) * 3,
@@ -1726,7 +1921,7 @@ def kpoint_sector_atom_tolerance(*, forces: bool = False) -> float:
     return min(tolerance, POSITION_TOLERANCE) if forces else tolerance
 
 
-def check_kpoint_sector_switches() -> None:
+def check_kpoint_sector_switches(problem=None) -> None:
     """Read the switches of the k-point sectors and of the detection of their cell group, so that a value they do not
     know is refused at the preparation of a run (``ValueError``) and not first at the setup of its k-point solver:
     ``PARSEC_KPOINT_SECTORS``, ``PARSEC_KPOINT_SECTOR_TOLERANCE``, ``PARSEC_SYMMETRY_ATOM_TOLERANCE``,
@@ -1734,7 +1929,11 @@ def check_kpoint_sector_switches() -> None:
     ``PARSEC_PERIODIC_DEFECT_CENTRE``, ``PARSEC_HYBRID_KPOINT_SECTORS``, ``PARSEC_PERIODIC_IMAGE_ROWS`` (the
     density group of the k-point wedge), ``PARSEC_KPOINT_SECTOR_CLASSES``, ``PARSEC_KPOINT_SECTOR_REAL``, the real
     arithmetic of the Gamma point (``PARSEC_KPOINT_REAL_GAMMA``, :mod:`.kpoint_real`),
-    ``PARSEC_KPOINT_SECTOR_WARM_GROWTH`` and ``PARSEC_KPOINT_SECTOR_LDAU``.  Reading them changes nothing else."""
+    ``PARSEC_KPOINT_SECTOR_WARM_GROWTH``, ``PARSEC_KPOINT_SECTOR_LDAU`` and ``PARSEC_KPOINT_SECTOR_META_GGA``.  Reading
+    them changes nothing else.  With ``problem`` (the input of the run) a meta-GGA under ``PARSEC_KPOINT_KINETIC=bloch``
+    is refused as well: the orbital term keeps the gradient form of the kinetic term of a k-point
+    (:func:`parsec_python.Laplacian.finite_difference.bloch_laplacian_or_none`, which would stop its k-point loop after
+    the first iteration, the first with the term)."""
 
     from parsec_python.Grid.space_group import periodic_image_rows_setting
 
@@ -1765,6 +1964,19 @@ def check_kpoint_sector_switches() -> None:
     check_real_switches()
     kpoint_sector_warm_growth_setting()
     kpoint_sector_ldau_setting()
+    from ..Hamiltonian.sector_bloch_meta_gga import kpoint_sector_meta_gga_setting
+
+    kpoint_sector_meta_gga_setting()
+    scf = getattr(problem, "scf", None)
+    if getattr(scf, "is_meta_gga", False) and getattr(problem, "periodic_cell", None) is not None:
+        from parsec_python.Laplacian.finite_difference import kpoint_kinetic_setting
+
+        if kpoint_kinetic_setting() == "bloch":
+            raise ValueError(
+                "PARSEC_KPOINT_KINETIC=bloch is not available for a meta-GGA: its orbital term keeps the gradient form "
+                "of the kinetic term of a k-point (gradient, the default; auto and trim take the Bloch form only "
+                "without the term)"
+            )
 
 
 def _cell_group_text(cell: "CellGroup", tolerance: float) -> str:
@@ -1780,7 +1992,7 @@ def _cell_group_text(cell: "CellGroup", tolerance: float) -> str:
     )
 
 
-def plan_sectors(job: KPointJob, notes: list | None = None) -> list[KPointSectors | None] | None:
+def plan_sectors(job: KPointJob, notes: list | None = None, *, devices: int = 1) -> list[KPointSectors | None] | None:
     """The sectors of every k-point of ``job`` (``None`` for a k-point that stays one task), ``None`` for none.
 
     The cell group is built at :func:`kpoint_sector_atom_tolerance` (``PARSEC_SYMMETRY_ATOM_TOLERANCE``, at most 1e-6
@@ -1788,6 +2000,8 @@ def plan_sectors(job: KPointJob, notes: list | None = None) -> list[KPointSector
     before on the same structure (the cache of ``geometry``, same signature) are taken before any search of the group.
     ``notes`` (a list): the line of the report that says which cell group was found and at which tolerance, or why
     none was searched, is appended to it (:func:`sector_solver`; ``kpoint_symmetry_detection`` of ``parsec.out``).
+    ``devices``: the devices the solver of one task per k-point would deal the tasks over (a meta-GGA on more than one
+    takes the floor of :data:`_META_MINIMUM_ENTRIES`).
     """
 
     def said(text: str, plans=None):
@@ -1812,10 +2026,18 @@ def plan_sectors(job: KPointJob, notes: list | None = None) -> list[KPointSector
     # PARSEC_HYBRID_KPOINT_SECTORS=on (the loops of a Fock loop): every k-point with sectors, whatever its size and the
     # work they save
     any_size = isinstance(cache, dict) and bool(cache.get(ANY_SIZE_KEY))
-    if not any_size and rows * states < _MINIMUM_ENTRIES:  # before any search of the group: a small cell stays as it was
+    # a meta-GGA (PARSEC_KPOINT_SECTOR_META_GGA, a geometry with "meta_fields") whose tasks the solver of one task per
+    # k-point would deal over more than one device: the floor of _META_MINIMUM_ENTRIES (the sectors of one process do
+    # not scale with its devices, and below it their orbital terms cost more than that solver's division of the k-points)
+    meta = geometry.get("meta_fields") is not None
+    floor = _META_MINIMUM_ENTRIES if meta and min(int(devices), int(job.n_tasks)) > 1 else _MINIMUM_ENTRIES
+    if not any_size and rows * states < floor:  # before any search of the group: a small cell stays as it was
+        where = (
+            f" of a meta-GGA on {min(int(devices), int(job.n_tasks))} devices" if floor != _MINIMUM_ENTRIES else ""
+        )
         return said(
-            f"skipped: {rows} grid points x {states} states are below the floor of the k-point sectors, "
-            f"{_MINIMUM_ENTRIES} entries (no cell group searched; one task per k-point)"
+            f"skipped: {rows} grid points x {states} states are below the floor of the k-point sectors{where}, "
+            f"{floor} entries (no cell group searched; one task per k-point)"
         )
     tolerance = kpoint_sector_atom_tolerance(forces=job.extras is not None)
     margin = sector_margin()
@@ -1826,13 +2048,16 @@ def plan_sectors(job: KPointJob, notes: list | None = None) -> list[KPointSector
 
     from .kpoint_real import trim_partners, trim_real_setting
 
+    # a meta-GGA: the gradient form of the kinetic term, so no conjugate pairs; no real forms and no complex characters
+    # either (the orbital term is reduced on the real characters of commuting involutions alone,
+    # ..Hamiltonian.sector_bloch_meta_gga)
     pairs = (
         trim_real_setting() == "auto"
         and len(set(int(value) for value in k_of_task)) == int(k_of_task.size)
         and geometry.get("exchange_cross_scale") is None
         and geometry.get("invariance") is None
     )
-    bloch = tuple(bool(pairs and bloch_form_at(grid, k_point)) for k_point in k_points)
+    bloch = tuple(bool(pairs and bloch_form_at(grid, k_point, meta_gga=meta)) for k_point in k_points)
     # the classes of sectors carried into each other by the operations of the little group beyond H_k
     # (PARSEC_KPOINT_SECTOR_CLASSES, sector_classes): loops without the exchange of a hybrid (whose operator is made
     # from the orbitals of every k-point), both spin channels, the band k-points of a Gamma cell (their potential is
@@ -1857,20 +2082,21 @@ def plan_sectors(job: KPointJob, notes: list | None = None) -> list[KPointSector
 
     from ..Symmetry.complex_sectors import largest_abelian_subgroup, sector_characters_setting
 
-    complex_wanted = sector_characters_setting() == "complex" and not hubbard
+    complex_wanted = sector_characters_setting() == "complex" and not hubbard and not meta
     real_wanted = (
         sector_real_setting() == "auto"
         and geometry.get("exchange_cross_scale") is None
         and geometry.get("invariance") is None
         and not fock_loop
         and not hubbard
+        and not meta
     )
     signature = (
         int(job.n_tasks), states, rows, margin, _EXTRA_STATES, tuple(int(value) for value in k_of_task),
         tuple(np.round(k_points, 12).ravel().tolist()), tolerance, any_size, bloch,
     ) + ((("classes",) if classes_wanted else ())) + ((("real",) if real_wanted else ())) + (
         (("complex",) if complex_wanted else ())
-    )
+    ) + ((("meta",) if meta else ()))
     # The plans the loops before kept for this structure (the cache of its projectors), before the group is searched
     # again: they were made from the same atoms and grid.
     if isinstance(cache, dict):
@@ -1901,8 +2127,9 @@ def plan_sectors(job: KPointJob, notes: list | None = None) -> list[KPointSector
         members = generated_subgroup(cell.table, cell.little_group(k_point, invariance))
         elements, generators = largest_commuting_involutions(cell.table, members)
         # the groups whose sectors may serve the k-point: the commuting involutions, and under
-        # PARSEC_KPOINT_SECTOR_CHARACTERS=complex a largest abelian subgroup with complex characters (not at Gamma, not
-        # with the pairs of a time-reversal invariant point in the Bloch form); the one of the least work is taken
+        # PARSEC_KPOINT_SECTOR_CHARACTERS=complex (the default) a largest abelian subgroup with complex characters
+        # (not at Gamma, not with the pairs of a time-reversal invariant point in the Bloch form); the one of the least
+        # work is taken
         candidates: list[tuple] = []
         if len(elements) >= 2:
             key = tuple(elements)
@@ -2172,6 +2399,20 @@ class SectorKPointSolver:
         # more (the exchange energy of a hybrid) gives its density part apart
         geometry = self.job.geometry
         parts = geometry.get("density_part", self.job.accumulate)(k_index, np.sqrt(whole)[:, None], np.ones(1))
+        meta = geometry.get("meta_fields")
+        if meta is not None:
+            # a meta-GGA (PARSEC_KPOINT_SECTOR_META_GGA): tau (and the orbital density gradient) of the sector's
+            # states from the derivatives between the sectors, with the images of its class, on the orbits of the
+            # k-point: the sectors of a k-point add there and accumulate() expands the sum once
+            scale, _, gradient_key = meta(k_index)
+            wedge, along = self._plans[k_index].kinetic_orbit_sums(
+                sector, vectors, occupations, scale, geometry["meta_derivatives"], members=members or (),
+                gradient=gradient_key is not None, xp=xp,
+            )
+            parts = dict(parts)
+            parts[f"{_META_KEY}:{k_index}:tau"] = wedge
+            if along is not None:
+                parts[f"{_META_KEY}:{k_index}:gradient"] = along
         hubbard_part = geometry.get("hubbard_part")
         if hubbard_part is not None:
             # LDA+U (PARSEC_KPOINT_SECTOR_LDAU): the occupation matrices of the sector's states, <phi|U v> with the
@@ -2520,7 +2761,25 @@ class SectorKPointSolver:
             for position, source in self._source.items():
                 inner[source] = inner[source] + inner[position]
             inner = [inner[position] for position in self._solved]
-        return self._inner.accumulate(inner)
+        total = self._inner.accumulate(inner)
+        meta = self.job.geometry.get("meta_fields")
+        if meta is not None:
+            # tau and g of the sectors of each k-point, summed on its orbits (_accumulate), on the whole grid
+            for key in sorted(key for key in total if key.startswith(_META_KEY + ":")):
+                _, k_index, kind = key.split(":")
+                k_index = int(k_index)
+                values = total.pop(key)
+                _, tau_key, gradient_key = meta(k_index)
+                plan = self._plans[k_index]
+                if kind == "tau":
+                    name, field = tau_key, plan.expanded_kinetic(values, None, self.job.geometry["meta_derivatives"])[0]
+                else:
+                    name = gradient_key
+                    field = plan.expanded_kinetic(
+                        np.zeros(values.shape[1]), values, self.job.geometry["meta_derivatives"]
+                    )[1]
+                total[name] = field if name not in total else total[name] + field
+        return total
 
     def residuals(self) -> list[float]:
         inner = self._expanded(self._inner.residuals())
@@ -2859,6 +3118,61 @@ class SectorKPointSolver:
 
         return max((part for part, _ in self._fractional_parts(levels, occupations, capacity)), default=0.0)
 
+    def sector_doublet_report(self, levels, occupations, *, capacity: float = 1.0):
+        """Levels of one sector of a guarded task within :data:`.spin_sectors.MULTIPLET_WIDTH` of each other that hold
+        ``w_k min(f, 1 - f)`` of at least :data:`.spin_sectors.SPIN_SECTOR_OCCUPATION_TOLERANCE` (Fermi-Dirac
+        occupations, at the end of a loop), as a report of reason :data:`.spin_sectors.SECTOR_DOUBLET_REASON` with
+        ``doublet`` set; ``None`` where there are none (``PARSEC_SPIN_GUARD_DOUBLETS``).
+
+        Test 3 (:meth:`fractional_report`) counts a fractional multiplet only where its levels lie in two or more
+        sectors; partners of one sector label (the e_g of Oh, both in the sector of the identity character of the
+        commuting involutions at the Gamma point) mix there as on the whole grid of the k-point, but the symmetric
+        ensemble the sectors keep (both partly filled) can be a saddle, as on the abelian sectors of a cluster or a Gamma
+        cell (:func:`.spin_sectors.fractional_sector_doublets`, whose rule this is, with the weight ``w_k`` of the
+        k-point as in tests 1 and 3).
+        """
+
+        from .spin_sectors import (
+            MULTIPLET_WIDTH,
+            SECTOR_DOUBLET_REASON,
+            SPIN_SECTOR_OCCUPATION_TOLERANCE,
+            FractionalOccupations,
+            _multiplets,
+        )
+
+        largest = 0.0
+        lines: list[str] = []
+        for task in self.guarded_tasks():
+            values, filled, sectors = self._guard_levels(task, levels, occupations, capacity)
+            if not filled.size:
+                continue
+            weight = self._task_weight(task)
+            fractional = weight * np.minimum(filled, 1.0 - filled)
+            for group in _multiplets(values, MULTIPLET_WIDTH):
+                labels, counts = np.unique(sectors[group], return_counts=True)
+                for label in labels[counts >= 2]:
+                    members = [member for member in group if sectors[member] == label]
+                    part = float(np.max(fractional[members]))
+                    if part < SPIN_SECTOR_OCCUPATION_TOLERANCE:
+                        continue
+                    largest = max(largest, part)
+                    text = " ".join(f"{values[member] * 13.605693122994:.4f}" for member in members)
+                    shares = " ".join(f"{filled[member]:.4f}" for member in members)
+                    lines.append(
+                        f"task {task} (k-point weight {weight:.4g}): {len(members)} levels at {text} eV of sector "
+                        f"{int(label)} hold {float(np.sum(filled[members])):.4f} electrons (occupations {shares})"
+                    )
+        if not lines:
+            return None
+        return FractionalOccupations(
+            largest=largest,
+            tolerance=float(SPIN_SECTOR_OCCUPATION_TOLERANCE),
+            lines=tuple(lines),
+            reason=SECTOR_DOUBLET_REASON,
+            measure="largest w_k min(f, 1-f)",
+            doublet=True,
+        )
+
     def _layout(self) -> list[tuple]:
         layout = [(int(k), -1 if sector is None else int(sector), self._rows((k, sector))) for k, sector in self._items]
         if self._source:  # the conjugate pairs (PARSEC_KPOINT_TRIM_REAL): which items their partners solve
@@ -2977,7 +3291,7 @@ def sector_solver(job: KPointJob, make_solver: Callable[..., Any], *, notes: lis
     if getattr(job, "geometry", None) is None:
         refusal = (
             "skipped: this k-point loop takes no sectors (the spinors of a spin-orbit or non-collinear run, LDA+U "
-            "without PARSEC_KPOINT_SECTOR_LDAU=on or spin, a meta-GGA, fixed "
+            "without PARSEC_KPOINT_SECTOR_LDAU=on or spin, a meta-GGA under PARSEC_KPOINT_SECTOR_META_GGA=off, fixed "
             "occupations, refined levels under PARSEC_KPOINT_SECTOR_LEVELS=off, or the loop after the symmetry guard "
             "left the sectors)"
         )
@@ -2993,7 +3307,9 @@ def sector_solver(job: KPointJob, make_solver: Callable[..., Any], *, notes: lis
         if notes is not None:
             notes.append(refusal)
         return None
-    plans = plan_sectors(job, notes)
+    # the devices the solver of one task per k-point would deal the tasks over (the floor of a meta-GGA, plan_sectors)
+    meta = job.geometry.get("meta_fields") is not None
+    plans = plan_sectors(job, notes, devices=_solver_devices(options.get("backend")) if meta else 1)
     if plans is None:
         return None
     # the gathered stencils of the kinetic terms only where the operators go to the device code
@@ -3006,6 +3322,16 @@ def sector_solver(job: KPointJob, make_solver: Callable[..., Any], *, notes: lis
                 # complex sectors
                 plan.real_forms = None
     return SectorKPointSolver(job, plans, make_solver, options)
+
+
+def _solver_devices(backend: str | None = None) -> int:
+    """The worker devices of the k-point solver of this process: those of the device plan of ``backend``
+    (:func:`.kpoint_parallel.resolve_backend`), one on the CPU route."""
+
+    from .kpoint_parallel import device_worker_count, resolve_backend
+
+    plan = resolve_backend(backend)
+    return 1 if plan is None else int(device_worker_count(plan, 1 << 30))
 
 
 def sector_operators_on_device(backend: str | None = None) -> bool:

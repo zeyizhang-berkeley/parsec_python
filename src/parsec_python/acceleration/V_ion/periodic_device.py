@@ -655,7 +655,7 @@ def coulomb_radius(potential, local_l: int) -> float:
     """
 
     radii = np.asarray(potential.radii, dtype=float)
-    weighted = radii * np.asarray(potential.channel_potentials[local_l], dtype=float)
+    weighted = radii * np.asarray(potential.local_channel_potential(local_l), dtype=float)
     two_z = 2.0 * float(potential.ionic_charge)
     deviating = np.flatnonzero(np.abs(weighted + two_z) > COULOMB_TAIL_TOLERANCE * max(two_z, 1.0))
     cutoff = float(potential.interpolation_cutoff)
@@ -818,7 +818,7 @@ def device_local_ionic_potential(grid, atoms, potentials, specifications, lattic
         potential = potentials[symbol]
         local_l = specifications[symbol].local_angular_momentum
         potential.validate_local_channel(local_l)
-        values = np.asarray(potential.channel_potentials[local_l], dtype=np.float64)
+        values = np.asarray(potential.local_channel_potential(local_l), dtype=np.float64)
         tables[symbol] = np.asarray(potential.radii, dtype=np.float64) * values
         parameters.append(
             [

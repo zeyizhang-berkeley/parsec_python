@@ -1169,6 +1169,32 @@ def regrown_trim_setting() -> str:
     return value
 
 
+def identity_sector_states_setting() -> str:
+    """``PARSEC_IDENTITY_SECTOR_STATES``: ``auto`` (the default) or ``off``.
+
+    One sector of the identity stands for the full grid of a structure without
+    a point group (``PARSEC_CUPY_SINGLE_SECTOR``: the sector of the MPI
+    full-SCF runner, ``on`` in one process, and the shared full grid of a spin
+    fallback).  Its first solve takes the states of the full grid,
+    ``States_Num`` plus the buffer; the trim that follows every step of the
+    sectors (:meth:`CuPySymmetrySCFEigensolver._trim_sector_states_like_parsec`,
+    the lowest ``States_Num - 1`` plus at most the buffer per sector) then
+    left it one state fewer than the full grid, whose later filters keep all
+    of them.  The filter of the next step starts at the largest Ritz value
+    that is kept, so the two routes took different SCF steps from the second
+    on, and an SCF stopped at a loose criterion gave different totals (CO at
+    5e-5 Ry: -43.27051923 against -43.27040822 Ry in 33 and 24 steps; both
+    -43.270526327479 at 1e-9 Ry).  ``auto`` keeps the states of the first
+    solve in such a sector, as the full grid does; ``off`` trims it as before.
+    Sectors of a point group are trimmed under both.
+    """
+
+    value = os.environ.get("PARSEC_IDENTITY_SECTOR_STATES", "auto").strip().lower() or "auto"
+    if value not in {"auto", "off"}:
+        raise ValueError("PARSEC_IDENTITY_SECTOR_STATES must be auto or off")
+    return value
+
+
 def weighted_state_count_setting() -> str:
     """``PARSEC_WEIGHTED_STATE_COUNT``: ``auto`` (the default since 2026-11-22) or ``off``.
 
@@ -1391,6 +1417,8 @@ class CuPySymmetrySCFEigensolver:
         sector_growth_release_setting()
         cut_sectors_first_setting()
         regrown_trim_setting()
+        # (and of one sector of the identity, which keeps the states of the full grid)
+        self.identity_sector_states = identity_sector_states_setting()
         sector_warm_growth_setting()
         warm_growth_host_setting()
         # (and the count of the states the SCF receives, PARSEC_WEIGHTED_STATE_COUNT)
@@ -4058,6 +4086,22 @@ class CuPySymmetrySCFEigensolver:
             "global requested eigenspectrum"
         )
 
+    def _keeps_full_grid_states(self) -> bool:
+        """Whether this is one sector of the identity that keeps the states of the full grid in every step.
+
+        ``PARSEC_IDENTITY_SECTOR_STATES=auto`` (:func:`identity_sector_states_setting`) and a decomposition of one
+        representation of the group of the identity alone (``AxisReflectionReduction.identity``: the sector of
+        ``PARSEC_CUPY_SINGLE_SECTOR`` and of the shared spin fallback).
+        """
+
+        if getattr(self, "identity_sector_states", "auto") != "auto":
+            return False
+        decomposition = self.decomposition
+        if int(getattr(decomposition, "representation_count", 0)) != 1:
+            return False
+        reduction = getattr(decomposition, "reduction", None)
+        return reduction is not None and int(getattr(reduction, "group_order", 0)) == 1
+
     def _trim_sector_states_like_parsec(
         self,
         results: list[CuPyEigvalResult],
@@ -4066,14 +4110,19 @@ class CuPySymmetrySCFEigensolver:
         safety_buffer: int,
         keep: frozenset = frozenset(),
     ) -> None:
-        """Apply ``eigen_sort``'s active-state count for the next SCF step.
+        """Apply the port's active-state count of the sectors for the next SCF step.
 
-        PARSEC first counts each representation among the lowest
-        ``N_states-1`` globally sorted values, then admits at most ``nadd``
-        additional values per representation from the remainder.  Its
-        eigenspace allocation is not shrunk, but ``nn`` limits later work.
-        Here a device view of the leading Ritz columns is the equivalent.
-        The sectors in ``keep`` are not trimmed in this step.
+        The rule is this port's own: each sector is counted among the lowest
+        ``N_states-1`` globally sorted values and then admits at most
+        ``safety_buffer`` (``Subspace_Buffer_Size``) further values from the
+        remainder; a device view of its leading Ritz columns keeps them.
+        PARSEC 1.5 does otherwise: its ``eigen_sort`` counts each
+        representation among the lowest ``N_states`` values and adds none
+        (``nrep_add = 0``, ``eigval.F90`` 1344-1356 and 906-931), its arrays
+        never shrink (``eig_adj_size``, 1436), and it does not read
+        ``Subspace_Buffer_Size``.  The sectors in ``keep`` are not trimmed in
+        this step; one sector of the identity is not trimmed under
+        ``PARSEC_IDENTITY_SECTOR_STATES=auto`` (:meth:`_keeps_full_grid_states`).
         """
 
         if safety_buffer < 1:
@@ -4256,6 +4305,15 @@ class CuPySymmetrySCFEigensolver:
             self.sector_margin_record = None
             if self._weighted and sector_margin_policy() == "auto":
                 self._fit_sector_margins(requested_states, settings.safety_buffer)
+        elif (
+            self._state is not None
+            and requested_states != self._state.requested_states
+            and self._keeps_full_grid_states()
+        ):
+            # A loop that changed its count of states (PARSEC_STATES_CLOSE_MULTIPLET): the full grid starts its solver
+            # again with the new count and the buffer, and one sector of the identity takes the same count, which
+            # starts its solver again too (PARSEC_IDENTITY_SECTOR_STATES).
+            self._sector_counts = [self._initial_sector_count(0, requested_states, settings.safety_buffer)]
         counts = self._sector_counts
         if self.mpi_context is None:
             self._configure_large_problem_allocator(counts)
@@ -4326,6 +4384,9 @@ class CuPySymmetrySCFEigensolver:
         if getattr(self, "fixed_state_count", False):
             if not frozen:
                 self._fix_sector_states(results, counts, requested_states)
+        elif self._keeps_full_grid_states():
+            # One sector of the identity keeps the states of the full grid (PARSEC_IDENTITY_SECTOR_STATES).
+            pass
         else:
             self._trim_sector_states_like_parsec(
                 results,

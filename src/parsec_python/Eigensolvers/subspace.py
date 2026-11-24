@@ -296,6 +296,32 @@ def subspace_filter_bounds(
     return float(lower), float(upper)
 
 
+#: The spectral-width floor of the last SUBSPACE pass of this process (0: none), which the NOTE of
+#: PARSEC_FILTER_DEGREE_STALL reads (SCF/filter_degree.py): a restored degree at or below it changes nothing.
+_LAST_SPECTRAL_FLOOR = [0]
+
+
+def spectral_width_floor(lower_bound: float, upper_bound: float) -> int:
+    """The lowest degree PARSEC's table allows for the interval ``[lower_bound, upper_bound]`` (0: no limit)."""
+
+    interval = upper_bound - lower_bound
+    if interval > 1400.0:
+        return 15
+    if interval > 1200.0:
+        return 11
+    if interval > 1000.0:
+        return 9
+    if interval > 850.0:
+        return 8
+    return 0
+
+
+def last_spectral_width_floor() -> int:
+    """The spectral-width floor of the last SUBSPACE pass of this process (0: none, or no pass yet)."""
+
+    return _LAST_SPECTRAL_FLOOR[0]
+
+
 def _adapt_polynomial_degree(
     requested_degree: int,
     lower_bound: float,
@@ -314,15 +340,10 @@ def _adapt_polynomial_degree(
     lower limits, so an already larger user/SCF degree is never reduced here.
     """
 
-    interval = upper_bound - lower_bound
-    if interval > 1400.0:
-        return max(requested_degree, 15)
-    if interval > 1200.0:
-        return max(requested_degree, 11)
-    if interval > 1000.0:
-        return max(requested_degree, 9)
-    if interval > 850.0:
-        return max(requested_degree, 8)
+    floor = spectral_width_floor(lower_bound, upper_bound)
+    _LAST_SPECTRAL_FLOOR[0] = floor
+    if floor:
+        return max(requested_degree, floor)
     return requested_degree
 
 

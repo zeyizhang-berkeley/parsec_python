@@ -273,14 +273,22 @@ class DefaultTrimRouteTests(unittest.TestCase):
         self.assertNotIn("supercell", stdout_off)
         self.assertGreater(gradient[-1] - per_cell, 0.0)
         self.assertLess((gradient[-1] - per_cell) / 8.0, 1.0e-4)
-        # Restart_Run of the cell from the file of the supercell: the k-points on the Fortran-derived routines (which
-        # a Restart_Run selects), from the converged density: the energy of that route from the start, in fewer
-        # iterations
+        # Restart_Run of the cell from the file of the supercell, from the converged density: the energy of the
+        # route of the restart from the start, in fewer iterations.  Under PARSEC_FILE_KEYWORD_ROUTINES=fortran the
+        # k-points on the Fortran-derived routines (which a Restart_Run selects there); under neutral, the default,
+        # the k-points of the routines of the input (a restart keeps the k-points), the run of off above.
         _, _, fortran, _ = self._run(folder / "fortran", {}, fortran=True)
-        stdout_restart, _, restarted, _ = self._run(folder / "auto", {}, restart=True)
+        stdout_restart, _, restarted, _ = self._run(
+            folder / "auto", {"PARSEC_FILE_KEYWORD_ROUTINES": "fortran"}, restart=True
+        )
         self.assertIn("Restart_Run", stdout_restart)
         self.assertAlmostEqual(restarted[-1], fortran[-1], delta=2.0e-6)
         self.assertLess(len(restarted), len(fortran))
+        stdout_restart, out_restart, restarted, _ = self._run(folder / "auto", {}, restart=True)
+        self.assertIn("Restart_Run", stdout_restart)
+        self.assertIn("Routines: default (Andrew Grieder's)", out_restart)
+        self.assertAlmostEqual(restarted[-1], gradient[-1], delta=2.0e-6)
+        self.assertLess(len(restarted), len(gradient))
 
     def test_a_charged_cell_and_a_restarted_structure(self) -> None:
         import tempfile

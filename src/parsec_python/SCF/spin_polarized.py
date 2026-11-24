@@ -91,6 +91,7 @@ from .single_point import (
     warm_start_mixer,
 )
 from .state_extension import MultipletCloser, working_levels
+from .filter_degree import LaterFilterDegree
 
 
 SPIN_NAMES = ("up", "down")
@@ -1146,6 +1147,7 @@ def _run_spin_loop(
     history: list[SCFIteration] = []
     filter_degree = eigensolver_settings.filter_degree
     minimum_filter_degree = max(10, eigensolver_settings.filter_degree_delta + 1)
+    degree_schedule = LaterFilterDegree.for_loop(filter_degree, minimum_filter_degree)
     converged = False
     energies = None
     grid_size = system.grid.size
@@ -1558,12 +1560,11 @@ def _run_spin_loop(
         selected_residual = (
             metrics.plain if settings.use_plain_residual else metrics.weighted
         )
-        if (
-            iteration > settings.degree_decrease_after
-            and metrics.weighted < settings.approach_criterion
-            and filter_degree > minimum_filter_degree
-        ):
-            filter_degree -= 1
+        # PARSEC_FILTER_DEGREE_STALL (SCF/filter_degree.py): the degree lowered near convergence, and the
+        # starting degree back where the loop stalls after that
+        filter_degree = degree_schedule.after_iteration(
+            iteration, metrics.weighted, settings.approach_criterion, settings.degree_decrease_after
+        )
         if iteration == 1:
             first_residual = selected_residual
         iteration_converged = selected_residual < criterion_scale * loop_criterion(
@@ -1585,6 +1586,8 @@ def _run_spin_loop(
         listed = min(len(public[0][0]), len(public[1][0]))
         diagnostic = SCFIteration(
             iteration=iteration,
+            # PARSEC_FILTER_DEGREE_STALL: the NOTE of a restoration (once)
+            filter_degree_note=degree_schedule.take_note(),
             weighted_residual=metrics.weighted,
             plain_residual=metrics.plain,
             eigen_residual_max=eigen_residual_max,
@@ -2135,6 +2138,7 @@ def run_scf_spin_polarized(
     mixer = preconditioned_mixer(make_mixer(system.input.mixing), system, channels=2)
     filter_degree = system.input.eigensolver.filter_degree
     minimum_filter_degree = max(10, system.input.eigensolver.filter_degree_delta + 1)
+    degree_schedule = LaterFilterDegree.for_loop(filter_degree, minimum_filter_degree)
     eigensolver_settings = system.input.eigensolver
     if eigensolver_settings.method == "none":
         raise ValueError(
@@ -2313,6 +2317,8 @@ def run_scf_spin_polarized(
             callback(
                 SpinPolarizedSCFIteration(
                     iteration=iteration,
+                    # PARSEC_FILTER_DEGREE_STALL: the NOTE of a restoration (once)
+                    filter_degree_note=degree_schedule.take_note(),
                     weighted_residual=metrics.weighted,
                     plain_residual=metrics.plain,
                     energies=energies,
@@ -2362,12 +2368,11 @@ def run_scf_spin_polarized(
                     ),
                 )
             )
-        if (
-            iteration > settings.degree_decrease_after
-            and metrics.weighted < settings.approach_criterion
-            and filter_degree > minimum_filter_degree
-        ):
-            filter_degree -= 1
+        # PARSEC_FILTER_DEGREE_STALL (SCF/filter_degree.py): the degree lowered near convergence, and the
+        # starting degree back where the loop stalls after that
+        filter_degree = degree_schedule.after_iteration(
+            iteration, metrics.weighted, settings.approach_criterion, settings.degree_decrease_after
+        )
         if selected_residual < settings.convergence_criterion:
             converged = True
             break

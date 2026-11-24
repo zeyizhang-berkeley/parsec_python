@@ -78,6 +78,7 @@ from ..Occupations import (
     weighted_fixed_occupations,
 )
 from ..Pseudopotential import ParsecPseudopotential
+from ..Pseudopotential.local_filter import apply_local_filters
 from ..V_ion import (
     NonlocalProjectorOperator,
     build_local_ionic_potential,
@@ -103,6 +104,7 @@ from ..models import (
     SinglePointInput,
     SinglePointResult,
 )
+from .filter_degree import LaterFilterDegree
 from ..V_xc import (
     NoncollinearXCResult,
     SpinPolarizedXCResult,
@@ -1249,6 +1251,9 @@ def prepare_single_point(
     )
     grid_seconds = time.perf_counter() - stage_start
     _require_atoms_inside_domain(problem.grid, atoms)
+    # PARSEC_LOCAL_FILTER on / all: the local potential tables (and under all the projectors) Fourier-filtered to
+    # this grid (Pseudopotential/local_filter.py)
+    pseudopotentials = apply_local_filters(pseudopotentials, problem.pseudopotentials, grid)
     # FDET: the frozen sample field on this grid (potfield.F90, tipsphere_field), None without.
     embedding = _embedding_field(problem, grid, atoms, pseudopotentials, tip)
 
@@ -2446,6 +2451,7 @@ def run_scf(
     minimum_filter_degree = max(
         10, eigensolver_settings.filter_degree_delta + 1
     )
+    degree_schedule = LaterFilterDegree.for_loop(filter_degree, minimum_filter_degree)
     # PARSEC's ordinary condition is polym>10.  The delta+1 term is a Python
     # validity guard for unusual inputs, ensuring p-delta remains positive;
     # it is identical to the Fortran threshold for normal delta values 0--3.
@@ -2813,14 +2819,11 @@ def run_scf(
         # when plain SRE is selected for the final stop.  The threshold is
         # Convergence_Criterion_Approach, by default 100*vconv.
         approach_residual = metrics.weighted
-        if (
-            iteration > settings.degree_decrease_after
-            and approach_residual < settings.approach_criterion
-            and filter_degree > minimum_filter_degree
-        ):
-            # Once reasonably close (100*vconv), save Hamiltonian applications
-            # by lowering only the later-SCF polynomial one degree per step.
-            filter_degree -= 1
+        # PARSEC_FILTER_DEGREE_STALL (SCF/filter_degree.py): the degree lowered near convergence, and the
+        # starting degree back where the loop stalls after that
+        filter_degree = degree_schedule.after_iteration(
+            iteration, approach_residual, settings.approach_criterion, settings.degree_decrease_after
+        )
         # The strict inequality is PARSEC's fixed-point stop rule.  Energy,
         # Hartree, and eigenpair residuals remain diagnostics only.
         if iteration == 1:
@@ -2859,6 +2862,8 @@ def run_scf(
         iteration_seconds = time.perf_counter() - iteration_start
         diagnostic = SCFIteration(
             iteration=iteration,
+            # PARSEC_FILTER_DEGREE_STALL: the NOTE of a restoration (once)
+            filter_degree_note=degree_schedule.take_note(),
             weighted_residual=metrics.weighted,
             plain_residual=metrics.plain,
             eigen_residual_max=eigen_residual_max,

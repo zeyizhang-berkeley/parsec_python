@@ -150,7 +150,9 @@ h-BN PBE0 its E_hyb - E_PBE lies 1.6e-3 Ry below the padded value at 3x3x1 and 2
 QE: Si 60, C 120, MgO 150, h-BN 100, O2 150 Ry. The logs (23 November 2026) integrate the Kleinman-Bylander energies
 E_l exactly on the logarithmic mesh, which is QE's Simpson rule to 1e-12 relative, so the differences hold QE's cutoff
 error of the totals (Si -1.4e-4, C -5.5e-5, MgO -1.0e-4, h-BN -5.3e-4 Ry per cell against QE's converged total) and
-this code's grid (oxygen converges slowest: MgO about +5e-4 Ry at h 0.14); Si differs from QE by QE's cutoff error.
+this code's grid (oxygen converges slowest: MgO about +5e-4 Ry at h 0.14; the error depends on where the atoms sit
+relative to the grid points, which a crystal fixes, so it does not average out, `../0d_hybrid_functionals/README.md`,
+"PBE level"); Si differs from QE by QE's cutoff error.
 PARSEC's trapezoid on the logarithmic mesh, with which the logs before that date were made (`qe/README.md`;
 `PARSEC_KB_QUADRATURE=trapezoid`, with `PARSEC_FHI_ORIGIN=off` the totals of those logs to the printed digits, as
 `PARSEC_FORTRAN_NUMERICS=on` gives them for every cell but h-BN, -1.4e-5 Ry there), changes the totals of the `pbe`

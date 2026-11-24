@@ -29,6 +29,10 @@ iteration, ``(V, vtau)`` mixed together, the double counting
 
 ``tau`` is formed where a k-point worker keeps the orbitals: on the host, or
 on its device (:mod:`parsec_python.acceleration.Hamiltonian.bloch_meta_gga_device`).
+A k-point split into the sectors of its little group
+(``PARSEC_KPOINT_SECTOR_META_GGA``, the default) takes the orbital terms and
+``tau`` reduced to its sectors
+(:mod:`parsec_python.acceleration.Hamiltonian.sector_bloch_meta_gga`).
 """
 
 from __future__ import annotations

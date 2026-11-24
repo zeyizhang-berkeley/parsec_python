@@ -345,6 +345,18 @@ def spin_sector_fallback_lines(record) -> list[str]:
             *(f"       {line}" for line in getattr(record, "multiplets", ())),
             "",
         ]
+    if getattr(record, "route", "spin") == "kpoint" and getattr(record, "doublet", False):
+        # PARSEC_SPIN_GUARD_DOUBLETS=stop on the k-point sectors
+        return [
+            "",
+            f" NOTE: k-point sectors: {record.reason} after {record.stage}",
+            f"       ({record.measure} = {record.largest_fractional_occupation:.3E}, "
+            f"kept only below {record.tolerance:.0E}).",
+            "       The sectors hold both partners of such levels in one sector; the loop starts again with one",
+            "       task per k-point (PARSEC_SPIN_GUARD_DOUBLETS=note keeps the result of the sectors).",
+            *(f"       {line}" for line in record.multiplets),
+            "",
+        ]
     if getattr(record, "route", "spin") == "kpoint":
         return [
             "",
@@ -353,6 +365,19 @@ def spin_sector_fallback_lines(record) -> list[str]:
             f"kept only below {record.tolerance:.0E}).",
             "       The sectors of the k-points cannot hold a state that breaks the symmetry they assume;",
             "       the loop starts again with one task per k-point (PARSEC_KPOINT_SECTOR_GUARD=off keeps the sectors).",
+            *(f"       {line}" for line in record.multiplets),
+            "",
+        ]
+    if getattr(record, "route", "spin") == "kpoint_doublet":
+        # PARSEC_SPIN_GUARD_DOUBLETS=note on the k-point sectors: the result is kept.
+        return [
+            "",
+            f" NOTE: k-point sectors: {record.reason} after {record.stage}",
+            f"       ({record.measure} = {record.largest_fractional_occupation:.3E}).  The result is kept: the",
+            "       symmetric ensemble of degenerate partners that the sectors hold in one sector. A run without",
+            "       sectors can split such levels and end lower (bcc Mn2 with antiparallel start polarizations, 300 K,",
+            "       h 0.11 bohr, at the Gamma point: 82 mRy); PARSEC_SPIN_GUARD_DOUBLETS=stop starts this loop again",
+            "       with one task per k-point.",
             *(f"       {line}" for line in record.multiplets),
             "",
         ]
@@ -376,8 +401,7 @@ def spin_sector_fallback_lines(record) -> list[str]:
             f"       ({record.measure} = {record.largest_fractional_occupation:.3E}).  The result is kept: the",
             "       symmetric ensemble of degenerate partners that the sectors hold in one sector. The full grid can",
             "       split such levels and end lower (bcc Mn2 with antiparallel start polarizations, 300 K, h 0.11",
-            "       bohr: 82 mRy); PARSEC_SPIN_GUARD_DOUBLETS=stop sends this run to the full grid. The k-point",
-            "       sector routes do not look for such levels.",
+            "       bohr: 82 mRy); PARSEC_SPIN_GUARD_DOUBLETS=stop sends this run to the full grid.",
             *(f"       {line}" for line in record.multiplets),
             "",
         ]
@@ -1868,6 +1892,20 @@ def fortran_numerics_lines() -> tuple[str, ...]:
     return (" Numerics of PARSEC 1.5 (PARSEC_FORTRAN_NUMERICS=on; a switch set in the environment wins)",)
 
 
+def local_filter_lines() -> tuple[str, ...]:
+    """The line of the atom data of parsec.out under ``PARSEC_LOCAL_FILTER`` ``all`` (the local potential and the
+    projectors Fourier-filtered to the grid) and ``on`` (the local potential); nothing under ``off`` (the default:
+    PARSEC 1.5's tables, the output of before)."""
+
+    from ..Pseudopotential.local_filter import local_filter_setting
+
+    setting = local_filter_setting()
+    if setting == "off":
+        return ()
+    what = "local potential and projectors" if setting == "all" else "local potential"
+    return (f"  Fourier filter         : {what} filtered to the grid (PARSEC_LOCAL_FILTER=off: the tables)",)
+
+
 def kb_quadrature_lines(potential, local_l) -> tuple[str, ...]:
     """The line of the atom data of parsec.out that names the quadrature of the Kleinman-Bylander denominators of a
     species with projectors (``PARSEC_KB_QUADRATURE``); nothing under ``trapezoid`` (PARSEC 1.5's, the output of
@@ -2429,6 +2467,8 @@ class ParsecTextReporter:
                     ),
                     # Python addition: the quadrature of the KB denominators (PARSEC_KB_QUADRATURE)
                     *kb_quadrature_lines(potential, specification.local_angular_momentum),
+                    # Python addition: the local potential filtered to the grid (PARSEC_LOCAL_FILTER)
+                    *local_filter_lines(),
                     f" There are {len(atoms):6d} {symbol}  atoms",
                     " and their initial coordinates are:",
                     "",
@@ -3019,6 +3059,10 @@ class ParsecTextReporter:
         note = getattr(step, "state_count_note", ())
         if note:
             lines.extend([*note, ""])
+        # PARSEC_FILTER_DEGREE_STALL: the starting later-SCF degree back from the next iteration on.
+        note = getattr(step, "filter_degree_note", ())
+        if note:
+            lines.extend([*note, ""])
         self._previous_total = energies.total
         self.write("\n".join(lines))
 
@@ -3429,6 +3473,10 @@ class ParsecTextReporter:
                 *dynamic_tolerance_lines(step),
             ]
         )
+        # PARSEC_FILTER_DEGREE_STALL: the starting later-SCF degree back.
+        note = getattr(step, "filter_degree_note", ())
+        if note:
+            lines.extend([*note, ""])
         self.write("\n".join(lines))
 
     def _final_spin_k_tables(self, result) -> list[str]:
@@ -3848,6 +3896,10 @@ class ParsecTextReporter:
                 *dynamic_tolerance_lines(step),
             ]
         )
+        # PARSEC_FILTER_DEGREE_STALL: the starting later-SCF degree back.
+        note = getattr(step, "filter_degree_note", ())
+        if note:
+            lines.extend([*note, ""])
         self.write("\n".join(lines))
 
     @staticmethod

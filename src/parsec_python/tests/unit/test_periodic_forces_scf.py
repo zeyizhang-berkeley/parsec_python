@@ -61,6 +61,8 @@ def _scf(shift: float):
 class PeriodicForceSCFTests(unittest.TestCase):
     def setUp(self) -> None:
         self.addCleanup(setattr, ewald, "_local_potential_provider", ewald._local_potential_provider)
+        # (and whether it returns the converged sum, which set_local_potential_provider(None) clears)
+        self.addCleanup(setattr, ewald, "_provider_converged_for", ewald._provider_converged_for)
         ewald.set_local_potential_provider(None)
         # exact derivative of the spline (the default for the periodic local potential)
         self.addCleanup(setattr, ewald, "LOCAL_POTENTIAL_USES_CUBIC_SPLINE", ewald.LOCAL_POTENTIAL_USES_CUBIC_SPLINE)
@@ -102,6 +104,8 @@ def _scf_kpoints(shift: float, k_points, weights, forces: bool = False):
 class PeriodicKPointForceSCFTests(unittest.TestCase):
     def setUp(self) -> None:
         self.addCleanup(setattr, ewald, "_local_potential_provider", ewald._local_potential_provider)
+        # (and whether it returns the converged sum, which set_local_potential_provider(None) clears)
+        self.addCleanup(setattr, ewald, "_provider_converged_for", ewald._provider_converged_for)
         ewald.set_local_potential_provider(None)
         # exact derivative of the spline (the default for the periodic local potential)
         self.addCleanup(setattr, ewald, "LOCAL_POTENTIAL_USES_CUBIC_SPLINE", ewald.LOCAL_POTENTIAL_USES_CUBIC_SPLINE)

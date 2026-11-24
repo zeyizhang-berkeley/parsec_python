@@ -453,7 +453,8 @@ class PeriodicDriverTests(unittest.TestCase):
         sector = run_scf(system)
         self.assertTrue(full.converged and sector.converged)
         self.assertEqual(sector.iterations, full.iterations)
-        self.assertAlmostEqual(sector.energies.total, full.energies.total, delta=1.0e-6)
+        # The sector keeps the states of the full grid (PARSEC_IDENTITY_SECTOR_STATES): the same SCF steps.
+        self.assertAlmostEqual(sector.energies.total, full.energies.total, delta=1.0e-10)
 
     def test_the_cells_that_one_sector_of_the_identity_takes(self) -> None:
         refusal = driver_module.periodic_sector_refusal

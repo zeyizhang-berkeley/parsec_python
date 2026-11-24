@@ -8,7 +8,8 @@ which catch a partly filled multiplet held by one weighted state.  On a GPU: GeH
 against the abelian ones (the switch ``off``) and the full grid, with ``Fix_Number_Eigenvalues``, with ``occup.in``
 (equal partners; unequal partners start again in the abelian sectors), with libxc's PBE (where libxc loads), and
 spin-polarized (the neutral molecule and its anion, symmetric states; the cation, whose partly filled t2 shell the
-guard sends to the abelian sectors and on to the full grid), energies and forces.
+guard sends to the abelian sectors and on to the full grid), energies and forces; SCAN in the weighted sectors
+(``PARSEC_ORBITAL_GROUP_META_GGA``, since 2026-11-23), unpolarized and spin-polarized, and a step of a relaxation.
 """
 
 from __future__ import annotations
@@ -88,11 +89,13 @@ class SwitchTests(unittest.TestCase):
         counted.eigensolver.fixed_state_count = True
         libxc = _problem_namespace(xc_functional="libxc:gga_x_pbe+gga_c_pbe")
         spin = _problem_namespace(spin_polarized=True)
+        meta = _problem_namespace(is_meta_gga=True, xc_functional="scan")
         cases = (
             ("occupations", fixed, False, None),
             ("fixed_count", counted, False, None),
             ("libxc", libxc, False, None),
             ("spin", spin, True, None),
+            ("meta_gga", meta, False, None),
         )
         with mock.patch.dict(os.environ, {name: "auto" for name in WEIGHTED_INPUT_SWITCHES.values()}):
             for kind, problem, polarized, _ in cases:
@@ -123,6 +126,12 @@ class SwitchTests(unittest.TestCase):
             self.assertIsNone(refusal(cell, True, None))
             self.assertIsNotNone(refusal(_problem_namespace(self_consistent_spin_orbit=True), True, None))
             self.assertIsNotNone(refusal(_problem_namespace(spin_polarized=True, is_hybrid=True), True, None))
+            # a meta-GGA hybrid keeps it, as does the meta-GGA of a cell; a spin-polarized meta-GGA cluster takes it
+            self.assertIsNotNone(refusal(_problem_namespace(is_meta_gga=True, is_hybrid=True), False, None))
+            meta_cell = _problem_namespace(is_meta_gga=True, xc_functional="scan")
+            meta_cell.periodic_cell = object()
+            self.assertIsNotNone(refusal(meta_cell, False, None))
+            self.assertIsNone(refusal(_problem_namespace(is_meta_gga=True, spin_polarized=True), True, None))
 
 
 class StateCountTests(unittest.TestCase):
@@ -980,6 +989,79 @@ class DeviceTests(unittest.TestCase):
         self.assertAlmostEqual(float(warm.energies.total), float(full.result.energies.total), delta=2e-6)
         np.testing.assert_allclose(warm_forces.total, full.forces.total, rtol=0, atol=2e-5)
         self.assertGreater(float(np.abs(full.forces.total).max()), 1e-3)
+
+    def _meta_problem(self):
+        problem = _write_problem(self.directory, ("Correlation_Type: scan",))
+        self.assertTrue(problem.scf.is_meta_gga)
+        return problem
+
+    def test_meta_gga(self) -> None:
+        # SCAN in the weighted sectors (tau and g of the solved states averaged over Td, Hamiltonian/meta_gga_device.py)
+        # against the abelian sectors (PARSEC_ORBITAL_GROUP_META_GGA=off) and the full grid, in the orbital form of the
+        # density gradient (SCAN's default): energies and forces.  (The density form of SCAN does not converge to
+        # 1e-8 Ry on this coarse grid on any route, nor does the spin-polarized anion: the residuals stay at 1e-3 to
+        # 1e-2 after 400 steps, the floor of SCAN at low density; the density form is checked on the device functional,
+        # test_meta_gga_device.)
+        problem = self._meta_problem()
+        weighted = self._run(problem, "on")
+        abelian = self._run(problem, "on", {"PARSEC_ORBITAL_GROUP_META_GGA": "off"})
+        full = self._run(problem, "off")
+        self._assert_weighted(weighted)
+        self._assert_abelian(abelian)
+        for run in (weighted, abelian, full):
+            self.assertTrue(run.result.converged)
+        self._compare(weighted, abelian, full)
+
+    def test_meta_gga_spin(self) -> None:
+        # The neutral molecule, spin-polarized SCAN: both channels in the weighted sectors, against the abelian sectors
+        # and the full grid.
+        problem = self._meta_problem()
+        problem = replace(problem, scf=replace(problem.scf, spin_polarized=True))
+        weighted = self._run(problem, "on")
+        abelian = self._run(problem, "on", {"PARSEC_ORBITAL_GROUP_META_GGA": "off"})
+        full = self._run(problem, "off")
+        left = [record for record in weighted.records if type(record).__name__ == "SpinSectorFallbackRecord"]
+        self.assertEqual(left, [])
+        self._assert_weighted(weighted)
+        self._assert_abelian(abelian)
+        for run in (weighted, abelian, full):
+            self.assertTrue(run.result.converged)
+        self._compare(weighted, abelian, full, full_energy=2e-6)
+
+    def test_meta_gga_keeps_the_rows_of_the_sectors_of_irrep_units(self) -> None:
+        # The units of PARSEC_ORBITAL_IRREPS=once (A1 and A2 of Td are sectors of Td itself, on partner rows by default)
+        # with a meta-GGA in the weighted sectors: tau reads the sector orbitals on the rows of their sectors, so the
+        # units keep those rows (driver._prepare_single_point, a NOTE), as with LDA+U; the energy of the weighted
+        # sectors without units.  (Before, this run stopped before its first SCF step.)
+        problem = self._meta_problem()
+        units = self._run(problem, "on", {"PARSEC_ORBITAL_IRREPS": "once", "PARSEC_ORBITAL_IRREP_ROWS": ""})
+        plain = self._run(problem, "on")
+        decomposition = units.system.backend.symmetry_eigensolver.decomposition
+        self.assertTrue(decomposition.projected_sectors)
+        self.assertEqual(decomposition.partner_units, ())
+        self.assertEqual(decomposition.sector_rows_kept, "a meta-GGA")
+        notes = [value for key, value in units.result.backend.details if key == "symmetry_full_grid_note"]
+        self.assertTrue(any("A meta-GGA keeps the units" in note for note in notes), notes)
+        self.assertTrue(units.result.converged and plain.result.converged)
+        self.assertAlmostEqual(float(units.result.energies.total), float(plain.result.energies.total), delta=1e-8)
+        np.testing.assert_allclose(units.forces.total, plain.forces.total, rtol=0, atol=2e-6)
+
+    def test_meta_gga_step_of_a_relaxation(self) -> None:
+        # The molecule stretched along its breathing mode (Td kept): the weighted sectors of a meta-GGA move with the
+        # atoms from the potentials (vtau and W) of the first structure; against the full grid of the moved atoms.
+        from parsec_python.acceleration import driver
+
+        problem = self._meta_problem()
+        first = self._run(problem, "on")
+        self._assert_weighted(first)
+        moved_atoms = tuple(Atom(atom.symbol, 1.03 * np.asarray(atom.position)) for atom in first.system.atoms)
+        moved = driver.update_geometry(first.system, moved_atoms)
+        warm = driver.run_scf(moved, warm_start=driver.warm_start_for_moved_atoms(first.system, first.result, moved))
+        warm_forces = driver.compute_forces(moved, warm)
+        full = self._run(replace(problem, atoms=moved_atoms), "off")
+        self.assertTrue(warm.converged)
+        self.assertAlmostEqual(float(warm.energies.total), float(full.result.energies.total), delta=1e-6)
+        np.testing.assert_allclose(warm_forces.total, full.forces.total, rtol=0, atol=2e-5)
 
     def test_spin_cation_leaves_the_weighted_sectors(self) -> None:
         problem = self._spin_problem(1.0)

@@ -46,7 +46,7 @@ from parsec_python.Forces import LocalForceTerms, species_force_tables
 from parsec_python.Forces.periodic_local import dense_periodic_local_forces as reference_periodic_local_forces
 from parsec_python.models import Atom, SpeciesPotential
 from parsec_python.Pseudopotential import ParsecPseudopotential, ParsecRadialSpline
-from parsec_python.Pseudopotential.radial_derivatives import linear_slope_setting, tail_start_radius
+from parsec_python.Pseudopotential.radial_derivatives import linear_slope_setting
 from parsec_python.V_ion import ewald as _ewald
 from parsec_python.V_ion import ionic_potential as _ionic
 
@@ -188,20 +188,31 @@ def smooth_center(potential: ParsecPseudopotential) -> float:
 class _Slope:
     """The radial slope of one tabulated function with the rules of ``forcloc.f90``, on the arrays of ``xp``.
 
-    Zero closer than the first radial sample; between it and ``rs(npoint-6)`` the derivative of the padded cubic spline of
+    Zero closer than the first radial sample; between it and ``rs(ns-1)`` the derivative of the padded cubic spline of
     the table, or the linear interpolation of its derivative table; from there outwards zero, or the Coulomb slope
-    ``2 Z/r**2`` for the local potential (``charge``).  The same rules as
-    :func:`parsec_python.Pseudopotential.radial_derivatives.evaluate_local_potential_derivative` and ``evaluate_density_derivative``,
-    also with ``center`` (:func:`smooth_center`): closer than it the slope ``s(center) d/center``.
+    ``2 Z/r**2`` for the local potential (``charge``; with ``local_l`` from the spline's cutoff where that lies closer,
+    ``PARSEC_SPLINE_COULOMB_TAIL``), as the sampled potential and core density switch there.  The same rules as
+    :func:`parsec_python.Pseudopotential.radial_derivatives.evaluate_local_potential_derivative` and
+    ``evaluate_density_derivative`` with ``tail=rs(ns-1)`` (the reference sums,
+    :func:`parsec_python.Forces.periodic_local.dense_periodic_local_forces`), also with ``center``
+    (:func:`smooth_center`): closer than it the slope ``s(center) d/center``.  ``forcloc.f90``'s ``rs(npoint-6)`` lies at
+    or inside the first sample of a table of fewer than eight samples: every point took the Coulomb slope, and an atom
+    on a grid point ``2 Z/0`` times a zero ``1/d``, NaN.
     """
 
     def __init__(
         self, xp, potential: ParsecPseudopotential, values, *, spline_padding: int | None, table, charge=None,
-        center=0.0, interpolant: bool = False,
+        center=0.0, interpolant: bool = False, local_l: int | None = None,
     ):
         self.xp = xp
         self.first = float(potential.radii[0])
-        self.tail = tail_start_radius(potential)
+        # where the potential the energy samples becomes -2 Z/r and the sampled density is dropped (above the first
+        # sample, so a point on the atom never takes the Coulomb slope)
+        self.tail = float(potential.interpolation_cutoff)
+        if charge is not None and spline_padding is not None and local_l is not None:
+            # the spline of the local potential takes -2 Z/r from its cutoff (PARSEC_SPLINE_COULOMB_TAIL; rs(ns-1)
+            # under off)
+            self.tail = min(self.tail, potential.local_spline_cutoff(local_l))
         self.charge = charge
         # PARSEC_SPLINE_FORCE_CENTER=auto: closer than ``smooth`` the slope of the smooth behaviour, ``smooth_slope d``
         self.smooth = 0.0
@@ -780,8 +791,9 @@ def _batched_local_sums(xp, erf, grid, geometry, atoms, potentials, specificatio
         charge = potential.ionic_charge
         tables = species_force_tables(potential, specification)
         local = _Slope(
-            xp, potential, potential.channel_potentials[specification.local_angular_momentum],
+            xp, potential, potential.local_channel_potential(specification.local_angular_momentum),
             spline_padding=half_width, table=None, charge=charge, center=smooth_center(potential),
+            local_l=specification.local_angular_momentum,
         )
         reach = max(erfc_cutoff, _ionic.coulomb_onset_radius(potential, specification.local_angular_momentum))
 
@@ -888,8 +900,9 @@ def fast_periodic_local_forces(
         if atom.symbol not in tables:
             tables[atom.symbol] = species_force_tables(potential, specification)
             local = _Slope(
-                xp, potential, potential.channel_potentials[specification.local_angular_momentum],
+                xp, potential, potential.local_channel_potential(specification.local_angular_momentum),
                 spline_padding=half_width, table=None, charge=charge, center=smooth_center(potential),
+                local_l=specification.local_angular_momentum,
             )
             core = None
             if tables[atom.symbol].core_density_derivative is not None:

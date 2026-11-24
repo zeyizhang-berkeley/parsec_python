@@ -268,10 +268,14 @@ class SwitchTests(unittest.TestCase):
                 with mock.patch.dict(os.environ, {name: value}):
                     with self.assertRaisesRegex(ParsecInputError, name):
                         parse_parsec_input(path)
-            # without a band or nscf stage the switches are not read
+            # without a band or nscf stage PARSEC_BAND_CONVERGENCE is not read; PARSEC_KPOINT_EXTRA_CYCLES is read for
+            # every input since 2026-11-23 (the converged first solves of an SCF's k-points read it too)
             path.write_text(text, encoding="utf-8")
-            with mock.patch.dict(os.environ, {"PARSEC_KPOINT_EXTRA_CYCLES": "x"}):
+            with mock.patch.dict(os.environ, {BAND_CONVERGENCE_SWITCH: "yes"}):
                 parse_parsec_input(path)
+            with mock.patch.dict(os.environ, {"PARSEC_KPOINT_EXTRA_CYCLES": "x"}):
+                with self.assertRaisesRegex(ParsecInputError, "PARSEC_KPOINT_EXTRA_CYCLES"):
+                    parse_parsec_input(path)
 
 
 class FirstSolveTests(unittest.TestCase):

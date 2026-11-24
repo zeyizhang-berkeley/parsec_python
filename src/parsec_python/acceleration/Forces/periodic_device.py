@@ -611,7 +611,7 @@ def _device_local_forces(
         local_l = specification.local_angular_momentum
         samples = np.asarray(potential.radii, dtype=np.float64)
         radii.append(samples)
-        local_rv.append(samples * np.asarray(potential.channel_potentials[local_l], dtype=np.float64))
+        local_rv.append(samples * np.asarray(potential.local_channel_potential(local_l), dtype=np.float64))
         valence_table = np.asarray(_fields.valence_density_table(potential, specification), dtype=np.float64)
         valence.append(valence_table)
         has_core = bool(potential.has_nonlinear_core_correction)
@@ -928,12 +928,20 @@ def compute_device_periodic_forces(system, result, *, symmetrize: bool = True, o
     )
     from .compute import _nonlocal_forces, correction_forces
 
-    if getattr(system.grid, "is_confined_periodic", False) or getattr(
-        system.grid, "is_general_periodic", False
-    ):
+    if getattr(system.grid, "is_confined_periodic", False):
         raise NotImplementedError(
-            "the accelerated forces of a periodic cell take the orthorhombic grid of a bulk "
-            "cell; wires, slabs and Fortran's general grid run on the reference solver"
+            "the accelerated forces of a periodic cell take the grid of a bulk cell; wires and slabs run on the "
+            "reference solver"
+        )
+    if getattr(system.grid, "is_general_periodic", False) and (
+        getattr(system, "hubbard", None) is not None or getattr(system, "hubbard_device", None) is not None
+    ):
+        # Fortran's general grid (since 2026-11-23): the local terms of its potential (Forces/periodic_spline.py over
+        # its lattice balls, or the readable sums) and the nonlocal term of the projectors with their lattice images,
+        # as on the orthorhombic grid; the LDA+U term was not validated there.
+        raise NotImplementedError(
+            "the accelerated LDA+U forces of a cell on Fortran's general grid are not validated: the reference "
+            "solver computes them"
         )
     started = perf_counter()
     clock: dict[str, float] = {}

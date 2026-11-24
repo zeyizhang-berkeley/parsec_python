@@ -169,8 +169,10 @@ DEFAULT_EXTRA_CYCLES = 24
 
 def first_solve_extra_cycles() -> int:
     """The most CHEBFF cycles a converged first solve adds (``PARSEC_KPOINT_EXTRA_CYCLES``, default 24); a value
-    that is not a non-negative integer is an error (the input reader checks it before the band and ``nscf``
-    k-points, :func:`parsec_python.SCF.bands.validate_band_settings`)."""
+    that is not a non-negative integer is an error.  The input reader checks it for every input (the device solvers
+    of a CHEBDAV first solve on k-points read it in an SCF as well), and
+    :func:`parsec_python.SCF.bands.validate_band_settings` before the band and ``nscf`` k-points; the device solvers
+    (``acceleration/Eigensolvers/chebff_columns.py``, ``chebff_spinor.py``) read it here too."""
 
     import os
 

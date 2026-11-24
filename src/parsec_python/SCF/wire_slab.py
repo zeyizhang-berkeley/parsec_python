@@ -45,6 +45,7 @@ from ..Laplacian.nonorthogonal import (
     grid_laplacian_coefficients,
 )
 from ..models import PreparationTimings, SinglePointInput
+from ..Pseudopotential.local_filter import apply_local_filters
 from ..V_ion import (
     apply_fourier_filters,
     build_nonlocal_projectors,
@@ -211,6 +212,9 @@ def prepare_wire_slab_single_point(
     pseudopotentials = apply_fourier_filters(
         pseudopotentials, problem.pseudopotentials, float(grid.spacings[0])
     )
+    # PARSEC_LOCAL_FILTER on / all: the local potential tables (and under all the projectors) Fourier-filtered to
+    # this grid (Pseudopotential/local_filter.py)
+    pseudopotentials = apply_local_filters(pseudopotentials, problem.pseudopotentials, grid)
     laplacian_coefficients: NonorthogonalLaplacianCoefficients = grid_laplacian_coefficients(grid)
     # Symmetrize_Charge_Density: the space group of the wire or slab as
     # permutations of its grid points (symm_scalar of newrho.F90).

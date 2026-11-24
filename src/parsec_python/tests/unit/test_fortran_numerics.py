@@ -34,9 +34,10 @@ def _settings():
     from parsec_python.Input.parsec_input import cubic_spline_default_setting
     from parsec_python.Occupations.fermi_dirac import fermi_gap_root_setting
     from parsec_python.Pseudopotential.fhipp import fhi_origin_setting
-    from parsec_python.Pseudopotential.potre import projector_tail_setting
+    from parsec_python.Pseudopotential.potre import projector_tail_setting, spline_coulomb_tail_setting
     from parsec_python.Pseudopotential.radial_derivatives import spline_force_center_setting
     from parsec_python.Pseudopotential.radial_quadrature import kb_quadrature_setting
+    from parsec_python.SCF.filter_degree import filter_degree_stall_setting
     from parsec_python.SCF.bands import band_buffer_setting, band_convergence_setting
     from parsec_python.SCF.wire_slab import gaussian_solve_setting
     from parsec_python.V_ion.ionic_potential import projector_center_setting
@@ -58,6 +59,8 @@ def _settings():
         "PARSEC_BAND_BUFFER": (band_buffer_setting, 0.6),
         "PARSEC_FERMI_GAP_ROOT": (fermi_gap_root_setting, "on"),
         "PARSEC_FHI_ORIGIN": (fhi_origin_setting, "auto"),
+        "PARSEC_FILTER_DEGREE_STALL": (filter_degree_stall_setting, "off"),
+        "PARSEC_SPLINE_COULOMB_TAIL": (spline_coulomb_tail_setting, "auto"),
     }
     return table
 

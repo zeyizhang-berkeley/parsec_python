@@ -628,6 +628,27 @@ class GridMappingTests(unittest.TestCase):
         text = _grid_difference(stored, coarse, np.array([0.5, 0.5, 0.6]))
         self.assertIn("Use_Fortran_Routines: .false.", text)
         self.assertNotIn("Grid_Spacing", text)
+        # a run of the default routines names the switch that reads a file of the Fortran-derived routines, and says
+        # that the file is one of theirs where its counts are those these routines build for the input
+        self.assertIn("restarts with PARSEC_FILE_KEYWORD_ROUTINES=fortran or Use_Fortran_Routines: .true.", message)
+        stored_counts = [int(v) for v in periodic.points_per_axis]
+        with self.assertRaises(RestartError) as caught:
+            restart_fields(stored, coarse, spin_count=1, fortran_counts=lambda: stored_counts)
+        self.assertIn("it is one of theirs", str(caught.exception))
+        self.assertIn("restart it with PARSEC_FILE_KEYWORD_ROUTINES=fortran or Use_Fortran_Routines: .true.",
+                      str(caught.exception))
+        for hint in (lambda: [1, 2, 3], lambda: None):
+            with self.assertRaises(RestartError) as caught:
+                restart_fields(stored, coarse, spin_count=1, fortran_counts=hint)
+            self.assertNotIn("one of theirs", str(caught.exception))
+        # a run on the Fortran-derived routines: the message of before
+        fortran = build_periodic_grid(
+            PeriodicCell(np.diag([4.0, 4.0, 4.0])),
+            PeriodicGridSettings(spacing=0.5, expansion_order=4, fortran_routines=True),
+        )
+        with self.assertRaises(RestartError) as caught:
+            restart_fields(stored, fortran, spin_count=1, fortran_counts=lambda: stored_counts)
+        self.assertNotIn("PARSEC_FILE_KEYWORD_ROUTINES", str(caught.exception))
         # the same grid restarts as before
         self.assertFalse(check_restart_file(stored, periodic, spin_count=1, complex_wavefunctions=False))
 
@@ -733,6 +754,29 @@ class CubeTests(unittest.TestCase):
         self.assertEqual(len(lines), 7 + 38 * 38 * 7)
         self.assertEqual(lines[7], "  0.00000E+00" * 6)
         self.assertEqual(float(np.sum(dense)), float(grid.size))
+
+    def test_the_origin_of_a_periodic_cube_is_its_first_point(self) -> None:
+        # export_grid_data.f90 l.151-153: the origin (shift + i) step of the first point, on the default grid (half a
+        # step off the cell's origin) as on the Fortran-derived one; the value at dense[i, j, k] is that of the point
+        # origin + (i, j, k) steps
+        cell = PeriodicCell(np.diag([6.0, 6.0, 6.0]))
+        for label, settings, expected in (
+            ("default", PeriodicGridSettings(spacing=0.5, expansion_order=4, shift=(0.5, 0.5, 0.5)), 0.25),
+            ("default, Ignore_Symmetry", PeriodicGridSettings(spacing=0.5, expansion_order=4, shift=(0.0, 0.0, 0.0)), 0.0),
+            ("Fortran-derived", PeriodicGridSettings(spacing=0.5, expansion_order=4, shift=(0.5, 0.5, 0.5),
+                                                     fortran_routines=True), 0.25),
+        ):
+            with self.subTest(label):
+                grid = build_periodic_grid(cell, settings)
+                values = grid.coordinates[:, 0] + 10.0 * grid.coordinates[:, 1] + 100.0 * grid.coordinates[:, 2]
+                dense, origin, voxels = dense_box(values, grid)
+                np.testing.assert_allclose(origin, [expected] * 3, rtol=0, atol=1e-14)
+                np.testing.assert_allclose(voxels, np.eye(3) * 0.5, rtol=0, atol=1e-14)
+                index = np.array([3, 5, 7])
+                point = origin + index @ voxels
+                self.assertAlmostEqual(dense[tuple(index)], point[0] + 10.0 * point[1] + 100.0 * point[2], places=12)
+                header = cube_text("charge_den", dense, origin, voxels).splitlines()[2]
+                self.assertEqual(header, f"    1{expected:12.6f}{expected:12.6f}{expected:12.6f}")
 
 
 class OutputFileTests(unittest.TestCase):

@@ -33,6 +33,11 @@ What this module leaves out, and why:
   periodic consumer reads it: the local potential of a periodic system is
   made in reciprocal space from the transform of the unfiltered table
   (``pbc%vloc``), so the local potential stays unfiltered here as well.
+  The filter of the local potential of every system (and of its
+  projectors) to the grid is ``PARSEC_LOCAL_FILTER``
+  (:mod:`parsec_python.Pseudopotential.local_filter`), whose projector
+  filter leaves the projectors of a species with ``Alpha_Filter`` as
+  this module filters them.
 * Of the radial derivatives ``fourier_f.f90`` replaces (``drhodr``,
   ``dvion``, ``ddenc``, ``dvw``), only ``dvw`` has a reader here: the
   tabulated projector slopes of the nonlocal forces (wire and slab forces,

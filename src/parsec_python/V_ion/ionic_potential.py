@@ -102,12 +102,15 @@ def load_pseudopotentials(
     file of another label is used with a warning.
     """
     from ..Pseudopotential.fhipp import fhi_origin_setting
-    from ..Pseudopotential.potre import projector_tail_setting
+    from ..Pseudopotential.local_filter import local_filter_setting
+    from ..Pseudopotential.potre import projector_tail_setting, spline_coulomb_tail_setting
     from ..V_xc.libxc import is_libxc_functional
 
     # an unknown value is refused here, before any projector is built
     projector_tail_setting()
     fhi_origin_setting()
+    local_filter_setting()
+    spline_coulomb_tail_setting()
     libxc = is_libxc_functional(xc_functional)
     result: dict[str, ParsecPseudopotential] = {}
     hybrid_labels = hybrid_pseudopotential_labels(xc_functional.strip().lower())
@@ -521,9 +524,11 @@ def coulomb_tail_radius(potential: ParsecPseudopotential, local_l: int) -> float
     one with ``|r V + 2 Z| > max(10 f, 1e-10 x 2 Z)``: from 1.3 bohr (H) to 14 bohr (Cs) for the FHIPP files of the
     library, 6.1 bohr for its silicon.  Beyond it a periodic image adds
     to the Ewald split of the local potential only ``-2 Z erfc(eta r)/r`` and the noise of the file (below
-    ``1e-9/r`` Ry per image for the FHIPP files), and, for a ``Cubic_Spline`` species, the error of the spline of
-    ``V`` between the samples of ``-2 Z/r``, which grows to 1e-5 Ry near the end of the table and must not be summed
-    over the images.  ``None`` where the outer half deviates by more than ``1e-6 x 2 Z`` (no Coulomb tail, such as
+    ``1e-9/r`` Ry per image for the FHIPP files), and, for a ``Cubic_Spline`` species under
+    ``PARSEC_SPLINE_COULOMB_TAIL=off``, the error of the spline of ``V`` between the samples of ``-2 Z/r``, which grows
+    to 1e-4 Ry near the end of the table and must not be summed over the images (under ``auto``, the default, the
+    spline takes ``-2 Z/r`` from twelve samples past :func:`coulomb_onset_radius` on).  ``None`` where the outer half
+    deviates by more than ``1e-6 x 2 Z`` (no Coulomb tail, such as
     ``examples/h2_full_nonlocal/H_POTRE.DAT``: 4.6e-5 x 2 Z) or no sample settles: the callers then sum to the end
     of the table, the deviation being part of the potential, and :func:`warn_spline_without_coulomb_tail` warns
     that a ``Cubic_Spline`` species adds the spline error of that tail too.
@@ -531,7 +536,7 @@ def coulomb_tail_radius(potential: ParsecPseudopotential, local_l: int) -> float
 
     radii = np.asarray(potential.radii, dtype=float)
     two_z = 2.0 * float(potential.ionic_charge)
-    deviation = np.abs(radii * np.asarray(potential.channel_potentials[local_l], dtype=float) + two_z)
+    deviation = np.abs(radii * np.asarray(potential.local_channel_potential(local_l), dtype=float) + two_z)
     scale = max(two_z, 1.0)
     floor = float(np.max(deviation[radii >= 0.5 * radii[-1]], initial=0.0))
     if floor > _COULOMB_TAIL_NOISE_LIMIT * scale:
@@ -583,7 +588,8 @@ def coulomb_onset_radius(potential: ParsecPseudopotential, local_l: int) -> floa
     """
 
     radii = np.asarray(potential.radii, dtype=float)
-    deviation = np.abs(np.asarray(potential.channel_potentials[local_l], dtype=float) + 2.0 * potential.ionic_charge / radii)
+    table = np.asarray(potential.local_channel_potential(local_l), dtype=float)
+    deviation = np.abs(table + 2.0 * potential.ionic_charge / radii)
     significant = np.flatnonzero(deviation > _COULOMB_ONSET_TOLERANCE)
     if significant.size == 0:
         return float(radii[1])
@@ -601,7 +607,7 @@ def _coulomb_to_round_off(potential: ParsecPseudopotential, local_l: int) -> boo
 
     radii = np.asarray(potential.radii, dtype=float)
     two_z = 2.0 * float(potential.ionic_charge)
-    deviation = np.abs(radii * np.asarray(potential.channel_potentials[local_l], dtype=float) + two_z)
+    deviation = np.abs(radii * np.asarray(potential.local_channel_potential(local_l), dtype=float) + two_z)
     deviating = np.flatnonzero(deviation > COULOMB_ROUND_OFF_TOLERANCE * max(two_z, 1.0))
     if deviating.size == 0:
         return True
@@ -923,8 +929,8 @@ def projector_center_setting() -> str:
     ``off``: ``min(rs(2), 1e-6 bohr)`` (:data:`PROJECTOR_CENTER_ROUND_OFF`), as before that: between 1e-6 bohr and the
     first sample the harmonics took the true direction, so the projector had the full ``w(rs(2))`` in the direction
     of the atom and its gradient grew as ``w(rs(2))/|d|`` up to ``w(rs(2))/1e-6``; an atom within round-off of a grid
-    point got a nonlocal force of 0.1 Ry/bohr (carbon POTRE table, first sample 1.3e-5 bohr) to 0.75 Ry/bohr (carbon
-    FHI table, 1.04e-3 bohr) from that one point.  The projectors that used the true direction at every distance (the
+    point got a nonlocal force of up to about 1.2 Ry/bohr (spin C7N cell, carbon POTRE table, first sample 1.3e-5
+    bohr) from that one point.  The projectors that used the true direction at every distance (the
     double grid, the spin-orbit projectors) take ``rs(2)`` under ``auto`` and ``tip``.
     """
 

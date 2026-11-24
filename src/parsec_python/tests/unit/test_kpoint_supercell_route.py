@@ -294,6 +294,18 @@ class RouteTests(_Folder):
         all_states = route.trim_supercell_route(replace(translation, output_all_states=True), device="gpu")
         self.assertFalse(all_states.taken)
         self.assertIn("Output_All_States", all_states.note)
+        # a Save_Wfn_Bands block that lists states keeps the k-points, which write them (it chooses no routines under
+        # PARSEC_FILE_KEYWORD_ROUTINES=neutral); an empty block saves none and takes the supercell
+        from parsec_python.models import WavefunctionSelection
+
+        listed = replace(
+            translation.output_files, wavefunctions=WavefunctionSelection(mode="list", indices=(1, 2, 3), explicit=True)
+        )
+        bands = route.trim_supercell_route(replace(translation, output_files=listed), device="gpu")
+        self.assertFalse(bands.taken)
+        self.assertIn("Save_Wfn_Bands", bands.note)
+        empty = replace(translation.output_files, wavefunctions=WavefunctionSelection(mode="list", explicit=True))
+        self.assertTrue(route.trim_supercell_route(replace(translation, output_files=empty), device="gpu").taken)
         for value, count in (("0,1", 2), ("current", 1), ("3", 1), ("0, 2, 3", 3)):
             with mock.patch.dict(os.environ, {"PARSEC_CUPY_DEVICES": value}):
                 self.assertEqual(route.process_gpu_count(), count, value)

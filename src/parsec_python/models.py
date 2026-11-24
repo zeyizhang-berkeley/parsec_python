@@ -2715,7 +2715,8 @@ class SpinSectorFallbackRecord:
     # against ``tolerance``; ``measure`` empty where the reason has none), said before the loop starts;
     # ``spin_flip_stable``: the state of such a loop passed the test of PARSEC_SPIN_FLIP_STABILITY=auto and is kept
     # (``largest_fractional_occupation`` the largest eigenvalue of the response, ``multiplets`` the summary);
-    # ``doublet`` and ``sector_doublet``: the note of a kept result (PARSEC_SPIN_GUARD_DOUBLETS).
+    # ``doublet``, ``sector_doublet`` and ``kpoint_doublet`` (the k-point sectors): the note of a kept result
+    # (PARSEC_SPIN_GUARD_DOUBLETS).
     route: str = "spin"
     # Where the full grid of the ``spin`` route goes (the accelerated driver's plan, PARSEC_SPIN_FALLBACK_SHARED):
     # ``on the full grid of one device (...)``, ``as one sector of the identity whose basis ... share (...)``, or
@@ -2924,6 +2925,9 @@ class SCFIteration:
     # PARSEC_STATES_CLOSE_MULTIPLET (SCF/state_extension.py): the NOTE of an iteration after which the loop takes
     # more states, empty otherwise.
     state_count_note: tuple[str, ...] = field(default=(), repr=False)
+    # PARSEC_FILTER_DEGREE_STALL (SCF/filter_degree.py): the NOTE of an iteration after which a stalled loop takes its
+    # starting later-SCF degree back, empty otherwise.
+    filter_degree_note: tuple[str, ...] = field(default=(), repr=False)
 
     @property
     def spin_polarized(self) -> bool:
@@ -3002,6 +3006,8 @@ class SpinPolarizedSCFIteration:
     # loop): the iteration after the converged one, on the same V_in, as in
     # SCFIteration.
     level_refinement: bool = field(default=False, repr=False)
+    # PARSEC_FILTER_DEGREE_STALL, as in SCFIteration.
+    filter_degree_note: tuple[str, ...] = field(default=(), repr=False)
 
 
 @dataclass
@@ -3249,6 +3255,8 @@ class SelfConsistentSOCIteration:
     diagonalization_seconds: float = 0.0
     total_seconds: float = 0.0
     """Seconds of this iteration's diagonalization and of the whole iteration (0 where not measured)."""
+    # PARSEC_FILTER_DEGREE_STALL, as in SCFIteration.
+    filter_degree_note: tuple[str, ...] = field(default=(), repr=False)
 
 
 @dataclass

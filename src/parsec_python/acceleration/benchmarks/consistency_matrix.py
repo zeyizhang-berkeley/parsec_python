@@ -18,7 +18,8 @@ repository, so that the matrix can be run unchanged on any later tree.  Groups:
     energy.  ``dgrid`` is the distance of the atom from the nearest grid point where the archive holds the grid.
 ``mpi``
     One case per launch under ``srun`` or ``mpirun`` (2 or 4 ranks, one GPU each): the MPI full-SCF runner for a
-    cluster and a Gamma cell, ``--mpi`` of the command line for a k-point mesh.  Rank 0 then runs the same input in
+    cluster, a Gamma cell and (added 2026-11-23) the SCF of a PBE0 cell below and above the floor of the sectors of
+    a Gamma-point hybrid, ``--mpi`` of the command line for a k-point mesh.  Rank 0 then runs the same input in
     one process and compares: energies within 1e-8 Ry, forces within 1e-7 Ry/bohr.
 ``symmetry``
     The default route against the same input without symmetry: ``--symmetry off`` with
@@ -29,7 +30,8 @@ repository, so that the matrix can be run unchanged on any later tree.  Groups:
     The off values of the switches published after 3b5d134c0 (``ALL_OFF`` below, all at once) against the result of
     3b5d134c0 itself pinned in ``tests/data/consistency_pins.json`` (``--write-pins`` records it): ``bits`` where equal,
     otherwise within 1e-9 Ry and 1e-8 Ry/bohr (GPU noise).  A later tree that publishes new switches adds their off
-    values to ``ALL_OFF``; the pins stay.
+    values to ``ALL_OFF``; the pins stay.  Where a later tree changes a table a case reads, the pin is recomputed by
+    3b5d134c0 on the new table (``w_c7n_spin_*``: the cubic ``spin_ca_*_POTRE.DAT`` of the test data).
 ``repeat``
     The same input twice in fresh processes: energies within 1e-10 Ry and the same number of SCF steps.  The spread
     is printed.
@@ -67,7 +69,7 @@ from __future__ import annotations
 
 import argparse
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 import fnmatch
 import itertools
 import json
@@ -141,6 +143,7 @@ ALL_OFF = {
     "PARSEC_LDAU_WEIGHTED_SECTORS": "off",
     "PARSEC_MOVE_FLAG_SPACE_GROUP": "off",
     "PARSEC_MOVING_SECTORS": "off",
+    "PARSEC_ORBITAL_GROUP_META_GGA": "off",
     "PARSEC_ORBITAL_GROUP_MPI": "off",
     "PARSEC_ORBITAL_GROUP_SPIN_FLOOR": "off",
     "PARSEC_PERIODIC_IMAGE_ROWS": "off",
@@ -203,6 +206,28 @@ ALL_OFF = {
     # first radial sample
     "PARSEC_FERMI_GAP_ROOT": "off",
     "PARSEC_FHI_ORIGIN": "off",
+    # after a6401263f: one sector of the identity keeps the states of the full grid
+    "PARSEC_IDENTITY_SECTOR_STATES": "off",
+    # after a6401263f: the keywords of the files a run reads or writes choose no routines
+    "PARSEC_FILE_KEYWORD_ROUTINES": "fortran",
+    # after a6401263f: the exchange of periodic hybrids on the ranks of the MPI runner takes the routes of one process
+    "PARSEC_MPI_EXCHANGE_POOL": "off",
+    # defaults changed after a6401263f: the complex characters of the abelian little groups of the k-points
+    "PARSEC_KPOINT_SECTOR_CHARACTERS": "real",
+    # defaults changed after a6401263f: the sectors of a wire or slab above the size floor
+    "PARSEC_SLAB_WIRE_SECTORS": "off",
+    # after a6401263f: a Gamma-point cell on Fortran's general grid on the accelerated driver of the command line (off:
+    # the reference solver), and the sectors of oblique cells by default (off: the full grid, the default before)
+    "PARSEC_GENERAL_GRID_ACCELERATED": "off",
+    "PARSEC_OBLIQUE_SECTORS": "off",
+    # after a6401263f: the starting later-SCF degree back where a loop stalls after lowering it
+    "PARSEC_FILTER_DEGREE_STALL": "off",
+    # after a6401263f: the local potential and the projectors Fourier-filtered to the grid
+    "PARSEC_LOCAL_FILTER": "off",
+    # after a6401263f: the k-point sectors of meta-GGA loops (off: one task per k-point)
+    "PARSEC_KPOINT_SECTOR_META_GGA": "off",
+    # after a6401263f: the Coulomb tail of a splined local potential beyond its Coulomb onset
+    "PARSEC_SPLINE_COULOMB_TAIL": "off",
 }
 NO_SYMMETRY_ENV = {"PARSEC_PERIODIC_SYMMETRY": "off", "PARSEC_KPOINT_SECTORS": "off"}
 NO_SYMMETRY_ARGS = ("--symmetry", "off")
@@ -727,16 +752,18 @@ def ch4(name, *, perturb=True, offset_h=None, criterion=1.0e-10):
     return Structure(name, text, positions, ("C_FHI", "H_POTRE"), None, 0)
 
 
-def h2o(name, *, criterion=1.0e-10):
+def h2o(name, *, criterion=1.0e-10, ignore_symmetry=False):
     """H2O (TM O and H, CA), C2v, O on a grid point (0, -0.3, 0); the box of the atoms is centred on the origin, so
-    that PARSEC does not re-centre the cluster (``center_cluster_geometry``) at any step."""
+    that PARSEC does not re-centre the cluster (``center_cluster_geometry``) at any step.  ``ignore_symmetry``: the
+    group is not used (one process solves the full grid, the MPI runner one sector of the identity)."""
 
     positions = np.array([[0.0, -0.3, 0.0], [1.6, 0.3, 0.0], [-1.6, 0.3, 0.0]])
+    extra = "Ignore_Symmetry: .true.\n" if ignore_symmetry else ""
 
     def text(p):
-        return cluster_head(10.0, 0.30) + scf_block("ca", 8, criterion=criterion, diag=criterion / 10) + atom_blocks(
-            [("Ow_POTRE", p[:1], ""), ("Hw_POTRE", p[1:], "")]
-        )
+        return cluster_head(10.0, 0.30) + scf_block(
+            "ca", 8, criterion=criterion, diag=criterion / 10, extra=extra
+        ) + atom_blocks([("Ow_POTRE", p[:1], ""), ("Hw_POTRE", p[1:], "")])
 
     return Structure(name, text, positions, ("Ow_POTRE", "Hw_POTRE"), None, 0)
 
@@ -807,6 +834,82 @@ def bn_slab(name, *, fortran=None, mesh=None, snap=True, criterion=1.0e-10, potr
     return Structure(name, text, positions, (boron, nitrogen), lattice, 2, snap=0 if snap else None)
 
 
+def bn_rect_slab(name, *, nx=4, ny=2, criterion=1.0e-9):
+    """Rectangular h-BN (four atoms a cell, B FHI with a core correction, N FHI, PBE) repeated nx x ny as a slab of
+    half height 8 bohr at h 0.25, the origin on a B atom, no forces (which take a slab to the reference solver).  The
+    4 x 2 cell (2.4e7 grid points x states) lies below the floor of the sectors of a wire or slab
+    (``PARSEC_SLAB_WIRE_SECTORS``, ``driver.WIRE_SLAB_FLOOR_ENTRIES``): its runs take
+    ``PARSEC_PERIODIC_SECTOR_FLOOR=off``, so that the route of the sectors is checked at the cost of a small cell."""
+
+    a = 4.73
+    b = a * np.sqrt(3.0)
+    lx, ly = nx * a, ny * b
+    borons, nitrogens = [], []
+    for i in range(nx):
+        for j in range(ny):
+            borons += [(i * a, j * b), (i * a + a / 2, j * b + b / 2)]
+            nitrogens += [(i * a, j * b + b / 3), (i * a + a / 2, j * b + 5 * b / 6)]
+
+    def folded(points):
+        return [((x + lx / 2) % lx - lx / 2, (y + ly / 2) % ly - ly / 2, 0.0) for x, y in points]
+
+    positions = np.array(folded(borons) + folded(nitrogens))
+    count = len(borons)
+    states = int(round(4 * count * 1.15)) + 4
+
+    def text(p):
+        return (
+            cell_head([[lx, 0.0], [0.0, ly]], 0.25, boundary="slab", radius=8.0, sad=False)
+            + scf_block("pbe", states, criterion=criterion, diag=criterion / 10, forces=False, order=12)
+            + atom_blocks([("B_FHI", p[:count], ""), ("N_FHI", p[count:], "")])
+        )
+
+    lattice = np.array([[lx, 0.0, 0.0], [0.0, ly, 0.0], [0.0, 0.0, 1.0]])
+    return Structure(name, text, positions, ("B_FHI", "N_FHI"), lattice, 2, env={"PARSEC_PERIODIC_SECTOR_FLOOR": "off"})
+
+
+def ribbon_wire(name, *, half=12.0, criterion=1.0e-9):
+    """An H-passivated armchair graphene ribbon along x as a wire (C FHI, H POTRE, CA; period 3 d = 8.049 bohr, the
+    carbons within ``half`` bohr of the axis, the origin at a hexagon centre: the eight operations of D2h), radius
+    ``half`` + 9 bohr at h 0.3, no forces: 26 atoms for 12 bohr (2.5e7 grid points x states, below the floor of the
+    sectors of a wire or slab; its runs take ``PARSEC_PERIODIC_SECTOR_FLOOR=off``, as :func:`bn_rect_slab`)."""
+
+    d, ch = 2.683, 2.06
+    period = 3.0 * d
+    a1 = np.array([1.5 * d, 0.5 * np.sqrt(3.0) * d])
+    a2 = np.array([1.5 * d, -0.5 * np.sqrt(3.0) * d])
+    basis = (np.array([d, 0.0]), np.array([0.5 * d, 0.5 * np.sqrt(3.0) * d]))
+    reach = int(np.ceil(half / d)) + 6
+    carbons = []
+    for n in range(-reach, reach + 1):
+        for m in range(-reach, reach + 1):
+            for b in basis:
+                p = b + n * a1 + m * a2
+                if -period / 2 - 1e-6 <= p[0] < period / 2 - 1e-6 and abs(p[1]) <= half + 1e-9:
+                    carbons.append(p)
+    hydrogens = []
+    for c in carbons:
+        bonds = [other + np.array([shift, 0.0]) - c for shift in (-period, 0.0, period) for other in carbons]
+        bonds = [v / np.linalg.norm(v) for v in bonds if 1e-6 < np.linalg.norm(v) < 1.1 * d]
+        if len(bonds) == 2:
+            direction = -(bonds[0] + bonds[1])
+            hydrogens.append(c + ch * direction / np.linalg.norm(direction))
+    positions = np.array([(p[0], p[1], 0.0) for p in carbons] + [(p[0], p[1], 0.0) for p in hydrogens])
+    count = len(carbons)
+    states = int(round((4 * count + len(hydrogens)) / 2 * 1.15)) + 4
+    radius = float(np.ceil(half + 2.1 + 7.0))
+
+    def text(p):
+        return (
+            cell_head([period], 0.3, boundary="wire", radius=radius, sad=False)
+            + scf_block("ca", states, criterion=criterion, diag=criterion / 10, forces=False, order=12)
+            + atom_blocks([("C_FHI", p[:count], ""), ("H_POTRE", p[count:], "")])
+        )
+
+    lattice = np.array([[period, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]])
+    return Structure(name, text, positions, ("C_FHI", "H_POTRE"), lattice, 1, env={"PARSEC_PERIODIC_SECTOR_FLOOR": "off"})
+
+
 def ge2_slab(name, *, height=6.0, env=None):
     """Two Ge atoms (POTRE with a core correction, local p, CA) in a square slab cell of 5.6 bohr at h 0.45, the domain
     |z| <= ``height``; at 6 bohr the density at the edge of the slab is 1.1e-4 e/bohr^3, where the Hartree operator of
@@ -860,11 +963,31 @@ def si_pbe0(name, *, mesh=True):
     return Structure(name, text, positions, ("Si_FHI",), vectors, 3)
 
 
-def c8_pbe0(name):
+def c8_pbe0(name, *, forces=True):
     """C8 (C POTRE) at the Gamma point with PBE0, atom 0 moved along [111]."""
 
     return diamond(name, "C_POTRE", A_C, "pbe0", 20, criterion=1.0e-8,
-                   extra_scf="Exx_Tolerance: 1e-9 Ry\n")
+                   extra_scf="Exx_Tolerance: 1e-9 Ry\n", forces=forces)
+
+
+def si64_pbe0(name):
+    """Si64 (2x2x2 cubes, Si FHI, h = a / 34) at the Gamma point with PBE0, no forces: a basis above the floor of the
+    sectors of a Gamma-point hybrid, whose 32 abelian sectors carry the seven half-cell translations (the exchange in
+    their translation classes)."""
+
+    cells = np.array(list(itertools.product(range(2), repeat=3)), dtype=float)
+    positions = (cells[:, None, :] * A_SI + diamond_cube(A_SI)[None, :, :]).reshape(-1, 3)
+    vectors = np.diag([2.0 * A_SI] * 3)
+
+    def text(p):
+        return (
+            cell_head(vectors, A_SI / 34, fortran=False, sad=False)
+            + scf_block("pbe0", 140, temperature=1.0, criterion=1.0e-8, diag=1.0e-9, order=12, forces=False,
+                        extra="Exx_Tolerance: 1e-9 Ry\n")
+            + atom_blocks([("Si_FHI", p, "")])
+        )
+
+    return Structure(name, text, positions, ("Si_FHI",), vectors, 3)
 
 
 # ---------------------------------------------------------------------------------------------------------------
@@ -897,6 +1020,13 @@ class Check:
         raise NotImplementedError
 
 
+def _within(value, tolerance) -> bool:
+    """Whether a difference is finite and within ``tolerance``: a NaN or infinite force, slope, energy or level (whose
+    comparisons with a number are all false) is a failure, never a pass."""
+
+    return value is not None and bool(np.isfinite(value)) and value <= tolerance
+
+
 def compare_extras(a, b):
     """Text and verdict (None: nothing to compare) of the trajectories and band levels of two results."""
 
@@ -913,13 +1043,19 @@ def compare_extras(a, b):
         dr = float(np.max(np.abs(a.trajectory_positions - b.trajectory_positions)))
         text += (f" trajectory {a.trajectory_energies.size} structures max|dE| {de:.2e} max|dR| {dr:.2e}"
                  f" (tol {TRAJECTORY_ENERGY_TOLERANCE:.0e}/{TRAJECTORY_POSITION_TOLERANCE:.0e})")
-        ok = de <= TRAJECTORY_ENERGY_TOLERANCE and dr <= TRAJECTORY_POSITION_TOLERANCE
+        ok = _within(de, TRAJECTORY_ENERGY_TOLERANCE) and _within(dr, TRAJECTORY_POSITION_TOLERANCE)
     if a.bands is not None or b.bands is not None:
         if a.bands is None or b.bands is None or a.bands.shape != b.bands.shape:
             return text + " band levels missing or of other shapes in one run", False
-        db = float(np.nanmax(np.abs(a.bands - b.bands)))
+        # (levels missing in both runs, NaN at the same places, are left out; a level finite in one run only, or no
+        # finite level at all, is a failure)
+        finite_a, finite_b = np.isfinite(a.bands), np.isfinite(b.bands)
+        both = finite_a & finite_b
+        db = float(np.max(np.abs(a.bands[both] - b.bands[both]))) if both.any() else float("nan")
+        if np.any(finite_a != finite_b):
+            db = float("nan")
         text += f" bands {a.bands.shape} max|dlevel| {db:.2e} (tol {BAND_TOLERANCE:.0e})"
-        ok = (ok is not False) and db <= BAND_TOLERANCE
+        ok = (ok is not False) and _within(db, BAND_TOLERANCE)
     return text, ok
 
 
@@ -995,7 +1131,11 @@ class ForceCheck(Check):
             if missing:
                 lines.append(("ERROR", text + " | " + "; ".join(missing)))
                 continue
-            failing = [step for step, d in zip(FORCE_STEPS, diffs) if d > self.tolerance]
+            if not np.isfinite(force) or not all(np.isfinite(slope) for slope in slopes):
+                # (no exemption: a NaN or infinite force or slope is never a step that may miss)
+                lines.append(("FAIL", text + " | non-finite force or slope"))
+                continue
+            failing = [step for step, d in zip(FORCE_STEPS, diffs) if not _within(d, self.tolerance)]
             exempt_steps, reason = self.exempt.get(atom, ((), ""))
             first, second = (s - force for s in slopes)
             if not failing:
@@ -1004,7 +1144,7 @@ class ForceCheck(Check):
                 lines.append(("EXEMPT", text + f" | exempt step(s) {','.join(f'{s:g}' for s in failing)}: {reason}"))
             elif (
                 failing == [FORCE_STEPS[1]]
-                and abs(force - richardson) <= self.tolerance
+                and _within(abs(force - richardson), self.tolerance)
                 and first * second > 0.0
                 and abs(second) >= 2.0 * abs(first)
             ):
@@ -1014,7 +1154,7 @@ class ForceCheck(Check):
                 lines.append(("EXEMPT", text + f" | step {FORCE_STEPS[1]:g}: h^2 truncation of the central "
                               "difference (one-sided, Richardson within the tolerance)"))
             elif (
-                abs(force - richardson) <= self.tolerance
+                _within(abs(force - richardson), self.tolerance)
                 and first * second > 0.0
                 and 3.0 <= abs(second) / abs(first) <= 5.0
             ):
@@ -1064,7 +1204,7 @@ class SymmetryCheck(Check):
         if sym.moment is not None or off.moment is not None:
             text += f" moment {_fmt(sym.moment, '.6f')}/{_fmt(off.moment, '.6f')}"
         text += f" tol {self.energy_tolerance:.0e}/{self.force_tolerance:.0e}"
-        ok = de <= self.energy_tolerance and (df is None or df <= self.force_tolerance)
+        ok = _within(de, self.energy_tolerance) and (df is None or _within(df, self.force_tolerance))
         extra, extra_ok = compare_extras(sym, off)
         text += extra
         if extra_ok is False:
@@ -1109,7 +1249,7 @@ class SwitchCheck(Check):
             df = float(np.max(np.abs(run.forces - np.asarray(pin["forces"]))))
             text += f" max|dF| {df:.2e}"
         bits = de == 0.0 and (df is None or df == 0.0)
-        ok = de <= SWITCH_ENERGY_TOLERANCE and (df is None or df <= SWITCH_FORCE_TOLERANCE)
+        ok = _within(de, SWITCH_ENERGY_TOLERANCE) and (df is None or _within(df, SWITCH_FORCE_TOLERANCE))
         default = results.get("default")
         if default is not None and default.ok:
             text += f" | default dE {abs(default.free - run.free):.2e}"
@@ -1142,7 +1282,7 @@ class RepeatCheck(Check):
         text = f"E {first.free:.12f} {second.free:.12f} spread {de:.2e} it {first.iterations}/{second.iterations}"
         if first.forces is not None and second.forces is not None:
             text += f" max|dF| {float(np.max(np.abs(first.forces - second.forces))):.2e}"
-        ok = de <= REPEAT_ENERGY_TOLERANCE and first.iterations == second.iterations
+        ok = _within(de, REPEAT_ENERGY_TOLERANCE) and first.iterations == second.iterations
         extra, extra_ok = compare_extras(first, second)
         text += extra
         if extra_ok is False:
@@ -1526,6 +1666,14 @@ def force_checks():
         # the Hartree energy (added after 30edaacf1; the derivative is the default of a slab since b72375f60)
         ("f_ge2slab", ge2_slab("ge2slab", env={"PARSEC_HARTREE_VARIATIONAL": "off"}), ((0, 2), (0, 0)), on),
         ("f_ge2slab_var", ge2_slab("ge2slab_var"), ((0, 2), (1, 2)), on),
+        # oblique cells at the Gamma point (added after a6401263f): hcp Mg on Fortran's general grid, which the command
+        # line ran on the reference solver before PARSEC_GENERAL_GRID_ACCELERATED, and diamond in its primitive fcc
+        # cell on the default routines.  Moves along c only for Mg: a move in the plane gives the structure the near
+        # fractional translations of its space group, from which adjust_step takes 15 instead of 14 points along a1
+        # (the slope would compare two grids); atom 1 only for C: atom 0 at the corner of the cell leaves it at either
+        # step, which takes the input to the Fortran-derived routines and their grid
+        ("f_mg2g_f", hcp_mg2("mg2g_f", "", criterion=1.0e-10), ((0, 2), (1, 2)), on),
+        ("f_c2g_d", primitive_c2("c2g_d", "", criterion=1.0e-10), ((1, 0), (1, 2)), on),
         # no Cubic_Spline in the input (added after the first run, when such an input took PARSEC 1.5's linear tables
         # and these cases were exempt; after 30edaacf1 the default of PARSEC_CUBIC_SPLINE_DEFAULT is the cubic spline)
         ("f_si8k_lin_d", linear(diamond("si8k_lin_d", "Si_POTRE", A_SI, "ca", 24, mesh=(2, 2, 2))),
@@ -1585,6 +1733,13 @@ def symmetry_checks():
         # Fortran-derived routines (core correction): the whole mesh at the images the mesh computes
         ("s_mg2_hcp_k333_f_list", hcp_mg2("mg2_k333_f", (3, 3, 3)),
          hcp_mg2("mg2_k333_f_list", full_mesh_list(mg_lattice, (3, 3, 3), images="centred"))),
+        # oblique cells at the Gamma point in the sectors of the frame of their grid indices (PARSEC_OBLIQUE_SECTORS,
+        # the default after a6401263f; these cells are below the floor of the sectors, which is off here); hcp Mg on
+        # Fortran's general grid
+        ("s_mg2_hcp_gamma_f", replace(hcp_mg2("mg2g_sym_f", "", criterion=1.0e-9),
+                                      env={"PARSEC_PERIODIC_SECTOR_FLOOR": "off"}), None),
+        ("s_c2_fcc_gamma", replace(primitive_c2("c2g_sym", "", criterion=1.0e-9),
+                                   env={"PARSEC_PERIODIC_SECTOR_FLOOR": "off"}), None),
         ("s_h2o_c2v", h2o("h2o_c2v", criterion=1.0e-9), None),
         ("s_ch4_td", ch4("ch4_td", perturb=False, criterion=1.0e-9), None),
         ("s_o2_spin", o2("o2_sym", symmetric=True, criterion=1.0e-9), None),
@@ -1600,6 +1755,10 @@ def symmetry_checks():
         ("s_bnslab_k331_f_list", bn_slab("bn_k331_f", mesh=(3, 3, 1), snap=False, criterion=1.0e-9),
          bn_slab("bn_k331_f_list", mesh=full_mesh_list(bn_lattice, (3, 3, 1), periodic=2, images="centred"),
                  snap=False, criterion=1.0e-9)),
+        # Gamma-point sectors of a slab and a wire (PARSEC_SLAB_WIRE_SECTORS, added after a6401263f; the floor off)
+        # against the full grid
+        ("s_bnslab_rect_gamma", bn_rect_slab("bn_rect"), None),
+        ("s_ribbon_wire_gamma", ribbon_wire("ribbon"), None),
     ]
     out = []
     for name, structure, reference in checks:
@@ -1696,6 +1855,15 @@ def trajectory_checks():
                 structure = make(f"t_{label}_md", MD_LINES)
             checks.append(SymmetryCheck("traj", f"t_{label}_{kind}_sym", "", symmetric, reference))
             checks.append(RepeatCheck("traj", f"t_{label}_{kind}_rep", "", structure))
+    # an oblique cell on Fortran's general grid (added after a6401263f): its BFGS steps in the sectors of the frame of
+    # its grid indices (the floor of the sectors off) against the full grid of those routines (PARSEC_OBLIQUE_SECTORS=
+    # off), whose forces and moves are averaged over the operations of those routines too.  (Against --symmetry off,
+    # whose forces are not averaged, the paths part by 2.9e-4 bohr in three steps: the operations of these routines
+    # include the three-fold axis, which their finite-difference stencil on this grid does not keep exactly.)
+    mg2 = replace(hcp_mg2("t_mg2_bfgs", "", criterion=1.0e-9), env={"PARSEC_PERIODIC_SECTOR_FLOOR": "off"})
+    mg2 = mg2.with_text("t_mg2_bfgs", lambda text: text + RELAX_LINES)
+    checks.append(SymmetryCheck("traj", "t_mg2_bfgs_sym", "", mg2, mg2, reference_env={"PARSEC_OBLIQUE_SECTORS": "off"},
+                                reference_args=()))
     return checks
 
 
@@ -1745,6 +1913,10 @@ def soc_checks():
 def mpi_checks():
     table = [
         ("m_h2o", h2o("m_h2o"), "runner"),
+        # no group: the runner's one sector of the identity against the full grid of one process, at a loose
+        # criterion, where the two take the same SCF steps only if they solve the same states (added after
+        # a6401263f, PARSEC_IDENTITY_SECTOR_STATES)
+        ("m_h2o_nosym", h2o("m_h2o_nosym", criterion=1.0e-5, ignore_symmetry=True), "runner"),
         ("m_c8p_gamma", diamond("m_c8p", "C_POTRE", A_C, "pbe", 20), "runner"),
         # D-infinity-h: the runner divides the sectors of both spin channels over the ranks (a spin run without a
         # group is refused there by name)
@@ -1753,6 +1925,11 @@ def mpi_checks():
         # a band path after a k-point SCF (added after the first run)
         ("m_si8_bands", diamond("m_si8_bands", "Si_POTRE", A_SI, "ca", 24, move=(0.0, 0.0, 0.0), mesh=(2, 2, 2),
                                 criterion=1.0e-9, forces=False, extra_scf="Bandstruc_Points: 4\n" + BAND_LINES), "cli"),
+        # periodic hybrids on the runner (added 2026-11-23): the sector of the identity below the floor of the
+        # sectors, whose small builds the root forms on its GPU, and 32 sectors whose exchange every rank forms in
+        # the translation classes of one process (PARSEC_MPI_EXCHANGE_POOL)
+        ("m_c8p_pbe0_gamma", c8_pbe0("m_c8p_pbe0", forces=False), "runner"),
+        ("m_si64_pbe0_gamma", si64_pbe0("m_si64_pbe0"), "runner"),
     ]
     return [MpiCheck("mpi", name, "", structure, launcher) for name, structure, launcher in table]
 
@@ -1879,7 +2056,7 @@ def run_mpi(check: MpiCheck, out: Path, timeout: float, threads: int) -> list:
     if mpi.forces is not None and one.forces is not None:
         df = float(np.max(np.abs(mpi.forces - one.forces)))
         text += f" max|dF| {df:.2e}"
-    ok = de <= MPI_ENERGY_TOLERANCE and (df is None or df <= MPI_FORCE_TOLERANCE)
+    ok = _within(de, MPI_ENERGY_TOLERANCE) and (df is None or _within(df, MPI_FORCE_TOLERANCE))
     extra, extra_ok = compare_extras(mpi, one)
     text += extra
     if extra_ok is False:

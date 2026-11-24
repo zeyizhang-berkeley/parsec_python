@@ -998,7 +998,7 @@ def load_restart_start(translation, system, log, directory: Path, *, k_sampling=
                 planned_state_count(translation.problem, system.electron_count),
             )
         return warm_start
-    from .SCF.restart import load_restart, restart_report_lines
+    from .SCF.restart import fortran_routine_counts, load_restart, restart_report_lines
 
     scf = translation.problem.scf
     fields, warm_start = load_restart(
@@ -1007,6 +1007,8 @@ def load_restart_start(translation, system, log, directory: Path, *, k_sampling=
         complex_wavefunctions=k_sampling is not None,
         # restart_run.F90 with stype(2) = 2: the two spin components.
         spinors=bool(scf.self_consistent_spin_orbit and not scf.noncollinear),
+        # (error 364 says whether the file holds the grid of the Fortran-derived routines of this input)
+        fortran_counts=lambda: fortran_routine_counts(translation),
     )
     if fields_out is not None:
         fields_out.append(fields)
@@ -1158,7 +1160,7 @@ def _run_nscf(system, translation, reporter, log, arguments, *, start, archive_p
     from .Output.parsec_dat import read_parsec_dat
     from .Output.post_processing_output import nscf_report_lines
     from .SCF.nscf import restart_fermi_level, run_nscf
-    from .SCF.restart import RestartError, restart_fields, restart_report_lines
+    from .SCF.restart import RestartError, fortran_routine_counts, restart_fields, restart_report_lines
 
     problem = translation.problem
     settings = translation.nscf
@@ -1176,6 +1178,7 @@ def _run_nscf(system, translation, reporter, log, arguments, *, start, archive_p
         spin_count=spin_count,
         complex_wavefunctions=k_sampling is not None,
         spinors=spinors,
+        fortran_counts=lambda: fortran_routine_counts(translation),
     )
     log.write("\n".join(restart_report_lines(fields)))
     temperature = float(problem.scf.fermi_temperature_kelvin)
@@ -2414,7 +2417,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         from parsec_python.acceleration.SCF.kpoint_sectors import check_kpoint_sector_switches
 
         try:
-            check_kpoint_sector_switches()
+            check_kpoint_sector_switches(translation.problem)
             # PARSEC_KPOINT_WAVEFUNCTIONS and PARSEC_GAMMA_PARSEC_DAT: the orbitals and the kind of parsec.dat of a
             # k-point loop, read before the run
             from .Output.parsec_dat import validate_settings as validate_parsec_dat_settings
@@ -2431,12 +2434,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     from parsec_python.SCF.fock_diis import fock_diis_tail_setting
     # PARSEC_FERMI_GAP_ROOT: the Fermi level of a gap (Occupations/fermi_dirac.py)
     from parsec_python.Occupations.fermi_dirac import fermi_gap_root_setting
+    # PARSEC_FILTER_DEGREE_STALL: the starting later-SCF degree back where a loop stalls (SCF/filter_degree.py)
+    from parsec_python.SCF.filter_degree import filter_degree_stall_setting
 
     try:
         close_multiplet_setting()
         exchange_occupation_cut_setting()
         fock_diis_tail_setting()
         fermi_gap_root_setting()
+        filter_degree_stall_setting()
     except ValueError as error:
         print(f"Input error: {error}", file=sys.stderr)
         return 2

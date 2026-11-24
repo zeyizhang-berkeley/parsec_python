@@ -2902,8 +2902,19 @@ def _parse_parsec_input(
     # ionic loops of spinor orbitals; every other input (a cluster) runs the same
     # code under both and keeps the default without a note.
     choice_matters = _routines_choice_matters(scalar, one, optional_bool)
-    # PARSEC_SYMMETRY_KEYWORD_ROUTINES: read for every input, so that a wrong value stops here
+    # PARSEC_SYMMETRY_KEYWORD_ROUTINES and PARSEC_FILE_KEYWORD_ROUTINES: read for every input, so that a wrong value
+    # stops here
     _routines_module.symmetry_keyword_routines_setting()
+    _routines_module.file_keyword_routines_setting()
+    # PARSEC_KPOINT_EXTRA_CYCLES: the converged first solves of the k-points read it in an SCF too (the device solvers
+    # of a CHEBDAV first solve, which took an invalid value as 24), not only before a band or nscf stage: an invalid
+    # value stops here, before any of them
+    from ..Eigensolvers.eigval import first_solve_extra_cycles
+
+    try:
+        first_solve_extra_cycles()
+    except ValueError as error:
+        raise ParsecInputError(str(error)) from error
     if routines is None:
         # Use_Fortran_Routines: .true., .false. or not given (None: the default of each feature)
         requested = optional_bool(_routines_module.KEYWORD) if _routines_module.KEYWORD in scalar else None
@@ -5154,9 +5165,12 @@ def _parse_parsec_input(
     # PARSEC_FORTRAN_NUMERICS and PARSEC_CA_CONTINUITY (the high-density coefficients of CA-LDA): read for every
     # input, so that a wrong value stops here
     from ..V_xc.ca_lda import ca_continuity_setting
+    from ..Pseudopotential.potre import spline_coulomb_tail_setting
 
     fortran_numerics_setting()
     ca_continuity_setting()
+    # PARSEC_SPLINE_COULOMB_TAIL (where a splined local potential takes -2 Z/r): the same
+    spline_coulomb_tail_setting()
     # the irreducible wedge of a hybrid's mesh (PARSEC_HYBRID_KPOINT_WEDGE; SinglePointInput.hybrid_kpoint_wedge)
     hybrid_kpoint_wedge = False
     # the wedge an auto hybrid takes after an insulating semilocal start (SinglePointInput.hybrid_kpoint_wedge_deferred)
@@ -9774,7 +9788,14 @@ def _default_routines_value_refusal(scalar, one, optional_bool) -> str | None:
     checked where the parser has them.
     """
 
-    if "restart_run" in scalar and optional_bool("restart_run"):
+    # a restart builds the grid of the run that wrote parsec.dat (PARSEC_FILE_KEYWORD_ROUTINES=neutral, the default):
+    # Restart_Run chooses no routines; fortran: the Fortran-derived ones, as before
+    # (and so do the forces and ionic loops of spinor orbitals, whose default backend takes no restart potential)
+    if (
+        "restart_run" in scalar
+        and optional_bool("restart_run")
+        and not _routines_module.file_keywords_choose_nothing(scalar)
+    ):
         return "Restart_Run: .true."
     if "old_pseudopotential_format" in scalar and optional_bool("old_pseudopotential_format"):
         return "Old_Pseudopotential_Format: .true."

@@ -9,7 +9,7 @@ from typing import Any
 import numpy as np
 
 from parsec_python.Eigensolvers.spectral_bounds import bound_request
-from parsec_python.Eigensolvers.subspace import SubspaceSettings, subspace_filter_bounds
+from parsec_python.Eigensolvers.subspace import SubspaceSettings, _adapt_polynomial_degree, subspace_filter_bounds
 
 from ..backends.cupy import device_stage
 from .chebyshev import FilterBlock, subspace_filter, subspace_filter_blocks
@@ -110,18 +110,10 @@ def adapt_polynomial_degree(
     lower_bound: float,
     upper_bound: float,
 ) -> int:
-    """Apply PARSEC's spectral-width lower limits to the filter degree."""
+    """Apply PARSEC's spectral-width lower limits to the filter degree (the reference solver's table, which also
+    records the floor for the NOTE of PARSEC_FILTER_DEGREE_STALL)."""
 
-    interval = upper_bound - lower_bound
-    if interval > 1400.0:
-        return max(requested_degree, 15)
-    if interval > 1200.0:
-        return max(requested_degree, 11)
-    if interval > 1000.0:
-        return max(requested_degree, 9)
-    if interval > 850.0:
-        return max(requested_degree, 8)
-    return requested_degree
+    return _adapt_polynomial_degree(requested_degree, lower_bound, upper_bound)
 
 
 def filter_degree(

@@ -232,6 +232,21 @@ The order is that of `parsec.F90`.
    cubic point-group operations (signed permutations of the axes) that map
    the atoms onto themselves, then removal of the net force.
 
+The local potential and the projectors are radial tables sampled at the grid
+points, so the energy of an atom depends on where it sits between the points
+(the egg-box effect): with the FHI98PP tables of `examples/0d_meta_gga` at
+h 0.16 bohr a rigid translation over one grid step moves the energy of O2 by
+2.3e-3 Ry and the force on an O atom by 3.9e-2 Ry/bohr (H2O 1.7e-3 Ry and
+3.5e-2, N2 1.6e-3 and 1.7e-2, CH4 1.7e-4 and 3.9e-3), and relaxed geometries
+differ by 0.01-0.017 bohr and 2 degrees between two placements; the forces
+are the slope of that energy, egg-box included. `PARSEC_LOCAL_FILTER=all`
+(since 2026-11-23, opt-in; `Pseudopotential/local_filter.py`, the switch
+table of `acceleration/README.md`) filters the local potential and the
+projectors to the grid before they are sampled, which takes these numbers
+down by one to two orders of magnitude; the forces are the derivatives of the
+filtered tables. `on` filters the local potential alone; `off` (the default)
+keeps PARSEC 1.5's tables.
+
 The radial derivatives are the tables of `pseudo.f90`
 (`Pseudopotential/radial_derivatives.py`): an 18th-order central difference
 on the logarithmic grid, the local potential tabulated as `r^2 dV/dr` with
@@ -287,18 +302,19 @@ extrapolated). A check of forces against differences of the energy
 therefore needs the cubic spline and the zero tails of the defaults, or,
 under the off values, steps over which no grid point crosses a radial
 sample or a support edge. It also
-needs smooth tables: the copies of the former linear converter that the
-spin tests keep for their Fortran fixture (`tests/data/spin_*_POTRE.DAT`)
+needs smooth tables: files written by the linear converter of the versions
+before October 2026 (`src/tools/upf_to_parsec.py --interpolation linear`)
 ripple at the sample spacing (fourth differences of the potentials as
 large as the second), and the spline follows the ripple. A spin C7N cell
-at h 0.37 with the CA tables of C and N then has an energy whose third
+at h 0.37 with such CA tables of C and N has an energy whose third
 derivative along the moved N is about 3e3 Ry/bohr^3: the slopes at 1e-3
 and 2e-3 bohr miss the force by 6.0e-4 and 2.2e-3 Ry/bohr and approach it
 as the step squared (7.3e-6 at 1e-4 bohr), on both routine sets, with the
 magnetic moment and the occupations smooth along the scan; the library
-tables of the same pseudopotentials (cubic converter) give 1.4e-6 and
-6.2e-6, and a C8 cell without spin 2.0e-4 / 8.9e-4 with the rippled carbon
-table against 2.5e-7 / 1.0e-6. On the
+tables of the same pseudopotentials (cubic converter, also the files of
+the spin tests and their Fortran fixture, `tests/data/spin_*_POTRE.DAT`)
+give 1.4e-6 and 6.2e-6, and a C8 cell without spin 2.0e-4 / 8.9e-4 with a
+rippled carbon table against 2.5e-7 / 1.0e-6. On the
 Fortran-derived routines it also needs one grid for all its inputs: their
 grid rule depends on the structure, and an Si8 cell with one atom moved by
 1e-3 bohr along x or z ran on Fortran's general grid (3.3e-4 Ry above the
@@ -558,7 +574,26 @@ Forces (`Forces.compute_periodic_forces`; the Fortran routines are `forpbc.f90`,
 2. **Local pseudopotential** (`Forces/periodic_local.py`): `integral rho(r) grad V_a(r - R_a)` over the images of the local
    potential as it is built (the short-ranged `V_a(d) + 2 Z erf(eta d)/d` and the reciprocal series), and
    `integral V_xc(r) rho_core'(d) d/|d|` over the images of the core density. There is no SCF-residual term, as in
-   Fortran's periodic path.
+   Fortran's periodic path. The radial slopes switch to the Coulomb slope `2 Z/r^2` (the core slope to zero) at
+   `rs(ns-1)`, where the sampled potential and core density do. Until 2026-11-23 they switched at `forcloc.f90`'s
+   `rs(npoint-6)`, which lies at or inside the first sample of a table of fewer than eight samples: with the
+   six-sample test tables (`tests/data/H_POTRE.DAT`, `H_CORE_POTRE.DAT`) every grid point took the Coulomb slope and no
+   core slope (an fcc H2 cell at h 0.42 bohr: Fx -0.0460 Ry/bohr against the slope of the energy -0.0178, on a
+   cubic cell 0.0770 against -0.0364), and an atom on a grid point gave NaN in the fast sums. For the POTRE and FHI
+   tables of the tree `rs(npoint-6)` lies beyond 65 bohr: a table that is the Coulomb tail to round-off from a few bohr
+   on keeps its forces bit for bit (the ball sums stop at the larger of the Gaussian tail and that onset, 10 to 25
+   bohr); a table that is not (`examples/h2_full_nonlocal/H_POTRE.DAT`, onset 115.6 bohr) is summed to `rs(ns-1)`, and
+   its forces now take the spline slope between the radii (an H2 cell: changes up to 3.2e-5 Ry/bohr); the readable sums
+   reach `rs(npoint-6)` in large cells. Closer than the first radial sample the slopes keep `forcloc.f90`'s zero
+   unless `PARSEC_SPLINE_FORCE_CENTER=auto` gives them the smooth behaviour (tables whose first sample lies below 3e-3
+   bohr: every POTRE table of the tree, and the FHI tables as `PARSEC_FHI_ORIGIN=auto` continues them); a coarser
+   table (the six-sample tables, the H and He FHI tables under `PARSEC_FHI_ORIGIN=off`, 6.25e-3 and 3.1e-3 bohr)
+   leaves a grid point inside its first sample out, where the energy has the slope of the padded spline (the test
+   core table on a hexagonal cell, a grid point 0.06 bohr from an atom: 8.9e-5 Ry/bohr off the slope; the
+   Fortran-derived routines take the spline slope there). Clusters, wires and slabs (`Forces/local.py`,
+   `Forces/wire_slab.py`) keep `forcloc.f90`'s radius, as PARSEC 1.5 does, so their forces with a six-sample table are
+   not the slope of their energy (an H2 cluster: -0.111 against -0.218 Ry/bohr; an H2 slab on its default routines,
+   the Fortran-derived ones: -0.034 against 0.145).
 3. **Nonlocal projectors** (`Forces/nonlocal_force.py`): the same formula with the Bloch projectors of the k-point,
    `F_a = 4 sum_k w_k sum_n f_nk sum_q s_q Re[conj(<beta_q|u_nk>) <grad beta_q|u_nk>]`. A k-point run keeps no eigenvectors,
    so `run_scf_kpoints(..., compute_forces=True)` accumulates the term from them at the end of the SCF loop

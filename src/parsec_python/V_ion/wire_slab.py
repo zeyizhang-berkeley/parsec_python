@@ -71,6 +71,7 @@ from scipy.special import erf, erfc, erfcx, k0, k1, polygamma, psi
 
 from ..models import Atom, ChargedSheet, SpeciesPotential
 from ..Pseudopotential import ParsecPseudopotential
+from ..Pseudopotential.local_filter import filtered_local_reach
 
 #: ``sigmafac`` of ``const.f90``: Gaussian width per core radius.
 GAUSSIAN_WIDTH_FACTOR = 0.5
@@ -163,7 +164,8 @@ def short_range_local_potential(
         nominal += charge
         density_factor = charge / sigma**3 / np.sqrt(np.pi) / np.pi
         position = np.asarray(atom.position, dtype=np.float64)
-        for translation in grid.compensation_image_translations(position, sigma):
+        reach = filtered_local_reach(potential, specification.local_angular_momentum)
+        for translation in grid.compensation_image_translations(position, sigma, reach):
             distance = np.linalg.norm(grid.coordinates - (position + translation), axis=1)
             total += potential.local_potential(
                 distance,

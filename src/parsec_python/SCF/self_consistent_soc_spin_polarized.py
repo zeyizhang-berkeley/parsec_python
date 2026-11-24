@@ -71,6 +71,7 @@ from ..SCF.spin_polarized import (
     initchrg_start_needed,
 )
 from ..models import SelfConsistentSOCIteration, SelfConsistentSOCResult
+from .filter_degree import LaterFilterDegree
 from ..Hartree.variational import electrostatic_hartree
 
 
@@ -263,6 +264,7 @@ def run_self_consistent_soc_spin_polarized(
     mixer = make_mixer(system.input.mixing)
     filter_degree = system.input.eigensolver.filter_degree
     minimum_filter_degree = max(10, system.input.eigensolver.filter_degree_delta + 1)
+    degree_schedule = LaterFilterDegree.for_loop(filter_degree, minimum_filter_degree)
     # Dynamic_Diag_Tol: 0.1 for the first iteration (parsec.F90:1106-1111).
     dynamic_tolerance = system.input.eigensolver.dynamic_tolerance
     diagonalization_tolerance = first_diagonalization_tolerance(system.input.eigensolver)
@@ -378,6 +380,8 @@ def run_self_consistent_soc_spin_polarized(
             callback(
                 SelfConsistentSOCIteration(
                     iteration=iteration,
+                    # PARSEC_FILTER_DEGREE_STALL: the NOTE of a restoration (once)
+                    filter_degree_note=degree_schedule.take_note(),
                     weighted_residual=metrics.weighted,
                     plain_residual=metrics.plain,
                     energies=energies,
@@ -411,12 +415,11 @@ def run_self_consistent_soc_spin_polarized(
                     },
                 )
             )
-        if (
-            iteration > settings.degree_decrease_after
-            and metrics.weighted < settings.approach_criterion
-            and filter_degree > minimum_filter_degree
-        ):
-            filter_degree -= 1
+        # PARSEC_FILTER_DEGREE_STALL (SCF/filter_degree.py): the degree lowered near convergence, and the
+        # starting degree back where the loop stalls after that
+        filter_degree = degree_schedule.after_iteration(
+            iteration, metrics.weighted, settings.approach_criterion, settings.degree_decrease_after
+        )
         if selected_residual < settings.convergence_criterion:
             converged = True
             break

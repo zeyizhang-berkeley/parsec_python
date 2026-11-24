@@ -339,9 +339,9 @@ class ObliqueSplitTests(unittest.TestCase):
     """``PARSEC_PERIODIC_OBLIQUE_SPLIT``: the split of the orthorhombic grid on the general grid of the Fortran-derived
     routines (``validated``, the default since 2026-11-22: ``Cubic_Spline`` species and POTRE and FHIPP tables; ``auto``
     where a species uses ``Cubic_Spline``; ``fast`` for every species) or the readable sum.  A linearly
-    interpolated species gets the readable potential to round-off; a ``Cubic_Spline`` one loses the spline error of
-    ``-2 Z/r`` that the readable sum adds out to its erfc reach; the local forces are the derivative of that
-    potential."""
+    interpolated species gets the readable potential to round-off; a ``Cubic_Spline`` one too under
+    ``PARSEC_SPLINE_COULOMB_TAIL=auto`` (the default), and under ``off`` loses the spline error of ``-2 Z/r`` that the
+    readable sum adds out to its erfc reach; the local forces are the derivative of that potential."""
 
     def _potential(self, split: str, spline: bool):
         import os
@@ -445,9 +445,18 @@ class ObliqueSplitTests(unittest.TestCase):
         self.assertGreater(float(np.max(difference) - np.min(difference)), 1.0e-9)
 
     def test_spline_species_lose_the_spline_tail(self) -> None:
-        difference = self._potential("fast", True)[3] - self._potential("readable", True)[3]
+        import os
+        from unittest import mock
+
+        # PARSEC_SPLINE_COULOMB_TAIL=off: the readable sum adds the spline's error near the end of the table
+        with mock.patch.dict(os.environ, {"PARSEC_SPLINE_COULOMB_TAIL": "off"}):
+            difference = self._potential("fast", True)[3] - self._potential("readable", True)[3]
         self.assertLess(float(np.max(np.abs(difference))), 1.0e-4)
         self.assertGreater(abs(float(np.mean(difference))), 1.0e-7)  # nearly a constant: the tail of every image
+        # auto (the default): the spline takes -2 Z/r beyond the Coulomb onset, and the two sums agree to round-off
+        with mock.patch.dict(os.environ, {"PARSEC_SPLINE_COULOMB_TAIL": "auto"}):
+            difference = self._potential("fast", True)[3] - self._potential("readable", True)[3]
+        self.assertLess(float(np.max(np.abs(difference))), 1.0e-11)
 
     def test_forces_are_the_derivative_of_the_fast_potential(self) -> None:
         import os

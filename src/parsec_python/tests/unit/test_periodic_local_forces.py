@@ -102,6 +102,8 @@ class PeriodicLocalForceTests(unittest.TestCase):
     def setUp(self) -> None:
         # the dense reference potential: another test may have installed the FFT provider of the acceleration package
         self.addCleanup(setattr, ewald, "_local_potential_provider", ewald._local_potential_provider)
+        # (and whether it returns the converged sum, which set_local_potential_provider(None) clears)
+        self.addCleanup(setattr, ewald, "_provider_converged_for", ewald._provider_converged_for)
         ewald.set_local_potential_provider(None)
         # the dense sums are the definition these tests differentiate: no faster provider of the acceleration package
         self.addCleanup(force_sums.set_local_force_provider, force_sums._local_force_provider)
@@ -189,6 +191,73 @@ class PeriodicLocalForceTests(unittest.TestCase):
         terms = _Case("rectangular", False).forces()
         np.testing.assert_array_equal(terms.self_consistency, 0.0)
         np.testing.assert_allclose(terms.total, terms.ionic + terms.core_correction)
+
+
+class _ShortTableCase(_Case):
+    """The cells of :class:`_Case` with the six-sample test table with a core density (``H_CORE_POTRE.DAT``).
+
+    ``forcloc.f90``'s tail radius ``rs(npoint-6)`` lies at the origin for it (:func:`parsec_python.Pseudopotential.
+    radial_derivatives.tail_start_radius`), while the potential and the core density are the splines of the table out
+    to ``rs(ns-1)`` = 1.6 bohr.  ``on_grid`` puts the first atom on a grid point.  On these grids no point lies within
+    2e-3 bohr of the 1.6-bohr sphere of an atom (the sampled core density drops from 0.08 to zero there, a step that
+    central differences across it would see) nor closer than the first sample (0.1 bohr), except the atom's own.
+    """
+
+    def __init__(self, name: str, *, on_grid: bool = False) -> None:
+        path = _DATA / "H_CORE_POTRE.DAT"
+        self.symbol = "H"
+        self.lattice = _CELLS[name]
+        self.grid = build_periodic_grid(
+            PeriodicCell(self.lattice), PeriodicGridSettings(spacing=0.7, expansion_order=6)
+        )
+        self.potentials = {"H": read_parsec_pseudopotential(path)}
+        self.specifications = {"H": SpeciesPotential(path, 0, use_spline=True)}
+        self.positions = _FRACTIONAL @ self.lattice
+        if on_grid:
+            self.positions[0] = self.grid.coordinates[int(np.argmin(np.linalg.norm(
+                self.grid.coordinates - self.positions[0], axis=1)))]
+        fractional = self.grid.coordinates @ np.linalg.inv(self.lattice)
+        phase = 2.0 * np.pi * fractional
+        self.density = 0.3 + 0.2 * np.cos(phase[:, 0] + 0.4) * np.sin(phase[:, 1]) + 0.1 * np.sin(phase[:, 2] - phase[:, 0])
+        self.xc = -0.5 + 0.3 * np.sin(phase[:, 0]) * np.cos(phase[:, 2] + 0.3) + 0.2 * np.cos(phase[:, 1] - 2 * phase[:, 2])
+
+
+class ShortTableLocalForceTests(unittest.TestCase):
+    """The local forces of a cell differentiate the potential and the core density they sample also for a table of
+    fewer than eight samples (2026-11-23: every grid point took the Coulomb slope and no core slope, 0.08 Ry/bohr off on
+    an fcc H2 cell, and an atom on a grid point gave NaN in the sums of the acceleration package)."""
+
+    setUp = PeriodicLocalForceTests.setUp
+
+    def test_forces_are_the_derivatives_of_the_energies(self) -> None:
+        for name in _CELLS:
+            for on_grid in (False, True):
+                with self.subTest(cell=name, on_grid=on_grid):
+                    case = _ShortTableCase(name, on_grid=on_grid)
+                    terms = case.forces()
+                    self.assertTrue(np.all(np.isfinite(terms.ionic)) and np.all(np.isfinite(terms.core_correction)))
+                    for values, energy in ((terms.ionic, case.ionic_energy), (terms.core_correction, case.core_energy)):
+                        scale = float(np.max(np.abs(values)))
+                        self.assertGreater(scale, 1.0e-3)
+                        for atom, axis in ((0, 0), (0, 2), (1, 1)):
+                            numeric = case.finite_difference(energy, atom, axis, 1.0e-3)
+                            self.assertAlmostEqual(float(values[atom, axis]), numeric, delta=1.0e-5 * scale)
+
+    def test_the_sums_of_the_acceleration_package_agree(self) -> None:
+        from parsec_python.acceleration.Forces.periodic_local import fast_periodic_local_forces
+
+        for name in _CELLS:
+            for on_grid in (False, True):
+                with self.subTest(cell=name, on_grid=on_grid):
+                    case = _ShortTableCase(name, on_grid=on_grid)
+                    reference = case.forces()
+                    fast = fast_periodic_local_forces(
+                        case.grid, case.atoms(), case.potentials, case.specifications, case.lattice, case.density,
+                        case.xc,
+                    )
+                    self.assertTrue(np.all(np.isfinite(fast.ionic)))
+                    np.testing.assert_allclose(fast.ionic, reference.ionic, atol=1.0e-6)
+                    np.testing.assert_allclose(fast.core_correction, reference.core_correction, atol=1.0e-10)
 
 
 if __name__ == "__main__":

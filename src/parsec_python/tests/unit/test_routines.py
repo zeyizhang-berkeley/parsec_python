@@ -28,11 +28,15 @@ from parsec_python.Grid.pbc import (
 )
 from parsec_python.Input.parsec_input import parse_parsec_input
 from parsec_python.Input.routines import (
+    FILE_BLOCK_KEYS,
+    FILE_KEYWORD_ROUTINES_ENV,
+    FILE_KEYWORDS,
     GAMMA_FORCES_FEATURE,
     SYMMETRIC_GRID_FEATURE,
     SYMMETRY_KEYWORD_ROUTINES_ENV,
     SYMMETRY_KEYWORDS,
     bulk_default_features,
+    file_keyword_routines_setting,
     routines_report_line,
     symmetry_keyword_routines_setting,
 )
@@ -259,7 +263,7 @@ class FallBackTests(_ParserCase):
         ("Dynamic_Diag_Tol", _bulk("Dynamic_Diag_Tol: .true."), "Dynamic_Diag_Tol"),
         ("Old_Interpolation_Format", _bulk("Old_Interpolation_Format: .true."), "Old_Interpolation_Format"),
         ("Electric_Field", _bulk("Electric_Field: 0.001"), "Electric_Field"),
-        ("Restart_Run", _bulk("Restart_Run: .true."), "Restart_Run"),
+        # (Restart_Run chooses no routines under PARSEC_FILE_KEYWORD_ROUTINES=neutral, the default: FileKeywordTests)
     )
 
     def test_each_entry_falls_back_with_its_reason(self) -> None:
@@ -603,9 +607,13 @@ class ValueAwareRoutineTests(_ParserCase):
     #: (label, value) that act: they keep choosing the Fortran-derived routines, and the warning names the value.
     ACTING = (
         ("calc_hartree_g", ".true."), ("mixing_restart_factor", "0.1"), ("mixing_group_size", "2"),
-        ("core_filter", "0.5"), ("symmetrize_charge_density", "T"), ("output_data", ".false."),
-        ("output_eigenvalues", "T"), ("save_intermediate_charge_density", "T"), ("save_intermediate_eigenvalues", "T"),
-        ("output_file_name", "other.out"),
+        ("core_filter", "0.5"), ("symmetrize_charge_density", "T"),
+    )
+    #: (label, value) of the output files that act: the Fortran-derived routines under
+    #: PARSEC_FILE_KEYWORD_ROUTINES=fortran only (FileKeywordTests).
+    FILE_ACTING = (
+        ("output_data", ".false."), ("output_eigenvalues", "T"), ("save_intermediate_charge_density", "T"),
+        ("save_intermediate_eigenvalues", "T"), ("output_file_name", "other.out"),
     )
 
     def test_every_no_op_value_keeps_the_default_routines_and_the_run(self) -> None:
@@ -632,6 +640,18 @@ class ValueAwareRoutineTests(_ParserCase):
                     any(f"{label} = {value}" in reason for reason in translation.routines.reasons),
                     translation.routines.reasons,
                 )
+        # the output files: under PARSEC_FILE_KEYWORD_ROUTINES=fortran, as before; neutral (the default) keeps the
+        # routines of the input
+        for label, value in self.FILE_ACTING:
+            with self.subTest(label=label, value=value):
+                with mock.patch.dict(os.environ, {FILE_KEYWORD_ROUTINES_ENV: "fortran"}):
+                    translation = self.parse(_bulk() + f"\n{label} {value}\n")
+                self.assertTrue(translation.routines.fortran)
+                self.assertTrue(
+                    any(f"{label} = {value}" in reason for reason in translation.routines.reasons),
+                    translation.routines.reasons,
+                )
+                self.assertFalse(self.parse(_bulk() + f"\n{label} {value}\n").routines.fortran)
 
     def test_a_no_op_value_with_its_switch_on_acts(self) -> None:
         # DOS_Pnum is read with Create_DOS, Restart_From_Wfndat with Restart_Run: then the value counts.
@@ -664,7 +684,10 @@ class ValueAwareRoutineTests(_ParserCase):
         written = self.parse(_bulk(kpoints) + "\nOutput_Eigenvalues: .true.\n")
         self.assertEqual(written.routines.fortran, base.routines.fortran)
         self.assertEqual(_state(written), _state(base))
-        self.assertTrue(self.parse(_bulk() + "\nOutput_Eigenvalues: .true.\n").routines.fortran)
+        # at the Gamma point it chooses the Fortran-derived routines under PARSEC_FILE_KEYWORD_ROUTINES=fortran only
+        with mock.patch.dict(os.environ, {FILE_KEYWORD_ROUTINES_ENV: "fortran"}):
+            self.assertTrue(self.parse(_bulk() + "\nOutput_Eigenvalues: .true.\n").routines.fortran)
+        self.assertFalse(self.parse(_bulk() + "\nOutput_Eigenvalues: .true.\n").routines.fortran)
         # Super_Cell 1 1 1 and Super_Cell_Vac 0 0 0 leave the problem as it is, but parsec.out then prints the
         # replication lines of PARSEC and bak_complete_parsec.in expands its k-point lists: they are not in
         # NO_EFFECT and keep choosing the Fortran-derived routines.
@@ -731,7 +754,8 @@ class DefectFixTests(_ParserCase):
         self.assertAlmostEqual(analytic.total_energy, reference.total_energy, delta=1.0e-9)
 
     def test_parsec_dat_carries_the_shift_of_his_grid(self) -> None:
-        # a Restart_Run or NSCF (Fortran-derived routines) then refuses the file of a shifted default grid
+        # a run on the Fortran-derived routines (a Restart_Run or NSCF under PARSEC_FILE_KEYWORD_ROUTINES=fortran)
+        # then refuses the file of a shifted default grid
         from parsec_python.Output.parsec_dat import grid_shift
 
         cell = PeriodicCell(np.diag([6.0, 6.0, 6.0]))
@@ -797,6 +821,141 @@ class SymmetryKeywordTests(_ParserCase):
             with mock.patch.dict(os.environ, {SYMMETRY_KEYWORD_ROUTINES_ENV: value}):
                 self.assertEqual(symmetry_keyword_routines_setting(), expected)
         self.assertIn("spin_symmetry_sectors", SYMMETRY_KEYWORDS)
+
+
+class FileKeywordTests(_ParserCase):
+    """The keywords of the files a run reads or writes (``Save_Wfn_Bands``, ``Restart_Run``, the ``nscf_*`` run, the
+    output files) choose no routines (``PARSEC_FILE_KEYWORD_ROUTINES=neutral``, the default since 2026-11-23): a run
+    keeps the grid and the potentials of its input with and without them, and a restart or a non-self-consistent run
+    builds the grid of the run that wrote parsec.dat.  ``fortran`` restores the former choice, the Fortran-derived
+    routines, whose grid of a diamond cell has other counts (8 against 10 points a side here)."""
+
+    _FILES = {
+        "Save_Wfn_Bands": "begin Save_Wfn_Bands\n1 3\nend Save_Wfn_Bands",
+        "Restart_Run": "Restart_Run: .true.",
+        "nscf": "Restart_Run: .true.\nbegin nscf_kpoints\n0.0 0.0 0.0 1.0\nend nscf_kpoints\nnscf_states_num 6",
+        "output files": (
+            "Output_Eigenvalues: .true.\nOutput_Grid_Data: charge_density\nOutput_File_Name: other.out\n"
+            "Save_Intermediate_Eigenvalues: .true.\nSave_Intermediate_Charge_Density: .true."
+        ),
+    }
+
+    def _diamond(self, extra: str = ""):
+        # at the Gamma point: the default routines (a grid the space group sets is a default of the Fortran-derived
+        # ones only with k-points or spin)
+        return self.parse(_DIAMOND.format(extra=extra))
+
+    def test_the_keywords_keep_the_routines_and_the_grid_of_the_input(self) -> None:
+        base = self._diamond()
+        self.assertFalse(base.routines.fortran)
+        counts = build_periodic_grid(base.problem.periodic_cell, base.problem.grid).points_per_axis
+        self.assertEqual(list(counts), [10, 10, 10])
+        for name, extra in self._FILES.items():
+            with self.subTest(name):
+                translation = self._diamond(extra)
+                self.assertFalse(translation.routines.fortran, translation.routines.reasons)
+                self.assertEqual(repr(translation.problem.grid), repr(base.problem.grid))
+                self.assertEqual(repr(translation.problem.pseudopotentials), repr(base.problem.pseudopotentials))
+                self.assertFalse(any("Fortran-derived" in warning for warning in translation.warnings))
+                grid = build_periodic_grid(translation.problem.periodic_cell, translation.problem.grid)
+                np.testing.assert_array_equal(grid.points_per_axis, counts)
+
+    def test_the_counts_of_the_fortran_derived_grid_of_an_input(self) -> None:
+        # the hint of error 364 (SCF.restart.fortran_routine_counts): the grid those routines build for this input,
+        # which a file of theirs holds (before 2026-11-23 Restart_Run chose them)
+        from parsec_python.SCF.restart import fortran_routine_counts
+
+        translation = self._diamond("Restart_Run: .true.")
+        self.assertFalse(translation.routines.fortran)
+        self.assertEqual(fortran_routine_counts(translation), [8, 8, 8])
+        # an input already on those routines, or a cluster: no hint
+        self.assertIsNone(fortran_routine_counts(self._diamond("Use_Fortran_Routines: .true.")))
+        cluster = self.parse((_DATA / "H2_parsec.in").read_text(encoding="utf-8"))
+        self.assertIsNone(fortran_routine_counts(cluster))
+
+    def test_fortran_restores_the_former_choice(self) -> None:
+        with mock.patch.dict(os.environ, {FILE_KEYWORD_ROUTINES_ENV: "fortran"}):
+            plain = self._diamond()
+            chosen = {name: self._diamond(extra) for name, extra in self._FILES.items()}
+        self.assertFalse(plain.routines.fortran)
+        for name, translation in chosen.items():
+            with self.subTest(name):
+                self.assertTrue(translation.routines.fortran)
+                self.assertTrue(translation.problem.grid.fortran_routines)
+                grid = build_periodic_grid(translation.problem.periodic_cell, translation.problem.grid)
+                self.assertEqual(list(grid.points_per_axis), [8, 8, 8])
+        self.assertIn("Restart_Run", "; ".join(chosen["Restart_Run"].routines.reasons))
+        self.assertIn("save_wfn_bands", "; ".join(chosen["Save_Wfn_Bands"].routines.reasons))
+        self.assertIn("nscf_kpoints", "; ".join(chosen["nscf"].routines.reasons))
+
+    def test_the_ionic_loops_of_spinors_keep_the_former_choice(self) -> None:
+        # Andrew Grieder's spinor backend takes no restart potential and writes no file of an SCF iteration: with the
+        # forces or a relaxation of spinor orbitals the keywords of those files choose the Fortran-derived routines
+        from parsec_python.Input.routines import decide_routines, file_keywords_choose_nothing
+
+        class Item:
+            def __init__(self, value):
+                self.value = value
+
+        spinor = {"so_from_scratch": [Item(".true.")]}
+        for ionic in ({"skip_force": [Item(".false.")]}, {"minimization": [Item("bfgs")]},
+                      {"calculate_force": [Item("T")]}, {"molecular_dynamics": [Item(".true.")]}):
+            for files, blocks in (({"restart_run": [Item(".true.")]}, {}),
+                                  ({"save_intermediate_charge_density": [Item("T")]}, {}),
+                                  ({}, {"save_wfn_bands": [Item(("1 2",))]})):
+                with self.subTest(ionic=ionic, files=files, blocks=blocks):
+                    scalar = {**spinor, **ionic, **files}
+                    self.assertFalse(file_keywords_choose_nothing(scalar))
+                    if files.get("restart_run") is None:
+                        self.assertTrue(decide_routines(scalar, blocks).fortran)
+        # the forces and ionic loops of the periodic backend of the default routines write no file of an SCF iteration
+        # either: Save_Intermediate_* keep choosing the Fortran-derived routines with forces or moves (the other file
+        # keywords choose nothing there)
+        forces = {"skip_force": [Item(".false.")]}
+        for key in ("save_intermediate_charge_density", "save_intermediate_eigenvalues"):
+            with self.subTest(key=key):
+                self.assertTrue(decide_routines({**forces, key: [Item("T")]}, {}).fortran)
+                self.assertFalse(decide_routines({key: [Item("T")]}, {}).fortran)
+        self.assertFalse(decide_routines({**forces, "output_eigenvalues": [Item("T")]}, {}).fortran)
+        self.assertFalse(decide_routines(forces, {"save_wfn_bands": [Item(("1 2",))]}).fortran)
+        translation = self.parse(_bulk("Minimization: bfgs\nRestart_Run: .true."))
+        self.assertFalse(translation.routines.fortran, translation.routines.reasons)
+        # a spinor single point, or the ionic loop of scalar orbitals: the files choose nothing
+        self.assertTrue(file_keywords_choose_nothing({**spinor, "restart_run": [Item(".true.")]}))
+        self.assertTrue(file_keywords_choose_nothing({"skip_force": [Item(".false.")], "restart_run": [Item("T")]}))
+        self.assertTrue(file_keywords_choose_nothing({**spinor, "minimization": [Item("none")]}))
+
+    def test_a_wrong_value_stops_every_parse(self) -> None:
+        text = (_DATA / "H2_parsec.in").read_text(encoding="utf-8")
+        with mock.patch.dict(os.environ, {FILE_KEYWORD_ROUTINES_ENV: "bogus"}):
+            for source in (_bulk(), text):
+                with self.subTest(periodic=source is not text), self.assertRaisesRegex(
+                    Exception, FILE_KEYWORD_ROUTINES_ENV
+                ):
+                    self.parse(source)
+
+    def test_the_setting_reads_its_values(self) -> None:
+        for value, expected in (("", "neutral"), ("neutral", "neutral"), (" Fortran ", "fortran")):
+            with mock.patch.dict(os.environ, {FILE_KEYWORD_ROUTINES_ENV: value}):
+                self.assertEqual(file_keyword_routines_setting(), expected)
+        self.assertIn("restart_run", FILE_KEYWORDS)
+        self.assertIn("save_wfn_bands", FILE_BLOCK_KEYS)
+
+
+class ExtraCyclesValidationTests(_ParserCase):
+    """``PARSEC_KPOINT_EXTRA_CYCLES`` is read for every input (an SCF reads it in the converged first solves of its
+    k-points, not only a band or nscf stage): a value that is not a non-negative integer stops the parse."""
+
+    def test_every_parse_reads_the_switch(self) -> None:
+        text = (_DATA / "H2_parsec.in").read_text(encoding="utf-8")
+        for source in (_bulk(), _bulk(_MP222), text):
+            for value in ("abc", "-1", "2.5"):
+                with self.subTest(value=value), mock.patch.dict(os.environ, {"PARSEC_KPOINT_EXTRA_CYCLES": value}):
+                    with self.assertRaisesRegex(Exception, "PARSEC_KPOINT_EXTRA_CYCLES"):
+                        self.parse(source)
+            for value in ("", "0", "24", "7"):
+                with self.subTest(value=value), mock.patch.dict(os.environ, {"PARSEC_KPOINT_EXTRA_CYCLES": value}):
+                    self.parse(source)
 
 
 if __name__ == "__main__":

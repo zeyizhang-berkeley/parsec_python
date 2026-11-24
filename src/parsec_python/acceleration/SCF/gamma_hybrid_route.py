@@ -22,9 +22,12 @@ values:
   :func:`gamma_hybrid_sector_forces_setting`).
   The MPI full-SCF runner takes the SCF of such a cell since 2026-11-22 (``driver._mpi_periodic_hybrid``): the same
   sectors above the same floor, every sector basis on one GPU of its rank, and the one sector of the identity on the
-  first GPU of the root below it and under ``off``; the pair tiles of the exchange on every GPU of every rank with
-  the cuFFT pair solver of the cell (``SCF/hybrid_mpi.py``: the tiles of the sectors, not the coset blocks or the
-  pooled block of one process).  Its forces and moves, ``kpoint`` and a spin-polarized hybrid stay refused there.
+  first GPU of the root below it and under ``off``; the exchange with the cuFFT pair solver of the cell
+  (``SCF/hybrid_mpi.py``): since 2026-11-23 the coset blocks or (from 32 sectors) the pooled block of one process
+  gathered on every rank, a small build whole on each rank and a larger one divided among the GPUs of all ranks, and
+  a small build of the sector of the identity on its GPU alone (``PARSEC_MPI_EXCHANGE_POOL=auto``; ``off``: the
+  pair tiles of the sectors on every GPU of every rank, as before).  Its forces and moves, ``kpoint`` and a
+  spin-polarized hybrid stay refused there.
 * ``kpoint``: a cell this module finds large enough (:func:`gamma_hybrid_sector_route`) runs as the 1x1x1 k-point
   mesh of the reference solver, whose k-point sectors split the Gamma point into the sectors of the abelian subgroup
   ``H_Gamma`` of its little group (:mod:`.kpoint_sectors`), the exchange built from their orbitals on the whole grid

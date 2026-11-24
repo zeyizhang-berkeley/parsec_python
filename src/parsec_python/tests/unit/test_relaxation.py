@@ -4476,5 +4476,61 @@ class ReadableDriverFullSizeTests(_CommandLineRuns):
         self.check_manual("water_manual")
 
 
+class CellMoveFlagDecisionTests(unittest.TestCase):
+    """The note of ``symmetry_decision`` for a relaxation of a periodic cell with fixed atoms (the Fortran-derived
+    routines, whose translation keeps ``use_symmetry``) counts the operations of the cell (its space group and the
+    subgroup that maps the fixed atoms onto fixed atoms); the decision is that of the operations of the positions, as
+    before."""
+
+    _SI8 = ((0.0, 0.0, 0.0), (0.0, 0.5, 0.5), (0.5, 0.0, 0.5), (0.5, 0.5, 0.0),
+            (0.25, 0.25, 0.25), (0.25, 0.75, 0.75), (0.75, 0.25, 0.75), (0.75, 0.75, 0.25))
+
+    def _translation(self, flags):
+        scratch = tempfile.TemporaryDirectory()
+        self.addCleanup(scratch.cleanup)
+        directory = Path(scratch.name)
+        (directory / "Si_POTRE.DAT").write_bytes((DATA / "Si_POTRE.DAT").read_bytes())
+        rows = "\n".join(
+            f" {10.26 * x:.6f} {10.26 * y:.6f} {10.26 * z:.6f} {flag}" for (x, y, z), flag in zip(self._SI8, flags)
+        )
+        (directory / "parsec.in").write_text(
+            "Periodic_System: .true.\nBoundary_Conditions: bulk\nbegin Cell_Shape\n 10.26 10.26 10.26\nend Cell_Shape\n"
+            "Grid_Spacing: 0.5\nExpansion_Order: 6\nStates_Num: 20\nCorrelation_Type: ca\nMinimization: bfgs\n"
+            "Movement_Num: 2\nUse_Fortran_Routines: .true.\nAtom_Types_Num: 1\nAtom_Type: Si\nLocal_Component: p\n"
+            f"Move_Flag: -1\nbegin Atom_Coord\n{rows}\nend Atom_Coord\n",
+            encoding="utf-8",
+        )
+        return parse_parsec_input(directory / "parsec.in")
+
+    def test_the_note_counts_the_operations_of_the_cell(self) -> None:
+        cell = "operations of the space group of the cell"
+        cases = {
+            # fixed atoms (1-based) -> (PARSEC_MOVE_FLAG_SUBGROUP=auto, off): (decision, parts of the note)
+            (1,): ((True, (f"24 of the 48 {cell}", "keeps the subgroup of the 24 operations")), (True, None)),
+            (6,): ((True, (f"24 of the 48 {cell}", "keeps the subgroup of the 24 operations")),
+                   (False, (f"24 of the 48 {cell}", "uses no symmetry"))),
+            (2, 8): ((False, (f"36 of the 48 {cell}", "uses no symmetry")),
+                     (False, (f"36 of the 48 {cell}", "uses no symmetry"))),
+        }
+        for fixed, expected in cases.items():
+            translation = self._translation([0 if index + 1 in fixed else 1 for index in range(8)])
+            self.assertTrue(translation.routines.fortran)
+            for setting, (use, parts) in zip(("auto", "off"), expected):
+                with self.subTest(fixed=fixed, setting=setting), patch.dict(
+                    os.environ, {"PARSEC_MOVE_FLAG_SUBGROUP": setting}
+                ):
+                    decided, note = symmetry_decision(translation)
+                    self.assertEqual(decided, use)
+                    if parts is None:
+                        self.assertIsNone(note)
+                    else:
+                        for part in parts:
+                            self.assertIn(part, note)
+                        self.assertNotIn("of the structure", note)
+        # the decision is that of the operations of the positions, as before: the same booleans as for a cluster of
+        # these positions (atom 6: 2 of their 6 operations kept; atoms 2 and 8: the identity alone)
+        self.assertEqual(symmetry_decision(self._translation([1] * 8)), (True, None))
+
+
 if __name__ == "__main__":
     unittest.main()

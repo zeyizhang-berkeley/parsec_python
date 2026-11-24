@@ -941,10 +941,16 @@ def _refuse_unsupported_periodic(translation, *, supercell: bool = False) -> Non
     the origin, about a symmetric site off it, with the half-cell
     translations), or as one sector of the identity whose basis the ranks
     share (driver.periodic_sector_refusal).  The SCF of an unpolarized hybrid
-    of such a cell runs in its abelian sectors or, below their floor and under
-    PARSEC_GAMMA_HYBRID_SECTORS=off, as the one sector of the identity on the
-    root's first GPU, the pair tiles of its exchange on every GPU of every
-    rank (driver._mpi_periodic_hybrid, SCF/hybrid_mpi.py, since 2026-11-22);
+    of such a cell runs in its abelian sectors, whose exchange the ranks form
+    as one process does (the coset blocks of the half-cell translations or,
+    from 32 sectors, the full-grid block gathered on every rank, a large build
+    divided among the GPUs of all ranks; PARSEC_MPI_EXCHANGE_POOL, since
+    2026-11-23: before, the
+    pair tiles of the sectors on every GPU of every rank), or, below their
+    floor and under PARSEC_GAMMA_HYBRID_SECTORS=off, as the one sector of the
+    identity on the root's first GPU (a small build of its exchange on that GPU
+    alone, a larger one in tiles on every GPU of every rank)
+    (driver._mpi_periodic_hybrid, SCF/hybrid_mpi.py, since 2026-11-22);
     its forces and moves stay with main.py. A spin cell
     (PARSEC_GAMMA_SPIN_SECTORS=auto, since 2026-11-19) solves both channels
     in the abelian sectors of the cell; one that has no such group is
@@ -1005,9 +1011,9 @@ def _refuse_unsupported_periodic(translation, *, supercell: bool = False) -> Non
                              'or with PARSEC_SUPERCELL_KPOINTS=off as the Gamma point of the supercell')
     from parsec_python.acceleration.driver import _mpi_periodic_hybrid, periodic_sector_refusal
 
-    # An unpolarized hybrid at the Gamma point: its sectors or the one sector of the identity, every GPU of every rank
-    # solving pair tiles of its exchange (driver._mpi_periodic_hybrid, SCF/hybrid_mpi.py; since 2026-11-22, refused
-    # before); a spin-polarized one and the kpoint value of PARSEC_GAMMA_HYBRID_SECTORS stay refused.
+    # An unpolarized hybrid at the Gamma point: its sectors or the one sector of the identity, its exchange formed as
+    # in one process on the ranks (driver._mpi_periodic_hybrid, SCF/hybrid_mpi.py, PARSEC_MPI_EXCHANGE_POOL; since
+    # 2026-11-22, refused before); a spin-polarized one and the kpoint value of PARSEC_GAMMA_HYBRID_SECTORS stay refused.
     hybrid = bool(getattr(problem.scf, 'is_hybrid', False))
     reason = periodic_sector_refusal(problem, hybrid_sectors=hybrid and _mpi_periodic_hybrid(problem, True) is not None)
     if reason is not None:
@@ -1780,6 +1786,10 @@ def execute(args, cp, comm, MPI, initialization_seconds, initial_affinity=None):
     from parsec_python.Occupations.fermi_dirac import fermi_gap_root_setting
 
     fermi_gap_root_setting()
+    # PARSEC_FILTER_DEGREE_STALL (SCF/filter_degree.py) likewise: every rank restores the degree alike.
+    from parsec_python.SCF.filter_degree import filter_degree_stall_setting
+
+    filter_degree_stall_setting()
     use_symmetry, symmetry_note = symmetry_decision(translation)
     # Whether the atoms stay in the point group of the first structure, which Ignore_Symmetry does not tell.
     # The command line may overrule that keyword, but not a run that leaves the group.

@@ -2,9 +2,10 @@
 
 The one-dimensional sectors of a subgroup ``H`` of the point group ``G`` with weights (:class:`.PointGroupReduction`,
 "Weighted sectors of a larger subgroup" in ``acceleration/README.md``) solve one partner of some degenerate levels
-and count it ``w`` times.  Four kinds of input kept the abelian group of the orbitals until 2026-11-19
-(``driver._orbital_group_refusal``); each now takes the weighted sectors where its switch is ``auto`` (the default)
-and the plan of the group does (``PARSEC_ORBITAL_GROUP``, ``PARSEC_ORBITAL_GROUP_MAX_COST``):
+and count it ``w`` times.  Four kinds of input kept the abelian group of the orbitals until 2026-11-19, the
+meta-GGA of a cluster until 2026-11-23 (``driver._orbital_group_refusal``); each now takes the weighted sectors where
+its switch is ``auto`` (the default) and the plan of the group does (``PARSEC_ORBITAL_GROUP``,
+``PARSEC_ORBITAL_GROUP_MAX_COST``):
 
 * ``PARSEC_ORBITAL_GROUP_FIXED_COUNT`` -- ``Fix_Number_Eigenvalues``: the first solve of the run brackets the lowest
   ``States_Num`` levels counted with their weights, and every sector keeps the number of them it holds
@@ -30,6 +31,12 @@ and the plan of the group does (``PARSEC_ORBITAL_GROUP``, ``PARSEC_ORBITAL_GROUP
   weighted state is caught as one held by several sectors is.  A run whose guard fires starts again in the abelian
   sectors (whose own guard may still send it to the full grid), or goes straight to the full grid where those
   sectors would stop the same levels (``PARSEC_WEIGHTED_GUARD_SHORTCUT`` below).
+* ``PARSEC_ORBITAL_GROUP_META_GGA`` (since 2026-11-23) -- the meta-GGA of a cluster (not a meta-GGA hybrid, which
+  keeps the refusal of a hybrid, nor a periodic cell): ``tau`` and the orbital density gradient ``g`` of the solved
+  states, whose occupations carry the weights, are averaged over ``G`` as the density is, and the orbital term of
+  every sector reads the Cartesian derivatives at the representatives of every orbit of ``H``
+  (``Hamiltonian/meta_gga_device.py``, :class:`WeightedOrbitMaps`); the device functional takes the operation table of
+  ``G`` (``V_xc/meta_gga_xc.py``, ``permutations``).
 
 ``off`` keeps the abelian group of before for that input, bit for bit.  Every value is read and checked in every
 preparation (:func:`weighted_input_settings`), so that a value the code does not know stops the run before the
@@ -81,6 +88,7 @@ WEIGHTED_INPUT_SWITCHES = {
     "libxc": "PARSEC_ORBITAL_GROUP_LIBXC",
     "occupations": "PARSEC_ORBITAL_GROUP_OCCUPATIONS",
     "spin": "PARSEC_ORBITAL_GROUP_SPIN",
+    "meta_gga": "PARSEC_ORBITAL_GROUP_META_GGA",
 }
 _VALUES = ("auto", "off")
 

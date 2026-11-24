@@ -55,6 +55,7 @@ from ..Pseudopotential.radial_derivatives import (
 )
 from ..V_ion.ionic_potential import _projector_support_radius
 from ..V_ion.wire_slab import gaussian_width
+from ..Pseudopotential.local_filter import filtered_local_reach
 from .local import LocalForceTerms, species_force_tables
 from .nonlocal_force import (
     NonlocalProjectorGradients,
@@ -232,7 +233,8 @@ def wire_slab_local_forces(
         # within 2 rs(2) the slopes of the smooth behaviour of the tables (PARSEC_SPLINE_FORCE_CENTER=
         # auto), which also reach the points closer than rs(2); without it the tables leave those out (forcloc.f90)
         center = smooth_center_radius(potential, center_setting)
-        for translation in grid.compensation_image_translations(position, sigma):
+        reach = filtered_local_reach(potential, specification.local_angular_momentum)
+        for translation in grid.compensation_image_translations(position, sigma, reach):
             relative = grid.coordinates - (position + translation)
             radius = np.sqrt(np.einsum("ij,ij->i", relative, relative))
             included = radius >= potential.radii[0]

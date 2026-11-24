@@ -58,6 +58,14 @@ def _arguments(lattice, spacing, shift, species, count, seed=3):
     return grid, atoms, {symbol: potential}, {symbol: SpeciesPotential(path, local, use_spline=spline)}, lattice, density, xc
 
 
+def _six_sample_arguments(lattice, shift):
+    """Four atoms with the six-sample test table with a core density (``H_CORE_POTRE.DAT``, splines), the first on a
+    grid point."""
+    grid, atoms, *rest = _arguments(lattice, 0.7, shift, ("H", _DATA / "H_CORE_POTRE.DAT", 0, True), 4)
+    atoms[0] = Atom("H", tuple(grid.coordinates[17]))
+    return (grid, atoms, *rest)
+
+
 def _batched(arguments, *, xp=np, erf=None, points=None):
     """fast_periodic_local_forces with the batched ball sums forced (on any module)."""
     patches = [mock.patch.object(periodic_local, "_uses_batched_balls", return_value=True)]
@@ -118,6 +126,23 @@ class BatchedBallTests(unittest.TestCase):
         loop = fast_periodic_local_forces(*arguments)
         _assert_round_off(self, _batched(arguments), loop, "C + Ge")
         self.assertEqual(float(np.max(np.abs(loop.core_correction[[0, 1, 2, 4, 5]]))), 0.0)
+
+    def test_a_table_of_six_samples_and_an_atom_on_a_grid_point(self) -> None:
+        # forcloc.f90's tail radius rs(npoint-6) lies at the origin of this table: the slopes switch to the Coulomb one
+        # (and the core slope to zero) at rs(ns-1), where the sampled tables do, so an atom on a grid point is finite
+        from parsec_python.Forces.periodic_local import dense_periodic_local_forces
+
+        for shift in _SHIFTS[:2]:
+            for lattice in (_RECTANGULAR, 6.6 * (np.ones((3, 3)) - np.eye(3))):
+                arguments = _six_sample_arguments(lattice, shift)
+                with self.subTest(shift=shift, oblique=bool(lattice[0, 0] == 0.0)):
+                    loop = fast_periodic_local_forces(*arguments)
+                    self.assertTrue(np.all(np.isfinite(loop.ionic)) and np.all(np.isfinite(loop.core_correction)))
+                    self.assertGreater(float(np.max(np.abs(loop.core_correction))), 1.0e-3)
+                    _assert_round_off(self, _batched(arguments), loop, f"shift={shift}")
+                    reference = dense_periodic_local_forces(*arguments)
+                    np.testing.assert_allclose(loop.ionic, reference.ionic, atol=1.0e-6)
+                    np.testing.assert_allclose(loop.core_correction, reference.core_correction, atol=1.0e-10)
 
     def test_oblique_cells_and_the_host_keep_the_loop(self) -> None:
         fcc = 6.6 * (np.ones((3, 3)) - np.eye(3))
@@ -264,6 +289,20 @@ class DeviceBatchedBallTests(unittest.TestCase):
                 with self.subTest(species=species[0], spline=species[3], shift=shift):
                     self._both(_arguments(_RECTANGULAR, 0.7, shift, species, 5), f"{species[0]} {shift}")
         self._both(_arguments(_RECTANGULAR, 0.7, _SHIFTS[2], _SPECIES[1], 9), "small batches", points=5_000)
+
+    def test_a_table_of_six_samples_and_an_atom_on_a_grid_point(self) -> None:
+        # the fused terms and the loop on the device: no 2 Z/0 at the atom (NaN before 2026-11-23)
+        import cupy as cp
+        from cupyx.scipy.special import erf
+
+        for shift in _SHIFTS[:2]:
+            arguments = _six_sample_arguments(_RECTANGULAR, shift)
+            with self.subTest(shift=shift):
+                self._both(arguments, f"H six samples {shift}")
+                oblique = _six_sample_arguments(6.6 * (np.ones((3, 3)) - np.eye(3)), shift)
+                device = fast_periodic_local_forces(*oblique, xp=cp, erf=erf)
+                self.assertTrue(np.all(np.isfinite(device.ionic)))
+                _assert_round_off(self, device, fast_periodic_local_forces(*oblique), f"fcc {shift}")
 
     def test_a_diamond_cell(self) -> None:
         import time

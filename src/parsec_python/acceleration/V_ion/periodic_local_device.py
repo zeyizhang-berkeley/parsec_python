@@ -13,7 +13,8 @@ every atom.  On the host both grow with the atoms times the points they touch: b
   the order of the bins and of the atoms in them (deterministic), with the radial rules of the host: the cubic
   spline of the table on PARSEC's origin-padded knots (``splint``; the periodic local potential takes the spline,
   :data:`parsec_python.V_ion.ewald.LOCAL_POTENTIAL_USES_CUBIC_SPLINE`) or ``r V`` interpolated linearly and divided
-  by ``r``, the Coulomb tail ``-2 Z/r`` from ``rs(ns-1)`` on, and ``2 Z erf(eta r)/r`` (``4 Z eta/sqrt(pi)`` at
+  by ``r``, the Coulomb tail ``-2 Z/r`` from ``rs(ns-1)`` on (the spline from its own cutoff,
+  :meth:`~parsec_python.Pseudopotential.ParsecPseudopotential.local_spline_cutoff`), and ``2 Z erf(eta r)/r`` (``4 Z eta/sqrt(pi)`` at
   ``r = 0``), at the points with ``r <= reach``.
 
 The terms are those of the host; the order of the sums differs, so the potential agrees to round-off (tests:
@@ -311,7 +312,7 @@ def device_fft_local_ionic_potential(grid, atoms, potentials, specifications, la
             _ionic.warn_spline_without_coulomb_tail(potential, local_l, reach)
         spline = potential.local_potential_spline(local_l, padding)
         radii = np.asarray(potential.radii, dtype=np.float64)
-        channel = np.asarray(potential.channel_potentials[local_l], dtype=np.float64)
+        channel = np.asarray(potential.local_channel_potential(local_l), dtype=np.float64)
         positive = int(spline.knots.size - radii.size)
         if not np.array_equal(spline.knots[positive:], radii) or spline.knots[positive - 1] != 0.0:
             return None
@@ -328,7 +329,8 @@ def device_fft_local_ionic_potential(grid, atoms, potentials, specifications, la
         parameters.append([
             float(reach),
             2.0 * float(potential.ionic_charge),
-            float(potential.interpolation_cutoff),
+            # -2 Z/r from rs(ns-1), the spline from its own cutoff (PARSEC_SPLINE_COULOMB_TAIL)
+            float(potential.local_spline_cutoff(local_l) if uses_spline else potential.interpolation_cutoff),
             1.0 if uses_spline else 0.0,
             float(potential.radial_parameter_a),
             float(potential.radial_parameter_b),

@@ -650,7 +650,7 @@ def _short_range_species(potential, specification, padding, eta, reach) -> _Shor
         eta=eta,
         reach=reach,
         radii=radii,
-        weighted=potential.radii * potential.channel_potentials[specification.local_angular_momentum],
+        weighted=potential.radii * potential.local_channel_potential(specification.local_angular_momentum),
         two_z=2.0 * potential.ionic_charge,
         generic_from=generic_from,
         zero_from=max(cutoff, generic_from),
@@ -825,10 +825,11 @@ def _local_reach(potential, specification, eta: float, erfc_cutoff: float, rule:
     there to the last bit, so the terms past the onset are round-off).  A ``Cubic_Spline`` species
     takes the physical reach under both rules: the spline of ``V`` (not ``r V``) leaves ``-2 Z/r``
     between the samples, by 1e-9 Ry up to ~80 bohr and by up to 3e-5 Ry over the last ~40 bohr of a
-    POTRE table, and a ball out to the table end adds that tail of every image (-3.0 Ry bohr^3 per Si
-    or Ge atom, -0.47 per Na): -0.71 Ry for an 8-atom silicon cube, where the direct sum
-    (:func:`parsec_python.V_ion.ewald.ewald_local_ionic_potential`, which stops at its erfc reach)
-    and the physical reach agree to 6e-6 Ry.
+    POTRE table, and under ``PARSEC_SPLINE_COULOMB_TAIL=off`` a ball out to the table end adds that tail
+    of every image (-3.0 Ry bohr^3 per Si or Ge atom, -0.47 per Na): -0.71 Ry for an 8-atom silicon
+    cube, where the direct sum (:func:`parsec_python.V_ion.ewald.ewald_local_ionic_potential`, which
+    stops at its erfc reach) and the physical reach agree to 6e-6 Ry.  Under ``auto`` (the default)
+    the spline takes ``-2 Z/r`` beyond the Coulomb onset of the table, so neither sum adds it.
     """
     if rule == "physical" or specification.use_spline:
         from .periodic_device import coulomb_radius
@@ -1002,7 +1003,8 @@ def _oblique_local_ionic_potential(grid, atoms, potentials, specifications, latt
     species asks) over the balls of :func:`.periodic_setup._atom_balls` with the reach of :func:`_local_reach`, and the
     ``G = 0`` constant of the reference ``eta``.  The points of the general grid lie at ``sum_m (i_m + s_m) a_m/n_m``,
     the grid of those helpers.  Linearly interpolated species get the readable potential to round-off; ``Cubic_Spline``
-    species lose the spline error of ``-2 Z/r`` that the readable sum adds out to its erfc reach.
+    species too, where the spline takes ``-2 Z/r`` beyond its Coulomb onset (``PARSEC_SPLINE_COULOMB_TAIL=auto``, the
+    default); under ``off`` they lose the spline error of ``-2 Z/r`` that the readable sum adds out to its erfc reach.
     """
     from . import periodic_setup as _default
 

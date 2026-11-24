@@ -475,6 +475,10 @@ class DeviceBlochOperator:
         """
         from .bloch_meta_gga_device import pointwise_terms
 
+        apply = getattr(self.kinetic, "apply", None)
+        if apply is not None:
+            # the term of a sector of a k-point (.sector_bloch_meta_gga, PARSEC_KPOINT_SECTOR_META_GGA): its own object
+            return apply(block)
         forward, backward, (mix, device_mix), vtau, k_point, fluxes = self.kinetic
         if hasattr(forward[0], "product"):
             # CuPy: the strided CSR kernel of the meta-GGA (DeviceCSR) on the real
@@ -821,7 +825,7 @@ class DeviceBlochConverter:
         psi = bool(getattr(host_scalar, "psi_gauge", False))
         if not psi and (not self.real_gamma or not is_gamma(getattr(host_scalar, "k_point", None))):
             return False
-        if _host_kinetic_term(host_scalar) is not None:
+        if _host_kinetic_term(host_scalar) is not None or getattr(host_scalar, "sector_kinetic", None) is not None:
             return False
         if stencil is not None:
             if not bool(getattr(stencil, "real_capable", False)):
@@ -1209,6 +1213,17 @@ class DeviceBlochConverter:
                 )
             operator.kinetic = self._kinetic_parts(*term)
             operator.spectral_margin = _host_kinetic_margin(host_scalar)
+        sector_term = getattr(host_scalar, "sector_kinetic", None)
+        if sector_term is not None:
+            # the orbital term of a meta-GGA reduced to a sector of a k-point (.sector_bloch_meta_gga): the device term
+            # on CuPy, the host term on the NumPy double of the device code
+            if spinor or operator.row_bounds is not None:
+                raise NotImplementedError(
+                    "the orbital term of a meta-GGA in the sectors of a k-point is implemented for scalar operators on "
+                    "the rows of one process"
+                )
+            operator.kinetic = sector_term.on_backend(backend)
+            operator.spectral_margin = float(operator.kinetic.spectral_margin)
         return operator
 
     def _kinetic_parts(self, gradient, kinetic_potential, k_point, gradient_flux=None):

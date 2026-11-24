@@ -35,11 +35,12 @@ lattice balls of :func:`parsec_python.acceleration.V_ion.periodic_setup._atom_ba
 density terms run in the lattice kernel of :func:`.periodic_device.device_lattice_density_forces` where a device is
 usable (round-off equal), else over the lattice balls here.
 
-The readable sum also adds, between the reach of the potential and its 43-86 bohr, the error of the
-spline of ``V`` around ``-2 Z/r`` that the potential leaves out (Ry bohr^3 per atom near the end of a
-table, see :func:`parsec_python.V_ion.ionic_potential.coulomb_tail_radius`); its gradient is what the two
-forces differ by (2.6e-7 Ry/bohr for two Si atoms in a 6-bohr cube, the test of
-:mod:`parsec_python.acceleration.tests.test_periodic_coulomb_tail`).  Numerical routine: nothing is printed.
+Under ``PARSEC_SPLINE_COULOMB_TAIL=off`` the readable sum also adds, between the reach of the potential and
+its 43-86 bohr, the error of the spline of ``V`` around ``-2 Z/r`` that the potential leaves out (Ry
+bohr^3 per atom near the end of a table, see :func:`parsec_python.V_ion.ionic_potential.coulomb_tail_radius`);
+its gradient is what the two forces differ by (2.6e-7 Ry/bohr for two Si atoms in a 6-bohr cube, the test of
+:mod:`parsec_python.acceleration.tests.test_periodic_coulomb_tail`).  Under ``auto`` (the default) the spline
+takes ``-2 Z/r`` beyond the Coulomb onset of the table in both.  Numerical routine: nothing is printed.
 """
 
 from __future__ import annotations

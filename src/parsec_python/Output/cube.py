@@ -23,9 +23,10 @@ the domain.
 Deviation: with symmetry PARSEC fills only the points of the irreducible
 wedge (the file comments that it "probably does not work with symmetry"; the
 other points hold whatever the array held).  Python fills every point of the
-full grid.  The origin is that of the Python grid: ``(shift + k_min) h`` for
-a cluster as in PARSEC, ``0`` for a periodic cell, whose points are
-``i h, i = 0..n-1`` in Python.
+full grid.  The origin is that of the Python grid, as in PARSEC:
+``(shift + k_min) h`` for a cluster, the point of index 0 for a periodic cell
+(``shift h``: half a step off the cell's origin unless ``Ignore_Symmetry``, or
+the ``Grid_Shift`` block), whose points are ``(i + shift) h``.
 """
 
 from __future__ import annotations
@@ -103,11 +104,12 @@ def dense_box(values: np.ndarray, grid) -> tuple[np.ndarray, np.ndarray, np.ndar
         dense[points[:, 0], points[:, 1], points[:, 2]] = values
         lattice = np.asarray(grid.cell.lattice_vectors, dtype=float)
         voxels = lattice / np.asarray(counts, dtype=float)[:, None]
-        if getattr(grid, "is_general_periodic", False) or getattr(grid.settings, "fortran_routines", False):
-            # Fortran's grids (general and orthorhombic) start at their shift along each direction.
-            return dense, grid.physical_coordinates(np.zeros((1, 3)))[0], voxels
-        # (Andrew Grieder's grid: the origin as it has been written, also for a shifted grid.)
-        return dense, np.zeros(3), voxels
+        # Every periodic grid starts at its shift along each direction (export_grid_data.f90 l.151-153: the origin
+        # (shift + i) step of the first point): the point of integer index 0.  Andrew Grieder's grid has the shift of
+        # PARSEC (half a step off the origin unless Ignore_Symmetry, or the Grid_Shift block) as well; its cubes took
+        # the origin 0 before 2026-11-23, half a step off its points, in a branch the command lines did not reach
+        # (Output_Grid_Data chose the Fortran-derived routines).
+        return dense, grid.physical_coordinates(np.zeros((1, 3)))[0], voxels
     dense = np.zeros(grid.lookup.shape, dtype=float)
     local = np.asarray(grid.integer_coordinates) - np.asarray(grid.index_min)[None, :]
     dense[local[:, 0], local[:, 1], local[:, 2]] = values

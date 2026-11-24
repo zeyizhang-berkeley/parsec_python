@@ -1121,5 +1121,44 @@ class ReflectionRepresentationTests(unittest.TestCase):
             [None, 8, 8, None, 7, None, None, None],
         )
 
+    def test_one_sector_of_the_identity_keeps_the_states_of_the_full_grid(self) -> None:
+        # PARSEC_IDENTITY_SECTOR_STATES: the sector of a structure without a point group keeps States_Num plus the
+        # buffer in every step, as the full grid does; the trim would leave it States_Num - 1 plus the buffer.
+        from parsec_python.acceleration.Eigensolvers.symmetry import identity_sector_states_setting
+
+        grid = build_cluster_grid(GridSettings(radius=2.0, spacing=0.5))
+        identity = AxisReflectionReduction.identity(grid)
+        self.assertEqual(identity.group_order, 1)
+        wrapper = object.__new__(CuPySymmetrySCFEigensolver)
+        wrapper.decomposition = SimpleNamespace(representation_count=1, reduction=identity)
+        with patch.dict(os.environ, {"PARSEC_IDENTITY_SECTOR_STATES": "auto"}):
+            wrapper.identity_sector_states = identity_sector_states_setting()
+        self.assertTrue(wrapper._keeps_full_grid_states())
+        wrapper.identity_sector_states = "off"
+        self.assertFalse(wrapper._keeps_full_grid_states())
+
+        class RecordingSolver:
+            truncated_to: int | None = None
+
+            def truncate_state(self, count: int) -> None:
+                self.truncated_to = count
+
+        # What off restores: the trim of the sectors, one state fewer than the first solve took.
+        wrapper._solvers = [RecordingSolver()]
+        counts = [22]
+        results = [SimpleNamespace(eigenvalues=np.arange(22, dtype=np.float64))]
+        wrapper._trim_sector_states_like_parsec(results, counts, requested_states=16, safety_buffer=6)
+        self.assertEqual((counts, wrapper._solvers[0].truncated_to), ([21], 21))
+        # Sectors of a point group, one sector of a larger group and an unknown value: as before.
+        wrapper.identity_sector_states = "auto"
+        wrapper.decomposition = SimpleNamespace(representation_count=8, reduction=identity)
+        self.assertFalse(wrapper._keeps_full_grid_states())
+        wrapper.decomposition = SimpleNamespace(representation_count=1, reduction=SimpleNamespace(group_order=2))
+        self.assertFalse(wrapper._keeps_full_grid_states())
+        with patch.dict(os.environ, {"PARSEC_IDENTITY_SECTOR_STATES": "full"}):
+            with self.assertRaisesRegex(ValueError, "auto or off"):
+                identity_sector_states_setting()
+
+
 if __name__ == "__main__":
     unittest.main()

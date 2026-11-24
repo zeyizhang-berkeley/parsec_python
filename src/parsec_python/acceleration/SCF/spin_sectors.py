@@ -153,7 +153,9 @@ with start polarizations +0.5 and -0.5 (PBE, 300 K) ends in the weighted sectors
 and then in the abelian ones with a half-filled e_g pair in each channel and moments of +-3.25 bohr magnetons, at
 -56.87755621 Ry for h 0.11 bohr, while the full grid from the same start splits the pair (D2h, integer occupations)
 at -56.95948510 Ry.  ``note`` keeps the result with a NOTE, ``stop`` sends the run to the full grid, ``off`` does
-not look.  The guard of the k-point sectors (:class:`.kpoint_sectors.SectorGuardGroup`) does not run this check.
+not look.  The guard of the k-point sectors runs the same check on its guarded tasks at the end of a loop without the
+exchange of a hybrid (:meth:`.kpoint_sectors.SectorKPointSolver.sector_doublet_report`, ``SCF/kpoints.py``: ``note`` a
+NOTE, ``stop`` the loop again with one task per k-point).
 
 Units Ry, bohr.  Nothing here prints or opens files.
 """
@@ -540,9 +542,11 @@ def spin_guard_doublets_setting() -> str:
 
     ``note``: a run of weighted sectors that ends with a fractional doublet whose partners are states of one sector,
     or a run of abelian sectors that ends with fractional degenerate levels of one sector label
-    (:func:`fractional_sector_doublets`), keeps its result, the same bits as ``off``, and ``parsec.out`` says so.
-    ``stop``: tests 1 and 3 count such a doublet and the run goes to the full grid.  ``off``: not looked for, as
-    before.
+    (:func:`fractional_sector_doublets`), keeps its result, the same bits as ``off``, and ``parsec.out`` says so; so
+    does a spin-polarized loop in the guarded sectors of its k-points with such levels in one sector of a k-point
+    (``kpoint_sectors.SectorKPointSolver.sector_doublet_report``, since 2026-11-23).  ``stop``: tests 1 and 3 count
+    such a doublet and the run goes to the full grid (the k-point loop: again with one task per k-point).  ``off``:
+    not looked for, as before.
     """
 
     value = os.environ.get(_GUARD_DOUBLETS_SWITCH, "note").strip().lower() or "note"

@@ -532,6 +532,18 @@ class TrimRoute:
         return self.problem is not None
 
 
+def _saves_listed_states(translation) -> bool:
+    """Whether the input lists states for ``parsec.dat`` (a ``Save_Wfn_Bands`` block that names one or more)."""
+
+    files = getattr(translation, "output_files", None)
+    selection = getattr(files, "wavefunctions", None)
+    return bool(
+        getattr(files, "output_data", True)
+        and getattr(selection, "mode", None) == "list"
+        and getattr(selection, "indices", ())
+    )
+
+
 def _run_refusal(translation) -> str | None:
     """Why the default route keeps the k-points for this kind of run: what reads or writes the atoms, the
     k-points or the grid of the cell, and what the supercell's output would report differently."""
@@ -559,6 +571,9 @@ def _run_refusal(translation) -> str | None:
         (bool(getattr(translation, "complex_wavefunctions", False)), "complex wavefunctions"),
         # the orbitals of the archive: those of the supercell are not the k-points' Bloch states
         (bool(getattr(translation, "output_all_states", False)), "Output_All_States"),
+        # the states of a Save_Wfn_Bands block in parsec.dat, which the k-points write (the block chose the
+        # Fortran-derived routines, which keep them, before PARSEC_FILE_KEYWORD_ROUTINES=neutral)
+        (_saves_listed_states(translation), "Save_Wfn_Bands"),
     )
     for found, reason in checks:
         if found:

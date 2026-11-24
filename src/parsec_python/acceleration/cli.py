@@ -628,6 +628,7 @@ def _reference_only_features(
     device_eigensolver_selected: bool = False,
     hybrid_on_device: bool = False,
     gamma_spin_on_device: bool = False,
+    general_grid_on_device: bool = False,
 ) -> list[str]:
     """Input features only the reference :mod:`parsec_python.cli` dispatches.
 
@@ -650,6 +651,9 @@ def _reference_only_features(
     Gamma point that the accelerated Gamma sectors run
     (:func:`_gamma_spin_on_device`, ``PARSEC_GAMMA_SPIN_SECTORS``); otherwise
     the reference solver's 1x1x1 k-point driver runs it.
+    ``general_grid_on_device``: the backend resolves to CuPy (:func:`_cupy_backend_selected`), where a
+    Gamma-point cell on Fortran's general grid takes the accelerated driver
+    (``PARSEC_GENERAL_GRID_ACCELERATED``); otherwise the reference solver runs it.
     """
 
     problem = translation.problem
@@ -935,10 +939,11 @@ def _reference_only_features(
         from parsec_python.Grid.pbc import uses_general_periodic_grid
 
         if uses_general_periodic_grid(problem.periodic_cell, problem.grid):
-            features.append(
-                "a periodic cell on Fortran's general grid (non-orthogonal "
-                "lattice vectors, or sides without one common grid spacing)"
-            )
+            # A Gamma-point cell on that grid runs on the accelerated driver (PARSEC_GENERAL_GRID_ACCELERATED=auto,
+            # since 2026-11-23) unless one of these keeps it with the reference solver; under off every such cell.
+            from .SCF.periodic_routes import general_grid_reference_only
+
+            features.extend(general_grid_reference_only(translation, on_device=general_grid_on_device))
     if problem.periodic_cell is None and getattr(problem.hartree, "cg_criterion", 1) == 2:
         # PARSEC 1.5's Hartree_CG_Criterion 2 (the CG stops against ||b||): the readable CG
         # (Hartree.poisson.cg_stopping_threshold) and the device CG of wires, slabs and cells
@@ -1186,6 +1191,21 @@ def _device_eigensolver_selected(arguments: argparse.Namespace, translation) -> 
         return False
     try:
         selection = resolve_backend(arguments.backend, translation.problem)
+    except (BackendUnavailableError, NotImplementedError, ValueError):
+        return False
+    return selection.selected == "cupy"
+
+
+def _cupy_backend_selected(arguments: argparse.Namespace, translation) -> bool:
+    """Whether the backend of this run resolves to CuPy, asked for a periodic cell of the Fortran-derived routines
+    only (``False`` for every other input): the accelerated route of a cell on Fortran's general grid
+    (:func:`.SCF.periodic_routes.general_grid_reference_only`) was validated on the GPU."""
+
+    problem = translation.problem
+    if problem.periodic_cell is None or not getattr(problem.grid, "fortran_routines", False):
+        return False
+    try:
+        selection = resolve_backend(arguments.backend, problem)
     except (BackendUnavailableError, NotImplementedError, ValueError):
         return False
     return selection.selected == "cupy"
@@ -1747,7 +1767,7 @@ def _run(
         from .SCF.kpoint_sectors import check_kpoint_sector_switches
 
         try:
-            check_kpoint_sector_switches()
+            check_kpoint_sector_switches(translation.problem)
         except ValueError as error:
             print(f"Input error: {error}", file=sys.stderr)
             return 2
@@ -1843,10 +1863,14 @@ def _run(
         from .Symmetry.axis_reflection import slab_wire_sectors_setting
         from .Symmetry.oblique_frame import oblique_sectors_setting
 
-        # PARSEC_SLAB_WIRE_SECTORS and PARSEC_OBLIQUE_SECTORS: refused here too, before an input the reference solver
-        # runs (a cell on the general grid of the Fortran-derived routines) is handed over without reading them
+        # PARSEC_SLAB_WIRE_SECTORS, PARSEC_OBLIQUE_SECTORS and PARSEC_GENERAL_GRID_ACCELERATED: refused here too,
+        # before an input the reference solver runs (a cell on the general grid of the Fortran-derived routines under
+        # PARSEC_GENERAL_GRID_ACCELERATED=off) is handed over without reading them
+        from .SCF.periodic_routes import general_grid_accelerated_setting
+
         slab_wire_sectors_setting()
         oblique_sectors_setting()
+        general_grid_accelerated_setting()
         if _found_supercell is not None:
             # the mesh solved as its supercell: said in parsec.out too
             restart_notes = [*restart_notes, f" {_trim_route.note}"]
@@ -1940,6 +1964,7 @@ def _run(
         device_eigensolver_selected=_device_eigensolver_selected(arguments, translation),
         hybrid_on_device=hybrid_on_device,
         gamma_spin_on_device=gamma_spin_on_device,
+        general_grid_on_device=_cupy_backend_selected(arguments, translation),
     )
     if unsupported:
         features = ", ".join(unsupported)
@@ -2237,6 +2262,10 @@ def _run(
         from parsec_python.Occupations.fermi_dirac import fermi_gap_root_setting
 
         fermi_gap_root_setting()
+        # PARSEC_FILTER_DEGREE_STALL: the starting later-SCF degree back where a loop stalls after lowering it
+        from parsec_python.SCF.filter_degree import filter_degree_stall_setting
+
+        filter_degree_stall_setting()
         # PARSEC_KPOINT_WAVEFUNCTIONS and PARSEC_GAMMA_PARSEC_DAT (parsec.dat of the k-point loops)
         from parsec_python.Output.parsec_dat import validate_settings as validate_parsec_dat_settings
 
@@ -2509,8 +2538,7 @@ def _run(
         # PARSEC_KPOINT_SUPERCELL=auto: parsec.dat of the cell of the input, as the k-points write it (the
         # potential and density of the first cell, the k-points of the k-point route with the levels of each by their
         # Bloch phases, PARSEC_KPOINT_SUPERCELL_LEVELS; no orbitals: the supercell's states are no Bloch states of the
-        # cell; Output_All_States keeps the k-points, which write theirs, and so do the Fortran-derived routines that
-        # a Save_Wfn_Bands block selects),
+        # cell; Output_All_States and a Save_Wfn_Bands block keep the k-points, which write theirs),
         # which Restart_Run and nscf_kpoints of that input read on either route
         files.parsec_dat_view = _cell_parsec_dat_view(_mesh_problem, _found_supercell[1])
     taken = {*protected_paths, log_path}

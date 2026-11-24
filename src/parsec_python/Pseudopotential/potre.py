@@ -68,6 +68,59 @@ def projector_tail_setting() -> str:
     return value
 
 
+SPLINE_COULOMB_TAIL_ENV = "PARSEC_SPLINE_COULOMB_TAIL"
+SPLINE_COULOMB_TAIL_DEFAULT = "auto"
+#: Radial samples between the Coulomb onset of a local table and the sample where its spline hands over to ``-2 Z/r``
+#: (:meth:`ParsecPseudopotential.local_spline_cutoff`).  A table that becomes ``-2 Z/r`` abruptly at its generation
+#: radius (the tables converted from UPF files) leaves the spline's slope 2.5e-3 to 9.4e-3 Ry/bohr off ``2 Z/r^2`` at
+#: the onset, and that ringing decays by about 0.27 per interval: twelve samples on it is below the spline's own
+#: interpolation error, so value and slope join ``-2 Z/r`` continuously there.
+SPLINE_COULOMB_TAIL_ADVANCE = 12
+
+
+def spline_coulomb_tail_setting() -> str:
+    """``PARSEC_SPLINE_COULOMB_TAIL``: where the cubic spline of a local potential hands over to ``-2 Z/r``.
+
+    PARSEC's spline of a radial table is clamped with zero slope at both ends.  ``-2 Z/r`` has the slope ``2 Z/r^2`` at
+    the end of the table, so over its last ~10 bohr the spline of a local potential leaves ``-2 Z/r`` by up to 1.6e-4
+    Ry (the FHI tables, which end at 75-78 bohr: C 1.1e-4, N 1.4e-4, O 1.6e-4; the POTRE tables, which end near 118
+    bohr: Si 3.7e-5, Ag 1.0e-4), and between the samples of its Coulomb part it misses ``-2 Z/r`` by its interpolation
+    error (FHI tables 4e-9 to 7e-8 Ry, POTRE tables 1e-10 to 3e-9); the linear interpolation of ``r V`` is exact there.
+    A sum that reaches the end of a table adds that error to every term: the short-ranged image sums of a wire or slab
+    with a period of 44 bohr or more (``|m| <= nint(6 sigma/L) + 1`` images, distances out to 76 bohr), the periodic
+    sums of the readable route out to the real-space cutoff of the reference ``eta``, and a large cluster.  For
+    graphene slabs of 48 bohr the total energy moved by +8.1e-2 Ry (6x2) and +0.106 Ry (6x3), and the potential lost
+    the half-cell translation of the cell (9.4e-4 Ry at a corner).
+
+    ``auto`` (the default): every cubic-spline evaluation of a local potential (value and slope, on every route) takes
+    ``-2 Z/r`` and ``2 Z/r^2`` from :meth:`ParsecPseudopotential.local_spline_cutoff`: the radial sample
+    :data:`SPLINE_COULOMB_TAIL_ADVANCE` (12) samples beyond the Coulomb onset of the table
+    (:func:`parsec_python.V_ion.ionic_potential.coulomb_onset_radius`).  From the onset on every sample is ``-2 Z/r``
+    to 1e-14 Ry, or, for a table whose ``r V`` is ``-2 Z`` only to its digits, within ten times the noise of its
+    outer half and at most ``1e-10 x 2 Z`` in ``r V`` (up to 8.6e-10 Ry for the FHI tables of the package, 1.0e-8 and
+    1.6e-7 Ry for the MARTINS_OLD and MARTINS_WANG tables of the tests).  The onsets lie at 1.1 to 14.3 bohr (1.2 to
+    7.5 for the tables of the examples and tests; 14 for the La, Pr and Fr FHI tables), the hand-over 0.2 to 4.9
+    bohr further out, far from the last ~10 bohr of the tables.
+    The twelve samples let the spline ring down past a table that becomes ``-2 Z/r`` abruptly (the tables converted
+    from UPF files: at the onset itself the spline's slope is up to 9.4e-3 Ry/bohr off ``2 Z/r^2``): at the
+    hand-over the spline meets ``-2 Z/r`` in value (1.9e-8 Ry at most, the MARTINS_WANG table of the tests) and in
+    slope (5.0e-7 Ry/bohr at most, below the spline's own slope error beyond it) for every table of the package.  A
+    table that is not ``-2 Z/r`` near its end (no Coulomb tail) keeps its spline out to ``rs(ns-1)``.  The linear
+    tables are not changed, and the other radial tables keep their splines: the densities vanish over the end of
+    their tables (where the zero end slope is right) and the projectors end at ``rcore``.
+
+    ``off``: the spline out to ``rs(ns-1)``, as ``ionpot.f90`` evaluates a species with ``Cubic_Spline: .true.``
+    (PARSEC 1.5, and the default before 2026-11-23).
+    """
+
+    from ..fortran_numerics import switch_value
+
+    value = switch_value(SPLINE_COULOMB_TAIL_ENV, SPLINE_COULOMB_TAIL_DEFAULT)
+    if value not in ("auto", "off"):
+        raise ValueError(f"{SPLINE_COULOMB_TAIL_ENV} must be auto or off, not {value!r}")
+    return value
+
+
 def _numbers(text: str) -> list[float]:
     values = []
     for token in _FLOAT_RE.findall(text):
@@ -147,6 +200,14 @@ class ParsecPseudopotential:
     origin_samples: int = 0
     # The samples of the file the reader replaced by their even fit (``PARSEC_FHI_ORIGIN=auto``); 0 otherwise.
     origin_refit: int = 0
+    # The local channel Fourier-filtered to the grid by ``PARSEC_LOCAL_FILTER`` ``on`` or ``all``
+    # (:mod:`parsec_python.Pseudopotential.local_filter`), at the radii of the table, by local angular momentum; empty
+    # for the file's table.  The projectors are made from ``V_l - V_local`` of the file's channels (and under ``all``
+    # filtered on their own, ``filtered_projectors``).
+    filtered_local_potentials: dict[int, np.ndarray] = field(default_factory=dict)
+    # The radius the projectors filtered by ``PARSEC_LOCAL_FILTER=all`` end at (their tail beyond the file's support
+    # radius); ``None`` for the support of the file (:attr:`projector_support_radius`).
+    filtered_projector_radius: float | None = None
 
     @property
     def radial_offset(self) -> float:
@@ -175,6 +236,8 @@ class ParsecPseudopotential:
         ``Core_Cutoff_Radius`` of the input as given, which is in general
         not a tabulated radius.
         """
+        if self.filtered_projector_radius is not None:
+            return float(min(self.filtered_projector_radius, self.interpolation_cutoff))
         if self.core_radius is not None:
             return float(min(self.core_radius, self.interpolation_cutoff))
         requested = max(self.channel_cutoffs.values(), default=self.radii[0])
@@ -249,6 +312,63 @@ class ParsecPseudopotential:
                 f"available channels: {available}"
             )
 
+    def local_channel_potential(self, local_l: int) -> np.ndarray:
+        """The table of the local potential (Ry, at :attr:`radii`): the channel ``local_l`` Fourier-filtered to the grid
+        where ``PARSEC_LOCAL_FILTER`` (``on`` or ``all``) made one (:attr:`filtered_local_potentials`), else the
+        file's channel.  Every consumer of the local potential reads it here; the projectors read
+        :attr:`channel_potentials`."""
+
+        self.validate_local_channel(local_l)
+        filtered = self.filtered_local_potentials.get(local_l)
+        return self.channel_potentials[local_l] if filtered is None else filtered
+
+    @cached_property
+    def _local_spline_cutoffs(self) -> dict[int, float]:
+        # local_l -> local_spline_cutoff under PARSEC_SPLINE_COULOMB_TAIL=auto, filled as asked
+        return {}
+
+    def local_spline_cutoff(self, local_l: int) -> float:
+        """Radius (bohr) from which a cubic-spline evaluation of the local potential takes ``-2 Z/r``
+        (:func:`spline_coulomb_tail_setting`).
+
+        ``rs(ns-1)`` under ``PARSEC_SPLINE_COULOMB_TAIL=off``; under ``auto`` the radial sample
+        :data:`SPLINE_COULOMB_TAIL_ADVANCE` samples beyond the Coulomb onset of the table
+        (:func:`parsec_python.V_ion.ionic_potential.coulomb_onset_radius`) where it lies below.  From the onset on every
+        sample is ``-2 Z/r`` to 1e-14 Ry, or, for a table whose ``r V`` is ``-2 Z`` only to its digits, ``|r V + 2 Z|``
+        is within ten times the noise of the outer half of the table and at most ``1e-10 x 2 Z`` above it.  A property
+        of the file, so every process decides the same.  The linear tables keep ``rs(ns-1)``: they are exact there.
+        """
+
+        cutoff = float(self.interpolation_cutoff)
+        if spline_coulomb_tail_setting() == "off":
+            return cutoff
+        cutoffs = self._local_spline_cutoffs
+        found = cutoffs.get(local_l)
+        if found is None:
+            from ..V_ion.ionic_potential import coulomb_onset_radius
+
+            self.validate_local_channel(local_l)
+            found = min(cutoff, float(coulomb_onset_radius(self, local_l)))
+            if found < cutoff:
+                # past the ringing of the spline beyond a sharp onset (the sample count, not a radius: the ringing
+                # decays by about 0.27 per interval); never beyond rs(ns-1)
+                onset = int(np.searchsorted(self.radii, found))
+                advanced = min(onset + SPLINE_COULOMB_TAIL_ADVANCE, int(self.radii.size) - 2)
+                found = min(cutoff, float(self.radii[advanced]))
+            cutoffs[local_l] = found
+        return found
+
+    def local_spline_samples(self, local_l: int) -> int:
+        """The number of leading radial samples whose second to last is :meth:`local_spline_cutoff`: the table a kernel
+        that switches to ``-2 Z/r`` at ``rs(ns-1)`` of its table is given, so that it hands over there (the spline
+        itself keeps every knot)."""
+
+        cutoff = self.local_spline_cutoff(local_l)
+        index = int(np.searchsorted(self.radii, cutoff))
+        if index >= self.radii.size or float(self.radii[index]) != cutoff:
+            raise ValueError(f"the spline cutoff {cutoff!r} of {self.source} is not a radial sample")
+        return min(index + 2, int(self.radii.size))
+
     def local_potential_spline(self, local_l: int, spline_padding_width: int) -> ParsecRadialSpline:
         """The cubic spline :meth:`local_potential` evaluates with ``use_spline`` (PARSEC's origin padding).
 
@@ -256,7 +376,7 @@ class ParsecPseudopotential:
         """
         self.validate_local_channel(local_l)
         return ParsecRadialSpline.from_positive_grid(
-            self.radii, self.channel_potentials[local_l], spline_padding_width
+            self.radii, self.local_channel_potential(local_l), spline_padding_width
         )
 
     def local_potential(
@@ -280,16 +400,17 @@ class ParsecPseudopotential:
         Between the radial samples PARSEC interpolates ``r*V(r)`` linearly
         and divides by ``r``.  ``direct`` interpolates ``V(r)`` itself, the
         ``Old_Interpolation_Format`` branch of ``ionpot.f90:107-112``; the
-        spline takes precedence over both.
+        spline takes precedence over both.  The spline hands over to
+        ``-2 Z/r`` at :meth:`local_spline_cutoff` (``PARSEC_SPLINE_COULOMB_TAIL``).
         """
         self.validate_local_channel(local_l)
         radius = np.asarray(distances, dtype=float)
         if np.any(radius < 0):
             raise ValueError("radial distances cannot be negative")
-        values = self.channel_potentials[local_l]
+        values = self.local_channel_potential(local_l)
         result = np.empty_like(radius)
-        # ``ionpot.f90`` switches at ``dist >= rs(ns-1)``.
-        inside = radius < self.interpolation_cutoff
+        # ``ionpot.f90`` switches at ``dist >= rs(ns-1)``; the spline past its Coulomb onset (local_spline_cutoff)
+        inside = radius < (self.local_spline_cutoff(local_l) if use_spline else self.interpolation_cutoff)
         if use_spline:
             if spline_padding_width is None:
                 raise ValueError(

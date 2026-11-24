@@ -298,14 +298,15 @@ def local_potential_slope(
     with ``direct`` the slope of the linear interpolant of ``V``; otherwise
     ``(p'(r) - p(r)/r)/r`` with ``p`` the linear interpolant of ``r V`` (zero
     at and below the first sample, where the value is constant).  Beyond the
-    table (``r >= rs(ns-1)``) the Coulomb tail ``-2Z/r`` gives ``2Z/r^2``.
+    table (``r >= rs(ns-1)``; the spline from its own cutoff,
+    :meth:`ParsecPseudopotential.local_spline_cutoff`) the Coulomb tail ``-2Z/r`` gives ``2Z/r^2``.
     """
 
     radius = np.asarray(distances, dtype=float)
-    values = potential.channel_potentials[local_l]
+    values = potential.local_channel_potential(local_l)
     radii = potential.radii
     result = np.zeros_like(radius)
-    inside = radius < potential.interpolation_cutoff
+    inside = radius < (potential.local_spline_cutoff(local_l) if use_spline else potential.interpolation_cutoff)
     outside = ~inside
     result[outside] = 2.0 * potential.ionic_charge / (radius[outside] * radius[outside])
     if not np.any(inside):

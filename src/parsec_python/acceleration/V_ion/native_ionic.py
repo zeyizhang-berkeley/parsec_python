@@ -186,11 +186,18 @@ class NativeIonicBuilders:
             potential = potentials[atom.symbol]
             specification = specifications[atom.symbol]
             if atom.symbol not in tables:
-                values = _values64(potential.channel_potentials[specification.local_angular_momentum])
+                values = _values64(potential.local_channel_potential(specification.local_angular_momentum))
+                # the kernel takes -2 Z/r from rs(ns-1) of the table it is given: a splined table is cut after the
+                # sample that follows the spline's cutoff (PARSEC_SPLINE_COULOMB_TAIL; the spline keeps every knot)
+                samples = (
+                    potential.local_spline_samples(specification.local_angular_momentum)
+                    if specification.use_spline
+                    else potential.radii.size
+                )
                 tables[atom.symbol] = (values, _spline_payload(
                     potential, values, grid, specification.use_spline
-                ))
-            values, spline = tables[atom.symbol]
+                ), samples)
+            values, spline, samples = tables[atom.symbol]
             if _direct_interpolation(specification):
                 if bounds is None:
                     bounds = _coordinate_bounds(grid.coordinates)
@@ -199,8 +206,8 @@ class NativeIonicBuilders:
             total += np.asarray(
                 evaluator.local_potential(
                     _values64(atom.position),
-                    _values64(potential.radii),
-                    values,
+                    _values64(potential.radii[:samples]),
+                    values[:samples],
                     float(potential.ionic_charge),
                     *spline,
                 ),

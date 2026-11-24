@@ -222,7 +222,9 @@ def input_record(
             )
     except Exception as error:
         return {"error": [type(error).__name__, portable(str(error), roots)]}
-    return problem_record(translation, roots)
+    # and when the spline of a local potential reached rs(ns-1) (the set-up key of a Cubic_Spline species)
+    with patch.dict(os.environ, {"PARSEC_SPLINE_COULOMB_TAIL": "off"}):
+        return problem_record(translation, roots)
 
 
 # Benzene with every keyword the mistakes below touch.  Its pseudopotentials

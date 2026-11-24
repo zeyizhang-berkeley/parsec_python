@@ -34,6 +34,7 @@ from ..models import (
     SinglePointResult,
 )
 from ..Pseudopotential import ParsecPseudopotential
+from ..Pseudopotential.local_filter import apply_local_filters
 from ..V_ion.slab import slab_ewald_energy, slab_local_ionic_potential
 from ..V_ion import (
     NonlocalProjectorOperator,
@@ -677,6 +678,9 @@ def _prepare_fortran_periodic_single_point(
     pseudopotentials = apply_fourier_filters(
         pseudopotentials, problem.pseudopotentials, fortran_first_step(grid)
     )
+    # PARSEC_LOCAL_FILTER on / all: the local potential tables (and under all the projectors) Fourier-filtered to
+    # this grid (Pseudopotential/local_filter.py)
+    pseudopotentials = apply_local_filters(pseudopotentials, problem.pseudopotentials, grid)
     # Every periodic sum runs over lattice images, so an atom outside the
     # cell is translated into it by lattice vectors (Fortran PARSEC takes
     # such coordinates as they are); atoms inside keep their coordinates.
@@ -1314,6 +1318,9 @@ def prepare_periodic_single_point(
     stage_start = time.perf_counter()
     grid = build_periodic_grid(problem.periodic_cell, problem.grid)
     grid_seconds = time.perf_counter() - stage_start
+    # PARSEC_LOCAL_FILTER on / all: the local potential tables (and under all the projectors) Fourier-filtered to
+    # this grid (Pseudopotential/local_filter.py)
+    pseudopotentials = apply_local_filters(pseudopotentials, problem.pseudopotentials, grid)
     lattice_vectors = problem.periodic_cell.lattice_vectors
     dimensions = problem.periodic_cell.dimensions
     # The atoms of the builders: those of the problem, folded into a 3-D cell where one lies outside (a

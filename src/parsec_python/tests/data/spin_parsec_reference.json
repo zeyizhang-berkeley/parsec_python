@@ -1,5 +1,5 @@
 {
- "comment": "Fortran PARSEC (development version 1.4.x, gfortran 13.3) for small spin-polarized isolated systems (Spin_Polarization: .true.), read from parsec.out with Output_Level 2 in bohr, Ry and Ry/bohr with the digits Fortran prints. Every SCF loop is converged to 1e-8 Ry; 'iterations' is the number of SCF steps it took. 'eigenvalues', 'occupations', 'electrons' and 'energies' are those of the last step, per spin channel where there are two. 'initial_magnetic_moment' is what initchrg.f90 prints. 'forces' holds the tables of the structure: 'local' is \"local force components\" (ion-ion plus the local pseudopotential terms), 'ionic', 'sc' and 'core' its three pseudopotential terms. Pseudopotential files are named as tests/data/<file>: the spin_*_POTRE.DAT files are the potentials of the library under src/pp_generation as these runs read them, written by the converter while it resampled linearly (until October 2026). One case is a structural relaxation, with the steps of its atom.cor. A Python run needs Hartree_Boundary_Tolerance: off to use PARSEC's Hartree boundary values. With PBE the two programs differ beyond round-off: this package uses the potential of the discrete energy and Fortran the continuum expression (V_xc/pbe.py).",
+ "comment": "Fortran PARSEC (development version 1.4.x, gfortran 13.3, one MPI process) for small spin-polarized isolated systems (Spin_Polarization: .true.), read from parsec.out with Output_Level 2 in bohr, Ry and Ry/bohr with the digits Fortran prints. Every SCF loop is converged to 1e-8 Ry; 'iterations' is the number of SCF steps it took (it varies by one or two between repeated runs of the same input, and so do the last printed digits of the energy terms and levels). 'eigenvalues', 'occupations', 'electrons' and 'energies' are those of the last step, per spin channel where there are two. 'initial_magnetic_moment' is what initchrg.f90 prints. 'forces' holds the tables of the structure: 'local' is \"local force components\" (ion-ion plus the local pseudopotential terms), 'ionic', 'sc' and 'core' its three pseudopotential terms. Pseudopotential files are named as tests/data/<file>. The spin_*_POTRE.DAT files are the UPF files of the library under src/pp_generation (NCPPs/CA/C, N, O, H and NCPPs/PBE/H) converted by src/tools/upf_to_parsec.py with its cubic resampling, the same bytes as the POTRE files of the library; the cases that read them were run again on these files in November 2026 with the build that had made the first numbers on the linearly resampled files (October 2026), after that build had reproduced the first numbers on the linear files (every total energy and force printed). The other files belong to a core-corrected case. One case is a structural relaxation, with the steps of its atom.cor. A Python run needs Hartree_Boundary_Tolerance: off to use PARSEC's Hartree boundary values. With PBE the two programs differ beyond round-off: this package uses the potential of the discrete energy and Fortran the continuum expression (V_xc/pbe.py).",
  "cases": {
   "h_fixed_ca": {
    "comment": "Hydrogen atom with 0.7 electrons up and 0.3 down from occup.in (Fermi_Temp: -1), CA.",
@@ -37,13 +37,13 @@
    ],
    "iterations": 14,
    "initial_magnetic_moment": 0.2,
-   "energy": -0.9019874,
+   "energy": -0.90195547,
    "energies": {
-    "eigenvalue": -0.46103637,
-    "hartree": 0.59241113,
-    "integral_vxc_rho": -0.64649493,
-    "exchange_correlation": -0.49503482,
-    "electron_ion": -1.89720555,
+    "eigenvalue": -0.46101794,
+    "hartree": 0.59239359,
+    "integral_vxc_rho": -0.64647794,
+    "exchange_correlation": -0.49502188,
+    "electron_ion": -1.89713857,
     "ion_ion": 0.0
    },
    "electrons": [
@@ -53,16 +53,16 @@
    "net_magnetic_moment": 0.4,
    "eigenvalues": {
     "up": [
-     -0.490912359,
-     0.3360326049,
-     0.3360326049,
-     0.3360326049
+     -0.4908928519,
+     0.3360221972,
+     0.3360221972,
+     0.3360221972
     ],
     "down": [
-     -0.3913257359,
-     0.3624308056,
-     0.3624308056,
-     0.3624308057
+     -0.3913098257,
+     0.3624213467,
+     0.3624213467,
+     0.3624213467
     ]
    },
    "occupations": {
@@ -179,13 +179,13 @@
    ],
    "iterations": 14,
    "initial_magnetic_moment": 0.2,
-   "energy": -0.92989119,
+   "energy": -0.92985607,
    "energies": {
-    "eigenvalue": -0.466488,
-    "hartree": 0.60353144,
-    "integral_vxc_rho": -0.67373646,
-    "exchange_correlation": -0.53360821,
-    "electron_ion": -1.93338897,
+    "eigenvalue": -0.46646191,
+    "hartree": 0.60351152,
+    "integral_vxc_rho": -0.67370998,
+    "exchange_correlation": -0.53359263,
+    "electron_ion": -1.93331455,
     "ion_ion": 0.0
    },
    "electrons": [
@@ -195,16 +195,16 @@
    "net_magnetic_moment": 0.4,
    "eigenvalues": {
     "up": [
-     -0.5020304797,
-     0.3372120826,
-     0.3372120826,
-     0.3372120826
+     -0.5020023616,
+     0.3372035498,
+     0.3372035498,
+     0.3372035499
     ],
     "down": [
-     -0.3835555505,
-     0.3796877375,
-     0.3796877375,
-     0.3796877375
+     -0.3835341989,
+     0.3796798154,
+     0.3796798154,
+     0.3796798154
     ]
    },
    "occupations": {
@@ -310,16 +310,16 @@
    },
    "iterations": 13,
    "initial_magnetic_moment": 1.0,
-   "energy": -19.8296173,
+   "energy": -19.82885825,
    "energies": {
-    "eigenvalue": -4.33199474,
-    "hartree": 16.98271217,
-    "integral_vxc_rho": -6.22199617,
-    "exchange_correlation": -4.73690656,
-    "electron_ion": -49.02929597,
+    "eigenvalue": -4.33102739,
+    "hartree": 16.98296301,
+    "integral_vxc_rho": -6.22216067,
+    "exchange_correlation": -4.73702852,
+    "electron_ion": -49.03020358,
     "ion_ion": 0.0
    },
-   "fermi_level": -0.3856,
+   "fermi_level": -0.3854,
    "electrons": [
     4.0,
     1.0
@@ -327,24 +327,24 @@
    "net_magnetic_moment": 3.0,
    "eigenvalues": {
     "up": [
-     -1.4379732858,
-     -0.6001602286,
-     -0.6001602286,
-     -0.6001602286,
-     0.3267568658,
-     0.5477391593,
-     0.5477391593,
-     0.5477391593
+     -1.4375816087,
+     -0.6000944968,
+     -0.6000944967,
+     -0.6000944967,
+     0.3268370933,
+     0.5477031763,
+     0.5477031763,
+     0.5477031764
     ],
     "down": [
-     -1.09354077,
-     -0.268478112,
-     -0.268478112,
-     -0.268478112,
-     0.4159760111,
-     0.6668519501,
-     0.6668519501,
-     0.6668519501
+     -1.0931622948,
+     -0.2683475406,
+     -0.2683475406,
+     -0.2683475406,
+     0.4160482232,
+     0.6668383632,
+     0.6668383632,
+     0.6668383632
     ]
    },
    "occupations": {
@@ -408,7 +408,7 @@
     "nonlocal": [
      [
       0.0,
-      0.0,
+      -0.0,
       0.0
      ]
     ],
@@ -468,15 +468,15 @@
     "3 0.3333333333333333",
     "4 0.3333333333333334"
    ],
-   "iterations": 14,
+   "iterations": 13,
    "initial_magnetic_moment": 1.2,
-   "energy": -32.42952145,
+   "energy": -32.42955969,
    "energies": {
-    "eigenvalue": -6.0225487,
-    "hartree": 28.49986821,
-    "integral_vxc_rho": -8.79011953,
-    "exchange_correlation": -6.69722408,
-    "electron_ion": -82.77433009,
+    "eigenvalue": -6.02233052,
+    "hartree": 28.50013325,
+    "integral_vxc_rho": -8.79015527,
+    "exchange_correlation": -6.6972512,
+    "electron_ion": -82.77297511,
     "ion_ion": 0.0
    },
    "electrons": [
@@ -486,24 +486,24 @@
    "net_magnetic_moment": 2.0,
    "eigenvalues": {
     "up": [
-     -1.679077824,
-     -0.7898620352,
-     -0.7898620352,
-     -0.7898620352,
-     0.311547301,
-     0.5120273053,
-     0.5120273053,
-     0.5120273053
+     -1.6810251796,
+     -0.788829305,
+     -0.788829305,
+     -0.788829305,
+     0.3111776211,
+     0.5120430964,
+     0.5120430964,
+     0.5120430964
     ],
     "down": [
-     -1.4400911056,
-     -0.5337936621,
-     -0.5337936621,
-     -0.5337936621,
-     0.3497359961,
-     0.5646419459,
-     0.5646419459,
-     0.5646419459
+     -1.4419335735,
+     -0.5328838483,
+     -0.5328838483,
+     -0.5328838483,
+     0.3493644026,
+     0.564717099,
+     0.564717099,
+     0.564717099
     ]
    },
    "occupations": {
@@ -566,7 +566,7 @@
     ],
     "nonlocal": [
      [
-      0.0,
+      -0.0,
       -0.0,
       0.0
      ]
@@ -618,16 +618,16 @@
    },
    "iterations": 18,
    "initial_magnetic_moment": 2.4,
-   "energy": -65.34339648,
+   "energy": -65.34098092,
    "energies": {
-    "eigenvalue": -13.80389573,
-    "hartree": 87.37188245,
-    "integral_vxc_rho": -18.06362741,
-    "exchange_correlation": -13.77145947,
-    "electron_ion": -228.07181491,
+    "eigenvalue": -13.80122368,
+    "hartree": 87.37217377,
+    "integral_vxc_rho": -18.06376435,
+    "exchange_correlation": -13.77156158,
+    "electron_ion": -228.07125209,
     "ion_ion": 31.54021377
    },
-   "fermi_level": -0.4187,
+   "fermi_level": -0.4186,
    "electrons": [
     7.0,
     5.0
@@ -635,32 +635,32 @@
    "net_magnetic_moment": 2.0,
    "eigenvalues": {
     "up": [
-     -2.274660213,
-     -1.3495713008,
-     -1.0227129126,
-     -1.0227129126,
-     -0.9979949765,
-     -0.553166339,
-     -0.553166339,
-     0.1652996608,
-     0.3419618645,
-     0.5099128569,
-     0.5099128569,
-     0.6819922581
+     -2.274500246,
+     -1.3495806686,
+     -1.0224145856,
+     -1.0224145856,
+     -0.9976523337,
+     -0.5529333571,
+     -0.5529333571,
+     0.1655120462,
+     0.3419193386,
+     0.5099010587,
+     0.5099010587,
+     0.6819598008
     ],
     "down": [
-     -2.166145108,
-     -1.2158860011,
-     -0.8850430446,
-     -0.8850430446,
-     -0.8777935426,
-     -0.3879237319,
-     -0.3879237319,
-     0.3073520616,
-     0.3607415506,
-     0.5374332986,
-     0.5374332986,
-     0.6949483369
+     -2.1659719518,
+     -1.2158934242,
+     -0.884741143,
+     -0.884741143,
+     -0.8774468872,
+     -0.3876861189,
+     -0.3876861189,
+     0.3075741857,
+     0.3606972715,
+     0.5374282707,
+     0.5374282707,
+     0.6949302509
     ]
    },
    "occupations": {
@@ -709,24 +709,24 @@
     "ionic": [
      [
       0.0,
-      0.0,
-      -11.162059
+      -0.0,
+      -11.162591
      ],
      [
       -0.0,
       0.0,
-      11.162059
+      11.162591
      ]
     ],
     "sc": [
      [
       0.0,
-      0.0,
+      -0.0,
       0.0
      ],
      [
       -0.0,
-      0.0,
+      -0.0,
       -0.0
      ]
     ],
@@ -745,37 +745,37 @@
     "local": [
      [
       0.0,
-      0.0,
-      2.654401
+      -0.0,
+      2.653868
      ],
      [
       -0.0,
-      0.0,
-      -2.654401
+      -0.0,
+      -2.653868
      ]
     ],
     "nonlocal": [
      [
+      0.0,
       -0.0,
-      -0.0,
-      -3.489658
+      -3.493505
      ],
      [
+      -0.0,
       0.0,
-      0.0,
-      3.489658
+      3.493505
      ]
     ],
     "symmetrized": [
      [
       0.0,
-      0.0,
-      -0.835258
+      -0.0,
+      -0.839637
      ],
      [
       0.0,
       0.0,
-      0.835258
+      0.839637
      ]
     ],
     "net": [
@@ -786,13 +786,13 @@
     "total": [
      [
       0.0,
-      0.0,
-      -0.835258
+      -0.0,
+      -0.839637
      ],
      [
       0.0,
-      -0.0,
-      0.835258
+      0.0,
+      0.839637
      ]
     ]
    }
@@ -828,15 +828,15 @@
     "C_POTRE.DAT": "tests/data/spin_ca_C_POTRE.DAT",
     "H_POTRE.DAT": "tests/data/spin_ca_H_POTRE.DAT"
    },
-   "iterations": 19,
+   "iterations": 20,
    "initial_magnetic_moment": 1.4,
-   "energy": -14.74463999,
+   "energy": -14.74371458,
    "energies": {
-    "eigenvalue": -5.53495355,
-    "hartree": 24.49059798,
-    "integral_vxc_rho": -7.14886377,
-    "exchange_correlation": -5.46734745,
-    "electron_ion": -60.52644717,
+    "eigenvalue": -5.53416401,
+    "hartree": 24.49043831,
+    "integral_vxc_rho": -7.14876468,
+    "exchange_correlation": -5.4672722,
+    "electron_ion": -60.5246982,
     "ion_ion": 13.59939525
    },
    "fermi_level": -0.3239,
@@ -847,24 +847,24 @@
    "net_magnetic_moment": 1.0,
    "eigenvalues": {
     "up": [
-     -1.2024740773,
-     -0.7469316089,
-     -0.700406272,
-     -0.3623054688,
-     0.2960163441,
-     0.3727524588,
-     0.4212554323,
-     0.5049514092
+     -1.2025816628,
+     -0.7466971494,
+     -0.7002512938,
+     -0.3620721961,
+     0.2959010874,
+     0.3728173555,
+     0.4213517449,
+     0.504992444
     ],
     "down": [
-     -1.138505597,
-     -0.7149910612,
-     -0.6693394683,
-     -0.2118284016,
-     0.3289970117,
-     0.3901662015,
-     0.4359489501,
-     0.5546781136
+     -1.1386049549,
+     -0.7147651968,
+     -0.6691915524,
+     -0.211622012,
+     0.328874751,
+     0.3902283042,
+     0.4360403041,
+     0.5547251264
     ]
    },
    "occupations": {
@@ -914,46 +914,46 @@
     ],
     "ionic": [
      [
-      0.233135,
-      -0.212278,
-      -0.505685
+      0.233276,
+      -0.204306,
+      -0.501826
      ],
      [
-      -2.358032,
-      -0.16632,
-      0.23666
+      -2.358053,
+      -0.166068,
+      0.236348
      ],
      [
-      1.079626,
-      -1.779007,
-      -0.008186
+      1.080012,
+      -1.778342,
+      -0.007836
      ],
      [
-      1.188765,
-      1.890347,
-      0.361164
+      1.189264,
+      1.889309,
+      0.360852
      ]
     ],
     "sc": [
      [
-      0.0,
       -0.0,
-      -0.0
-     ],
-     [
-      -0.0,
-      -0.0,
-      -0.0
-     ],
-     [
-      -0.0,
-      0.0,
-      -0.0
-     ],
-     [
-      0.0,
       0.0,
       0.0
+     ],
+     [
+      0.0,
+      0.0,
+      -0.0
+     ],
+     [
+      -0.0,
+      0.0,
+      -0.0
+     ],
+     [
+      -0.0,
+      -0.0,
+      -0.0
      ]
     ],
     "core": [
@@ -980,31 +980,31 @@
     ],
     "local": [
      [
-      0.121642,
-      -0.114962,
-      0.057237
+      0.121783,
+      -0.10699,
+      0.061096
      ],
      [
-      -0.012843,
-      -0.032102,
-      0.02324
+      -0.012864,
+      -0.03185,
+      0.022927
      ],
      [
-      0.017858,
-      -0.024856,
-      -0.031157
+      0.018244,
+      -0.024191,
+      -0.030807
      ],
      [
-      0.016837,
-      -0.095337,
-      0.034633
+      0.017336,
+      -0.096375,
+      0.034321
      ]
     ],
     "nonlocal": [
      [
-      -0.255794,
-      0.218752,
-      -0.128621
+      -0.254705,
+      0.207992,
+      -0.131579
      ],
      [
       0.0,
@@ -1024,51 +1024,51 @@
     ],
     "symmetrized": [
      [
-      -0.134152,
-      0.10379,
-      -0.071383
+      -0.132922,
+      0.101002,
+      -0.070483
      ],
      [
-      -0.012843,
-      -0.032102,
-      0.02324
+      -0.012864,
+      -0.03185,
+      0.022927
      ],
      [
-      0.017858,
-      -0.024856,
-      -0.031157
+      0.018244,
+      -0.024191,
+      -0.030807
      ],
      [
-      0.016837,
-      -0.095337,
-      0.034633
+      0.017336,
+      -0.096375,
+      0.034321
      ]
     ],
     "net": [
-     -0.112299,
-     -0.048505,
-     -0.044668
+     -0.110207,
+     -0.051414,
+     -0.044041
     ],
     "total": [
      [
-      -0.106077,
-      0.115916,
-      -0.060217
+      -0.105371,
+      0.113855,
+      -0.059473
      ],
      [
-      0.015232,
-      -0.019976,
-      0.034407
+      0.014688,
+      -0.018997,
+      0.033938
      ],
      [
-      0.045933,
-      -0.01273,
-      -0.019991
+      0.045795,
+      -0.011337,
+      -0.019797
      ],
      [
-      0.044912,
-      -0.083211,
-      0.0458
+      0.044887,
+      -0.083521,
+      0.045332
      ]
     ]
    }
@@ -1105,16 +1105,16 @@
    },
    "iterations": 20,
    "initial_magnetic_moment": 1.6,
-   "energy": -35.18731576,
+   "energy": -35.18581166,
    "energies": {
-    "eigenvalue": -7.65033868,
-    "hartree": 44.1393891,
-    "integral_vxc_rho": -11.11830291,
-    "exchange_correlation": -8.48354824,
-    "electron_ion": -116.50005057,
+    "eigenvalue": -7.65037938,
+    "hartree": 44.13778223,
+    "integral_vxc_rho": -11.11803736,
+    "exchange_correlation": -8.48334476,
+    "electron_ion": -116.49574714,
     "ion_ion": 13.96765736
    },
-   "fermi_level": -0.0503,
+   "fermi_level": -0.0507,
    "electrons": [
     4.0,
     4.0
@@ -1122,24 +1122,24 @@
    "net_magnetic_moment": 0.0,
    "eigenvalues": {
     "up": [
-     -1.7142239972,
-     -0.9304210456,
-     -0.6456347238,
-     -0.5348895751,
-     0.1104237191,
-     0.2667157813,
-     0.4896616166,
-     0.5042955788
+     -1.7155012196,
+     -0.9298286214,
+     -0.6455455318,
+     -0.5343143199,
+     0.1102077947,
+     0.2669070522,
+     0.4896929374,
+     0.5042092102
     ],
     "down": [
-     -1.7142239965,
-     -0.9304210453,
-     -0.6456347235,
-     -0.5348895743,
-     0.1104237191,
-     0.2667157811,
-     0.4896616167,
-     0.5042955786
+     -1.7155012187,
+     -0.929828621,
+     -0.6455455312,
+     -0.534314319,
+     0.1102077949,
+     0.2669070522,
+     0.4896929377,
+     0.5042092102
     ]
    },
    "occupations": {
@@ -1186,17 +1186,17 @@
      [
       0.0,
       0.0,
-      1.68986
+      1.669461
      ],
      [
-      -3.192845,
-      0.0,
-      -2.16229
-     ],
-     [
-      3.192845,
+      -3.190946,
       -0.0,
-      -2.16229
+      -2.160216
+     ],
+     [
+      3.190946,
+      -0.0,
+      -2.160216
      ]
     ],
     "sc": [
@@ -1237,24 +1237,24 @@
      [
       0.0,
       0.0,
-      -2.800022
+      -2.820421
      ],
      [
-      -0.047953,
-      0.0,
-      0.082651
-     ],
-     [
-      0.047953,
+      -0.046054,
       -0.0,
-      0.082651
+      0.084725
+     ],
+     [
+      0.046054,
+      -0.0,
+      0.084725
      ]
     ],
     "nonlocal": [
      [
       0.0,
-      -0.0,
-      2.6952
+      0.0,
+      2.711701
      ],
      [
       0.0,
@@ -1271,39 +1271,39 @@
      [
       0.0,
       0.0,
-      -0.104822
+      -0.10872
      ],
      [
-      -0.047953,
+      -0.046054,
       -0.0,
-      0.082651
+      0.084725
      ],
      [
-      0.047953,
+      0.046054,
       0.0,
-      0.082651
+      0.084725
      ]
     ],
     "net": [
      0.0,
      -0.0,
-     0.06048
+     0.060731
     ],
     "total": [
      [
       0.0,
       0.0,
-      -0.124982
+      -0.128963
      ],
      [
-      -0.047953,
+      -0.046054,
       -0.0,
-      0.062491
+      0.064482
      ],
      [
-      0.047953,
+      0.046054,
       0.0,
-      0.062491
+      0.064482
      ]
     ]
    }
@@ -1339,25 +1339,25 @@
     "H_POTRE.DAT": "tests/data/spin_ca_H_POTRE.DAT"
    },
    "iterations": 16,
-   "energy": -35.18731576,
+   "energy": -35.18581166,
    "energies": {
-    "eigenvalue": -7.65033867,
-    "hartree": 44.13938909,
-    "integral_vxc_rho": -11.11830291,
-    "exchange_correlation": -8.48354824,
-    "electron_ion": -116.50005056,
+    "eigenvalue": -7.65037937,
+    "hartree": 44.13778223,
+    "integral_vxc_rho": -11.11803736,
+    "exchange_correlation": -8.48334476,
+    "electron_ion": -116.49574713,
     "ion_ion": 13.96765736
    },
-   "fermi_level": -0.0503,
+   "fermi_level": -0.0507,
    "eigenvalues": [
-    -1.7142239957,
-    -0.9304210429,
-    -0.6456347212,
-    -0.5348895753,
-    0.1104237191,
-    0.2667157818,
-    0.4896616174,
-    0.5042955795
+    -1.7155012183,
+    -0.9298286186,
+    -0.6455455289,
+    -0.5343143203,
+    0.1102077947,
+    0.2669070527,
+    0.4896929383,
+    0.504209211
    ],
    "occupations": [
     1.0,
@@ -1391,17 +1391,17 @@
      [
       0.0,
       0.0,
-      1.68986
+      1.669461
      ],
      [
-      -3.192845,
+      -3.190946,
       0.0,
-      -2.16229
+      -2.160216
      ],
      [
-      3.192845,
+      3.190946,
       0.0,
-      -2.16229
+      -2.160216
      ]
     ],
     "sc": [
@@ -1412,12 +1412,12 @@
      ],
      [
       -0.0,
-      0.0,
+      -0.0,
       -0.0
      ],
      [
       0.0,
-      -0.0,
+      0.0,
       -0.0
      ]
     ],
@@ -1442,24 +1442,24 @@
      [
       0.0,
       0.0,
-      -2.800022
+      -2.820421
      ],
      [
-      -0.047953,
+      -0.046054,
       0.0,
-      0.082651
+      0.084725
      ],
      [
-      0.047953,
+      0.046054,
       0.0,
-      0.082651
+      0.084725
      ]
     ],
     "nonlocal": [
      [
       -0.0,
-      0.0,
-      2.6952
+      -0.0,
+      2.711701
      ],
      [
       0.0,
@@ -1476,39 +1476,39 @@
      [
       0.0,
       0.0,
-      -0.104822
+      -0.10872
      ],
      [
-      -0.047953,
+      -0.046054,
       -0.0,
-      0.082651
+      0.084725
      ],
      [
-      0.047953,
+      0.046054,
       0.0,
-      0.082651
+      0.084725
      ]
     ],
     "net": [
      0.0,
      -0.0,
-     0.06048
+     0.060731
     ],
     "total": [
      [
       0.0,
       0.0,
-      -0.124982
+      -0.128963
      ],
      [
-      -0.047953,
+      -0.046054,
       -0.0,
-      0.062491
+      0.064482
      ],
      [
-      0.047953,
+      0.046054,
       0.0,
-      0.062491
+      0.064482
      ]
     ]
    }
@@ -1830,9 +1830,9 @@
        -1.1414
       ]
      ],
-     "energy_per_atom_ev": -444.52459,
-     "maximum_force": 0.83526,
-     "energy": -65.34339648
+     "energy_per_atom_ev": -444.50816,
+     "maximum_force": 0.83964,
+     "energy": -65.34098092
     },
     {
      "positions": [
@@ -1843,64 +1843,64 @@
       ],
       [
        0.0,
-       0.0,
+       -0.0,
        -0.434293
       ]
      ],
-     "energy_per_atom_ev": -348.59954,
-     "maximum_force": 54.71299,
-     "energy": -51.24278488
+     "energy_per_atom_ev": -348.64668,
+     "maximum_force": 54.73485,
+     "energy": -51.24971481
     },
     {
      "positions": [
       [
        0.0,
        0.0,
-       0.960937
+       0.960756
       ],
       [
        0.0,
-       0.0,
-       -0.960937
+       -0.0,
+       -0.960756
       ]
      ],
-     "energy_per_atom_ev": -442.34715,
-     "maximum_force": 2.51851,
-     "energy": -65.02332076
+     "energy_per_atom_ev": -442.33019,
+     "maximum_force": 2.53676,
+     "energy": -65.02082835
     },
     {
      "positions": [
       [
        0.0,
        0.0,
-       1.099075
+       1.098657
       ],
       [
        0.0,
-       0.0,
-       -1.099075
+       -0.0,
+       -1.098657
       ]
      ],
-     "energy_per_atom_ev": -444.77997,
-     "maximum_force": 0.02734,
-     "energy": -65.38093578
+     "energy_per_atom_ev": -444.76789,
+     "maximum_force": 0.01843,
+     "energy": -65.3791607
     },
     {
      "positions": [
       [
        0.0,
        0.0,
-       1.097643
+       1.097698
       ],
       [
        0.0,
-       0.0,
-       -1.097643
+       -0.0,
+       -1.097698
       ]
      ],
-     "energy_per_atom_ev": -444.77618,
-     "maximum_force": 0.00141,
-     "energy": -65.38037879
+     "energy_per_atom_ev": -444.76534,
+     "maximum_force": 8e-05,
+     "energy": -65.3787857
     }
    ]
   }

@@ -626,6 +626,258 @@ class DistributedExchangeTests(unittest.TestCase):
         )
 
 
+@unittest.skipUnless(cupy_available(), "CuPy with a usable CUDA device is required")
+class PeriodicRouteTests(unittest.TestCase):
+    """The sector orbitals of a periodic cell on the ranks take the routes of one process
+    (``PARSEC_MPI_EXCHANGE_POOL=auto``): ``W`` and ``E_x`` of the coset blocks of the half-cell translations and of the
+    full-grid block against :func:`apply_device_exchange` of one process, a small build to the last bit on every rank,
+    a divided one to round-off; the small build of one sector on its owner alone; the tiles under ``off``; coset
+    blocks that do not fit one rank send every rank to the next route."""
+
+    def _channel(self, repeats=(2, 1, 1), points=16, states=(4, 3, 0, 5), kind="diamond", seed=3):
+        from parsec_python.acceleration.tests.test_exchange_translations import _cell, _device_channel
+
+        grid, _reduction, decomposition = _cell(repeats, points, kind=kind)
+        orbitals = _device_channel(grid, decomposition, states_per_sector=states, occupied_fraction=0.6,
+                                   devices=(0,), seed=seed)
+        return grid, decomposition, orbitals
+
+    @staticmethod
+    def _service(rank, comm, grid, decomposition, orbitals, batch):
+        from parsec_python.acceleration.SCF.hybrid_mpi import MPIExchangeService
+        from parsec_python.acceleration.tests.test_exchange_translations import _device_solver
+
+        count = decomposition.representation_count
+        topology = tuple({sector: (0,) for sector in range(owner, count, comm.size)} for owner in range(comm.size))
+        retained = {
+            sector.representation: SimpleNamespace(vectors=sector.vectors, handover=None)
+            for sector in orbitals.sectors
+            if sector.representation % comm.size == rank
+        }
+        sectors = SimpleNamespace(decomposition=decomposition, _sector_device_ids=(0,) * count,
+                                  _mpi_retained_results=retained, _operators=[None] * count)
+        solvers = _device_solver(grid, batch)
+        exchange = SimpleNamespace(devices=(0,), expansions={}, bound=None, _solvers={}, operators=lambda: {},
+                                   pair_solvers=lambda _system, _definition: solvers)
+        return MPIExchangeService(SimpleNamespace(comm=comm, topology=topology), exchange, sectors, grid, None)
+
+    def _reference(self, grid, orbitals, batch, two_steps):
+        import cupy as cp
+
+        from parsec_python.acceleration.Hamiltonian.exchange_device import apply_device_exchange
+        from parsec_python.acceleration.tests.test_exchange_translations import _device_solver
+
+        solvers = _device_solver(grid, batch)
+        if two_steps:
+            occupied = apply_device_exchange(orbitals, solvers, (0,), columns="occupied")
+            whole = apply_device_exchange(orbitals, solvers, (0,), columns="all", known=occupied)
+            energy = occupied.energy
+        else:
+            whole = apply_device_exchange(orbitals, solvers, (0,), columns="all")
+            energy = whole.energy
+        applied = {sector.representation: cp.asnumpy(whole.applied[index])
+                   for index, sector in enumerate(orbitals.sectors)}
+        return applied, energy, whole.pair_solves, solvers.take_paths()
+
+    def _distributed(self, size, grid, decomposition, orbitals, batch, two_steps, memory=None):
+        import cupy as cp
+
+        representations, columns = _selection(orbitals)
+        world = _World(size)
+        selection = dict(id=1, channel=None, representations=representations, columns=columns,
+                         occupations=orbitals.occupations, spin_weight=2.0,
+                         volume_element=float(grid.volume_element))
+        ranks = threading.local()
+
+        def work(rank):
+            ranks.rank = rank
+            service = self._service(rank, _Comm(world, rank), grid, decomposition, orbitals, batch)
+            service.solvers.take_paths()
+            service.handle("exx_channel", dict(channels=[selection]))
+            if two_steps:
+                numbers = [service.handle("exx_apply", dict(channel=1, id=2, columns="occupied", known=None)),
+                           service.handle("exx_apply", dict(channel=1, id=3, columns="all", known=2))]
+            else:
+                numbers = [service.handle("exx_apply", dict(channel=1, id=3, columns="all", known=None))]
+            application = service.objects[3]
+            self.assertIsNone(application.pooled)
+            owned = {
+                sector.representation: cp.asnumpy(application.applied[index])
+                for index, sector in enumerate(application.orbitals.sectors)
+                if service.owners[sector.representation] == rank
+            }
+            record = service.record()
+            paths = service.solvers.take_paths()
+            service.handle("exx_trim", {})
+            return dict(numbers=numbers, applied=owned, record=record, paths=paths, left=len(service.objects))
+
+        if memory is None:
+            return _run_ranks(size, work)
+        from unittest.mock import patch
+
+        from parsec_python.acceleration.Hamiltonian import exchange_device
+
+        with patch.object(exchange_device, "_device_memory", side_effect=lambda device: memory(ranks.rank, device)):
+            return _run_ranks(size, work)
+
+    def _check(self, size, *, two_steps=False, divided=False, environment=None, batch=3, exact=None,
+               channel=None, memory=None, expected_paths=None, floor=None):
+        import os
+        from unittest.mock import patch
+
+        from parsec_python.acceleration.Hamiltonian import bloch_exchange_device, exchange_translations
+        from parsec_python.acceleration.SCF import hybrid_mpi
+
+        grid, decomposition, orbitals = channel or self._channel()
+        small = 0.0 if divided else 1.0e9
+        floor = hybrid_mpi.MPI_POOL_MIN_SECTORS if floor is None else floor
+        with patch.dict(os.environ, environment or {}), \
+                patch.object(exchange_translations, "SMALL_BUILD_POINTS", small), \
+                patch.object(bloch_exchange_device, "SMALL_BUILD_POINTS", small), \
+                patch.object(hybrid_mpi, "MPI_POOL_MIN_SECTORS", floor):
+            applied, energy, pair_solves, reference_paths = self._reference(grid, orbitals, batch, two_steps)
+            results = self._distributed(size, grid, decomposition, orbitals, batch, two_steps, memory)
+        root = results[0]
+        exact = (not divided) if exact is None else exact
+        found = root["numbers"][0]["energy"]
+        if exact:
+            self.assertEqual(found, energy)
+        else:
+            self.assertAlmostEqual(found, energy, delta=1.0e-12 * abs(energy))
+        self.assertEqual(sum(item["pair_solves"] for item in root["numbers"]), pair_solves)
+        scale = max(float(np.abs(block).max()) for block in applied.values())
+        seen = set()
+        for result in results:
+            for representation, block in result["applied"].items():
+                self.assertNotIn(representation, seen)
+                seen.add(representation)
+                if exact:
+                    np.testing.assert_array_equal(block, applied[representation])
+                else:
+                    self.assertLess(float(np.abs(block - applied[representation]).max()), 1.0e-12 * scale)
+        self.assertEqual(seen, set(applied))
+        self.assertEqual([result["left"] for result in results], [0] * size)
+        # every rank counts the builds by path as one process does
+        expected = reference_paths if expected_paths is None else expected_paths
+        self.assertEqual([result["paths"] for result in results], [expected] * size)
+        return results
+
+    def test_the_translation_classes_on_one_two_and_three_ranks(self) -> None:
+        from collections import Counter
+
+        for size in (1, 2, 3):
+            for two_steps in (False, True):
+                with self.subTest(ranks=size, two_steps=two_steps):
+                    results = self._check(size, two_steps=two_steps)
+                    self.assertEqual(results[0]["paths"], Counter({"translations": 2 if two_steps else 1}))
+                    # a small build on every rank: nothing of W travels, the orbitals are broadcast once
+                    for result in results:
+                        self.assertEqual(result["record"]["transport_bytes"]["reduce_sent"], 0)
+                    if size > 1:
+                        self.assertGreater(results[0]["record"]["transport_bytes"]["broadcast_sent"], 0)
+
+    def test_divided_tiles_of_the_translation_classes(self) -> None:
+        for size in (2, 3):
+            for two_steps in (False, True):
+                with self.subTest(ranks=size, two_steps=two_steps):
+                    results = self._check(size, two_steps=two_steps, divided=True)
+                    self.assertGreater(sum(item["record"]["transport_bytes"]["reduce_sent"] for item in results), 0)
+                    self.assertTrue(all(item["record"]["pair_solves"] > 0 for item in results))
+        # four cosets of the body centre (four classes per pair) on five ranks
+        self._check(5, divided=True, channel=self._channel((1, 1, 1), 16, kind="bcc", states=(3, 2, 4)))
+
+    def test_the_pooled_block_from_its_floor_of_sectors(self) -> None:
+        from collections import Counter
+
+        off = {"PARSEC_CUPY_EXCHANGE_TRANSLATIONS": "off"}
+        count = len(self._channel()[2].sectors)
+        for divided in (False, True):
+            for two_steps in (False, True):
+                with self.subTest(divided=divided, two_steps=two_steps):
+                    results = self._check(2, two_steps=two_steps, divided=divided, environment=off, floor=count)
+                    builds = 2 if two_steps else 1
+                    self.assertEqual(results[0]["paths"], Counter({"pool": builds, "full": builds}))
+
+    def test_fewer_sectors_than_the_floor_keep_the_tiles(self) -> None:
+        from collections import Counter
+
+        # the orbitals without translation classes, one sector fewer than the floor: the tiles of the sectors, and
+        # no copy of the orbitals on every rank
+        count = len(self._channel()[2].sectors)
+        for two_steps in (False, True):
+            with self.subTest(two_steps=two_steps):
+                builds = 2 if two_steps else 1
+                results = self._check(2, two_steps=two_steps, environment={"PARSEC_CUPY_EXCHANGE_TRANSLATIONS": "off"},
+                                      floor=count + 1, exact=False,
+                                      expected_paths=Counter({"tiles": builds, "full": builds}))
+                self.assertGreater(sum(item["record"]["transport_bytes"]["reduce_sent"] for item in results), 0)
+
+    def test_off_keeps_the_tiles_of_the_sectors(self) -> None:
+        from collections import Counter
+
+        results = self._check(2, environment={"PARSEC_MPI_EXCHANGE_POOL": "off"}, exact=False,
+                              expected_paths=Counter({"full": 1}))
+        self.assertGreater(sum(item["record"]["transport_bytes"]["reduce_sent"] for item in results), 0)
+
+    def test_coset_blocks_that_do_not_fit_one_rank_take_the_next_route_everywhere(self) -> None:
+        from collections import Counter
+
+        from parsec_python.acceleration.Hamiltonian import exchange_device
+
+        real = exchange_device._device_memory
+        count = len(self._channel()[2].sectors)
+        # rank 1 has room for neither the coset blocks nor the full-grid block: every rank takes the tiles
+        self._check(2, memory=lambda rank, device: (0, 1) if rank == 1 else real(device), exact=False, floor=count,
+                    expected_paths=Counter({"translations-unfit": 1, "pool-fallback": 1, "full": 1}))
+        # below the floor of the full-grid block the tiles come at once
+        self._check(2, memory=lambda rank, device: (0, 1) if rank == 1 else real(device), exact=False,
+                    floor=count + 1, expected_paths=Counter({"translations-unfit": 1, "tiles": 1, "full": 1}))
+
+    def test_a_small_build_of_one_sector_runs_on_its_owner_alone(self) -> None:
+        from collections import Counter
+
+        grid, decomposition, _ = self._channel()
+        count = decomposition.representation_count
+        # one occupied sector (representation 0, owned by rank 0): the small build of one process on one device
+        channel = self._channel(states=(6,) + (0,) * (count - 1))
+        self.assertEqual(len(channel[2].sectors), 1)
+        for two_steps in (False, True):
+            with self.subTest(two_steps=two_steps):
+                results = self._check(2, two_steps=two_steps, channel=channel,
+                                      expected_paths=Counter({"full": 2 if two_steps else 1}))
+                for result in results:
+                    self.assertEqual(result["record"]["transport_bytes"]["broadcast_sent"], 0)
+                    self.assertEqual(result["record"]["transport_bytes"]["reduce_sent"], 0)
+                self.assertEqual(results[1]["record"]["pair_solves"], 0)
+
+
+class PoolSettingTests(unittest.TestCase):
+    def test_the_tiles_of_few_sectors_are_named_as_builds_without_a_note(self) -> None:
+        from collections import Counter
+
+        from parsec_python.acceleration.tests.test_gamma_hybrid_route import _periodic_solvers
+
+        solvers = _periodic_solvers()
+        plain = solvers.description
+        unfit = "; the coset blocks of the half-cell translations of the sector orbitals did not fit the device in "
+        self.assertEqual(solvers.describe(Counter({"tiles": 2, "full": 2})), plain)
+        self.assertEqual(solvers.describe(Counter({"tiles": 1, "translations-unfit": 1, "full": 1})),
+                         plain + unfit + "1 of 1 builds")
+
+    def test_a_wrong_value_is_refused_before_the_scf(self) -> None:
+        import os
+        from unittest.mock import patch
+
+        from parsec_python.acceleration.SCF import hybrid_mpi
+
+        for value, expected in (("", "auto"), (" OFF ", "off"), ("auto", "auto")):
+            with patch.dict(os.environ, {"PARSEC_MPI_EXCHANGE_POOL": value}):
+                self.assertEqual(hybrid_mpi.mpi_exchange_pool_setting(), expected)
+        with patch.dict(os.environ, {"PARSEC_MPI_EXCHANGE_POOL": "on"}):
+            with self.assertRaisesRegex(ValueError, "PARSEC_MPI_EXCHANGE_POOL must be auto or off"):
+                hybrid_mpi.mpi_device_exchange_for(SimpleNamespace(), SimpleNamespace(), object(), None)
+
+
 class SpinFallbackTests(unittest.TestCase):
     def test_the_fallback_frees_the_exchange_of_every_rank_before_the_full_grid(self) -> None:
         from unittest.mock import patch

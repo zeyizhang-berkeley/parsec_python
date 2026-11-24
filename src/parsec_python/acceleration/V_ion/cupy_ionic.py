@@ -280,14 +280,18 @@ class CupyIonicBuilders(NativeIonicBuilders):
 
         for symbol in symbols:
             potential, spec = potentials[symbol], specifications[symbol]
+            samples = potential.radii.size
             if local:
-                values = _values64(potential.channel_potentials[spec.local_angular_momentum])
+                values = _values64(potential.local_channel_potential(spec.local_angular_momentum))
                 use_spline = spec.use_spline
+                if use_spline:
+                    # the kernel takes -2 Z/r from r[samples-2]: the spline's cutoff (PARSEC_SPLINE_COULOMB_TAIL)
+                    samples = potential.local_spline_samples(spec.local_angular_momentum)
             else:
                 values, use_spline = _density_table(potential, spec, core=core)
             knots, spl_values, second = _spline_payload(potential, values, grid, use_spline)
             descriptors.append([
-                append(potential.radii), potential.radii.size, append(values),
+                append(potential.radii), samples, append(values),
                 append(knots), append(spl_values), append(second), knots.size,
             ])
             charges.append(potential.ionic_charge)

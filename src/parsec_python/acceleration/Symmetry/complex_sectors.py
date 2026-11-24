@@ -1,5 +1,5 @@
 """Sectors of the complex one-dimensional characters of an abelian little group of a k-point
-(``PARSEC_KPOINT_SECTOR_CHARACTERS=complex``).
+(``PARSEC_KPOINT_SECTOR_CHARACTERS=complex``, the default since 2026-11-23; ``real`` keeps the commuting involutions).
 
 The sectors of a k-point (:mod:`..SCF.kpoint_sectors`) use the commuting involutions ``H_k`` of its little group,
 whose characters are ``+-1``.  The Bloch Hamiltonian of a k-point other than Gamma is complex anyway, so nothing asks
@@ -31,11 +31,12 @@ _SWITCH = "PARSEC_KPOINT_SECTOR_CHARACTERS"
 
 
 def sector_characters_setting() -> str:
-    """``PARSEC_KPOINT_SECTOR_CHARACTERS``: ``real`` (default) the commuting involutions of the little group of a
-    k-point; ``complex`` also an abelian subgroup with complex characters where its sectors (with their classes)
-    cost less, at k-points other than Gamma."""
+    """``PARSEC_KPOINT_SECTOR_CHARACTERS``: ``complex`` (default since 2026-11-23) also takes an abelian subgroup of
+    the little group of a k-point other than Gamma with complex characters where its sectors (with their classes)
+    cost less than those of the commuting involutions; ``real`` keeps the commuting involutions alone, bit for bit as
+    before."""
 
-    value = os.environ.get(_SWITCH, "real").strip().lower() or "real"
+    value = os.environ.get(_SWITCH, "complex").strip().lower() or "complex"
     if value not in {"real", "complex"}:
         raise ValueError(f"{_SWITCH} must be real or complex, not {value!r}")
     return value

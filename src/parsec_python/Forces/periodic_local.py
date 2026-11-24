@@ -14,7 +14,26 @@ nonlinear core correction, over the image balls of :func:`parsec_python.V_ion.io
 
 The local potential ignores ``Cubic_Spline`` as the Fortran periodic one does and always uses the cubic spline of the
 table (see :data:`parsec_python.V_ion.ewald.LOCAL_POTENTIAL_USES_CUBIC_SPLINE`); the core density follows ``Cubic_Spline``,
-as ``corecd.f90``.
+as ``corecd.f90``.  The radial slopes keep ``forcloc.f90``'s rule closer than the first sample (zero) but switch to the
+Coulomb slope (the potential) or to zero (the core density) at ``rs(ns-1)``, where the sampled tables do, not at
+``forcloc.f90``'s ``rs(npoint-6)``: for a table of fewer than eight samples that radius lies at or inside the first
+sample, and every grid point took the Coulomb slope (forces of a six-sample test table off by 0.08 Ry/bohr, and NaN in
+the sums of :mod:`parsec_python.acceleration.Forces.periodic_local` for an atom on a grid point).  Between the two radii
+the slopes are now those of the spline the energy samples.  The POTRE and FHI tables of the tree put ``rs(npoint-6)``
+beyond 65 bohr; a table that is the Coulomb tail to round-off from a few bohr on is summed by the ball sums of the
+acceleration package only out to the larger of the Gaussian tail and that Coulomb onset (10 to 25 bohr), so its forces
+keep their bits there.  A table that is not the Coulomb tail to round-off before its end is summed out to ``rs(ns-1)``
+(``examples/h2_full_nonlocal/H_POTRE.DAT``: onset ``rs(ns-1)`` = 115.6 bohr, ``rs(npoint-6)`` = 108.6 bohr; the forces
+of an H2 cell with it change by up to 3.2e-5 Ry/bohr), and the readable sums below (every grid point for every image)
+reach ``rs(npoint-6)`` in large cells (a 72-bohr Si cube at fixed smooth fields: 1.5e-2 of 97 Ry/bohr).
+
+Closer than the first radial sample the slopes keep ``forcloc.f90``'s zero unless ``PARSEC_SPLINE_FORCE_CENTER=auto``
+gives them the smooth behaviour of the table, which it does for a table whose first sample lies below 3e-3 bohr (every
+POTRE table of the tree, and the FHI tables, which ``PARSEC_FHI_ORIGIN=auto`` continues to 1e-5 bohr).  A coarser table
+(the six-sample test tables, 0.1 bohr; the H and He FHI tables under ``PARSEC_FHI_ORIGIN=off``, 6.25e-3 and 3.1e-3
+bohr) leaves a grid point inside its first sample out, where the energy has the slope of the padded spline (a
+hexagonal cell with the test core table and a grid point 0.06 bohr from an atom: 8.9e-5 Ry/bohr off the slope of the
+energy; the Fortran-derived routines take the spline slope there).
 
 Fortran's periodic path (``force_loc_pb.f90``) has no term for the SCF residual, so ``self_consistency`` is zero here;
 the forces are first-order accurate in the density, as the Hellmann-Feynman forces need a converged SCF.
@@ -164,6 +183,8 @@ def dense_periodic_local_forces(
                 use_spline=local_potential_uses_spline(specification),
                 spline_padding_width=half_width,
                 center=smooth_center_radius(potential, center),
+                # the Coulomb slope where the sampled potential becomes -2 Z/r (not forcloc.f90's rs(npoint-6))
+                tail=potential.interpolation_cutoff,
             ) + _erf_over_r_slope(charge, radius, eta)
             inverse = np.zeros_like(radius)
             positive = radius > 0.0
@@ -192,6 +213,7 @@ def dense_periodic_local_forces(
                     spline_padding_width=half_width,
                     center=smooth_center_radius(potential, center),
                     slopes=slopes,
+                    tail=potential.interpolation_cutoff,
                 )
                 inverse = np.zeros_like(radius)
                 positive = radius > 0.0

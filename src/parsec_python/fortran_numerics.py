@@ -5,7 +5,9 @@ accurate: the cubic spline of a species without ``Cubic_Spline``, projectors tha
 quadrature of the Kleinman-Bylander denominators, a continuous Perdew-Zunger correlation, the Hartree potential of a
 slab that makes its energy stationary, the controlled Hartree boundary values of a cluster, and force rules next to an
 atom and for the Gaussian charges of wires and slabs; the converged band solves, the Fermi level of a gapped system
-at the root of its electron count and FHI tables continued below their first radial sample.  ``on`` gives every one
+at the root of its electron count, FHI tables continued below their first radial sample, the Coulomb tail of a
+splined local potential beyond its Coulomb onset and (opt-in) a later-SCF filter degree that returns where a loop
+stalls.  ``on`` gives every one
 of them the value of PARSEC 1.5 at once (:data:`FORTRAN_NUMERICS_VALUES`, and for a cluster or slab whose input gives its
 domain the defaults ``Hartree_Boundary_Tolerance: off`` and ``Hartree_Atomic_Tail: off`` of
 :func:`fortran_boundary_defaults`).  A switch set in the environment, or a keyword in the input, wins over the
@@ -55,6 +57,14 @@ FORTRAN_NUMERICS_VALUES = {
     # an FHI table between the atom and its first radial sample as pseudo.f90 reads it
     # (Pseudopotential/fhipp.py, fhi_origin_setting, which reads it through switch_value)
     "PARSEC_FHI_ORIGIN": "off",
+    # the later-SCF Chebyshev degree of PARSEC 1.5, never raised in a loop (its default as well; listed so that the
+    # umbrella keeps PARSEC's rule where another default changes; SCF/filter_degree.py, filter_degree_stall_setting,
+    # which reads it through switch_value)
+    "PARSEC_FILTER_DEGREE_STALL": "off",
+    # the cubic spline of a local potential out to rs(ns-1), as ionpot.f90 evaluates a species with Cubic_Spline
+    # (Pseudopotential/potre.py, spline_coulomb_tail_setting, which reads it through switch_value); a species without
+    # Cubic_Spline takes linear tables under the umbrella anyway (PARSEC_CUBIC_SPLINE_DEFAULT above)
+    "PARSEC_SPLINE_COULOMB_TAIL": "off",
 }
 
 

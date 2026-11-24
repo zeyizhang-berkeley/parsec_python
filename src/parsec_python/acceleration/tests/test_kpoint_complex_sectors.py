@@ -1,7 +1,9 @@
 """Sectors of the complex characters of an abelian little group of a k-point (``acceleration/Symmetry/complex_sectors.py``,
 ``PARSEC_KPOINT_SECTOR_CHARACTERS=complex``).
 
-CPU: the characters of an abelian group, the union of the spectra of the sectors (the threefold axis of a vacancy
+CPU: the plans of the default (the complex characters on the threefold axis of a vacancy cube, the involutions at
+Gamma and on the z axis, none with the Hubbard term of LDA+U; ``real`` as before), the characters of an abelian
+group, the union of the spectra of the sectors (the threefold axis of a vacancy
 cube without the translations of the face-centred cell, a fourfold axis, the silicon cube) is the spectrum of the
 k-point, the orbitals of a sector and its reduction are adjoint, the gathered stencil with a complex palette is the
 reduced kinetic term, and the classes of the complex sectors are images of each other; the SCF of the diamond vacancy
@@ -72,7 +74,7 @@ def _vacancy_system():
 
 class SwitchTests(unittest.TestCase):
     def test_the_switch(self) -> None:
-        for value, expected in (("", "real"), ("COMPLEX", "complex"), ("real", "real")):
+        for value, expected in (("", "complex"), ("COMPLEX", "complex"), ("real", "real")):
             with mock.patch.dict(os.environ, {"PARSEC_KPOINT_SECTOR_CHARACTERS": value}):
                 self.assertEqual(complex_sectors.sector_characters_setting(), expected)
         with mock.patch.dict(os.environ, {"PARSEC_KPOINT_SECTOR_CHARACTERS": "auto"}):
@@ -80,6 +82,57 @@ class SwitchTests(unittest.TestCase):
                 complex_sectors.sector_characters_setting()
             with self.assertRaises(ValueError):
                 sectors.check_kpoint_sector_switches()
+
+
+class DefaultPlanTests(unittest.TestCase):
+    """The plans of the vacancy cube at Gamma, on the threefold axis and on the z axis: the default takes the complex
+    characters of C3 on the threefold axis only, ``real`` the involutions everywhere (the axis then stays whole: its
+    halves of Cs would not halve the work), and a loop with the Hubbard term of LDA+U takes no complex sectors."""
+
+    def plans(self, value: str, **extra):
+        from parsec_python.SCF.kpoint_solver import KPointJob
+
+        problem, system = _vacancy_system()
+        side = float(np.asarray(problem.periodic_cell.lattice_vectors)[0, 0])
+
+        class Invariance:
+            def __init__(self, *arguments) -> None:
+                pass
+
+            def __call__(self, index) -> bool:
+                return True
+
+            def in_density_group(self, index) -> bool:
+                return True
+
+        geometry = {
+            "grid": system.grid,
+            "atoms": tuple(system.cell_atoms),
+            "k_points": 2.0 * np.pi / side * np.array([[0.0, 0.0, 0.0], [1 / 3, 1 / 3, 1 / 3], [0.0, 0.0, 0.25]]),
+            "weights": np.ones(3),
+            "lattice": np.asarray(problem.periodic_cell.lattice_vectors, dtype=float),
+            "density_symmetry": None,
+            "invariance": Invariance,
+            **extra,
+        }
+        with mock.patch.dict(os.environ, {"PARSEC_KPOINT_SECTOR_CHARACTERS": value}):
+            return sectors.plan_sectors(KPointJob(3, 22, None, None, None, geometry=geometry))
+
+    @staticmethod
+    def kinds(plans):
+        return [None if plan is None else bool(getattr(plan.decomposition, "is_complex", False)) for plan in plans]
+
+    def test_the_threefold_axis_by_default(self) -> None:
+        default, real = self.plans(""), self.plans("real")
+        self.assertEqual(self.kinds(default), [False, True, False])
+        self.assertEqual(default[1].order, 3)
+        self.assertEqual(self.kinds(real), [False, None, False])
+        for found, before in ((default[0], real[0]), (default[2], real[2])):
+            self.assertEqual(found.sizes, before.sizes)
+
+    def test_no_complex_characters_with_the_hubbard_term(self) -> None:
+        marked = self.plans("", hubbard_part=lambda *arguments, **keywords: {})
+        self.assertEqual(self.kinds(marked), [False, None, False])
 
 
 class DecompositionTests(unittest.TestCase):

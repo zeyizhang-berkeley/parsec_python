@@ -25,6 +25,7 @@ from scipy.special import erf, erfc, erfcx
 from ..Grid.pbc import SlabRealSpaceGrid
 from ..models import Atom, HartreeSettings, SpeciesPotential
 from ..Pseudopotential import ParsecPseudopotential
+from ..Pseudopotential.local_filter import filtered_local_reach
 
 _SIGMA_FACTOR = 0.5  # Fortran ``sigmafac``: sigma = sigmafac * rcore
 _GAUSSIAN_REACH = 6.0  # sigmas
@@ -146,6 +147,8 @@ def slab_local_ionic_potential(
         charge = potential.ionic_charge
         sigma = _SIGMA_FACTOR * _rcore(potential)
         reach = _GAUSSIAN_REACH * sigma
+        # a table filtered by PARSEC_LOCAL_FILTER reaches its Coulomb onset (0 for the file's table)
+        reach = max(reach, filtered_local_reach(potential, specification.local_angular_momentum))
         position = np.asarray(atom.position, dtype=np.float64)
         candidates = _in_plane_images(lattice, reach, position, radius)
         near = np.linalg.norm((position + candidates)[:, :2] - center, axis=1) <= reach + radius
