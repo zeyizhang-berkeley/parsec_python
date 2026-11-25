@@ -556,8 +556,9 @@ _HYBRID_PAIRS_NO_FORCE_GROUP = (
 _UNSHIFTED_HYBRID_WEDGE_NOTE = (
     _UNSHIFTED_MESH_PREFIX
     + "reduced to its irreducible wedge as with a zero Monkhorst_Pack_Shift; the exchange of the hybrid functional "
-    "sums over the whole mesh through the images of the wedge (PARSEC_HYBRID_KPOINT_WEDGE=on: the semilocal start "
-    "and the Fock loop on the wedge, the symmetric state; off keeps the time-reversal pairs of the mesh) "
+    "sums over the whole mesh through the images of the wedge (PARSEC_HYBRID_KPOINT_WEDGE=on, the default: the "
+    "semilocal start and the Fock loop on the wedge, metals included, equivalent k-points filled alike; auto "
+    "keeps the time-reversal pairs where the semilocal start has a partly filled state, off keeps them always) "
     + _UNSHIFTED_MESH_PORT
 )
 _UNSHIFTED_HYBRID_DEFERRED_NOTE = (
@@ -5249,10 +5250,10 @@ def _parse_parsec_input(
             )
         # A hybrid single point (PARSEC_HYBRID_KPOINT_WEDGE): the wedge of the stencil-exact operations of the grid
         # and the mesh with the density averaged over them, where there are any; the exchange reaches the rest of the
-        # mesh through the images of the wedge's Bloch factors (SCF/hybrid_periodic.py, hybrid_mesh_stars).  on: the
-        # whole run on the wedge; auto (since 2026-11-20): the input of off (the time-reversal pairs, no density
-        # average) with the wedge kept aside, which the Fock loop takes after a semilocal start without partly filled
-        # states (BlochExchange.after_start).
+        # mesh through the images of the wedge's Bloch factors (SCF/hybrid_periodic.py, hybrid_mesh_stars).  on (the
+        # default since 2026-11-23): the whole run on the wedge, metals too; auto (the default from 2026-11-20 to
+        # 2026-11-22): the input of off (the time-reversal pairs, no density average) with the wedge kept aside, which
+        # the Fock loop takes after a semilocal start without partly filled states (BlochExchange.after_start).
         hybrid_wedge = None
         # the forces and relaxations of a hybrid on its wedge (PARSEC_HYBRID_KPOINT_FORCE_WEDGE=auto): bfgs, simple and
         # the forces of a single point, the group keeping movable and fixed atoms apart, the forces completed and
@@ -5662,9 +5663,10 @@ def _parse_parsec_input(
             # hybrid_wedge_operations, on any grid: Fortran's general grid of an oblique cell keeps those that map
             # lapmvs with its auxiliary directions onto itself); the density average keeps the whole group, as for
             # every k-point run of these routines, and the images of the exchange take only the stencil-exact
-            # operations that keep the mesh (V_xc.bloch_exchange.mesh_stars).  on: the whole run on the wedge; auto
-            # (since 2026-11-20): the input of off with the wedge kept aside, which the Fock loop takes after a
-            # semilocal start without partly filled states (SCF.hybrid_periodic.BlochExchange.after_start).
+            # operations that keep the mesh (V_xc.bloch_exchange.mesh_stars).  on (the default since 2026-11-23): the
+            # whole run on the wedge, metals too; auto (the default from 2026-11-20 to 2026-11-22): the input of off
+            # with the wedge kept aside, which the Fock loop takes after a semilocal start without partly filled
+            # states (SCF.hybrid_periodic.BlochExchange.after_start).
             from ..Grid.kpoints import DeferredHybridWedge, hybrid_wedge_operations
 
             kept = hybrid_wedge_operations(

@@ -15,11 +15,11 @@ initial state. In eV:
 | | CH4 | CF4 | shift |
 |---|---:|---:|---:|
 | **PBE** | | | |
-| library potentials | 297.102 | 307.349 | 10.246 |
+| library potentials | 297.093 | 307.349 | 10.256 |
 | all-electron, spin-unpolarized hole | 297.019 | 307.290 | 10.272 |
 | all-electron, spin-polarized hole | 289.999 | 300.207 | 10.208 |
 | **LDA (CA)** | | | |
-| library potentials | 293.905 | 304.442 | 10.537 |
+| library potentials | 293.901 | 304.441 | 10.540 |
 | all-electron, spin-unpolarized hole | 293.832 | 304.382 | 10.550 |
 | all-electron, spin-polarized hole | 287.074 | 297.547 | 10.473 |
 | experiment | 290.80 | 301.85 | 11.05 |
@@ -27,7 +27,7 @@ initial state. In eV:
 - The pseudopotential calculation works with spin-unpolarized atoms and
   molecules, so its all-electron counterpart is the calculation with occupation
   1 in the C 1s orbital of a spin-restricted molecule. The library potentials
-  agree with it to 0.06–0.08 eV in the binding energies and to 0.03 eV (PBE)
+  agree with it to 0.06–0.07 eV in the binding energies and to 0.02 eV (PBE)
   and 0.01 eV (CA) in the shift.
 - Spin polarization of the core hole lowers the binding energies by 7.02 eV
   (CH4) and 7.08 eV (CF4) with PBE: the offset the papers describe, constant to
@@ -57,20 +57,36 @@ beside the potential.
 
 The kept logs are first runs without cache, double precision, with the Poisson
 solves on the GPU (`PARSEC_HARTREE_LINEAR_BACKEND=cupy`, the default since 2026-11-07), on A100 GPUs with
-80 GB, one run per GPU (code of 22 November 2026): 6–8 s per CH4 case,
-40–49 s per CF4 case (3.1 million grid points). On a laptop with an RTX 5070
+80 GB, one run per GPU, four side by side on a node after one throwaway
+warm-up run on each GPU (code of 24 November 2026): 6–8 s per CH4 case,
+40–50 s per CF4 case (3.1 million grid points). On a laptop with an RTX 5070
 Laptop GPU (8 GB) the same cases took 20–33 s and 336–402 s with the library files as they were
 before 12 October 2026 (see `src/pp_generation/README.md`).
 
+Since 24 November 2026 the local potential and the projectors of each
+species are Fourier-filtered to the grid (`PARSEC_LOCAL_FILTER=all`, the
+default). Against `PARSEC_LOCAL_FILTER=off` it lowers the PBE totals by
+6.0e-5 Ry (CH4 IS) to 1.0e-3 Ry (CF4) and the CA totals of CH4 by 1.0e-4
+and 2.5e-4 Ry (those of CF4 move by 1.1e-5 Ry at most), and moves the CH4
+binding energies by -8.8 meV (PBE) and -2.1 meV (CA), on the grid of
+0.12 angstrom, and the CF4 ones by less than 0.1 meV; the CA run of CF4 FS_1s
+takes 47 SCF steps instead of 42, the others as many as without it. Together
+with the exact Kleinman-Bylander quadrature of 23 November 2026 (and for CA
+the continuous correlation) the totals are 5.5e-5 Ry (PBE CH4 IS) to
+1.6e-3 Ry (CA CF4 FS_1s) below those of the logs of 22 November 2026, and the
+binding energies of the table moved by at most 0.009 eV.
+
 Since 22 November 2026 a `martins_new` projector is zero beyond the largest
 cutoff radius of its channels (`PARSEC_PROJECTOR_TAIL=auto`). On the C, C-1s
-and F tables of these cases that changes the projectors by 1e-5 to 2e-5 of
+and F tables of these cases that changed the projectors by 1e-5 to 2e-5 of
 their size and the totals by 4e-8 to 8e-6 Ry (CF4 is converged to 5e-5 Ry);
-the binding energies move by at most 2e-4 eV, no digit of the table above.
-`PARSEC_PROJECTOR_TAIL=off` gave the former logs to every printed digit (code
-of 22 November 2026; since 23 November 2026 together with
-`PARSEC_KB_QUADRATURE=trapezoid`, and `PARSEC_CA_CONTINUITY=off` for the CA
-cases).
+with the filtered projectors `PARSEC_PROJECTOR_TAIL=off` moves the totals by
+-3.7e-7 to -2.0e-6 Ry and the binding energies by at most 5e-6 eV.
+`PARSEC_LOCAL_FILTER=off PARSEC_SPLINE_COULOMB_TAIL=off
+PARSEC_KB_QUADRATURE=trapezoid PARSEC_FERMI_GAP_ROOT=off` (and
+`PARSEC_CA_CONTINUITY=off` for the CA cases) gives the logs of 22 November
+2026 in every line apart from the timings, and with `PARSEC_PROJECTOR_TAIL=off` in addition
+those made before 22 November 2026 (code of 24 November 2026).
 
 ## All-electron reference
 

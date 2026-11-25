@@ -1134,6 +1134,10 @@ class DeviceBlochConverter:
             # a sector of a k-point in its real form (PARSEC_KPOINT_SECTOR_REAL, ..SCF.kpoint_real_forms): a real
             # operator in any case (a complex block goes by its parts)
             return hamiltonian.device_operator(self, real=real)
+        if getattr(hamiltonian, "spinor_sector", False):
+            # a double-group sector of a spin-orbit k-point (PARSEC_SOC_KPOINT_SECTORS, ..SCF.kpoint_spinor_sectors):
+            # the operators of its two scalar sectors and its reduced spin-orbit term
+            return hamiltonian.device_operator(self, real=real)
         exchange = getattr(hamiltonian, "exchange", None)
         base = getattr(hamiltonian, "base", None)
         if exchange is not None and base is not None:

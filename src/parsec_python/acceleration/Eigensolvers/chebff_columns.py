@@ -54,6 +54,7 @@ from parsec_python.Eigensolvers.chebyshev import subspace_filter_blocks
 from parsec_python.Eigensolvers.spectral_bounds import bound_request
 from parsec_python.Eigensolvers.subspace import _adapt_polynomial_degree, subspace_filter_bounds
 
+from ..backends.device_checks import all_finite
 from .chebff_spinor import (
     _Bounds,
     SpinorEigvalResult,
@@ -118,7 +119,7 @@ def _whitened_ritz(xp, overlap_lower, projection_lower):
     overlap = overlap_lower + xp.tril(overlap_lower, -1).conj().T
     projection = projection_lower + xp.tril(projection_lower, -1).conj().T
     diagonal = xp.real(xp.diagonal(overlap)).copy()
-    if not bool(xp.all(xp.isfinite(diagonal))) or float(diagonal.min()) <= 0.0:
+    if not all_finite(diagonal) or float(diagonal.min()) <= 0.0:
         return None
     scale = 1.0 / xp.sqrt(diagonal)
     overlap = overlap * scale[:, None] * scale[None, :]
@@ -127,7 +128,7 @@ def _whitened_ritz(xp, overlap_lower, projection_lower):
         lower = xp.linalg.cholesky(overlap)
     except Exception:  # LinAlgError (NumPy) or the backend's equivalent: not positive definite
         return None
-    if not bool(xp.all(xp.isfinite(lower))):
+    if not all_finite(lower):
         return None
     inverse = _solve_triangular_inverse(xp, lower)  # R^-1, R = L^H
     check = inverse.conj().T @ overlap @ inverse
@@ -737,7 +738,7 @@ class ColumnGroup:
 # ------------------------------------------------------------------ dense steps
 def _check_finite_columns(xp, block, group: ColumnGroup) -> None:
     """Every rank of the pool stops together when the recurrence of any rank is not finite."""
-    bad = 0.0 if block.shape[1] == 0 or bool(xp.all(xp.isfinite(block[:, :1]))) else 1.0
+    bad = 0.0 if block.shape[1] == 0 or all_finite(block[:, :1]) else 1.0
     if group.size > 1:
         bad = float(np.asarray(group._host(group.sum(xp.asarray(np.array([bad])))))[0])
     if bad > 0.0:
@@ -817,7 +818,7 @@ def _cholesky_qr_rows(xp, rows, group: ColumnGroup, dimension: int) -> None:
             for _attempt in range(4):
                 try:
                     lower = xp.linalg.cholesky(gram + shift * xp.eye(count, dtype=dtype))
-                    if bool(xp.all(xp.isfinite(lower))):
+                    if all_finite(lower):
                         factor = lower
                         break
                 except Exception:  # LinAlgError (NumPy) or the backend's equivalent: not positive definite

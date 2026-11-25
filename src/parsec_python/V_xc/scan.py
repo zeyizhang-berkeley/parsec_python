@@ -119,6 +119,18 @@ def _module(array):
     return np
 
 
+def _any(mask) -> bool:
+    """``bool(mask.any())``; a CuPy mask without CuPy's CUB reduction, which a first run compiles for 3 s
+    (``acceleration/backends/device_checks.py``, the same answer).  A NumPy array or scalar (the mask of a 0-d
+    density is a ``numpy.bool_``) and a Python bool stay on the host."""
+
+    if isinstance(mask, (np.ndarray, np.generic, bool)):
+        return bool(np.any(mask))
+    from parsec_python.acceleration.backends.device_checks import any_set
+
+    return any_set(mask)
+
+
 # ----- helpers analytic in complex-step arguments --------------------------------
 
 
@@ -401,7 +413,7 @@ class NativeScan:
             raise ValueError("SCAN inputs must share one shape")
         outputs = [xp.zeros_like(rho) for _ in range(4)]
         active = rho >= SCAN_DENSITY_THRESHOLD
-        if not bool(active.any()):
+        if not _any(active):
             return (*outputs, None)
         selected = [rho[active], sigma[active], tau[active]]
 
@@ -428,7 +440,7 @@ class NativeScan:
             raise ValueError("SCAN spin inputs must share one shape")
         outputs = [xp.zeros(shape, dtype=xp.float64) for _ in range(8)]
         active = (arrays[0] + arrays[1]) >= SCAN_DENSITY_THRESHOLD
-        if not bool(active.any()):
+        if not _any(active):
             return (*outputs, None, None)
         selected = [array[active] for array in arrays]
         raw_up = selected[0]

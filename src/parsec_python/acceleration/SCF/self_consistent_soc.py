@@ -92,6 +92,53 @@ class DeviceSpinorHamiltonianBuilder:
         )
 
 
+class _DeviceKeeper:
+    """What a loop of an ionic step keeps on its device for the forces and the next structure.
+
+    It wraps the eigensolver and ``to_host`` hooks of the reference loop: the last eigensolver state (the subspace
+    the next structure filters again, :func:`parsec_python.SCF.single_point.state_for_new_potential`) and the final
+    device spinors (a view of that subspace, or the :class:`.soc_sectors.SectorSpinors` of the sectors), which the
+    device forces read (:mod:`..Forces.spinor_device`).
+    """
+
+    def __init__(self, device: int, accepts) -> None:
+        self.device = int(device)
+        self.accepts = accepts
+        self.state = None
+        self.spinors = None
+
+    def solver(self, solve):
+        def wrapped(operator, requested_states, *, settings, state=None):
+            if state is not None and not self.accepts(operator, state):
+                # the subspace of a structure solved on another route (whole grid or other sectors): a first solve
+                state = None
+            solution = solve(operator, requested_states, settings=settings, state=state)
+            self.state = solution.state
+            return solution
+
+        return wrapped
+
+    def to_host(self, convert):
+        def wrapped(spinors):
+            # the loop converts its final spinors last
+            self.spinors = spinors
+            return convert(spinors)
+
+        return wrapped
+
+    def attach(self, result, soc_projectors) -> None:
+        result.eigensolver_state = self.state
+        result.device_spinors = self.spinors
+        result.device_spinors_device = self.device
+        result.soc_projectors = soc_projectors
+
+
+def _whole_grid_state(operator, state) -> bool:
+    from ..Eigensolvers.chebff_spinor import SpinorEigvalState
+
+    return isinstance(state, SpinorEigvalState) and int(state.operator_dimension) == int(operator.shape[0])
+
+
 def run_self_consistent_soc(
     system: AcceleratedPreparedSinglePointSystem,
     soc_projectors: tuple[AtomSpinOrbitProjectors, ...],
@@ -101,6 +148,9 @@ def run_self_consistent_soc(
     note: Callable[[str], None] | None = None,
     symmetry: bool = True,
     forced: bool = False,
+    warm_start=None,
+    keep_device: bool = False,
+    plan_cache: dict | None = None,
 ) -> SelfConsistentSOCResult:
     """Run self-consistent SOC with the device spinor Hamiltonian and eigensolver.
 
@@ -120,6 +170,19 @@ def run_self_consistent_soc(
     receives a line that says which route the run takes and why.
     ``symmetry=False`` (``Ignore_Symmetry``, ``--symmetry off``) keeps the
     whole grid whatever the switch.
+
+    The loop of a structure of a relaxation or molecular dynamics run
+    (``PARSEC_SOC_DEVICE_FORCES=auto``) passes ``warm_start``
+    (:func:`parsec_python.SCF.single_point.warm_start_for_moved_atoms` of the
+    structure before: its mixed potential with the ionic part exchanged, its
+    Hartree potential and its device subspace, which a structure on the same
+    route filters again) and ``keep_device``: the result then keeps its last
+    eigensolver state (``eigensolver_state``), its final device spinors
+    (``device_spinors`` on the device ``device_spinors_device``, the whole-grid
+    subspace or the sector spinors) and ``soc_projectors``, which the device
+    forces read (:mod:`..Forces.spinor_device`).  ``plan_cache`` (a dict the ionic loop keeps) lets a structure
+    whose atoms keep the operations of the structure before take its sector bases and the folds that do not depend on
+    the atoms (the same numbers as made again).
     """
     from .soc_sectors import SWITCH, resolve_soc_sectors, soc_sectors_setting
 
@@ -155,22 +218,26 @@ def run_self_consistent_soc(
     elif sectors != "off":
         route = _sector_route(
             system, soc_projectors, backend, note, parity=sectors == "on",
-            label="auto" if requested == "auto" else None, fourfold=sectors == "fourfold",
+            label="auto" if requested == "auto" else None, fourfold=sectors == "fourfold", cache=plan_cache,
         )
         if route is not None:
+            keeper = _DeviceKeeper(backend.device_id, route.accepts) if keep_device else None
             result = run_reference_self_consistent_soc(
                 system,
                 soc_projectors,
                 callback=callback,
-                eigenproblem_solver=route.eigensolver,
+                eigenproblem_solver=route.eigensolver if keeper is None else keeper.solver(route.eigensolver),
                 spinor_hamiltonian_builder=route.hamiltonian,
                 orbital_density_builder=route.density,
                 synchronize=backend.synchronize,
-                to_host=route.to_host,
+                to_host=route.to_host if keeper is None else keeper.to_host(route.to_host),
+                **({} if warm_start is None else {"warm_start": warm_start}),
             )
             result.timings["soc_sector_setup"] = route.setup_seconds
             if route.regrown:
                 result.timings["soc_sector_regrown"] = float(route.regrown)
+            if keeper is not None:
+                keeper.attach(result, soc_projectors)
             return result
 
     def solver(operator, requested_states, *, settings, state=None):
@@ -183,33 +250,40 @@ def run_self_consistent_soc(
             sync=backend.synchronize,
         )
 
-    return run_reference_self_consistent_soc(
+    keeper = _DeviceKeeper(backend.device_id, _whole_grid_state) if keep_device else None
+    result = run_reference_self_consistent_soc(
         system,
         soc_projectors,
         callback=callback,
-        eigenproblem_solver=solver,
+        eigenproblem_solver=solver if keeper is None else keeper.solver(solver),
         spinor_hamiltonian_builder=DeviceSpinorHamiltonianBuilder(backend),
         orbital_density_builder=lambda spinors, occupations, volume_element: spinor_density_on_device(
             xp, spinors, occupations, volume_element
         ),
         synchronize=backend.synchronize,
-        to_host=backend.asnumpy,
+        to_host=backend.asnumpy if keeper is None else keeper.to_host(backend.asnumpy),
+        **({} if warm_start is None else {"warm_start": warm_start}),
     )
+    if keeper is not None:
+        keeper.attach(result, soc_projectors)
+    return result
 
 
 def _sector_route(
-    system, soc_projectors, backend, note, *, parity: bool, label: str | None = None, fourfold: bool = False
+    system, soc_projectors, backend, note, *, parity: bool, label: str | None = None, fourfold: bool = False,
+    cache: dict | None = None,
 ):
     """The hooks of the double-group sectors (:class:`.soc_sectors.SectorRoute`), split by inversion parity with
     ``parity`` or by a four-fold operation about z with ``fourfold``, or ``None`` (the whole grid) for a cluster
-    without a two-fold rotation or mirror; ``note`` hears which."""
+    without a two-fold rotation or mirror; ``note`` hears which.  ``cache``: the plans of the structures before
+    (:func:`.soc_sectors.detect_sector_plan`)."""
     import time
 
     from .soc_sectors import SWITCH, SectorRoute, detect_sector_plan
 
     setting = label or ("on" if parity else "fourfold" if fourfold else "kramers")
     start = time.perf_counter()
-    plan, reason = detect_sector_plan(system.grid, system.atoms, parity=parity, fourfold=fourfold)
+    plan, reason = detect_sector_plan(system.grid, system.atoms, parity=parity, fourfold=fourfold, cache=cache)
     seconds = time.perf_counter() - start
     if plan is None:
         if note is not None:
@@ -222,4 +296,102 @@ def _sector_route(
     return route
 
 
-__all__ = ["DeviceSpinorHamiltonianBuilder", "run_self_consistent_soc"]
+def soc_ionic_backend(
+    *,
+    symmetry: bool = True,
+    forced: bool = False,
+    note: Callable[[str], None] | None = None,
+    potential_extrapolation: str = "none",
+    fortran: bool = False,
+):
+    """The ionic loop of a self-consistent spin-orbit cluster on the device (``PARSEC_SOC_DEVICE_FORCES=auto``).
+
+    The counterpart of :func:`parsec_python.Relaxation.backend.spinor_backend` (the reference solver's) for a system
+    prepared on CuPy: every structure runs :func:`run_self_consistent_soc` (the double-group sectors of
+    ``PARSEC_SOC_SECTORS`` where ``symmetry`` allows them, ``forced`` under ``--symmetry on``) with the spin-orbit
+    projectors of its atoms, keeping its device spinors and subspace; the forces are those of
+    :func:`..Forces.spinor_device.compute_device_spinor_forces`; the moved atoms are installed by the accelerated
+    :func:`..driver.update_geometry`; a moved structure starts from the one before as on the reference path
+    (:func:`parsec_python.SCF.single_point.warm_start_for_moved_atoms` with ``potential_extrapolation``: the mixed
+    potential with its ionic part exchanged, the Hartree potential and the subspace, filtered again where the route
+    of the sectors is the same).  ``note`` hears the route of the first structure and of every structure whose route
+    line differs from that of the one before (another sector plan, or the whole grid).  ``fortran``: the forces of the
+    Fortran-derived routines (:func:`parsec_python.Forces.spin_orbit_fortran.compute_spin_orbit_forces` on the
+    device) and the moved atoms as new atoms of symbol and position, as
+    :func:`parsec_python.Relaxation.backend.fortran_spinor_backend` moves them.
+    """
+
+    from dataclasses import replace
+    from functools import partial
+
+    from parsec_python.Eigensolvers.perturbative_soc import build_spin_orbit_projectors
+    from parsec_python.Relaxation.backend import IonicBackend
+    from parsec_python.SCF.single_point import extrapolation_keywords, warm_start_for_moved_atoms
+
+    from ..driver import update_geometry
+    from ..Forces.spinor_device import compute_device_spinor_forces, release_device_spinors
+
+    # the route lines of the structure before: a structure on the same route says nothing, one whose plan or route
+    # differs (its atoms left operations of the one before, or another route was taken) says which it takes
+    previous: list[str] = []
+    # the sector plans of the structures (the same grid; a structure that keeps the operations reuses its bases)
+    plans: dict = {}
+
+    def with_criterion(system, criterion):
+        # the loop reads its criterion from the settings of the system: a copy (the same fields) with the loosened one
+        loosened = replace(system)
+        scf = replace(system.input.scf, convergence_criterion=float(criterion))
+        loosened.input = replace(system.input, scf=scf)
+        return loosened
+
+    def solve(system, *, callback=None, warm_start=None, convergence_criterion=None):
+        if convergence_criterion is not None:
+            system = with_criterion(system, convergence_criterion)
+        projectors = tuple(
+            build_spin_orbit_projectors(system.grid, system.atoms, system.pseudopotentials, system.input.pseudopotentials)
+        )
+        lines: list[str] = []
+
+        def heard(line: str) -> None:
+            index = len(lines)
+            lines.append(line)
+            if note is not None and (index >= len(previous) or previous[index] != line):
+                note(line)
+
+        result = run_self_consistent_soc(
+            system,
+            projectors,
+            callback=callback,
+            note=heard,
+            symmetry=symmetry,
+            forced=forced,
+            warm_start=warm_start,
+            keep_device=True,
+            plan_cache=plans,
+        )
+        previous[:] = lines
+        return result
+
+    def forces(system, result, *, symmetrize=False, operations=None):
+        return compute_device_spinor_forces(
+            system, result, symmetrize=symmetrize, operations=operations, fortran=fortran
+        )
+
+    def carried(previous_system, previous_result, system, **keywords):
+        start = warm_start_for_moved_atoms(previous_system, previous_result, system, **keywords)
+        # the subspace moved into the start; the spinors of the forces are not needed again
+        previous_result.eigensolver_state = None
+        release_device_spinors(previous_result)
+        return start
+
+    return IonicBackend(
+        run_scf=solve,
+        compute_forces=forces,
+        update_geometry=update_geometry,
+        warm_start=partial(carried, **extrapolation_keywords(potential_extrapolation)),
+        restart_scf=lambda system, result: carried(system, result, system),
+        keep_atom_fields=not fortran,
+    )
+
+
+__all__ = ["DeviceSpinorHamiltonianBuilder", "run_self_consistent_soc", "soc_ionic_backend"]

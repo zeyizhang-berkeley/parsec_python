@@ -81,7 +81,11 @@ def _system(**flags):
     )
     base = _PREPARED.get(soc)
     if base is None:
-        base = _PREPARED[soc] = prepare_periodic_single_point(problem)
+        # On the tables of the file (PARSEC_LOCAL_FILTER=off): at h 0.6 bohr, far too coarse for Au, the tables
+        # filtered to the grid (the default) move this cell by 0.2 Ry and its SCF to 2e-5 Ry takes some 120 steps (8 on
+        # the tables of the file); the tests compare the routes of the k-point drivers, not the tables.
+        with mock.patch.dict(os.environ, {"PARSEC_LOCAL_FILTER": "off"}):
+            base = _PREPARED[soc] = prepare_periodic_single_point(problem)
     return dataclasses.replace(base, input=problem)
 
 

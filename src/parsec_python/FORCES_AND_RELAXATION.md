@@ -239,13 +239,43 @@ h 0.16 bohr a rigid translation over one grid step moves the energy of O2 by
 2.3e-3 Ry and the force on an O atom by 3.9e-2 Ry/bohr (H2O 1.7e-3 Ry and
 3.5e-2, N2 1.6e-3 and 1.7e-2, CH4 1.7e-4 and 3.9e-3), and relaxed geometries
 differ by 0.01-0.017 bohr and 2 degrees between two placements; the forces
-are the slope of that energy, egg-box included. `PARSEC_LOCAL_FILTER=all`
-(since 2026-11-23, opt-in; `Pseudopotential/local_filter.py`, the switch
-table of `acceleration/README.md`) filters the local potential and the
-projectors to the grid before they are sampled, which takes these numbers
-down by one to two orders of magnitude; the forces are the derivatives of the
-filtered tables. `on` filters the local potential alone; `off` (the default)
-keeps PARSEC 1.5's tables.
+are the slope of that energy, egg-box included. These numbers are those of
+the tables as the files give them (PARSEC 1.5's, `PARSEC_LOCAL_FILTER=off`).
+By default (`PARSEC_LOCAL_FILTER=all`, since 2026-11-23;
+`Pseudopotential/local_filter.py`, the switch table of `acceleration/README.md`)
+the local potential and the projectors are filtered to the grid before they
+are sampled, which takes them down by one to two orders of magnitude; the
+forces are the derivatives of the filtered tables. `on` filters the local
+potential alone.
+
+A gradient-corrected functional adds a finer feature for an atom whose
+pseudo-valence density is low at its nucleus (Au and Ag, whose d shell
+vanishes there: the Au table of `examples/0d_AuH` gives 9.6e-4 e/bohr^3 at
+the nucleus and 3.5e-2 at 0.31 bohr) when it sits on or next to a grid point.
+The density gradient of the functional is a finite difference, as `gradmvs`
+in PARSEC 1.5. At the grid point on the nucleus it grows with the offset of
+the atom, because the stencil reaches the steep shell around it: for the
+superposed atoms of a bcc-like Au2 cell at h = 0.31 bohr (order 6) the
+reduced gradient there goes from 0.2 to 0.9 within 2e-3 bohr while the
+density there stays put, and the PBE enhancement changes on that scale. The
+discrete energy then varies on a scale of 1e-3 bohr (about 1.4e-6 Ry in that
+cell), and the force, which is its derivative, by up to 9e-4 Ry/bohr within
+4e-3 bohr of the grid point. Central differences over 1e-3 and 2e-3 bohr miss
+the force there by 2.5e-5 to 3.2e-4 Ry/bohr (PBE and PBE0, the cell and an
+Au2 cluster, both routine sets, also under `PARSEC_LOCAL_FILTER=all`), and at
+steps of 2e-5 and 4e-5 bohr they approach it as the square of the step (the
+cluster within 4e-8 Ry/bohr after Richardson extrapolation, the cell within
+the 1e-10 Ry precision of its energy; the cases `f_au2_pbe_fine` and
+`f_au2c_pbe_fine` of `acceleration/benchmarks/consistency_matrix.py`). CA has
+no such term (within 2e-8 Ry/bohr at 1e-3 bohr on the same structures), nor
+do species whose density is high at the nucleus (Ge with its core correction
+and C, with PBE on a grid point: within 1e-8 after Richardson
+extrapolation). It is a discretization error of the gradient that shrinks
+with the spacing and the order: the same Au2 cell and cluster at h = 0.207
+bohr give 4e-7 and 5e-8 Ry/bohr at 1e-3 bohr, and the exchange-correlation
+energy of the superposed atoms with the finite-difference gradient lies
+1.7e-3 Ry above that with their exact gradient at h = 0.31 bohr (order 6),
+4.9e-4 at order 12, 3.7e-4 at h = 0.207 and 8.6e-5 at h = 0.155.
 
 The radial derivatives are the tables of `pseudo.f90`
 (`Pseudopotential/radial_derivatives.py`): an 18th-order central difference
@@ -485,7 +515,26 @@ the grid, its finite-difference operators and the mesh onto themselves and
 keep movable and fixed atoms apart): the nonlocal forces of the wedge's
 k-points are completed over its group and the forces averaged over it, as
 for semilocal k-point forces (`PARSEC_KPOINT_FORCE_WEDGE`), so the structure
-keeps the group; under `auto` the first structure's semilocal start decides
+keeps the group; under `PARSEC_HYBRID_KPOINT_WEDGE=on` (the default since
+23 November 2026) every structure runs on the wedge from its semilocal
+start, metals included (the forces of metals on the wedge follow the slope
+of the free energy at steps of 1e-3 and 2e-3 bohr: bcc Au2 and AuAg PBE0
+4x4x4 within 1.0e-6 Ry/bohr on both routine sets, hcp Na2 PBE0 3x3x3 within
+6.6e-8; `consistency_matrix.py`, `f_au2_pbe0_d`, `f_auag_pbe0_*`,
+`f_na2_pbe0_k333`; an Au atom exactly on a grid point misses the slope over
+these steps by 1e-4 to 2e-4 Ry/bohr with PBE and PBE0 alike, on the pairs as
+on the wedge: the GGA energy varies on a scale of 1e-3 bohr there and the
+force is its derivative, as the paragraph on gradient-corrected functionals
+under "Forces" shows with `f_au2_pbe_fine` and `f_au2c_pbe_fine`; exempt in
+the matrix up to 5e-4 Ry/bohr).
+The forces of the wedge are the slope of the free energy for displacements
+that keep a subgroup of the wedge's operations: a displacement that removes
+the group runs the displaced structures on the time-reversal pairs, whose
+Fock loop can end in a lower, broken state of a metal, so their slope is
+that of the broken branch (bcc Au2 of the group {E, x <-> y} at 1000 K: 1.3e-5
+Ry below the wedge state of the base, the slope 9.7e-6 to 1.2e-5 Ry/bohr from
+the force; `f_au2b_pbe0_d`, exempt with that reason up to 5e-5); under `auto` (the default from 20 to 22 November
+2026) the first structure's semilocal start decides
 (an insulator takes the wedge for its Fock loop) and the later structures
 of a relaxation keep that route (their Fock loops start from the wedge's
 orbitals, `SCF/hybrid_periodic.py`, `BlochExchange.adopt_carried`; the
@@ -812,10 +861,17 @@ test, not that the grid is converged.
 
 Not covered: the perturbative correction (`SO_PSP` with an ordinary spin-polarized SCF), which shifts the eigenvalues of that
 SCF to first order and reports no total energy that includes the shift, so a relaxation would have no energy to follow
-(`SO_from_scratch` has forces); `Energy_Refinement`; the row-distributed MPI k-point solver (it raises, as for the scalar k-point forces); the
-accelerated path, which hands every spin-orbit and non-collinear input with forces to the reference solver (the pooled
+(`SO_from_scratch` has forces); `Energy_Refinement`; the row-distributed MPI k-point solver (it raises, as for the scalar k-point forces).
+The accelerated path hands the spin-orbit and non-collinear inputs with forces to the reference solver (the pooled
 k-point solver of that solver runs on the GPUs for periodic and non-collinear inputs and forms the overlaps of the force on the
-device, which agrees with the CPU to 1e-5 Ry/bohr on four A100 GPUs: `parsec_tests/pbc_forces/gpu_spinor` and `gpu_k`).
+device, which agrees with the CPU to 1e-5 Ry/bohr on four A100 GPUs: `parsec_tests/pbc_forces/gpu_spinor` and `gpu_k`),
+except a cluster with self-consistent spin-orbit coupling that is neither spin-polarized nor non-collinear: its forces,
+relaxation and molecular dynamics run the device spinor loop, in its double-group sectors where the run allows symmetry,
+with the forces above contracted on the device that holds the spinors, each sector state with the electrons of its
+Kramers pair (`acceleration/Forces/spinor_device.py`, `PARSEC_SOC_DEVICE_FORCES=auto`, on both routine sets;
+`acceleration/README.md`, "Self-consistent spin-orbit coupling of clusters"). There `--symmetry off` leaves
+the forces and moved positions unsymmetrized, as on the scalar route; the reference solver symmetrizes them whatever
+the flag says.
 
 ## Structural relaxation
 
@@ -1182,7 +1238,8 @@ real-space Ewald split instead of the G-space `v_first`/`pot_local`):
   at Gamma as for clusters (since 2026-11-21 the LDA+U forces and relaxations of a
   cell whose SCF takes the sectors keep them, `PARSEC_LDAU_SECTOR_FORCES=auto`: the
   LDA+U term of every atom from the sector bases, averaged over the full group in
-  weighted sectors, the total and the moves averaged over the group). The
+  weighted sectors, the total and the moves averaged over the group). Under
+  `PARSEC_LDAU_SMOOTH_PROJECTORS=off` (the default before 2026-11-23) the
   LDA+U energy follows `upot.F90`: the d projectors are cut hard at the radius
   that holds 95 % of the norm, where `R_d` is still 11 % of its peak for Ag, and
   `R_d` is interpolated linearly. So the energy steps when a grid point crosses
@@ -1197,12 +1254,15 @@ real-space Ewald split instead of the G-space `v_first`/`pot_local`):
   steps and the kinks are a property of that convention. A finer grid makes
   each step smaller (a step is the term of the one grid point that crosses the
   cut), and a check of the forces against differences of the energy needs
-  steps that cross no cut. The opt-in `PARSEC_LDAU_SMOOTH_PROJECTORS`
-  (`Hamiltonian/hubbard.py`, README of `acceleration/`) replaces the linear
-  interpolation by a cubic spline and the cut by a taper from `(1 - f/2) r_c`
-  to `(1 + f/2) r_c` (`f = 0.2`), antisymmetric about `r_c`: the energy is then
-  twice differentiable and the forces follow its slope over finite steps, at
-  the price of energies that differ from PARSEC's;
+  steps that cross no cut. By default (`PARSEC_LDAU_SMOOTH_PROJECTORS=on`,
+  since 2026-11-23; `Hamiltonian/hubbard.py`, README of `acceleration/`) a
+  cubic spline replaces the linear interpolation and a taper from
+  `(1 - f/2) r_c` to `(1 + f/2) r_c` (`f = 0.2`), antisymmetric about `r_c`,
+  replaces the cut: the energy is then twice differentiable and the forces
+  follow its slope over finite steps (Ag4 atom 0, steps of 1e-3 / 2e-3 bohr:
+  3.96e-4 / 5.01e-2 -> 7.7e-6 / 3.0e-5 Ry/bohr, the `h^2` term of the
+  difference), at the price of energies that differ from PARSEC's (Ag4
+  +2.9e-3 Ry);
 - with fractional occupations the forces are the derivative of the Mermin free
   energy `E - TS`, not of the printed total energy (as in Fortran).
 

@@ -48,6 +48,56 @@ from ..Hamiltonian.exchange_device import (
 )
 
 
+class WeightedHybridAbandoned(RuntimeError):
+    """An unpolarized hybrid in the weighted sectors of a point group found a partly filled degenerate level.
+
+    The weighted sectors give every partner of a level one occupation and keep the density of the full group, so the
+    exact exchange cannot split such a level there, while the sectors of the abelian group and the full grid can: from
+    the symmetric ensemble, a saddle of the hybrid functional, they reach a lower state (PBE0 at 80 K, SCF 1e-10 Ry:
+    the C atom of Oh 0.108 Ry lower, CH4+ of Td 0.026, unpolarized O2 0.089).  ``stage`` names the loop, ``report``
+    (:class:`.spin_sectors.FractionalOccupations`) the levels; the driver starts the calculation again in the sectors
+    of the abelian group (``driver._SpinSectorFallback``), with a NOTE.
+    """
+
+    def __init__(self, stage: str, report) -> None:
+        self.stage = stage
+        self.report = report
+        super().__init__(
+            f"weighted sectors of a hybrid: {report.reason} after {stage} "
+            f"({report.measure} = {report.largest:.3e} >= {report.tolerance:.0e}): " + "; ".join(report.lines)
+        )
+
+
+#: The reason of :func:`partly_filled_partner_levels`.
+PARTLY_FILLED_LEVEL_REASON = "a partly filled degenerate level"
+
+
+def partly_filled_partner_levels(result, tolerance: float | None = None):
+    """The partly filled degenerate levels of an unpolarized result of weighted sectors
+    (:class:`.spin_sectors.FractionalOccupations`), ``None`` where there are none, the result has no weighted sectors
+    or two channels (the guard of the spin sectors tests them).
+
+    The levels of :func:`.spin_sectors.weighted_partly_filled_levels`, which the NOTE of a semilocal run in the
+    weighted sectors reads too (``driver._say_symmetric_level``): every listed partner of a solved state of weight
+    ``w`` is a level of its own label, so a run of levels within :data:`.spin_sectors.MULTIPLET_WIDTH` over two or
+    more labels, one of whose occupations has ``min(f, 1 - f)`` of ``tolerance``
+    (:data:`.spin_sectors.SPIN_SECTOR_OCCUPATION_TOLERANCE` by default) or more, is partly filled; degenerate states
+    of one label mix as on the full grid and do not count.  The report names :data:`PARTLY_FILLED_LEVEL_REASON` and
+    the electrons of both spins of a level.
+    """
+
+    from .spin_sectors import SPIN_SECTOR_OCCUPATION_TOLERANCE, weighted_partly_filled_levels
+
+    if getattr(result, "spin", None) is not None:
+        return None
+    return weighted_partly_filled_levels(
+        result,
+        SPIN_SECTOR_OCCUPATION_TOLERANCE if tolerance is None else float(tolerance),
+        reason=PARTLY_FILLED_LEVEL_REASON,
+        both_spins=True,
+    )
+
+
 @dataclass(frozen=True)
 class DeviceFockOperator(FockOperator):
     """:class:`parsec_python.SCF.hybrid.FockOperator` whose channels live on devices.
@@ -105,6 +155,8 @@ class DeviceExchange:
         self.multipole_order = int(multipole_order)
         self.batch_size = int(batch_size)
         self.expansions: dict = {}
+        # the exchange of the weighted sectors of each point group (PARSEC_ORBITAL_GROUP_HYBRID), by reduction
+        self.weightings: dict = {}
         self._solvers: dict = {}
         self.bound: object | None = None
 
@@ -127,16 +179,27 @@ class DeviceExchange:
             volume_element,
             expansions=self.expansions,
             sector_devices=self._sector_devices(),
+            weightings=self.weightings,
         )
+
+    @staticmethod
+    def _solved_occupations(result):
+        """The occupations of the states ``result`` solved: those of the SCF loop, times their weights, for weighted
+        sectors (``sector_states``, whose ``occupations`` list every partner), else ``result.occupations``."""
+
+        solved = getattr(result, "sector_states", None)
+        if solved is not None:
+            return np.asarray(solved[1], dtype=np.float64)
+        return result.occupations
 
     def orbital_sets(self, result):
         """The channels of an SCF result, where its orbitals are: one set or two."""
 
         channels = getattr(result, "spin", None)
         if channels is None:
-            return (self.channel(result.wavefunctions, result.occupations, 2.0),)
+            return (self.channel(result.wavefunctions, self._solved_occupations(result), 2.0),)
         return tuple(
-            self.channel(channel.wavefunctions, channel.occupations, 1.0) for channel in channels
+            self.channel(channel.wavefunctions, self._solved_occupations(channel), 1.0) for channel in channels
         )
 
     # ----- the term in the Hamiltonians -------------------------------------
@@ -350,6 +413,25 @@ class DeviceFockEngine:
         self.device = exchange
         self.definition = definition
         self.solvers = exchange.pair_solvers(system, definition)
+        scf = getattr(getattr(system, "input", None), "scf", None)
+        # occup.in fills the partners of a weighted state alike (Occupations.weighted_fixed_occupations): its equal
+        # fractional occupations are the input's, which the abelian sectors keep too
+        self.fixed_occupations = getattr(scf, "fixed_occupations", None) is not None
+
+    def weighted_guard(self, result, stage: str) -> None:
+        """Raise :class:`WeightedHybridAbandoned` where an unpolarized ``result`` of weighted sectors has a partly
+        filled degenerate level (:func:`partly_filled_partner_levels`).
+
+        :func:`parsec_python.SCF.hybrid.run_hybrid_scf` asks after its semilocal start and after every inner loop.
+        Nothing for orbitals of other sectors or of the full grid, for two channels (the guard of the spin sectors
+        tests them, ``SCF/spin_sectors.py``) and for the occupations of ``occup.in``.
+        """
+
+        if self.fixed_occupations:
+            return
+        report = partly_filled_partner_levels(result)
+        if report is not None:
+            raise WeightedHybridAbandoned(stage, report)
 
     @property
     def description(self) -> str:
@@ -520,7 +602,8 @@ class DeviceFockEngine:
         """
 
         for orbitals in sets:
-            for sector in orbitals.sectors:
+            # (and the coset images of weighted sectors, which read the same bases)
+            for sector in orbitals.all_sources():
                 sector.vectors = None
         if result is not None:
             channels = getattr(result, "spin", None)
@@ -625,5 +708,8 @@ __all__ = [
     "DeviceExchange",
     "DeviceFockEngine",
     "DeviceFockOperator",
+    "PARTLY_FILLED_LEVEL_REASON",
+    "WeightedHybridAbandoned",
     "device_exchange_for",
+    "partly_filled_partner_levels",
 ]

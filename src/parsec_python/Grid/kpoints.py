@@ -1279,8 +1279,8 @@ def _hybrid(problem) -> bool:
 
 
 HYBRID_KPOINT_WEDGE_ENV = "PARSEC_HYBRID_KPOINT_WEDGE"
-#: The value of PARSEC_HYBRID_KPOINT_WEDGE without the variable.
-HYBRID_KPOINT_WEDGE_DEFAULT = "auto"
+#: The value of PARSEC_HYBRID_KPOINT_WEDGE without the variable (since 2026-11-23; ``auto`` before).
+HYBRID_KPOINT_WEDGE_DEFAULT = "on"
 
 
 def hybrid_kpoint_wedge_setting() -> str:
@@ -1291,19 +1291,45 @@ def hybrid_kpoint_wedge_setting() -> str:
     k-points solved, their Bloch factors with the grid points permuted (Quantum ESPRESSO's ``exxinit`` rotates its
     wavefunctions the same way; :class:`parsec_python.V_xc.bloch_exchange.MeshStars`).
 
-    * ``auto`` (default, since 2026-11-20): the semilocal start runs on the time-reversal pairs, bit for bit as ``off``;
-      where it fills every state to 0 or 1 (no occupation within :data:`HYBRID_WEDGE_FRACTIONAL_TOLERANCE` of the
-      Fermi-Dirac interior, :func:`partly_filled_states`: an insulator) the Fock loop moves to the wedge, from the
-      representatives' orbitals of that start (:meth:`parsec_python.SCF.hybrid_periodic.BlochExchange.after_start`);
-      a start with a partly filled state keeps the pairs for the whole run, bit for bit as ``off``.  The reason: a
-      metal's level that is partly filled at the Fermi level at a set of equivalent k-points (the two L points of hcp
-      Au, the three X points of fcc Au) can take an occupation that breaks the crystal symmetry in the Fock loop of
-      the pairs (exact exchange favours integer occupations: the same-k exchange goes as f^2/N_k), 9.7e-4 Ry (hcp Au2
-      PBE0 4x4x2) and 6.9e-4 Ry (primitive fcc Au 4x4x4) below the symmetric state, which is all the wedge can hold
-      (its star members are images of one representative).  The grid's shape has nothing to do with it: insulators
-      on oblique grids take the wedge within the discretization (primitive Si 1e-10 Ry, hexagonal Si 5.4e-8 Ry), and
-      the conventional cubic fcc Au cell breaks on its orthogonal grid (A100, 2026-11-20).
-    * ``on``: the wedge always, its semilocal start too: the symmetric state, also for a metal.
+    * ``on`` (default, since 2026-11-23): the wedge always, its semilocal start too, metals included: the members of
+      every star of the mesh are filled alike (within the little group of a k-point the wedge's own Fock loop can
+      still break: fcc Au 3x3x3 and 6x6x6 at 1000 K became unstable at outer iterations 13 and 8).  The lower state
+      that the time-reversal pairs of a metal reach at a small smearing is an artefact of the finite mesh: exact
+      exchange favours integer occupations of a level that is partly filled at the Fermi level at a set of equivalent
+      k-points (the exchange of a state at one k-point with itself, ``f^2 w_k^2`` times the kernel's element at
+      q + G = 0, which grows only as ``N_k^(2/3)``: a gain of order ``N_k^(-4/3)`` per level), so a Fock loop of the
+      pairs that runs long enough moves the electron of such a level onto one of the points and breaks the crystal
+      symmetry.  The split of a filled and an emptied member per unit of occupation is that self-exchange,
+      ``a_x K(q+G=0) / (N_k Omega)`` (fcc Au: 0.0638, 0.0425, 0.0319 Ry on 4x4x4, 6x6x6, 8x8x8; measured 0.0637,
+      0.0415, 0.0326 Ry), which falls as ``N_k^(-1/3)``; a level breaks only where it times ``f (1 - f)`` outweighs
+      about kT, so the instability leaves any finite temperature as the mesh grows, slowly at the default 80 K (about
+      100 points per direction by that estimate).  Quantum ESPRESSO's exchange through the rotated orbitals of its
+      irreducible points gives the symmetric state.  A100, PBE0, primitive fcc Au (the PBE table of the repository,
+      0.25 bohr, order 12), ``F = E - TS`` of the pairs minus that of the wedge: at 80 K and ``Exx_Tolerance`` 1e-10
+      -2.28e-3 Ry on 3x3x3, -6.33e-4 Ry on 4x4x4 (the pairs unstable at outer iteration 4, integer occupations),
+      -3.06e-4 Ry on 6x6x6; at 1000 K -1.21e-3 Ry on 3x3x3, -2.89e-4 Ry on 4x4x4 (one of the three X points takes the
+      level, f 0.99 against 0.005), -8.3e-5 Ry on 6x6x6, -5.7e-7 Ry on 8x8x8 (the pairs stay symmetric down to dexx
+      8e-14); F of the wedge moves by 1.06e-2 Ry from 4x4x4 to 6x6x6 at 1000 K.  On 4x4x4 at 1500 K -1.22e-4 Ry, at
+      2000 K none (the pairs converge to dexx 1e-14 on the symmetric state).  The symmetric state of the same PBE
+      table has its X level at E_F + 0.0044 Ry, f 0.332, in this code and in Quantum ESPRESSO 7.5 alike, and Quantum
+      ESPRESSO's time-reversal pairs (``nosym``) break to the same levels and F (2.886e-4 Ry lower).  Insulators take
+      the same state as under ``auto``, 12 to 31 % faster (the start on the wedge too).
+
+      The limit: the forces of the wedge are the slope of F for displacements that keep a subgroup of the wedge's
+      operations.  A structure of lower symmetry runs on the time-reversal pairs (and so do molecular dynamics,
+      ``manual`` movements, spin with forces, a ``Kpoint_List``, slabs and spinors), whose Fock loop can end in the
+      broken state, so at a tight ``Exx_Tolerance``, a coarse mesh and a low smearing its energy is not comparable with
+      that of a symmetric structure: fcc Au at 80 K on 4x4x4, the crystal translated by (1e-4, 2e-4, 0) bohr lies
+      6.33e-4 Ry below the symmetric one at ``Exx_Tolerance`` 1e-10 (7.6e-7 Ry at the default 1e-6, where the pairs
+      stop before the instability; with the CA table at 0.35 bohr and order 6 they break at 1e-6 too, E 6.6e-4 Ry
+      below the wedge).  ``parsec.out`` names the state a metal's Fock loop ends in
+      (:meth:`parsec_python.SCF.hybrid_periodic.BlochExchange.after_loop`).
+    * ``auto`` (the default from 2026-11-20 to 2026-11-22): the semilocal start runs on the time-reversal pairs, bit
+      for bit as ``off``; where it fills every state to 0 or 1 (no occupation within
+      :data:`HYBRID_WEDGE_FRACTIONAL_TOLERANCE` of the Fermi-Dirac interior, :func:`partly_filled_states`: an
+      insulator) the Fock loop moves to the wedge, from the representatives' orbitals of that start
+      (:meth:`parsec_python.SCF.hybrid_periodic.BlochExchange.after_start`); a start with a partly filled state keeps
+      the pairs for the whole run, bit for bit as ``off``.
     * ``off``: the time-reversal pairs of the mesh, as before.
 
     Forces and moving atoms take the same route unless ``PARSEC_HYBRID_KPOINT_FORCE_WEDGE=off``
@@ -1327,12 +1353,13 @@ def hybrid_kpoint_force_wedge_setting() -> str:
     irreducible wedge of its Monkhorst-Pack mesh.
 
     * ``auto`` (default, since 2026-11-21): the single-point forces and the ``bfgs``/``simple`` relaxations of a bulk
-      hybrid take the wedge that :func:`hybrid_kpoint_wedge_setting` gives a single point (``auto``: after a semilocal
-      start of the first structure without partly filled states, which the later structures of a relaxation keep, so
-      a metal keeps the pairs; ``on``: the whole run on it), under the operations of the space group that map the
-      grid, its finite-difference operators and the mesh onto themselves and keep the movable atoms apart from the
-      fixed ones; the nonlocal forces of the wedge are completed over the group and the forces averaged over it
-      (``symm_forces.f90``), so the structure keeps the group, as for semilocal k-point forces.  On the default
+      hybrid take the wedge that :func:`hybrid_kpoint_wedge_setting` gives a single point (``on``, its default since
+      2026-11-23: the whole run on it, metals too; ``auto``: after a semilocal start of the first structure without
+      partly filled states, which the later structures of a relaxation keep, so a metal keeps the pairs), under the
+      operations of the space group that map the grid, its finite-difference operators and the mesh onto themselves
+      and keep the movable atoms apart from the fixed ones; the nonlocal forces of the wedge are completed over the
+      group and the forces averaged over it (``symm_forces.f90``), so the structure keeps the group, as for semilocal
+      k-point forces.  On the default
       routines ``PARSEC_KPOINT_FORCE_WEDGE=off`` (:func:`kpoint_force_wedge_setting`) turns this off too; the
       Fortran-derived routines do not read that switch (they reduce the mesh of every k-point force, as PARSEC 1.5
       does), so there ``off`` of this switch is the one that keeps a hybrid's forces on the pairs.  Molecular

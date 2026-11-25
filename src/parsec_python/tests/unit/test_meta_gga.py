@@ -175,6 +175,24 @@ class ScanPointwiseTests(unittest.TestCase):
         self.assertEqual(off[0][1], on[0][1])
         self.assertEqual(on[2][0], 0.0)
 
+    def test_scalars_give_the_values_of_arrays(self) -> None:
+        # Python floats and 0-d arrays (whose density mask is a numpy.bool_) as one-element arrays, and a density
+        # below the threshold as zeros.
+        functional = NativeScan()
+        for rho, sigma, tau in ((0.1, 0.01, 0.05), (1e-20, 0.0, 0.0)):
+            arrays = functional.unpolarized(np.array([rho]), np.array([sigma]), np.array([tau]))
+            for scalars in ((rho, sigma, tau), tuple(np.float64(value) for value in (rho, sigma, tau)),
+                            tuple(np.array(value) for value in (rho, sigma, tau))):
+                values = functional.unpolarized(*scalars)
+                for value, expected in zip(values[:4], arrays[:4]):
+                    self.assertEqual(float(np.asarray(value).reshape(-1)[0]), float(expected[0]), scalars)
+        spin = (0.06, 0.04, 0.004, 0.001, 0.003, 0.03, 0.02)
+        arrays = functional.polarized(*(np.array([value]) for value in spin))
+        for scalars in (spin, tuple(np.array(value) for value in spin)):
+            values = functional.polarized(*scalars)
+            for value, expected in zip(values[:8], arrays[:8]):
+                self.assertEqual(float(np.asarray(value).reshape(-1)[0]), float(expected[0]))
+
     def test_two_equal_channels_are_the_unpolarized_functional(self) -> None:
         rho, sigma, tau = (np.asarray(values) for values in reference.UNPOLARIZED_INPUTS)
         functional = NativeScan()

@@ -29,7 +29,9 @@ before the SCF):
     ``tau`` of the sector orbitals and the term ``-div(vtau grad)`` as the derivatives between the sectors
     (``Hamiltonian/meta_gga_device.py``; the derivative along a common eigenvector of the operations maps a sector
     onto the sector of the product of the characters, which the half-cell translations leave unchanged), the
-    functional on the orbit fields (``V_xc/meta_gga_xc.py``).  Abelian sectors with their translations.
+    functional on the orbit fields (``V_xc/meta_gga_xc.py``).  Abelian sectors with their translations; since
+    2026-11-23 the weighted sectors of the point group of the cell (``PARSEC_ORBITAL_GROUP_META_GGA_CELL``,
+    ``Symmetry/weighted_inputs.py``: ``tau`` and ``g`` of the solved states averaged over the group).
 ``PARSEC_GAMMA_LIBXC_SECTORS``
     a libxc LDA or GGA: the device evaluators of :mod:`.V_xc.device_libxc` on the orbit fields (the stencil of the
     density gradient wrapped in the cell), or on the host on the expanded fields.  Abelian sectors with their
@@ -41,11 +43,12 @@ carries ``Ignore_Symmetry`` (PARSEC error 159), which the command line reads as 
 ``on`` where the sectors of a CuPy run take the cell (:func:`ts_ignore_symmetry_note`).
 
 Values: ``auto`` takes the sectors where the basis of the cell (grid points times states) reaches
-:data:`MINIMUM_ENTRIES` of its switch (2^27 for TS and a meta-GGA, 2^28 for libxc, 2^26 for LDA+U since
-2026-11-21), below which the setup of the sectors costs more than they save; for TS only an unpolarized cell (a spin
-cell was slower in the spin sectors than on the 1x1x1 k-point driver); :data:`MINIMUM_DEVICES` (from 2026-11-19 to 21
-four CUDA devices for LDA+U) is empty; ``on`` takes them at every size; ``off`` keeps the full grid of one device, as
-before.  Defaults (:data:`DEFAULTS`): ``auto`` for a meta-GGA, libxc, LDA+U and TS (TS since 2026-11-21: the
+:data:`MINIMUM_ENTRIES` of its switch (2^27 for TS, 2^28 for libxc, 2^26 for LDA+U since 2026-11-21, 2^24 for a
+meta-GGA since 2026-11-23, native or of libxc, ``PARSEC_GAMMA_META_GGA_FLOOR``: 2^27 before, and a libxc meta-GGA took
+the floor of libxc too), below which the setup of the sectors costs more than they save; for TS only an unpolarized
+cell (a spin cell was slower in the spin sectors than on the 1x1x1 k-point driver); :data:`MINIMUM_DEVICES` (from
+2026-11-19 to 21 four CUDA devices for LDA+U) is empty; ``on`` takes them at every size; ``off`` keeps the full grid
+of one device, as before.  Defaults (:data:`DEFAULTS`): ``auto`` for a meta-GGA, libxc, LDA+U and TS (TS since 2026-11-21: the
 ``Ignore_Symmetry`` of a TS input is read as PARSEC 1.5's requirement of the correction, error 159, not as a request
 for the full grid; ``off`` restores the former default).  The energies are those of the full grid to the
 convergence of the SCF (forces of a meta-GGA, of libxc and, under ``PARSEC_LDAU_SECTOR_FORCES=auto``, of LDA+U too;
@@ -99,12 +102,32 @@ DEFAULTS = {
 #: 5.6 (10.1) on four; SrTiO3 135 atoms 60^3 x 380 (8.2e7) 8.8 (11.6) -> 4.5 (7.0), 5.3 (9.0) on four; SrTiO3 320
 #: atoms 84^3 x 891 (5.3e8) 48.2 (52.3) -> 8.7 (18.1), 9.9 (20.7) on four; Ag256 64^3 x 1836 (4.8e8) 61.9 (65.2)
 #: -> 9.9 (18.5), 11.6 (21.5) on four; the energies to 1e-8 Ry, the occupation matrices within 1.5e-7.
+#:
+#: A meta-GGA since 2026-11-23, in the weighted sectors of the point group of the cell
+#: (``PARSEC_ORBITAL_GROUP_META_GGA_CELL``): 2^24 entries, the floor of every unpolarized cell
+#: (``PARSEC_PERIODIC_SECTOR_FLOOR``), for native SCAN and for the libxc ``mgga_`` functionals, which no longer take the
+#: floor of libxc (2^28, measured for its LDA and GGA, whose full grid has cheap device terms);
+#: ``PARSEC_GAMMA_META_GGA_FLOOR`` (:func:`meta_gga_floor_setting`; ``former``: 2^27 and the floor of libxc).  First
+#: runs, FHI Si, criterion 1e-6 Ry, total seconds, the full grid (a spin cell: the 1x1x1 k-point driver) -> the sectors,
+#: one A100 / one process on four: Si64 at 48^3 x 160 (1.8e7) 32.1 -> 23.7 / 32.2 -> 24.3; the same with an atom moved
+#: (the abelian sectors of C2v) 31.7 -> 20.2 / 31.7 -> 20.0; spin Si64 at 48^3 x 160 73.7 -> 33.7 / 40.8 -> 34.1, at
+#: 64^3 x 144 (3.8e7) - / 99.9 -> 33.1; Si64 at 64^3 51.8 -> 25.5 / 50.7 -> 26.0, at 82^3 (8.8e7) 87.9 -> 25.7;
+#: Si216 at 64^3 x 486 (1.3e8) 110.1 -> 25.7 / 109.4 -> 26.9; libxc r2SCAN Si64 at 64^3 45.3 -> 18.5 / 45.1 -> 18.8,
+#: Si216 at 82^3 x 486 (2.7e8) 193.8 -> 20.3 (GPU peak 25.7 -> 0.8 GiB); with forces (Si64, Td with the translations,
+#: 1e-8 Ry) 37.3 -> 25.4, the forces within 1.4e-9 Ry/bohr.  Below 2^24 the sectors gain little or nothing on the
+#: small cells (Si8, Si16: 0.9 to 1.07 of the full grid's time on four A100), a spin Si64 at 40^3 (9.2e6) was slower
+#: on four (24.9 -> 28.5) and at 32^3 did not converge in 200 steps in the sectors (the k-point driver did in 116).
 MINIMUM_ENTRIES = {
     TS_SWITCH: 1 << 27,
     LDAU_SWITCH: 1 << 26,
-    META_GGA_SWITCH: 1 << 27,
+    META_GGA_SWITCH: 1 << 24,
     LIBXC_SWITCH: 1 << 28,
 }
+
+#: ``PARSEC_GAMMA_META_GGA_FLOOR``: the floor of a meta-GGA under ``PARSEC_GAMMA_META_GGA_SECTORS=auto``.
+META_GGA_FLOOR_SWITCH = "PARSEC_GAMMA_META_GGA_FLOOR"
+#: The floor of a meta-GGA from 2026-11-19 to 23 (``former``), which a libxc meta-GGA took with that of libxc.
+META_GGA_FORMER_FLOOR = 1 << 27
 
 #: The fewest CUDA devices of the process (``PARSEC_CUPY_DEVICES``) with which ``auto`` takes a switch into the
 #: sectors; none since 2026-11-21.  From 2026-11-19 LDA+U needed four: its sectors carried the KB and LDA+U columns of
@@ -135,9 +158,44 @@ def gamma_feature_setting(name: str) -> str:
 
 
 def gamma_feature_settings() -> dict[str, str]:
-    """Every switch of this module, read (and checked) at once."""
+    """Every switch of this module, read (and checked) at once (``PARSEC_GAMMA_META_GGA_FLOOR`` too)."""
 
+    meta_gga_floor_setting()
     return {name: gamma_feature_setting(name) for name in DEFAULTS}
+
+
+def meta_gga_floor_setting() -> tuple[int, bool]:
+    """``PARSEC_GAMMA_META_GGA_FLOOR``: ``(floor, with the floor of libxc)`` of a meta-GGA under
+    ``PARSEC_GAMMA_META_GGA_SECTORS=auto``.
+
+    ``auto`` (the default since 2026-11-23): :data:`MINIMUM_ENTRIES` of the meta-GGA (2^24 grid points x states) for
+    native SCAN and for a libxc ``mgga_`` functional alike, whose ``PARSEC_GAMMA_LIBXC_SECTORS`` must not be ``off``
+    but whose floor (2^28) it does not take; ``former``: the rule from 2026-11-19 to 23, 2^27 and, for a libxc
+    meta-GGA, the floor of libxc as well (the routes of before, bit for bit); an integer ``>= 0``: that floor for
+    every meta-GGA.  Below ``PARSEC_PERIODIC_SECTOR_FLOOR`` an unpolarized cell keeps the full grid whatever this
+    floor.
+    """
+
+    raw = os.environ.get(META_GGA_FLOOR_SWITCH, "auto").strip().lower() or "auto"
+    if raw == "auto":
+        return int(MINIMUM_ENTRIES[META_GGA_SWITCH]), False
+    if raw == "former":
+        return int(META_GGA_FORMER_FLOOR), True
+    try:
+        value = int(raw)
+    except ValueError:
+        value = -1
+    if value < 0:
+        raise ValueError(f"{META_GGA_FLOOR_SWITCH} must be auto, former or a number of entries >= 0, not {raw!r}")
+    return value, False
+
+
+def _floor_entries(switch: str) -> int:
+    """The floor of ``switch`` under ``auto`` (that of a meta-GGA from :func:`meta_gga_floor_setting`)."""
+
+    if switch == META_GGA_SWITCH:
+        return meta_gga_floor_setting()[0]
+    return int(MINIMUM_ENTRIES[switch])
 
 
 #: Whether the forces and relaxations of a Gamma cell with LDA+U whose SCF takes the sectors keep them (``auto``)
@@ -268,7 +326,7 @@ def basis_entries(problem) -> int | None:
 
 def _below_floor(problem, switch: str) -> bool:
     entries = basis_entries(problem)
-    return entries is None or entries < MINIMUM_ENTRIES[switch]
+    return entries is None or entries < _floor_entries(switch)
 
 
 def process_device_count() -> int:
@@ -293,15 +351,24 @@ def process_device_count() -> int:
 def _floor_refusal(reason: str, switch: str) -> str:
     """The refusal of a cell whose basis is below the floor of ``switch`` under ``auto``."""
 
-    return f"{reason} (a basis below {MINIMUM_ENTRIES[switch]} grid points x states under {switch}=auto; on takes it)"
+    return f"{reason} (a basis below {_floor_entries(switch)} grid points x states under {switch}=auto; on takes it)"
 
 
 def _refused(
-    problem, switch: str, reason: str, *, features: bool, refused: bool = False, auto_refusal: str | None = None
+    problem,
+    switch: str,
+    reason: str,
+    *,
+    features: bool,
+    refused: bool = False,
+    auto_refusal: str | None = None,
+    floor: bool = True,
 ) -> str | None:
     """``reason`` where the switch keeps the feature off the sectors, with why under ``auto``; ``None`` where it
     takes them.  ``refused``: a combination that no value takes (a hybrid; LDA+U of a spin cell).
-    ``auto_refusal``: why ``auto`` keeps the route of before for this cell whatever its size (``on`` takes it)."""
+    ``auto_refusal``: why ``auto`` keeps the route of before for this cell whatever its size (``on`` takes it).
+    ``floor`` false: ``auto`` applies no floor of this switch (the libxc switch of a meta-GGA, whose floor is that
+    of the meta-GGA, :func:`meta_gga_floor_setting`)."""
 
     if not features or refused:
         return reason
@@ -311,7 +378,7 @@ def _refused(
     if value == "auto":
         if auto_refusal is not None:
             return f"{reason} ({auto_refusal} under {switch}=auto; on takes it)"
-        if _below_floor(problem, switch):
+        if floor and _below_floor(problem, switch):
             return _floor_refusal(reason, switch)
         devices = MINIMUM_DEVICES.get(switch)
         if devices is not None and process_device_count() < devices:
@@ -323,20 +390,25 @@ def meta_gga_or_libxc_refusal(problem, *, features: bool) -> str | None:
     """The refusal of a meta-GGA or libxc functional by the route of the Gamma sectors, or ``None``.
 
     ``features`` false (a caller that runs several ranks or folds a mesh): refused as before.  Otherwise each takes
-    the sectors under its switch (``on``; ``auto`` from :data:`MINIMUM_ENTRIES` on) where the functional is not a
-    hybrid.
+    the sectors under its switch (``on``; ``auto`` from :data:`MINIMUM_ENTRIES` on, a meta-GGA from the floor of
+    ``PARSEC_GAMMA_META_GGA_FLOOR``) where the functional is not a hybrid; a libxc meta-GGA needs both switches, and
+    since 2026-11-23 takes the floor of the meta-GGA alone (``PARSEC_GAMMA_META_GGA_FLOOR=former``: that of libxc as
+    well, as before).
     """
 
     from parsec_python.V_xc.libxc import is_libxc_functional
 
     scf = problem.scf
     hybrid = bool(getattr(scf, "is_hybrid", False))
-    if getattr(scf, "is_meta_gga", False):
+    meta = bool(getattr(scf, "is_meta_gga", False))
+    if meta:
         found = _refused(problem, META_GGA_SWITCH, META_GGA_REASON, features=features, refused=hybrid)
         if found is not None:
             return found
     if is_libxc_functional(getattr(scf, "xc_functional", "ca")):
-        return _refused(problem, LIBXC_SWITCH, LIBXC_REASON, features=features, refused=hybrid)
+        # (a libxc meta-GGA: the floor of the meta-GGA alone, unless PARSEC_GAMMA_META_GGA_FLOOR=former)
+        floor = not meta or meta_gga_floor_setting()[1]
+        return _refused(problem, LIBXC_SWITCH, LIBXC_REASON, features=features, refused=hybrid, floor=floor)
     return None
 
 
@@ -478,7 +550,10 @@ __all__ = [
     "LDAU_SPIN_SWITCH",
     "LDAU_SWITCH",
     "LIBXC_SWITCH",
+    "META_GGA_FLOOR_SWITCH",
+    "META_GGA_FORMER_FLOOR",
     "META_GGA_SWITCH",
+    "meta_gga_floor_setting",
     "TS_SWITCH",
     "correction_refusal",
     "gamma_feature_setting",

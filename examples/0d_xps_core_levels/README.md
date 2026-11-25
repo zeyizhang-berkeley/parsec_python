@@ -125,7 +125,7 @@ the cases up to that many grid points.
 | atomic reference energies | from the potential generation | the same (spin-unpolarized atoms) |
 | refinement | `Lrefine=T` | `Energy_Refinement: b3lyp` |
 
-With 0.10 Å the binding energies of CH4 and CF4 are 0.008 and 0.003 eV above
+With 0.10 Å the binding energies of CH4 and CF4 are 0.009 and 0.004 eV above
 those of runs with 0.07 Å (`setup.py --spacing 0.07`). The totals of CH4
 change by 0.0003 eV at most when the wall is moved from 4 Å to 8 Å beyond the
 outermost nucleus. `States_Num` is the number of occupied states plus at least 8,
@@ -149,13 +149,13 @@ PP-PBE(B3LYP). The complete tables are `RESULTS.md` in each folder.
 | quantity | paper | here |
 |---|---|---|
 | Table 1, atomic energies of the generation, 16 spin-unpolarized values | | within 0.001 |
-| Table 2, PP-PBE of the four reference molecules | 198.04, 296.71, 411.94, 544.93 | 198.042, 296.718, 411.945, 544.931 |
-| Table S1, the same with its spin-polarized atomic energies, PBE | 191.60, 288.16, 401.86, 534.46 | 191.606, 288.160, 401.862, 534.463 |
-| Table S1, the same, refined | 191.77, 288.15, 401.64, 534.09 | 191.800, 288.165, 401.642, 534.095 |
+| Table 2, PP-PBE of the four reference molecules | 198.04, 296.71, 411.94, 544.93 | 198.041, 296.719, 411.946, 544.925 |
+| Table S1, the same with its spin-polarized atomic energies, PBE | 191.60, 288.16, 401.86, 534.46 | 191.605, 288.161, 401.863, 534.457 |
+| Table S1, the same, refined | 191.77, 288.15, 401.64, 534.09 | 191.799, 288.167, 401.643, 534.089 |
 | Table S1, shifts of the other 50 molecules, PBE / refined | | mean absolute difference 0.007 / 0.010, largest 0.029 / 0.037 |
-| Table 3, error against experiment, PBE (B, C, N, O, all) | 0.23, 0.20, 0.15, 0.11, 0.16 | 0.228, 0.205, 0.151, 0.108, 0.167 |
-| Table 3, the same, refined | 0.11, 0.18, 0.14, 0.12, 0.14 | 0.109, 0.175, 0.142, 0.115, 0.138 |
-| Table S2, N shifts with 0 to 5 times the exact exchange | 0.15, 0.14, 0.16, 0.21, 0.26, 0.31 | 0.155, 0.142, 0.164, 0.208, 0.252, 0.301 |
+| Table 3, error against experiment, PBE (B, C, N, O, all) | 0.23, 0.20, 0.15, 0.11, 0.16 | 0.229, 0.205, 0.150, 0.109, 0.167 |
+| Table 3, the same, refined | 0.11, 0.18, 0.14, 0.12, 0.14 | 0.109, 0.175, 0.142, 0.114, 0.138 |
+| Table S2, N shifts with 0 to 5 times the exact exchange | 0.15, 0.14, 0.16, 0.21, 0.26, 0.31 | 0.155, 0.142, 0.164, 0.208, 0.252, 0.302 |
 
 - The absolute values of Table S1 use atomic energies of spin-polarized atoms.
   The constant per element that this takes off a binding energy follows from
@@ -169,7 +169,7 @@ PP-PBE(B3LYP). The complete tables are `RESULTS.md` in each folder.
   8.199. The comparison above uses the printed 8.558, with which the carbon
   values of Table S1 are reproduced.
 - Table S1 prints the values of Cl3CCN and HNCO (N set) in each other's rows:
-  here Cl3CCN 1.499 / 1.818 and HNCO 1.942 / 2.098, in the table 1.95 / 2.10
+  here Cl3CCN 1.500 / 1.819 and HNCO 1.943 / 2.098, in the table 1.95 / 2.10
   and 1.49 / 1.82. They are compared exchanged.
 - The errors of Table 3 count the reference molecule of each set.
 - Table S2 is evaluated from the parts of the B3LYP energy that every case
@@ -180,20 +180,20 @@ and with spin polarization and their difference:
 
 | | unpolarized, here | paper | polarized, here | paper | spin polarization, here | paper |
 |---|---:|---:|---:|---:|---:|---:|
-| B atom | -70.485 | -70.483 | -70.798 | -70.796 | -0.313 | -0.313 |
-| B ion, 1s hole | -128.686 | -128.688 | -129.234 | -129.236 | -0.548 | -0.548 |
-| C atom | -145.946 | -145.943 | -147.317 | -147.314 | -1.371 | -1.371 |
-| C ion, 1s hole | -240.672 | -240.665 | -242.727 | -242.723 | -2.056 | -2.058 |
-| N atom | -262.454 | -262.446 | -265.830 | -265.824 | -3.376 | -3.378 |
-| N ion, 1s hole | -401.752 | -401.742 | -406.413 | -406.408 | -4.662 | -4.666 |
-| O atom | -428.175 | -428.168 | -429.770 | -429.765 | -1.596 | -1.597 |
-| O ion, 1s hole | -619.402 | -619.405 | -621.450 | -621.455 | -2.048 | -2.050 |
+| B atom | -70.483 | -70.483 | -70.796 | -70.796 | -0.313 | -0.313 |
+| B ion, 1s hole | -128.690 | -128.688 | -129.238 | -129.236 | -0.548 | -0.548 |
+| C atom | -145.943 | -145.943 | -147.314 | -147.314 | -1.371 | -1.371 |
+| C ion, 1s hole | -240.667 | -240.665 | -242.723 | -242.723 | -2.056 | -2.058 |
+| N atom | -262.448 | -262.446 | -265.824 | -265.824 | -3.376 | -3.378 |
+| N ion, 1s hole | -401.746 | -401.742 | -406.408 | -406.408 | -4.662 | -4.666 |
+| O atom | -428.172 | -428.168 | -429.768 | -429.765 | -1.596 | -1.597 |
+| O ion, 1s hole | -619.413 | -619.405 | -621.462 | -621.455 | -2.048 | -2.050 |
 
 - An atom has its 2s orbital filled and its 2p electrons spread evenly over
   the three 2p orbitals; with spin polarization the 2p shell is filled by
   Hund's rule (1, 2, 3 and 2 Bohr magnetons for B, C, N and O). An ion is the
   atom in the potential with a 1s hole, with the charge +1.
-- Largest difference: 0.010 in a total energy (N ion), 0.004 in an energy of
+- Largest difference: 0.008 in a total energy (O ion), 0.004 in an energy of
   spin polarization (N ion). The table of the paper comes from the radial
   program that generates the potentials. Here the atom is solved on the grid
   of 0.10 Å in a sphere of 7 Å, with the potentials as the solver reads them:
@@ -204,22 +204,22 @@ level of the hydronium oxygen relative to the water molecule of the 2022 set:
 
 | n | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| PBE, here | 9.929 | 7.890 | 6.187 | 5.630 | 5.546 | 5.025 | 5.278 | 4.803 | 4.565 | 4.211 |
+| PBE, here | 9.946 | 7.910 | 6.206 | 5.640 | 5.558 | 5.025 | 5.305 | 4.831 | 4.592 | 4.222 |
 | PBE, figure | 9.94 | 7.86 | 6.17 | 5.59 | 5.50 | 4.98 | 5.29 | 4.80 | 4.56 | 4.18 |
-| refined, here | 9.983 | 7.975 | 6.295 | 5.743 | 5.663 | 5.142 | 5.414 | 4.935 | 4.695 | 4.342 |
+| refined, here | 10.000 | 7.996 | 6.314 | 5.753 | 5.675 | 5.142 | 5.440 | 4.962 | 4.721 | 4.354 |
 | refined, figure | 9.99 | 7.97 | 6.31 | 5.71 | 5.62 | 5.10 | 5.42 | 4.93 | 4.69 | 4.32 |
 
 | n | 11 | 12 | 13 | 14 | 15 | 16 | 17 | 18 | 19 | 20 |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| PBE, here | 3.930 | 3.692 | 3.713 | 3.515 | 3.371 | 3.516 | 3.436 | 3.343 | 3.233 | 3.169 |
+| PBE, here | 3.949 | 3.708 | 3.736 | 3.527 | 3.377 | 3.520 | 3.444 | 3.350 | 3.250 | 3.182 |
 | PBE, figure | 3.92 | 3.62 | 3.68 | 3.49 | 3.35 | 3.51 | 3.40 | 3.32 | 3.18 | 3.15 |
-| refined, here | 4.069 | 3.821 | 3.853 | 3.658 | 3.510 | 3.657 | 3.580 | 3.484 | 3.376 | 3.314 |
+| refined, here | 4.088 | 3.837 | 3.876 | 3.669 | 3.517 | 3.661 | 3.588 | 3.492 | 3.393 | 3.327 |
 | refined, figure | 4.05 | 3.75 | 3.82 | 3.64 | 3.49 | 3.66 | 3.56 | 3.45 | 3.32 | 3.30 |
 
 - The paper gives the figure only. Its points were read from the image
   (0.013 eV per pixel; the squares of the PBE curve lie partly under the
   circles of the refined one), which leaves an uncertainty of about 0.03.
-  Mean absolute difference 0.027 / 0.024, largest 0.072 / 0.071 (n = 12).
+  Mean absolute difference 0.039 / 0.035, largest 0.088 / 0.087 (n = 12).
 - The structures are the first entry of each published file, the global
   minimum. The hole is on the oxygen with three hydrogens bound (Figure S2 of
   the paper); the initial state has the charge +1, the final state +2.
@@ -228,10 +228,10 @@ level of the hydronium oxygen relative to the water molecule of the 2022 set:
 
 | quantity | paper | here |
 |---|---|---|
-| Table S1, S 1s of H2S and P 1s of P(CH3)3, PBE | 2492.11, 2162.71 | 2492.114, 2162.701 |
-| Table S1, the same, refined | 2492.11, 2162.77 | 2492.126, 2162.775 |
-| Table S4, S 2s of S8 and P 2s of P4, PBE | 224.3, 185.72 | 224.367, 185.717 |
-| Table S4, the same, refined | 224.44, 185.71 | 224.435, 185.701 |
+| Table S1, S 1s of H2S and P 1s of P(CH3)3, PBE | 2492.11, 2162.71 | 2492.115, 2162.702 |
+| Table S1, the same, refined | 2492.11, 2162.77 | 2492.127, 2162.776 |
+| Table S4, S 2s of S8 and P 2s of P4, PBE | 224.3, 185.72 | 224.368, 185.718 |
+| Table S4, the same, refined | 224.44, 185.71 | 224.436, 185.701 |
 | Tables S1, S4, S5, shifts of 33 further entries, PBE / refined | | mean absolute difference 0.018 / 0.022, largest 0.053 / 0.059 |
 
 - A potential with a 2p hole is spherical, so a 2p binding energy here is the
@@ -245,15 +245,15 @@ level of the hydronium oxygen relative to the water molecule of the 2022 set:
 The stored energies and times are from first calculations (no cache, no
 restart, an empty kernel cache for every run) in double precision on A100 GPUs
 with 80 GB (Perlmutter, one run per GPU, solver defaults), all made with the
-code of 22 November 2026; the atoms ran two side by side on one node. The 224
-runs took 11.9 GPU hours, 41 minutes on up to 28 GPUs:
+code of 24 November 2026; the atoms ran two side by side on one node. The 224
+runs took 11.6 GPU hours, 72 minutes on up to 16 GPUs:
 
 | set | runs | all runs | median run | shortest | longest |
 |---|---:|---:|---:|---:|---:|
-| 2022, 54 molecules | 108 | 1.4 GPU hours | 31 s | 14 s (H2O) | 304 s (B(OC2H5)3) |
-| 2022, atoms of Table 1 | 16 | 0.06 GPU hours | 13 s | 10 s (B ion) | 15 s (N ion, polarized) |
-| 2022, protonated water | 40 | 9.6 GPU hours | 583 s | 27 s (H3O+(H2O)1) | 2422 s (H3O+(H2O)20) |
-| 2024, 21 molecules | 60 | 0.83 GPU hours | 41 s | 17 s (H2S) | 242 s (P(CF3)3) |
+| 2022, 54 molecules | 108 | 1.2 GPU hours | 24 s | 11 s (H2O) | 288 s (B(OC2H5)3) |
+| 2022, atoms of Table 1 | 16 | 0.04 GPU hours | 10 s | 7 s (N ion) | 12 s (N ion, polarized) |
+| 2022, protonated water | 40 | 9.6 GPU hours | 582 s | 24 s (H3O+(H2O)1) | 2425 s (H3O+(H2O)20) |
+| 2024, 21 molecules | 60 | 0.78 GPU hours | 37 s | 13 s (H2S) | 237 s (P(CF3)3) |
 
 37 of the molecular inputs run in symmetry sectors (`PARSEC_MOVING_SECTORS`:
 28 of the 2022 set, 9 of the 2024 set), the others and the water clusters on
@@ -270,22 +270,47 @@ energies and two printed atomic totals moved by 0.001 eV. With
 `PARSEC_PROJECTOR_TAIL=off`, 26 of the runs gave the earlier totals in all
 eight printed decimals (code of 22 November 2026; since 23 November 2026 the
 Kleinman-Bylander denominators take the exact quadrature of the logarithmic
-mesh, and `PARSEC_KB_QUADRATURE=trapezoid` is needed beside it).
+mesh and the cubic spline of a local potential its exact Coulomb tail, and
+since 24 November 2026 the potentials are filtered, see below:
+`PARSEC_KB_QUADRATURE=trapezoid PARSEC_SPLINE_COULOMB_TAIL=off
+PARSEC_LOCAL_FILTER=off` is needed beside it, checked on 18 of the runs with
+the code of 24 November 2026).
+
+The local potential and the projectors of every potential, the core-hole
+ones included, are Fourier-filtered to the grid (`PARSEC_LOCAL_FILTER=all`,
+the default since 24 November 2026). On 18 runs checked against
+`PARSEC_LOCAL_FILTER=off` this moved the totals by -1.0e-3 Ry (the O ion with
+the hole) to +4.5e-4 Ry; with the exact Kleinman-Bylander quadrature of
+23 November 2026 (+2.6e-5 to +2.3e-4 Ry on the same runs) the PBE totals are
+-7.3e-3 Ry (PF5 with the P 1s hole) to +6.3e-3 Ry (POF3) away from those of
+the runs of 22 November 2026, and the binding energies -15 to +13 meV. The
+O 1s binding energies moved most, down by 10 to 15 meV for six molecules of
+the 2022 set. For the water molecule the 0.10 Å grid gives 548.204 eV
+(PBE) without the filter and 548.188 eV with it, against 548.192 eV with
+either on grids of 0.07 and 0.05 Å: the filter takes the error of the grid
+from +11 to -4 meV. The water molecule is the reference of the protonated
+clusters, whose values above rose by 0 to 0.028 eV. The 2024 binding
+energies moved by 2 meV at most and the totals of the atoms of Table 1 by
+up to 0.012 eV (the O ion; their largest difference from the paper is now
+0.008 eV, before 0.010 eV).
+`PARSEC_LOCAL_FILTER=off PARSEC_SPLINE_COULOMB_TAIL=off
+PARSEC_KB_QUADRATURE=trapezoid` gives the totals of 22 November 2026 in all
+eight printed decimals (the same 18 runs).
 
 | run | grid points | occupied / computed states | SCF steps | SCF [s] | pair solves | refinement [s] | whole run [s] | host memory [GiB] |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
-| CO, neutral | 723,160 | 5 / 16 | 24 | 8 | 15 | 2 | 14 | 2.2 |
-| P(CF3)3, neutral | 1,854,640 | 40 / 48 | 41 | 22 | 820 | 208 | 239 | 5.6 |
-| B(OC2H5)3, neutral | 3,246,592 | 30 / 48 | 61 | 50 | 465 | 223 | 287 | 9.4 |
-| H3O+(H2O)1 | 1,360,280 | 8 / 16 | 38 | 14 | 36 | 7 | 27 | 3.4 |
-| H3O+(H2O)5 | 2,278,264 | 24 / 32 | 41 | 26 | 300 | 97 | 131 | 5.8 |
-| H3O+(H2O)10 | 3,260,032 | 44 / 64 | 40 | 38 | 990 | 479 | 532 | 10.1 |
-| H3O+(H2O)15 | 3,939,528 | 64 / 80 | 44 | 53 | 2080 | 1279 | 1346 | 14.4 |
-| H3O+(H2O)20 | 4,140,056 | 84 / 96 | 43 | 58 | 3570 | 2310 | 2384 | 15.9 |
+| CO, neutral | 723,160 | 5 / 16 | 24 | 5 | 15 | 2 | 11 | 2.2 |
+| P(CF3)3, neutral | 1,854,640 | 40 / 48 | 40 | 19 | 820 | 208 | 237 | 5.7 |
+| B(OC2H5)3, neutral | 3,246,592 | 30 / 48 | 58 | 45 | 465 | 223 | 283 | 9.4 |
+| H3O+(H2O)1 | 1,360,280 | 8 / 16 | 38 | 11 | 36 | 7 | 24 | 3.4 |
+| H3O+(H2O)5 | 2,278,264 | 24 / 32 | 43 | 23 | 300 | 97 | 129 | 5.8 |
+| H3O+(H2O)10 | 3,260,032 | 44 / 64 | 40 | 35 | 990 | 478 | 527 | 10.1 |
+| H3O+(H2O)15 | 3,939,528 | 64 / 80 | 44 | 51 | 2080 | 1275 | 1339 | 14.4 |
+| H3O+(H2O)20 | 4,140,056 | 84 / 96 | 43 | 55 | 3570 | 2302 | 2374 | 16.0 |
 
 The refinement is one Poisson solve per pair of orbitals that hold electrons:
 0.09 s on 0.7 million points, 0.17 s on 1.4 million, 0.64 s on 4.1 million. It
-takes 48 % of the time of the 2022 molecules, 57 % of the 2024 set and 94 % of
+takes 54 % of the time of the 2022 molecules, 61 % of the 2024 set and 94 % of
 the water clusters. An orbital enters the exact exchange when its occupation
 exceeds 1e-10, the electron-count tolerance of the Fermi search
 (`PARSEC_EXCHANGE_OCCUPATION_CUT`, the default since 22 November 2026). With
@@ -307,7 +332,8 @@ Fermi temperature of the inputs (H3O+(H2O)20 with the hole: 85 orbitals for
 On a laptop with 32 logical cores, an RTX 5070 Laptop GPU with 8 GB and 32 GB
 of memory, the runs of the next table, the second state of the two water
 clusters and the 16 atoms gave the totals of the A100 runs made before
-22 November 2026 (now `PARSEC_PROJECTOR_TAIL=off PARSEC_KB_QUADRATURE=trapezoid`)
+22 November 2026 (now `PARSEC_PROJECTOR_TAIL=off PARSEC_KB_QUADRATURE=trapezoid
+PARSEC_SPLINE_COULOMB_TAIL=off PARSEC_LOCAL_FILTER=off`)
 in all eight printed decimals:
 
 | run | grid points | occupied / computed states | SCF steps | SCF [s] | pair solves | refinement [s] | whole run [s] | host memory [GiB] |

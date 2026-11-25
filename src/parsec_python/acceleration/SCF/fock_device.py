@@ -16,6 +16,8 @@ Units Ry, bohr.  Nothing here prints or opens files.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import numpy as np
 
 from parsec_python.SCF.fock_diis import OccupiedBlock, orthonormal_complement, window_occupation_floor
@@ -31,14 +33,30 @@ WINDOW_MARGIN = 0.10
 BUILD_COLUMNS = 3
 
 
+@dataclass
+class WeightedOccupiedBlock(OccupiedBlock):
+    """The occupied block of a weighted sector (``PARSEC_ORBITAL_GROUP_HYBRID``): ``occupations`` per partner, in
+    ``[0, 1]``, and the ``weight`` of the sector, the partners each state stands for, by which the traces of the
+    window (:func:`parsec_python.SCF.fock_diis._trace`) and the electrons of the natural orbitals (``partners``) count
+    the block."""
+
+    weight: float = 1.0
+
+    @property
+    def partners(self) -> float:
+        return float(self.weight)
+
+
 def _sector_bytes(sets, occupied_only: bool) -> dict[int, int]:
     """Bytes of the columns of the window (or all columns) of ``sets`` on each device."""
 
     counts: dict[int, int] = {}
     threshold = window_occupation_floor()
     for orbitals in sets:
+        # (the occupation of each partner of a state of a weighted sector)
+        partner = orbitals.partner_occupations()
         for sector in orbitals.sectors:
-            weights = orbitals.occupations[sector.states]
+            weights = partner[sector.states]
             count = int(np.count_nonzero(weights > threshold)) if occupied_only else int(weights.size)
             counts[int(sector.device)] = counts.get(int(sector.device), 0) + 8 * int(sector.rows) * count
     return counts
@@ -105,14 +123,22 @@ def occupied_blocks(sets) -> list | None:
     channels = []
     for orbitals in sets:
         blocks = {}
+        weighting = getattr(orbitals, "weighting", None)
+        partner = orbitals.partner_occupations()
         for sector in orbitals.sectors:
-            weights = orbitals.occupations[sector.states]
+            weights = partner[sector.states]
             positions = np.flatnonzero(weights > window_occupation_floor())
             if not positions.size:
                 continue
             with cp.cuda.Device(sector.device):
                 vectors = cp.array(sector.columns(cp, positions), dtype=cp.float64, order="F", copy=True)
-            blocks[sector.representation] = OccupiedBlock(vectors, np.array(weights[positions], dtype=np.float64))
+            occupations = np.array(weights[positions], dtype=np.float64)
+            blocks[sector.representation] = (
+                OccupiedBlock(vectors, occupations)
+                if weighting is None
+                # a weighted sector: the occupation of each partner, and the partners of a state
+                else WeightedOccupiedBlock(vectors, occupations, weight=weighting.sector_weight(sector.representation))
+            )
         channels.append(blocks)
     return channels
 
@@ -137,8 +163,12 @@ def natural_channels(sets, natural):
         sectors = []
         occupations = []
         start = 0
+        # A weighted channel: the natural occupations are per partner (WeightedOccupiedBlock), the channel's times the
+        # weight of the sector, and its coset images are those of the new columns (WeightedExchange.channel).
+        weighting = getattr(orbitals, "weighting", None)
+        partner = orbitals.partner_occupations()
         for sector in orbitals.sectors:
-            weights = orbitals.occupations[sector.states]
+            weights = partner[sector.states]
             empty = np.flatnonzero(weights <= window_occupation_floor())
             phi, values = blocks.get(sector.representation, (None, np.zeros(0)))
             with cp.cuda.Device(sector.device):
@@ -160,12 +190,24 @@ def natural_channels(sets, natural):
                     expansion=sector.expansion,
                 )
             )
-            occupations.append(np.concatenate([np.asarray(values, dtype=np.float64), np.zeros(count - len(values))]))
+            values = np.asarray(values, dtype=np.float64)
+            if weighting is not None:
+                values = values * weighting.sector_weight(sector.representation)
+            occupations.append(np.concatenate([values, np.zeros(count - len(values))]))
             start += count
+        joined = np.concatenate(occupations) if occupations else np.zeros(0)
+        if weighting is not None:
+            result.append(
+                weighting.channel(
+                    tuple(sectors), joined, float(orbitals.spin_weight), int(orbitals.full_size),
+                    float(orbitals.volume_element),
+                )
+            )
+            continue
         result.append(
             ChannelOrbitals(
                 tuple(sectors),
-                np.concatenate(occupations) if occupations else np.zeros(0),
+                joined,
                 float(orbitals.spin_weight),
                 int(orbitals.full_size),
                 float(orbitals.volume_element),

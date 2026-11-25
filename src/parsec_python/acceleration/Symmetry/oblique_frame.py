@@ -26,6 +26,19 @@ the grid itself: only the rows enter them.  The operations of the reduction are 
 (the default routines' grid along the lattice vectors, the general grid of the Fortran-derived routines) and, with
 ``PARSEC_SLAB_WIRE_SECTORS=auto``, for a wire or slab whose periodic vectors are not along the axes; ``off`` keeps them
 on the full grid.
+
+The operations whose ``W`` is an integer matrix but no signed permutation (the three- and six-fold axes of a hexagonal
+cell, the three- and four-fold axes of the primitive fcc and bcc cells that are no body diagonal of their grid) carry
+the second differences of the Laplacian of both routine sets onto lines of the same weight (their extra directions are
+the nearest neighbours of the lattice: ``u_1 + u_2`` of a hexagonal grid, ``u_i - u_j`` of fcc, ``u_1 + u_2 + u_3`` of
+bcc), so the kinetic energy, the local and nonlocal pseudopotential, the densities and the finite-difference Hartree
+potential commute with them (to the precision to which the cell is typed).  The centred first differences along the
+three grid axes do not: such a ``W`` turns an axis onto an extra direction, along which the gradient takes no
+difference of its own, so the discrete gradient of a GGA (its potential is off by 2e-3 to 8e-2 Ry on hcp Mg, diamond,
+bcc Na and graphite) and the k-point term ``-2ik.grad`` are not invariant.  ``PARSEC_OBLIQUE_FULL_GROUP=auto`` (the
+default since 2026-11-23, :func:`oblique_full_group_setting`) admits them for a bulk cell whose Hamiltonian has no
+gradient (a local-density functional at the Gamma point; :func:`general_index_operations`); ``off`` keeps the signed
+permutations alone.
 """
 
 from __future__ import annotations
@@ -53,6 +66,28 @@ def oblique_sectors_setting() -> str:
     value = os.environ.get(_SWITCH, "auto").strip().lower() or "auto"
     if value not in {"auto", "off"}:
         raise ValueError(f"{_SWITCH} must be auto or off, not {value!r}")
+    return value
+
+
+_FULL_GROUP_SWITCH = "PARSEC_OBLIQUE_FULL_GROUP"
+#: The functionals whose potential reads no gradient of the density (``SCFSettings.xc_functional``): the operations of
+#: :func:`general_index_operations` keep their discrete Hamiltonian at the Gamma point.
+GRADIENT_FREE_FUNCTIONALS = frozenset({"ca", "pw92", "xalpha", "wigner", "hedin_lundqvist"})
+
+
+def oblique_full_group_setting() -> str:
+    """``PARSEC_OBLIQUE_FULL_GROUP``: ``auto`` (the default since 2026-11-23) or ``off``.
+
+    ``auto``: the sectors of a bulk cell in the frame of its grid indices (``PARSEC_OBLIQUE_SECTORS=auto``) whose
+    functional reads no gradient (:data:`GRADIENT_FREE_FUNCTIONALS`; the frame is taken at the Gamma point only) also
+    take the operations whose action on the indices is an integer matrix but no signed permutation
+    (:func:`general_index_operations`: the full hexagonal and cubic groups), where its sectors then cost less (rows times
+    states plus the fixed cost of a sector, :func:`.axis_reflection.detect_point_group_reduction`); otherwise the
+    sectors of the signed permutations, bit for bit.  ``off``: the signed permutations alone, as before 2026-11-23."""
+
+    value = os.environ.get(_FULL_GROUP_SWITCH, "auto").strip().lower() or "auto"
+    if value not in {"auto", "off"}:
+        raise ValueError(f"{_FULL_GROUP_SWITCH} must be auto or off, not {value!r}")
     return value
 
 
@@ -165,13 +200,86 @@ def admissible_index_operations(grid) -> tuple[np.ndarray, ...]:
     return tuple(kept)
 
 
+def _unimodular_candidates() -> np.ndarray:
+    """The 3x3 integer matrices with entries -1, 0 or 1 and determinant +-1 that are no signed permutation."""
+
+    entries = np.asarray(list(product((-1, 0, 1), repeat=9)), dtype=np.int64).reshape(-1, 3, 3)
+    determinants = np.rint(np.linalg.det(entries.astype(np.float64))).astype(np.int64)
+    entries = entries[np.abs(determinants) == 1]
+    absolute = np.abs(entries)
+    signed = np.all(absolute.sum(axis=1) == 1, axis=1) & np.all(absolute.sum(axis=2) == 1, axis=1)
+    return entries[~signed]
+
+
+def general_index_operations(grid) -> tuple[np.ndarray, ...]:
+    """The integer matrices ``W`` (entries -1, 0 or 1) that are no signed permutation and act on the indices of the
+    bulk ``grid`` as an operation of its lattice that keeps its Laplacian: ``R = S W S^-1`` an isometry, ``W`` maps the
+    lattice of the counts onto itself (``N^-1 W N`` integer, ``N`` the counts) and every second difference onto one of
+    the same weight.  Empty for a wire or slab.
+
+    These are the rotations and reflections of a hexagonal cell that are no signed permutation of its grid axes (16 of
+    D6h), and those of the primitive fcc and bcc cells (36 of Oh).  The gradient of the grid does not commute with them
+    (the module docstring): only a Hamiltonian without one keeps them (:func:`oblique_full_group_setting`)."""
+
+    from .axis_reflection import confined_grid
+
+    if confined_grid(grid):
+        return ()
+    steps = step_matrix(grid)
+    inverse = np.linalg.inv(steps)
+    lines = stencil_lines(grid)
+    scale = max(abs(weight) for _, weight in lines)
+    weights: dict[tuple[int, int, int], float] = {}
+    for offset, weight in lines:
+        weights[tuple(int(v) for v in offset)] = weight
+        weights[tuple(-int(v) for v in offset)] = weight
+    counts = np.asarray(grid.points_per_axis, dtype=np.int64)
+    candidates = _unimodular_candidates()
+    # N^-1 W N integer: entry (i, j) times n_j / n_i
+    lattice = candidates * counts[None, None, :]
+    whole = np.all(lattice % counts[None, :, None] == 0, axis=(1, 2))
+    candidates = candidates[whole]
+    rotations = np.einsum("ij,gjk,kl->gil", steps, candidates.astype(np.float64), inverse)
+    deviation = np.max(np.abs(np.einsum("gji,gjk->gik", rotations, rotations) - np.eye(3)[None]), axis=(1, 2))
+    candidates = candidates[deviation <= _ORTHOGONALITY_TOLERANCE]
+    kept = []
+    for matrix in candidates:
+        preserved = True
+        for offset, weight in lines:
+            image = tuple(int(v) for v in matrix @ np.asarray(offset, dtype=np.int64))
+            other = weights.get(image)
+            if other is None or abs(other - weight) > _WEIGHT_TOLERANCE * scale:
+                preserved = False
+                break
+        if preserved:
+            kept.append(matrix.astype(np.int8))
+    return tuple(kept)
+
+
+def signed_frame_grid(frame_grid):
+    """``frame_grid`` without the operations of :func:`general_index_operations`: the grid of the frame whose detection
+    takes the signed permutations alone (the same object where it has none)."""
+
+    if not getattr(frame_grid, "index_frame_general_operations", None):
+        return frame_grid
+    cached = getattr(frame_grid, "_signed_frame_grid", None)
+    if cached is not None:
+        return cached
+    copy = replace(frame_grid)
+    object.__setattr__(copy, "index_frame_operations", frame_grid.index_frame_operations)
+    object.__setattr__(frame_grid, "_signed_frame_grid", copy)
+    return copy
+
+
 @dataclass(frozen=True)
 class IndexFrame:
     """The detection of the sectors of ``grid`` in the frame of its indices (the module docstring).
 
     ``frame_grid`` holds the points, rows and lookup of ``grid`` with the box of its counts as cell and one step per
-    axis (``index_frame_operations``: the admissible ``W``); :meth:`atoms` gives the atoms at ``S^-1 r`` and
-    :meth:`tolerance` a distance in index units.
+    axis (``index_frame_operations``: the admissible signed permutations ``W``; ``index_frame_general_operations``: the
+    integer matrices of :func:`general_index_operations` where ``general`` holds them); :meth:`atoms` gives the atoms at
+    ``S^-1 r`` and :meth:`tolerance` a distance in index units.  ``operations`` are all admissible ``W``, the signed
+    permutations first.
     """
 
     grid: object
@@ -180,6 +288,8 @@ class IndexFrame:
     inverse: np.ndarray
     operations: tuple
     scale: float
+    # the operations of :func:`general_index_operations` among ``operations`` (PARSEC_OBLIQUE_FULL_GROUP=auto)
+    general: tuple = ()
 
     def atoms(self, atoms) -> tuple:
         """``atoms`` at their index coordinates ``S^-1 r`` (every other field kept)."""
@@ -204,9 +314,23 @@ class IndexFrame:
 
         return len(self.operations)
 
+    def signed(self) -> "IndexFrame":
+        """This frame with the signed permutations alone (itself where it has no other operation)."""
 
-def index_frame(grid) -> IndexFrame:
-    """The :class:`IndexFrame` of ``grid`` (:func:`needs_index_frame`)."""
+        if not self.general:
+            return self
+        general = {np.asarray(op, dtype=np.int8).tobytes() for op in self.general}
+        return replace(
+            self,
+            frame_grid=signed_frame_grid(self.frame_grid),
+            operations=tuple(op for op in self.operations if np.asarray(op, dtype=np.int8).tobytes() not in general),
+            general=(),
+        )
+
+
+def index_frame(grid, *, general: bool = False) -> IndexFrame:
+    """The :class:`IndexFrame` of ``grid`` (:func:`needs_index_frame`); ``general`` also admits the operations of
+    :func:`general_index_operations` (the caller has checked that the Hamiltonian keeps them)."""
 
     from parsec_python.Grid.pbc import PeriodicRealSpaceGrid
     from parsec_python.models import PeriodicCell
@@ -252,14 +376,18 @@ def index_frame(grid) -> IndexFrame:
             lookup=grid.lookup,
         )
     object.__setattr__(frame_grid, "index_frame_operations", frozenset(op.tobytes() for op in operations))
+    others = general_index_operations(grid) if general else ()
+    if others:
+        object.__setattr__(frame_grid, "index_frame_general_operations", tuple(others))
     singular = np.linalg.svd(steps, compute_uv=False)
     return IndexFrame(
         grid=grid,
         frame_grid=frame_grid,
         steps=steps,
         inverse=inverse,
-        operations=operations,
+        operations=tuple(operations) + tuple(others),
         scale=1.0 / float(np.min(singular)),
+        general=tuple(others),
     )
 
 
@@ -357,8 +485,12 @@ def sector_negative_laplacian(grid, operations):
 
 
 __all__ = [
+    "GRADIENT_FREE_FUNCTIONALS",
     "IndexFrame",
     "admissible_index_operations",
+    "general_index_operations",
+    "oblique_full_group_setting",
+    "signed_frame_grid",
     "lines_negative_laplacian",
     "sector_negative_laplacian",
     "symmetric_stencil_lines",

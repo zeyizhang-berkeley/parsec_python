@@ -42,6 +42,7 @@ from parsec_python.Eigensolvers.spectral_bounds import bound_request, lanczos_bo
 from parsec_python.Eigensolvers.subspace import SubspaceSettings, _adapt_polynomial_degree, subspace_filter_bounds
 
 from ..backends.cupy import require_cupy
+from ..backends.device_checks import all_finite
 
 _BREAKDOWN_TOLERANCE = 2.5e-16
 FILTER_COLUMNS_ENV = "PARSEC_SPINOR_FILTER_COLUMNS"
@@ -580,7 +581,7 @@ def _filter_group(
 
 
 def _check_finite(xp, array, operator=None) -> None:
-    bad = np.array([0.0 if bool(xp.all(xp.isfinite(array))) else 1.0])
+    bad = np.array([0.0 if all_finite(array) else 1.0])
     if operator is not None:
         bad = _sum_host(operator, bad)  # every rank must take the same decision
     if bad[0] > 0.0:

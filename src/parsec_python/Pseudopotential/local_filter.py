@@ -7,7 +7,9 @@ holds components far beyond ``q0`` near the nucleus (the O, N and C tables of FH
 8.9e-4 and 3.0e-4 Ry from an atom on a grid point to one between points, and spurious forces up to 3.9e-2 Ry/bohr on
 O), which the grid cannot represent but samples.  Briggs, Sullivan and Bernholc (Phys. Rev. B 54, 14362 (1996)) filter
 them out of the table before it is sampled; PARSEC 1.5 does so for periodic systems only (``fourier_f.f90``, whose
-filtered ``vion`` no periodic consumer reads) and not at all for clusters.
+filtered ``vion`` no periodic consumer reads) and not at all for clusters.  This package filters the local potential
+and the projectors by default (``all``); ``off`` keeps the file's tables as PARSEC 1.5 does (and is one of the values
+of ``PARSEC_FORTRAN_NUMERICS=on``).
 
 The filter here splits off the Coulomb tail with a Gaussian charge of width ``rc``,
 
@@ -43,16 +45,23 @@ before (the Troullier-Martins O table of ``examples/0d_water_geoopt`` at ``h = 0
 raises the egg-box effect.  The projectors keep a compact support through the mask-function method of Wang (Phys.
 Rev. B 64, 201107 (2001)): ``R0 = 1.5 rc`` instead of ``rc`` (3.4 times the points of a projector).  A species
 whose input filters its projectors (``Alpha_Filter`` of a periodic system, ``fourier_f.f90``) keeps those, and with
-``Double_Grid_Order`` above 1 (which treats the projectors its own way) only the local potential is filtered.  The
-spin-orbit projectors are not filtered (they are evaluated on the larger sphere, zero beyond ``rc``), nor are the
-core-correction and atomic valence densities.
+``Double_Grid_Order`` above 1 (which treats the projectors its own way) only the local potential is filtered; a species
+whose table ends within the support of the filtered projectors (a test table of six radii) keeps both tables of its
+file.  The spin-orbit projectors are not filtered (they are evaluated on the larger sphere, zero beyond ``rc``), nor
+are the core-correction and atomic valence densities.
 
-On coarse grids ``all`` is not always more accurate: the mask-function projectors change components at and below
-``q0`` there (up to 1.6e-3 relative at ``0.75 q0`` for the d projector of the C POTRE table at ``h = 0.45``; about
-1e-7 at ``h = 0.16``), and for hard species at ``h >= 0.35`` the error against the converged energy can grow (Cu2 of
-the NCPP library: -0.265 -> -0.352 Ry at ``h = 0.40``, -0.066 -> -0.080 at 0.35; benzene at 0.40: -3.1e-3 ->
--9.3e-3), while soft and medium species and ``h <= 0.30`` improve (the Troullier-Martins H2O at 0.30: -8.4e-3 ->
--2.9e-3; Si28H36 at 0.43: +1.02e-2 -> -2.3e-4).
+The mask-function projectors change components at and below ``q0`` on coarse grids (up to 1.6e-3 relative at
+``0.75 q0`` for the d projector of the C POTRE table at ``h = 0.45``; about 1e-7 at ``h = 0.16``).  Where a grid is far
+too coarse for a species the energy of one placement can move either way; the means over placements agree within the
+spread of the placements, at ``h <= 0.3`` every difference is within chemical accuracy, and the spread is usually,
+not always, smaller.  Five rigid placements without re-centring, error of the mean against a fine grid, ``off`` ->
+``all``: Cu2 of the NCPP library -0.445 -> -0.463 Ry at ``h = 0.40`` (placements spread over 0.30 and 0.18 Ry),
+-0.140 -> -0.143 at 0.35, -3.96e-2 -> -3.91e-2 at 0.30; benzene -1.06e-2 -> -1.08e-2 at 0.40 (spread 1.1e-2 and
+2.3e-3), -3.9e-3 -> -3.2e-3 at 0.35 and -2.4e-3 -> -7.8e-4 at 0.30; N2 of the NCPP library -1.24e-3 -> -1.52e-3 at
+0.30 (spread 7.8e-4 and 4.0e-4) (one re-centred placement of Cu2 and benzene at 0.40: -0.262 -> -0.350 and
+-2.8e-3 -> -9.2e-3).  On a grid far too coarse for a species the filter can expose an error that the aliasing of the
+file's tables was cancelling (an H2 slab at Gamma and X at ``h = 0.6``, 0.2 Ry); parsec.out notes such grids
+(:func:`core_departure`, :data:`COARSE_NOTE_LIMIT`).
 """
 
 from __future__ import annotations
@@ -70,7 +79,7 @@ from .potre import ParsecPseudopotential
 from .radial_spline import ParsecRadialSpline
 
 LOCAL_FILTER_ENV = "PARSEC_LOCAL_FILTER"
-LOCAL_FILTER_DEFAULT = "off"
+LOCAL_FILTER_DEFAULT = "all"
 LOCAL_FILTER_VALUES = ("off", "on", "all")
 
 #: Centre and width of the mask ``F(q) = erfc((q/q0 - MASK_CENTRE)/MASK_WIDTH)/2`` in units of ``q0 = pi/h``.
@@ -88,6 +97,9 @@ TAIL_TOLERANCE = 1.0e-14
 #: ``all``: the filtered projectors end at this multiple of the support radius of the file's projectors (the mask
 #: function of :func:`filtered_projector_tables`).
 PROJECTOR_SUPPORT_FACTOR = 1.5
+#: parsec.out notes a grid that is coarse for a species where the filtered local table departs from the file's by more
+#: than this inside the support radius (Ry, the ``r^2``-weighted root mean square of :func:`core_departure`).
+COARSE_NOTE_LIMIT = 0.05
 
 _TABLES: OrderedDict = OrderedDict()
 _TABLES_LOCK = Lock()
@@ -95,9 +107,10 @@ _TABLES_SIZE = 64
 
 
 def local_filter_setting() -> str:
-    """``PARSEC_LOCAL_FILTER``: ``off`` (the default: the file's tables, as PARSEC 1.5), ``all`` (the local potential
-    Fourier-filtered to the grid, the module docstring, and the Kleinman-Bylander projectors with the same mask,
-    :func:`filtered_projector_tables`) or ``on`` (the local potential only).  An unknown value is an error."""
+    """``PARSEC_LOCAL_FILTER``: ``all`` (the default: the local potential Fourier-filtered to the grid, the module
+    docstring, and the Kleinman-Bylander projectors with the same mask, :func:`filtered_projector_tables`), ``on`` (the
+    local potential only) or ``off`` (the file's tables, as PARSEC 1.5, and the bits of the code before the default;
+    also under ``PARSEC_FORTRAN_NUMERICS=on``).  An unknown value is an error."""
 
     from ..fortran_numerics import switch_value
 
@@ -229,7 +242,9 @@ def filtered_projector_tables(
     the projectors below ``q0`` was tried and refused: it removes components the orbitals have on a coarse grid
     (64-atom diamond, C POTRE at ``h = 0.374``: +1.0 Ry).  ``F`` itself is 1 to 2e-4 up to ``q0``, but the mask
     function still changes the components of ``p_f`` at and below ``q0`` on a coarse grid (up to 1.6e-3 relative at
-    ``0.75 q0`` for the d projector of the C POTRE table at ``h = 0.45``; about 1e-7 at ``h = 0.16``).
+    ``0.75 q0`` for the d projector of the C POTRE table at ``h = 0.45``; about 1e-7 at ``h = 0.16``).  A table whose
+    second-to-last radius does not reach ``R0`` (every table of the pseudopotential libraries reaches six times its
+    projector support; a test table of six radii does not) gives no filtered projectors: the species keeps the file's.
     """
 
     step = float(step)
@@ -237,7 +252,11 @@ def filtered_projector_tables(
         raise ValueError("the grid step of the projector filter must be positive")
     radii = np.asarray(potential.radii, dtype=np.float64)
     support = float(potential.projector_support_radius)
-    outer = min(PROJECTOR_SUPPORT_FACTOR * support, float(radii[-2]))
+    outer = PROJECTOR_SUPPORT_FACTOR * support
+    if not projector_support_fits(potential):
+        # a table that ends within the support of the filtered projectors (the mask function would vanish where the
+        # projector does not; a test table of a few radii) gives no filtered projectors
+        return {}, {}, support
     spacing = min(MESH_STEPS * step, MESH_LARGEST)
     count = int(np.ceil(support / spacing))
     spacing = support / count
@@ -278,6 +297,40 @@ def filtered_projector_tables(
     return projectors, slopes, outer
 
 
+def projector_support_fits(potential: ParsecPseudopotential) -> bool:
+    """Whether the table reaches the support of its filtered projectors (``PROJECTOR_SUPPORT_FACTOR`` times its
+    projector support radius) before its last radius: every table of the pseudopotential libraries does (six times
+    and more), a test table of six radii does not."""
+
+    radii = np.asarray(potential.radii, dtype=np.float64)
+    return bool(PROJECTOR_SUPPORT_FACTOR * float(potential.projector_support_radius) < float(radii[-2]))
+
+
+def nonlocal_channels(potential: ParsecPseudopotential, local_l: int) -> list[int]:
+    """The channels of ``potential`` that have a Kleinman-Bylander projector with the local channel ``local_l``."""
+
+    return [l for l in sorted(potential.radial_wavefunctions) if l != local_l and l in potential.channel_potentials]
+
+
+def core_departure(potential: ParsecPseudopotential, local_l: int, table: np.ndarray, padding: int = 6) -> float:
+    """How far the filtered local ``table`` departs from the file's inside the projector support radius ``rc``: the
+    ``r^2``-weighted root mean square of the difference of the two cubic splines on a uniform mesh, Ry.  The weight
+    keeps a structure of the file the grid cannot hold at the very centre (the spike of the Fe table of the tests at
+    0.03 bohr, 5 Ry in either form at every spacing) from counting; the H table of ``examples/0d_water_geoopt`` gives
+    0.107 at ``h = 0.6``, 0.028 at 0.45 and 0.006 at 0.3, its O 0.41, 0.086 and 0.020, C of ``examples/0d_benzene``
+    0.067 at 0.6 and 0.014 at 0.4, Cu of the NCPP library 0.026 at 0.6."""
+
+    radii = np.asarray(potential.radii, dtype=np.float64)
+    support = float(potential.projector_support_radius)
+    r = np.linspace(1.0e-4, support, 4000)
+    file_values = ParsecRadialSpline.from_positive_grid(radii, np.asarray(potential.channel_potentials[local_l]),
+                                                        int(padding))(r)
+    filtered_values = ParsecRadialSpline.from_positive_grid(radii, np.asarray(table), int(padding))(r)
+    weight = r * r
+    difference = filtered_values - file_values
+    return float(np.sqrt(np.sum(weight * difference * difference) / np.sum(weight)))
+
+
 def filtered_local_reach(potential: ParsecPseudopotential, local_l: int) -> float:
     """The radius (bohr) a sum over periodic images of the local table must reach: 0 for the file's table (the rules of
     the routes stand), the Coulomb onset of a filtered table, whose ringing reaches 10 to 14 grid steps beyond the
@@ -296,7 +349,7 @@ def apply_local_filters(
     grid,
 ) -> dict[str, ParsecPseudopotential]:
     """``potentials`` with the local channel of every species filtered to ``grid`` under ``PARSEC_LOCAL_FILTER`` ``on``
-    and ``all`` (:attr:`ParsecPseudopotential.filtered_local_potentials`), under ``all`` its projectors too
+    and ``all`` (the default) (:attr:`ParsecPseudopotential.filtered_local_potentials`), under ``all`` its projectors too
     (``filtered_projectors``, ``filtered_projector_slopes``, ``filtered_projector_radius``); unchanged under ``off``."""
 
     result = dict(potentials)
@@ -311,9 +364,25 @@ def apply_local_filters(
             continue
         potential = result[symbol]
         local_l = int(specification.local_angular_momentum)
+        filter_projectors = setting == "all" and not potential.filtered_projectors and double_grid <= 1
+        if filter_projectors and nonlocal_channels(potential, local_l) and not projector_support_fits(potential):
+            # the local part filtered alone is the configuration of on, worse where the local and the projector
+            # aliasing partly cancel: such a species keeps both tables of its file
+            result[symbol] = replace(
+                potential,
+                local_filter_note="the tables of the file: the table ends within the support of the filtered projectors",
+            )
+            continue
         table = filtered_local_table(potential, local_l, step, padding)
         changes = {"filtered_local_potentials": {local_l: table}}
-        if setting == "all" and not potential.filtered_projectors and double_grid <= 1:
+        departure = core_departure(potential, local_l, table, padding)
+        if departure > COARSE_NOTE_LIMIT:
+            changes["local_filter_note"] = (
+                f"the grid is coarse for this species: its local potential filtered to the grid departs from the file's "
+                f"by {departure:.3f} Ry inside {float(potential.projector_support_radius):.2f} bohr (r^2-weighted rms); "
+                "its energies on this grid can carry errors that the aliasing of the file's tables partly cancelled"
+            )
+        if filter_projectors:
             # (a species whose input filters its projectors, Alpha_Filter of a periodic system, keeps those; the
             # double grid treats the projectors its own way)
             projectors, slopes, end = filtered_projector_tables(potential, local_l, step, padding)
@@ -329,6 +398,9 @@ __all__ = [
     "LOCAL_FILTER_DEFAULT",
     "LOCAL_FILTER_ENV",
     "apply_local_filters",
+    "core_departure",
+    "nonlocal_channels",
+    "projector_support_fits",
     "filter_mask",
     "filter_step",
     "filtered_local_reach",

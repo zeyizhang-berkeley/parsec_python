@@ -465,10 +465,12 @@ class MeshGuardTests(_Directory):
         self.assertGreater(len(k_auto), len(k_crystal))
         self.assertAlmostEqual(float(np.sum(w_auto)), 1.0, places=13)
         self.assertFalse(np.any(lowest_free_levels(k_auto, problem.periodic_cell, problem.grid) < -1.0e-8))
-        # a hybrid keeps its k-points (the time-reversal pairs here, the whole mesh) and does not average their density
+        # a hybrid whose semilocal start keeps the time-reversal pairs (PARSEC_HYBRID_KPOINT_WEDGE=auto, the default
+        # before 2026-11-23) keeps its k-points (the whole mesh) and does not average their density
         hybrid_text = _bcc(mesh="4 4 4").replace("Correlation_Type: CA", "Correlation_Type: PBE0")
-        hybrid = self.parse(hybrid_text).problem
-        hybrid_whole = self.parse(hybrid_text, {"PARSEC_KPOINT_GUARD_WEDGE": "crystal"}).problem
+        pairs = {"PARSEC_HYBRID_KPOINT_WEDGE": "auto"}
+        hybrid = self.parse(hybrid_text, pairs).problem
+        hybrid_whole = self.parse(hybrid_text, {**pairs, "PARSEC_KPOINT_GUARD_WEDGE": "crystal"}).problem
         self.assertFalse(hybrid.scf.symmetrize_density)
         self.assertTrue(hybrid_whole.scf.symmetrize_density)
         self.assertEqual(hybrid.space_group.order, 12)
@@ -476,6 +478,13 @@ class MeshGuardTests(_Directory):
         self.assertEqual(hybrid_whole.space_group.order, 48)
         self.assertIsNone(hybrid_whole.force_space_group)
         np.testing.assert_array_equal(kpoint_sampling(hybrid)[0], kpoint_sampling(hybrid_whole)[0])
+        # under PARSEC_HYBRID_KPOINT_WEDGE=on (the default since 2026-11-23) it takes the wedge of the 12 operations
+        # that keep the grid's operators from its semilocal start, the density averaged over them
+        wedge = self.parse(hybrid_text).problem
+        self.assertTrue(wedge.hybrid_kpoint_wedge)
+        self.assertTrue(wedge.scf.symmetrize_density)
+        self.assertEqual(wedge.space_group.order, 12)
+        self.assertLess(len(kpoint_sampling(wedge)[0]), len(kpoint_sampling(hybrid)[0]))
         # the guard of PARSEC_KPOINT_MESH_GUARD=off and a requested routine set keep the whole group
         for text, environment in (
             (_bcc(mesh="4 4 4"), {"PARSEC_KPOINT_MESH_GUARD": "off"}),

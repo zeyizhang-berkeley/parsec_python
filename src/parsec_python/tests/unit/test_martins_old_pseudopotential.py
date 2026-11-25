@@ -77,6 +77,11 @@ class FortranReportTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.cases = load_cases()
+        # the block sizes of nonloc.F90 are those of the projectors of the files (PARSEC_LOCAL_FILTER=off; the
+        # projectors filtered to the grid end at 1.5 times their radius)
+        patcher = mock.patch.dict(os.environ, {"PARSEC_LOCAL_FILTER": "off"})
+        patcher.start()
+        cls.addClassCleanup(patcher.stop)
 
     def assert_report(self, potential, reported: dict, local_l: int) -> None:
         # g13.6 prints six significant digits.

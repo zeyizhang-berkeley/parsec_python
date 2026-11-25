@@ -2379,8 +2379,9 @@ class SinglePointInput:
     """Whether the Monkhorst-Pack mesh of a hybrid single point runs as its irreducible wedge under the operations of
     ``space_group`` that map the mesh onto itself and the grid's finite-difference operators onto themselves (and time
     reversal), with the density symmetrized over them, its semilocal start included: set by the input reader under
-    ``PARSEC_HYBRID_KPOINT_WEDGE=on`` (:func:`parsec_python.Grid.kpoints.hybrid_wedge_group`,
-    :func:`parsec_python.SCF.hybrid_periodic.hybrid_mesh_stars`).  ``False``: the time-reversal pairs of the mesh."""
+    ``PARSEC_HYBRID_KPOINT_WEDGE=on``, the default since 2026-11-23
+    (:func:`parsec_python.Grid.kpoints.hybrid_wedge_group`, :func:`parsec_python.SCF.hybrid_periodic.hybrid_mesh_stars`).
+    ``False``: the time-reversal pairs of the mesh (or the deferred wedge of ``auto``, below)."""
     hybrid_kpoint_wedge_deferred: object | None = None
     """The wedge a hybrid single point takes after its semilocal start (``PARSEC_HYBRID_KPOINT_WEDGE=auto``, a
     :class:`parsec_python.Grid.kpoints.DeferredHybridWedge`): the input is that of the time-reversal pairs (``off``),
@@ -2667,11 +2668,15 @@ class HybridMeshRouteRecord:
     ran on its ``pairs_points`` time-reversal pairs); ``pairs``: ``partly_filled`` states of the start lay within
     ``tolerance`` of neither 0 nor 1 (the largest ``min(f, 1 - f)`` is ``largest_fractional_occupation``), and the
     run keeps the pairs, as ``off`` (``points`` the k-points of the wedge ``on`` would run, 0 where unknown), or the
-    wedge could not be made (``reason``); ``wedge_partly_filled``: the Fock loop that ``auto`` moved to the wedge of
-    ``points`` k-points ended with ``partly_filled`` states (:meth:`parsec_python.SCF.hybrid_periodic.BlochExchange.
-    after_loop`; ``reason`` ``start`` after an insulating start, ``carried`` for a later structure of a relaxation that
-    kept the wedge of the structure before), a NOTE that changes nothing.  It is no SCF iteration and carries no
-    levels of its own."""
+    wedge could not be made (``reason``).  At the end of a Fock loop whose last inner loop has ``partly_filled``
+    states (a metal; :meth:`parsec_python.SCF.hybrid_periodic.BlochExchange.after_loop`, a NOTE that changes
+    nothing): ``wedge_partly_filled`` on the wedge of ``points`` k-points (``reason`` ``wedge`` for a run on the wedge
+    from its start, ``PARSEC_HYBRID_KPOINT_WEDGE=on``; ``start`` after an insulating start under ``auto``;
+    ``carried`` for a later structure of a relaxation that kept the wedge of the structure before);
+    ``pairs_partly_filled`` on the ``points`` time-reversal pairs of the mesh.  ``instability`` is the outer iteration
+    at which dexx rose tenfold above its smallest earlier value (the state the loop approached was unstable), ``None``
+    where it did not; ``start_partly_filled`` the partly filled states of the semilocal start (a metal whose Fock loop
+    ends with every state 0 or 1 has ``partly_filled`` 0).  It is no SCF iteration and carries no levels of its own."""
 
     route: str
     points: int
@@ -2682,6 +2687,8 @@ class HybridMeshRouteRecord:
     largest_fractional_occupation: float
     tolerance: float
     reason: str = ""
+    instability: int | None = None
+    start_partly_filled: int = 0
 
 
 @dataclass(frozen=True)
@@ -2716,7 +2723,11 @@ class SpinSectorFallbackRecord:
     # ``spin_flip_stable``: the state of such a loop passed the test of PARSEC_SPIN_FLIP_STABILITY=auto and is kept
     # (``largest_fractional_occupation`` the largest eigenvalue of the response, ``multiplets`` the summary);
     # ``doublet``, ``sector_doublet`` and ``kpoint_doublet`` (the k-point sectors): the note of a kept result
-    # (PARSEC_SPIN_GUARD_DOUBLETS).
+    # (PARSEC_SPIN_GUARD_DOUBLETS); ``symmetric_level``: the note of an unpolarized run of weighted sectors that ends
+    # with a partly filled degenerate level at the Fermi level, kept (acceleration.driver._say_symmetric_level);
+    # ``weighted_hybrid``: an unpolarized hybrid in the weighted sectors with a partly filled degenerate level after
+    # ``stage``, which starts again in the sectors of the abelian group (PARSEC_ORBITAL_GROUP_HYBRID,
+    # ``acceleration/SCF/hybrid.WeightedHybridAbandoned``).
     route: str = "spin"
     # Where the full grid of the ``spin`` route goes (the accelerated driver's plan, PARSEC_SPIN_FALLBACK_SHARED):
     # ``on the full grid of one device (...)``, ``as one sector of the identity whose basis ... share (...)``, or

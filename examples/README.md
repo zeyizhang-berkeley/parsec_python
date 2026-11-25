@@ -89,7 +89,9 @@ The final-state inputs use the explicit species label `C-1s` and therefore
 resolve `C-1s_POTRE.DAT`. The supplied ARES directory is reference data, not
 an executable dependency of the Python solver. See
 [`0_CH4_CF4/python_pbe/README.md`](0_CH4_CF4/python_pbe/README.md) for the
-scientific comparison and current B3LYP limitation.
+scientific comparison, and
+[`0_CH4_CF4/python_pbe_b3lyp/README.md`](0_CH4_CF4/python_pbe_b3lyp/README.md)
+for B3LYP refinements of the same cases.
 
 ## Outputs, caches, and reproducibility
 
@@ -136,14 +138,38 @@ The reference coverage is:
 | `0_CH4_CF4/python_pbe` | One `parsec_python.out` in each IS/FS directory | Corresponding ARES PBE `ares.log` files and the comparison in its README |
 | `ml_initial_density` | CHEBDAV `parsec.out` and retained CHEBFF `parsec_chebff.out` | Paired SAD/SCDP/ChargE3Net regression data |
 
-The Hartree boundary values of the Python solver differ from PARSEC's by
-default where an estimate from the geometry says PARSEC's are inaccurate
-(`src/parsec_python/README.md`). Of these cases only `0d_Si28H36` is large
-enough: it now runs at multipole order 10 with the atomic tail, and its
-`parsec_python.out` and the Fortran reference were made with PARSEC's
-boundary. Add `Hartree_Boundary_Tolerance: off` to the input, or set
-`PARSEC_HARTREE_BOUNDARY=legacy` for the accelerated driver, to reproduce
-them.
+The default numerics of the Python solver depart from PARSEC 1.5 where that
+is more accurate: cubic splines of the radial tables with the exact Coulomb
+tail, projectors that end at their cutoff, the exact Kleinman-Bylander
+quadrature on the logarithmic mesh, the continuous Perdew-Zunger correlation,
+FHI98PP tables continued to the nucleus, local potentials and projectors
+Fourier-filtered to the grid (which removes most of the dependence of the
+total on where the atoms sit on the grid), smooth LDA+U projectors, the Fermi
+level of a gapped system at the root of its electron count, and Hartree
+boundary values at a multipole order chosen by an estimate from the geometry
+(`src/parsec_python/README.md`, `src/parsec_python/acceleration/README.md`).
+`PARSEC_FORTRAN_NUMERICS=on` restores PARSEC 1.5's numerics in one go,
+including PARSEC's boundary for an input that gives its domain; the Fortran
+comparisons quoted in the example READMEs are reproduced under it. Of the
+cases above, `0d_Si28H36` gives -263.51147821 Ry under it against
+-263.51147856 Ry of its Fortran reference, and -263.52977897 Ry with the
+defaults (filtered tables, multipole order 10 with the atomic tail). Its
+`parsec_python.out` (-263.51946553 Ry) was made with the code of 22 November
+2026 and PARSEC's boundary; `PARSEC_HARTREE_BOUNDARY=legacy` with
+`PARSEC_KB_QUADRATURE=trapezoid`, `PARSEC_CA_CONTINUITY=off`,
+`PARSEC_FERMI_GAP_ROOT=off`, `PARSEC_LOCAL_FILTER=off` and
+`PARSEC_SPLINE_COULOMB_TAIL=off` reproduces it.
+
+Example outputs are made again when a change of the code concerns them
+directly (their subject, a comparison their README states, or their tables).
+The others keep the outputs of their date: later default changes move their
+totals far less than chemical accuracy (those of 23 November 2026 by up to
+about 2.3e-3 Ry per Ag or Au atom and 1e-6 to 3e-4 Ry per light atom; the
+grid filter of 24 November 2026 by the egg-box term of their placement,
+typically 1e-5 to 4e-4 Ry per atom on the grids of the examples, more for a
+species far from resolved, such as Au at h 0.5 bohr) and add lines such as
+the Kleinman-Bylander quadrature and the Fourier filter of each species to
+`parsec.out`.
 
 Reference timings are hardware-specific; energies and convergence histories
 are the portable validation quantities. Ordinary new outputs, NumPy result

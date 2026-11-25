@@ -412,25 +412,35 @@ class BackendDetailTests(unittest.TestCase):
                 problem = parse_parsec_input(_write_input(directory, extra)).problem
                 return dict(setup_option_details(problem, native))
 
-            self.assertEqual(details(""), {})
-            self.assertIn("NumPy fine-point sums", details("Double_Grid_Order: 2")["projector_double_grid"])
-            self.assertIn(
-                "Old_Interpolation_Format",
-                details("Old_Interpolation_Format: .true.")["local_potential_interpolation"],
-            )
+            # the tables filtered to the grid are the default (PARSEC_LOCAL_FILTER=all) and say so; off adds nothing
+            self.assertEqual(list(details("")), ["local_potential_filter"])
+            with mock.patch.dict(os.environ, {"PARSEC_LOCAL_FILTER": "off"}):
+                self.assertEqual(details(""), {})
+                self.assertIn("NumPy fine-point sums", details("Double_Grid_Order: 2")["projector_double_grid"])
+                self.assertIn(
+                    "Old_Interpolation_Format",
+                    details("Old_Interpolation_Format: .true.")["local_potential_interpolation"],
+                )
 
 
 class CacheKeyTests(unittest.TestCase):
     def test_only_the_option_adds_to_the_key(self) -> None:
         default = SpeciesPotential(DATA / "spin_ca_O_POTRE.DAT", 1)
-        # the quadrature of the KB denominators enters the key except under PARSEC 1.5's (PARSEC_KB_QUADRATURE)
-        with mock.patch.dict(os.environ, {"PARSEC_KB_QUADRATURE": "trapezoid"}):
+        # the quadrature of the KB denominators enters the key except under PARSEC 1.5's (PARSEC_KB_QUADRATURE), and
+        # so does the filter of the tables to the grid except under off (PARSEC_LOCAL_FILTER)
+        parsec15 = {"PARSEC_KB_QUADRATURE": "trapezoid", "PARSEC_LOCAL_FILTER": "off"}
+        with mock.patch.dict(os.environ, parsec15):
             digest = sha256()
             hash_pseudopotential_setup(digest, default)
         self.assertEqual(digest.hexdigest(), sha256().hexdigest())
         digest = sha256()
         hash_pseudopotential_setup(digest, default)
         self.assertNotEqual(digest.hexdigest(), sha256().hexdigest())
+        for name, value in (("PARSEC_KB_QUADRATURE", "auto"), ("PARSEC_LOCAL_FILTER", "all")):
+            with self.subTest(switch=name), mock.patch.dict(os.environ, {**parsec15, name: value}):
+                digest = sha256()
+                hash_pseudopotential_setup(digest, default)
+                self.assertNotEqual(digest.hexdigest(), sha256().hexdigest())
         with tempfile.TemporaryDirectory() as directory:
             directory = Path(directory)
 

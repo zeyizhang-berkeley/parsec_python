@@ -154,34 +154,45 @@ reference-corrected all-electron values, in eV:
 
 | system | Python | ARES | Python - ARES |
 |---|---:|---:|---:|
-| CH4 IS | -1101.53972976 | -1101.48773900 | -0.05199076 |
-| CH4 FS_1s | -804.38248842 | -804.34015900 | -0.04232942 |
-| CF4 IS | -11909.65954868 | -11909.43066320 | -0.22888548 |
-| CF4 FS_1s | -11601.94393513 | -11601.71550480 | -0.22843033 |
+| CH4 IS | -1101.54226570 | -1101.48773900 | -0.05452670 |
+| CH4 FS_1s | -804.39406546 | -804.34015900 | -0.05390646 |
+| CF4 IS | -11909.67764253 | -11909.43066320 | -0.24697933 |
+| CF4 FS_1s | -11601.96228159 | -11601.71550480 | -0.24677679 |
 
 The physically relevant energy differences reproduce much more closely:
 
 | quantity | Python | ARES | Python - ARES |
 |---|---:|---:|---:|
-| BE(CH4) | 297.15724134 | 297.14758000 | +0.00966134 |
-| BE(CF4) | 307.71561355 | 307.71515840 | +0.00045515 |
-| CF4-CH4 shift | 10.55837221 | 10.56757840 | -0.00920619 |
+| BE(CH4) | 297.14820024 | 297.14758000 | +0.00062024 |
+| BE(CF4) | 307.71536094 | 307.71515840 | +0.00020254 |
+| CF4-CH4 shift | 10.56716070 | 10.56757840 | -0.00041770 |
 
 The larger offsets in individual absolute totals are systematic discretization
 and implementation differences.  They cancel within each matched ordinary/
-core-hole PP pair; the final chemical-shift disagreement is about 9 meV.
+core-hole PP pair; the final chemical-shift disagreement is below 1 meV.
 With the linearly resampled tables used before 23 November 2026 (the same
-code and defaults, measured on 23 November 2026) the totals are 0.019 (CH4
-IS) to 0.117 eV (CF4 FS_1s) lower, the binding energies 297.15419064 and
-307.70893835 eV and the shift 10.55474771 eV (13 meV below ARES); SCF
+code and defaults, measured on 24 November 2026) the totals are 0.018 (CH4
+IS) to 0.116 eV (CF4 FS_1s) lower, the binding energies 297.14478295 and
+307.70876127 eV and the shift 10.56397832 eV (3.6 meV below ARES); SCF
 iterations are the same.
 
-For these first runs (the kept logs, of 23 November 2026, one NVIDIA A100
+Since 24 November 2026 the local potential and the projectors of each
+species are Fourier-filtered to the grid (`PARSEC_LOCAL_FILTER=all`, the
+default; the `Fourier filter` line of each species in the logs). Against the
+logs of 23 November 2026 this lowered the totals by 2.5 meV (CH4 IS),
+11.6 meV (CH4 FS_1s) and 18.1 to 18.3 meV (CF4) and moved the binding
+energies by -9.0 meV (CH4, on the coarser grid of 0.12 angstrom) and
+-0.3 meV (CF4), with the same SCF iterations; the CH4 binding energy now
+lies 0.6 meV from ARES instead of 9.7 meV.
+`PARSEC_LOCAL_FILTER=off` with `PARSEC_SPLINE_COULOMB_TAIL=off` gives the
+logs of 23 November 2026 in every line apart from the timings.
+
+For these first runs (the kept logs, of 24 November 2026, one NVIDIA A100
 per case and four cases side by side on a node, no symmetry cache, after one
 throwaway warm-up run on each GPU), CH4 IS/FS used 28/21 SCF iterations and
-CF4 IS/FS used 40/37.  CF4 wall times were 43/40 seconds.  Its dominant cost
+CF4 IS/FS used 40/37.  CF4 wall times were 43/42 seconds.  Its dominant cost
 was the Hartree linear solve (15/14 seconds), followed by GPU diagonalization
-(12/11 seconds); PBE evaluation itself was not the dominant kernel. Since 2026-11-07 that linear
+(13/12 seconds); PBE evaluation itself was not the dominant kernel. Since 2026-11-07 that linear
 solve runs on the GPU by default (`PARSEC_HARTREE_LINEAR_BACKEND`,
 `src/parsec_python/acceleration/Hartree/GPU_HARTREE.md`);
 `PARSEC_HARTREE_LINEAR_BACKEND=native` takes the host CG of the logs of
@@ -193,7 +204,8 @@ since 22 November 2026). The cubic files differ from their local potential by
 up to 2.6e-4 Ry (C, C-1s) and 7e-4 Ry (F) at the first one or two mesh points beyond
 that radius, where the interpolation reaches across it; with
 `PARSEC_PROJECTOR_TAIL=off` those points enter the projectors and the totals
-are 4.3e-6 (CH4 IS) to 8.8e-6 Ry (CF4 FS_1s) lower.
+move by +3.0e-7 (CH4 IS) to -3.1e-6 Ry (CF4 FS_1s) (with the filtered
+projectors; 4.3e-6 to 8.8e-6 Ry lower with the tables of the files).
 
 ## B3LYP status
 

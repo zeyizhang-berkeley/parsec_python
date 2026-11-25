@@ -610,15 +610,37 @@ static __device__ void pw92_spin_correlation(double n, double up, double down, d
 // Weighted sums (semilocal_components.py ComponentSemilocal)
 // ---------------------------------------------------------------------------
 
+// HX_COMPONENTS: bit c set for every component c the module is compiled with (device_hybrid_xc.py compiles the
+// components its functional weights; all of them by default).  A component left out is never called: its weight
+// is zero, which skips it below.  Leaving it out only spares NVRTC its code; the others are the same arithmetic.
+#ifndef HX_COMPONENTS
+#define HX_COMPONENTS 0xFFF
+#endif
+#define HX_HAS(c) ((HX_COMPONENTS >> (c)) & 1)
+
 // Unpolarized exchange core of component c (0..5) at a positive density.
 static __device__ void exchange_core(int c, double n, double sigma, double omega, double* e, double* e_n, double* e_s) {
     switch (c) {
+#if HX_HAS(0)
         case 0: slater_exchange(n, e, e_n, e_s); break;
+#endif
+#if HX_HAS(1)
         case 1: pbe_exchange(n, sigma, e, e_n, e_s); break;
+#endif
+#if HX_HAS(2)
         case 2: b88_exchange(n, sigma, e, e_n, e_s); break;
+#endif
+#if HX_HAS(3)
         case 3: pw91_exchange(n, sigma, e, e_n, e_s); break;
+#endif
+#if HX_HAS(4)
         case 4: wpbe_sr_exchange(n, sigma, omega, e, e_n, e_s); break;
+#endif
+#if HX_HAS(5)
         default: ityh_exchange(n, sigma, omega, e, e_n, e_s); break;
+#else
+        default: *e = 0.0; *e_n = 0.0; *e_s = 0.0; break;
+#endif
     }
 }
 
@@ -626,12 +648,26 @@ static __device__ void exchange_core(int c, double n, double sigma, double omega
 static __device__ void correlation_core(int c, double n, double sigma, double* e, double* e_n, double* e_s) {
     *e_s = 0.0;
     switch (c) {
+#if HX_HAS(6)
         case 6: pbe_correlation(n, sigma, e, e_n, e_s); break;
+#endif
+#if HX_HAS(7)
         case 7: pw91_correlation(n, sigma, e, e_n, e_s); break;
+#endif
+#if HX_HAS(8)
         case 8: pw92_correlation(n, e, e_n); break;
+#endif
+#if HX_HAS(9)
         case 9: vwn_correlation(n, 0, e, e_n); break;
+#endif
+#if HX_HAS(10)
         case 10: vwn_correlation(n, 1, e, e_n); break;
+#endif
+#if HX_HAS(11)
         default: lyp_correlation(n, sigma, e, e_n, e_s); break;
+#else
+        default: *e = 0.0; *e_n = 0.0; break;
+#endif
     }
 }
 
@@ -693,9 +729,16 @@ static __device__ void hybrid_polarized(double rho_up, double rho_down, double s
             if (c == 6 || c == 7) {
                 // semilocal_components.py _total_gradient_form
                 double s_tot = fmax(s_uu + 2.0 * s_ud + s_dd, 0.0);
-                double r[4];
-                if (c == 6) pbe_spin_correlation(n, up, down, s_tot, r);
-                else pw91_spin_correlation(n, up, down, s_tot, r);
+                double r[4] = {0.0, 0.0, 0.0, 0.0};
+                if (c == 6) {
+#if HX_HAS(6)
+                    pbe_spin_correlation(n, up, down, s_tot, r);
+#endif
+                } else {
+#if HX_HAS(7)
+                    pw91_spin_correlation(n, up, down, s_tot, r);
+#endif
+                }
                 v[0] = r[0];
                 v[1] = r[1];
                 v[2] = r[2];
@@ -703,11 +746,17 @@ static __device__ void hybrid_polarized(double rho_up, double rho_down, double s
                 v[4] = 2.0 * r[3];
                 v[5] = r[3];
             } else if (c == 8) {
+#if HX_HAS(8)
                 pw92_spin_correlation(n, up, down, &v[0], &v[1], &v[2]);
+#endif
             } else if (c == 9 || c == 10) {
+#if HX_HAS(9) || HX_HAS(10)
                 vwn_spin_correlation(n, up, down, c == 10, &v[0], &v[1], &v[2]);
+#endif
             } else {
+#if HX_HAS(11)
                 lyp_spin_correlation(n, up, down, s_uu, s_ud, s_dd, v);
+#endif
             }
         }
         for (int k = 0; k < 6; ++k) total[k] += weight * v[k];

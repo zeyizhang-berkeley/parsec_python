@@ -25,12 +25,12 @@ def _result(free, forces=None, bands=None):
     return result
 
 
-def _force_results(force, slope):
+def _force_results(force, slope, steps=matrix.FORCE_STEPS):
     """A base result whose force on atom 0 along x is ``force`` and displaced results whose free energies give the
-    central difference ``slope`` at both steps."""
+    central difference ``slope`` at both ``steps``."""
 
     results = {"base": _result(-1.0, [[force, 0.0, 0.0]])}
-    for step in matrix.FORCE_STEPS:
+    for step in steps:
         for sign in (1.0, -1.0):
             # -(E(+h) - E(-h)) / 2h = slope
             results[(0, 0, step, sign)] = _result(-1.0 - sign * slope * step)
@@ -58,6 +58,32 @@ class ConsistencyMatrixVerdictTests(unittest.TestCase):
         exempt = matrix.ForceCheck("force", "f_test", "", None, ((0, 0),), None,
                                    exempt={0: (matrix.FORCE_STEPS, "test")})
         self.assertEqual([v for v, _ in exempt.judge(_force_results(float("nan"), 1.0e-3))], ["FAIL"])
+
+    def test_a_case_with_its_own_steps_moves_and_judges_at_those_steps(self) -> None:
+        fine = matrix.ForceCheck("force", "f_test", "", matrix.Structure("t", str, np.zeros((1, 3)), ()),
+                                 ((0, 0),), None, steps=matrix.FINE_STEPS)
+        moves = {key[2] for key in fine.jobs() if key != "base"}
+        self.assertEqual(moves, set(matrix.FINE_STEPS))
+        verdicts = fine.judge(_force_results(1.0e-3, 1.0e-3 + 1.0e-7, matrix.FINE_STEPS))
+        self.assertEqual([verdict for verdict, _ in verdicts], ["PASS"])
+        self.assertIn(f"slope({matrix.FINE_STEPS[0]:g})", verdicts[0][1])
+        # the cases of the matrix that take them
+        names = {check.name: check.steps for check in matrix.force_checks()}
+        self.assertEqual(names["f_au2_pbe_fine"], matrix.FINE_STEPS)
+        self.assertEqual(names["f_au2c_pbe_fine"], matrix.FINE_STEPS)
+        self.assertEqual(names["f_c8p_d_grid"], matrix.FORCE_STEPS)
+
+    def test_a_bounded_exemption_fails_beyond_its_bound(self) -> None:
+        bounded = matrix.ForceCheck("force", "f_test", "", None, ((0, 0),), None,
+                                    exempt={0: (matrix.FORCE_STEPS, "test", 5.0e-4)})
+        self.assertEqual([v for v, _ in bounded.judge(_force_results(1.0e-3, 1.0e-3 + 1.0e-4))], ["EXEMPT"])
+        self.assertIn("exempt up to 5e-04", bounded.judge(_force_results(1.0e-3, 1.0e-3 + 1.0e-4))[0][1])
+        self.assertEqual([v for v, _ in bounded.judge(_force_results(1.0e-3, 1.0e-3 + 1.0e-3))], ["FAIL"])
+        self.assertEqual([v for v, _ in bounded.judge(_force_results(1.0e-3, 1.0e-3 + 1.0e-7))], ["PASS"])
+        # without a bound, as before
+        unbounded = matrix.ForceCheck("force", "f_test", "", None, ((0, 0),), None,
+                                      exempt={0: (matrix.FORCE_STEPS, "test")})
+        self.assertEqual([v for v, _ in unbounded.judge(_force_results(1.0e-3, 1.0e-3 + 1.0e-3))], ["EXEMPT"])
 
     def test_non_finite_energies_forces_and_levels_fail_the_comparisons(self) -> None:
         symmetry = matrix.SymmetryCheck("symmetry", "s_test", "")

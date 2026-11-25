@@ -142,6 +142,10 @@ def reference_cache_key(problem, roots: dict[str, Path]) -> tuple[str, str]:
     # the stored records were made under the quadrature of the KB denominators of PARSEC 1.5 (the default before
     # 2026-11-23), which the key leaves out
     environment["PARSEC_KB_QUADRATURE"] = "trapezoid"
+    # and under the tables as the files give them (PARSEC_LOCAL_FILTER=off; the filter to the grid is the default
+    # since 2026-11-23)
+    environment["PARSEC_LOCAL_FILTER"] = "off"
+    environment["PARSEC_LDAU_SMOOTH_PROJECTORS"] = "off"
     with (
         patch.object(driver, "sha256", lambda: recorder),
         patch.dict(os.environ, environment, clear=True),

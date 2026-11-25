@@ -1000,6 +1000,13 @@ def _spent(applications) -> _Spent:
     )
 
 
+def _partner_occupations(orbital_set):
+    """The occupations of ``orbital_set`` per partner of a weighted state (its ``occupations`` otherwise)."""
+
+    partner = getattr(orbital_set, "partner_occupations", None)
+    return partner() if callable(partner) else orbital_set.occupations
+
+
 def _observe(
     diis, engine, step: int, sets, source, error=None, energy=None, extrapolated=False, criteria=None, final_next=False
 ) -> None:
@@ -1008,7 +1015,9 @@ def _observe(
     that does not fit the devices stops DIIS."""
 
     output = OutputSet(step, None, source, error, energy, extrapolated=extrapolated)
-    occupations = [np.asarray(orbital_set.occupations) for orbital_set in sets]
+    # (the occupation of each partner where the states of weighted symmetry sectors carry their weights:
+    # ``ChannelOrbitals.partner_occupations`` of the device exchange, PARSEC_ORBITAL_GROUP_HYBRID)
+    occupations = [np.asarray(_partner_occupations(orbital_set)) for orbital_set in sets]
     if not diis.judge(output, occupations, criteria, final_next):
         return
     # The oldest output goes before the copy of the new one: WINDOW copies at most.
@@ -1122,6 +1131,10 @@ def run_hybrid_scf(
         keywords["iteration_state_callback"] = iteration_state_callback
     # The SCF loops of the Fock loop: the engine's (k-point loops) or run_scf.
     run_loop = getattr(engine, "run_scf", None) or run_scf
+    # An engine whose orbitals may lie in sectors that give the partners of a degenerate level one occupation tests the
+    # results of the start and of every inner loop (``weighted_guard``: it raises where a partly filled level would
+    # need what those sectors cannot hold, :class:`parsec_python.acceleration.SCF.hybrid.DeviceFockEngine`).
+    guard = getattr(engine, "weighted_guard", None)
     # The pair solver of each record: the paths of that step's builds (none were made by this run yet).
     solver_names = _SolverNames(engine)
     # How the loop gets to its fixed point (parsec_python.SCF.fock_controls).
@@ -1174,6 +1187,11 @@ def run_hybrid_scf(
         history.extend(start.history)
         loops.append(_Timed(start.timings))
         start_iterations = int(start.iterations)
+        if callable(guard):
+            # A partly filled degenerate level of the start in sectors that give its partners one occupation (the
+            # weighted sectors of a point group, PARSEC_ORBITAL_GROUP_HYBRID): the engine raises, and the driver starts
+            # the calculation again in the sectors of the abelian group.
+            guard(start, "the semilocal start of the Fock loop")
         if start_criterion is not None and start.converged and fractional_start(start):
             start_note = (
                 f"partly filled levels after {start_iterations} iterations: the start goes on to "
@@ -1301,6 +1319,13 @@ def run_hybrid_scf(
         level_change = float(level_detail.get("level_change", 0.0))
         history.extend(inner.history)
         loops.append(_Timed(inner.timings))
+        if callable(guard):
+            # (the same test after every inner loop: a level that the exact exchange brings to the Fermi level)
+            try:
+                guard(inner, f"outer iteration {outer} of the Fock loop")
+            except Exception:
+                engine.release(operator)
+                raise
         sets = engine.orbital_sets(inner)
         # 3. E_x of the new orbitals with the operator of this loop (which is
         # then no longer needed), E_x of them with their own (occupied
@@ -1449,12 +1474,13 @@ def run_hybrid_scf(
         previous_energy = exchange_energy
         inner_start = engine.next_warm_start(system, inner)
 
-    # An engine may report what the end of the Fock loop says about its route (a Fock loop that
-    # PARSEC_HYBRID_KPOINT_WEDGE=auto moved to the wedge and that ends with partly filled states: a NOTE,
-    # parsec_python.SCF.hybrid_periodic.BlochExchange.after_loop); nothing of the result changes.
+    # An engine may report what the end of the Fock loop says about its route (a Fock loop of a k-point mesh that ends
+    # with partly filled states: a NOTE of the state it holds, on the wedge or on the time-reversal pairs, with the
+    # outer iteration at which it became unstable, parsec_python.SCF.hybrid_periodic.BlochExchange.after_loop);
+    # nothing of the result changes.
     after_loop = getattr(engine, "after_loop", None)
     if callable(after_loop) and inner is not None:
-        after_loop(system, inner, callback=callback)
+        after_loop(system, inner, callback=callback, records=tuple(records))
     seconds = perf_counter() - started
     summary = FockLoopSummary(
         functional=definition.label,

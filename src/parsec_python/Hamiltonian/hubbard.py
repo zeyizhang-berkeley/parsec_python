@@ -16,11 +16,12 @@ the file by ``r`` at its end) interpolated linearly on the logarithmic grid,
 and ``Y_2m`` the real d harmonics of ``ylm_real`` in the order xy, yz, xz,
 3z^2-1, x^2-y^2.  The projectors are not renormalized on the grid and they
 end at the radius ``r_c`` of the 0.95 rule below, where ``R_d`` is not zero;
-the cut and the missing normalization are PARSEC's and are kept.  The cut and
-the linear interpolation make the energy a non-smooth function of the atomic
-positions; ``PARSEC_LDAU_SMOOTH_PROJECTORS`` (opt-in,
-:func:`ldau_smooth_projectors_fraction`) replaces both by a cubic spline that
-a taper centred on ``r_c`` takes to zero.  A grid
+the cut and the missing normalization are PARSEC's.  The cut and the linear
+interpolation make the energy a non-smooth function of the atomic positions;
+by default (``PARSEC_LDAU_SMOOTH_PROJECTORS=on``,
+:func:`ldau_smooth_projectors_fraction`) both are replaced by a cubic spline
+that a taper centred on ``r_c`` takes to zero (the missing normalization is
+kept); ``off`` gives the projectors of ``upot.F90`` described here.  A grid
 point belongs to the support of an atom if it lies within ``r_c`` of the atom
 or, in a periodic cell, of one of its images one cell away in each periodic
 direction; every such (point, image) pair is one entry of the projector.
@@ -177,15 +178,17 @@ def hubbard_cutoff_radius(potential: ParsecPseudopotential) -> float:
 def interpolate_hubbard_radial(
     potential: ParsecPseudopotential, distances: np.ndarray
 ) -> tuple[np.ndarray, np.ndarray]:
-    """``R_d`` at ``distances`` as ``upot.F90`` interpolates it, and its slope.
+    """``R_d`` at ``distances`` and its slope: the smooth projector of ``PARSEC_LDAU_SMOOTH_PROJECTORS`` (default), or
+    under ``off`` the one of ``upot.F90``.
 
-    A distance below the first radius of the file is raised to it.  The
-    interval is the one of the index ``int(ln(1 + r/a)/b) + 1`` of the
-    logarithmic grid ``r_j = a(exp(b(j-1)) - 1)``, as there.  The slope is
-    that of the linear interpolant (zero where the distance was raised): the
-    exact derivative of the sampled projector with respect to the distance.
-    Under ``PARSEC_LDAU_SMOOTH_PROJECTORS`` (:func:`ldau_smooth_projectors_fraction`)
-    both are those of the cubic spline times the taper centred on ``r_c``.
+    A distance below the first radius of the file is raised to it (slope zero
+    there).  Under ``off`` the interval is the one of the index
+    ``int(ln(1 + r/a)/b) + 1`` of the logarithmic grid
+    ``r_j = a(exp(b(j-1)) - 1)``, as there, and the slope is that of the
+    linear interpolant: the exact derivative of the sampled projector with
+    respect to the distance.  Under ``PARSEC_LDAU_SMOOTH_PROJECTORS``
+    (:func:`ldau_smooth_projectors_fraction`) both are those of the cubic
+    spline times the taper centred on ``r_c``.
     """
 
     radii, radial = _extended_radial_tables(potential)
@@ -217,9 +220,10 @@ def interpolate_hubbard_radial(
     return values, slope
 
 
-#: ``PARSEC_LDAU_SMOOTH_PROJECTORS``: ``off`` (default), ``on`` or a width as a fraction of ``r_c`` (see
+#: ``PARSEC_LDAU_SMOOTH_PROJECTORS``: ``on`` (default), ``off`` or a width as a fraction of ``r_c`` (see
 #: :func:`ldau_smooth_projectors_fraction`).
 LDAU_SMOOTH_PROJECTORS_SWITCH = "PARSEC_LDAU_SMOOTH_PROJECTORS"
+LDAU_SMOOTH_PROJECTORS_DEFAULT = "on"
 #: Width of the taper of ``PARSEC_LDAU_SMOOTH_PROJECTORS=on``, as a fraction of ``r_c``.
 HUBBARD_TAPER_FRACTION = 0.2
 
@@ -227,7 +231,8 @@ HUBBARD_TAPER_FRACTION = 0.2
 def ldau_smooth_projectors_fraction() -> float:
     """``PARSEC_LDAU_SMOOTH_PROJECTORS``: the width of the taper of smooth LDA+U projectors over ``r_c``, or 0.
 
-    ``off`` (default; ``false``, ``no``, or any number equal to 0): 0, the projectors of ``upot.F90``: ``R_d``
+    ``off`` (``false``, ``no``, or any number equal to 0; also under ``PARSEC_FORTRAN_NUMERICS=on``): 0, the
+    projectors of ``upot.F90``, bit for bit those of the code before the default: ``R_d``
     interpolated linearly on the logarithmic grid and cut at ``r_c``, where it is not zero.  Both make the LDA+U
     energy a non-smooth function of the atomic positions, in PARSEC 1.5 as here: it jumps when a grid point crosses
     the sphere of radius ``r_c``
@@ -237,8 +242,8 @@ def ldau_smooth_projectors_fraction() -> float:
     energy over finite steps (Ag4: 5e-2 Ry/bohr at a step of 2e-3 bohr across the sphere, up to 4e-4 Ry/bohr at steps
     of 1e-3 bohr that only cross table samples).
 
-    ``on`` (``1``, ``true``, ``yes``): :data:`HUBBARD_TAPER_FRACTION`; another number ``f`` in ``(0, 1]``: that
-    fraction.  ``1`` is the boolean spelling of ``on`` (``f`` = 0.2), as in the other switches; the full width
+    ``on`` (the default; ``1``, ``true``, ``yes``): :data:`HUBBARD_TAPER_FRACTION`; another number ``f`` in
+    ``(0, 1]``: that fraction.  ``1`` is the boolean spelling of ``on`` (``f`` = 0.2), as in the other switches; the full width
     ``f`` = 1 is written ``1.0``.  ``R_d`` is the cubic spline of the table (zero slope at the origin, natural at its
     end) times the taper ``S(r) = 1 - t^3 (10 - 15 t + 6 t^2)``, ``t = (r - r_c)/(f r_c) + 1/2``, which is 1 below
     ``(1 - f/2) r_c``, falls to zero with its first two derivatives at ``(1 + f/2) r_c`` (the support radius of these
@@ -250,9 +255,9 @@ def ldau_smooth_projectors_fraction() -> float:
     by those terms and by the spline (see the README).
     """
 
-    import os
+    from ..fortran_numerics import switch_value
 
-    value = os.environ.get(LDAU_SMOOTH_PROJECTORS_SWITCH, "off").strip().lower() or "off"
+    value = switch_value(LDAU_SMOOTH_PROJECTORS_SWITCH, LDAU_SMOOTH_PROJECTORS_DEFAULT)
     if value in ("off", "false", "no"):
         return 0.0
     if value in ("on", "1", "true", "yes"):

@@ -58,6 +58,13 @@ from parsec_python.SCF.pbc import prepare_periodic_single_point
 from parsec_python.SCF.single_point import prepare_single_point
 from parsec_python.tests.archives import read_archive
 
+#: The Au2+ of these tests sits on a grid of h 0.7 bohr, far too coarse for Au, and its moment there depends on the
+#: tables: |m| 1.0 with the tables of the file, 0.36 with the tables filtered to the grid (PARSEC_LOCAL_FILTER, the
+#: default), 0.41 with either at h 0.35.  The tests that ask for the moment of the file's tables (more than 0.5, or 1.0
+#: without spin-orbit coupling) run under PARSEC_LOCAL_FILTER=off; the force tests take the default tables, but for the
+#: derivative check of the converged energy (see there).
+FILE_TABLES = {"PARSEC_LOCAL_FILTER": "off"}
+
 _AU = Path(__file__).resolve().parents[4] / "examples" / "0d_AuH" / "Au_POTRE.DAT"
 _POSITIONS = np.array([[-2.31, 0.17, 0.22], [2.43, -0.11, 0.13]])
 
@@ -261,8 +268,12 @@ class IsolatedSpinorForceTests(unittest.TestCase):
 
     def test_the_run_is_magnetic_and_converged(self) -> None:
         self.assertTrue(self.result.converged)
-        self.assertGreater(self.result.magnetic_moment, 0.5)
+        self.assertGreater(self.result.magnetic_moment, 0.25)  # 0.36 with the default tables at h 0.7
         self.assertGreater(float(np.max(np.abs(self.forces.total))), 1.0)
+        with mock.patch.dict(os.environ, FILE_TABLES):
+            plain = self.backend.run_scf(prepare_single_point(self.problem))
+        self.assertTrue(plain.converged)
+        self.assertGreater(plain.magnetic_moment, 0.5)
 
     def test_each_force_term_is_the_derivative_of_its_energy(self) -> None:
         system, result, forces = self.system, self.result, self.forces
@@ -311,19 +322,27 @@ class IsolatedSpinorForceTests(unittest.TestCase):
             self.assertGreater(float(np.max(np.abs(reference[key]))), 0.1)
 
     def test_the_forces_are_the_derivative_of_the_converged_energy(self) -> None:
-        # what a relaxation follows: the total energy of the SCF loop at displaced atoms
+        # what a relaxation follows: the total energy of the SCF loop at displaced atoms.  On the tables of the file
+        # (the state of |m| 1.0 at every displacement): with the default tables the displaced runs land in different
+        # magnetic states at h 0.7, a grid far too coarse for Au (|m| 0.24 to 0.88 in other directions against 0.33 at
+        # the centre), so their energies are not one curve; the term-by-term check above passes on the same tables
         atom, axis = 0, 1
+        with mock.patch.dict(os.environ, FILE_TABLES):
+            system = prepare_single_point(self.problem)
+            base = self.backend.run_scf(system)
+            forces = self.backend.compute_forces(system, base)
 
-        def energy(shift: float) -> float:
-            positions = self.positions.copy()
-            positions[atom, axis] += shift
-            result = self.backend.run_scf(self._moved(positions))
-            self.assertTrue(result.converged)
-            return result.energies.total
+            def energy(shift: float) -> float:
+                positions = self.positions.copy()
+                positions[atom, axis] += shift
+                moved = update_geometry(system, [replace(a, position=p) for a, p in zip(system.atoms, positions)])
+                result = self.backend.run_scf(moved)
+                self.assertTrue(result.converged)
+                return result.energies.total
 
-        central = [-(energy(h) - energy(-h)) / (2.0 * h) for h in (0.01, 0.005)]
+            central = [-(energy(h) - energy(-h)) / (2.0 * h) for h in (0.01, 0.005)]
         extrapolated = (4.0 * central[1] - central[0]) / 3.0
-        self.assertAlmostEqual(float(self.forces.unsymmetrized[atom, axis]), extrapolated, delta=5.0e-3)
+        self.assertAlmostEqual(float(forces.unsymmetrized[atom, axis]), extrapolated, delta=5.0e-3)
 
     def test_the_net_force_is_removed(self) -> None:
         np.testing.assert_allclose(self.forces.total.sum(axis=0), 0.0, atol=1.0e-12)
@@ -342,6 +361,7 @@ class IsolatedSpinorForceTests(unittest.TestCase):
 
 
 class CollinearLimitTests(unittest.TestCase):
+    @mock.patch.dict(os.environ, FILE_TABLES)
     def test_without_spin_orbit_the_noncollinear_forces_are_the_collinear_spin_forces(self) -> None:
         # the spin-polarized forces of the scalar driver were compared with Fortran PARSEC; a ground state of one unpaired
         # electron has the same energy and forces whichever way its moment points
@@ -555,6 +575,7 @@ class SpinOrbitWarmStartTests(unittest.TestCase):
         self.assertIsInstance(warm.next_effective_potential, tuple)
         self.assertAlmostEqual(warm.magnetic_moment, cold.magnetic_moment, places=4)
 
+    @mock.patch.dict(os.environ, FILE_TABLES)
     def test_a_noncollinear_cluster_carries_the_field_and_so_the_moments(self) -> None:
         system, moved = self._moved_cluster("ncl", 1.0, 5.0e-5)  # above the noise floor of a spinor loop (1e-5)
         cold, warm = self._compare(spinor_backend(), system, moved, energy_places=4)
@@ -717,6 +738,7 @@ class SpinorIonicCliTests(unittest.TestCase):
         np.testing.assert_allclose(forces.sum(axis=0), 0.0, atol=1.0e-9)
         self.assertGreater(float(np.max(np.abs(archive["forces_nonlocal"]))), 1.0)
 
+    @mock.patch.dict(os.environ, FILE_TABLES)
     def test_a_relaxation_moves_the_atoms_and_keeps_their_moments(self) -> None:
         code, log = self._run("Skip_Force: .false.\nMinimization: bfgs\nMovement_Num: 1\nForce_Min: 0.001\n")
         self.assertEqual(code, 4)  # one movement is not enough to relax it

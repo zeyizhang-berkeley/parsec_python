@@ -317,7 +317,13 @@ class DeviceLibxcSCFTests(unittest.TestCase):
 
     def test_meta_gga_hybrid_on_the_device_fock_loop(self) -> None:
         # TPSSh: the device Fock loop with meta-GGA inner loops (the orbital term and the exchange
-        # in the device Hamiltonians, libxc's meta-GGA on CuPy arrays) = the reference path.
+        # in the device Hamiltonians, libxc's meta-GGA on CuPy arrays) = the reference path.  On the tables of the
+        # file (PARSEC_LOCAL_FILTER=off): the TPSS SCF of this H2 in a sphere of 5 bohr is on the edge of convergence
+        # (both routes stall at residuals of 1e-4 to 1e-3 at h 0.35 on either table, and at h 0.5 on the tables
+        # filtered to the grid, the default), and the test compares the routes, not the tables.
+        import os
+        from unittest import mock
+
         from parsec_python.acceleration.tests.test_hybrid_device import TIGHT
 
         for symmetry, tolerance, extra, species, states, atoms in (
@@ -332,7 +338,8 @@ class DeviceLibxcSCFTests(unittest.TestCase):
                 species=species,
                 extra=extra + TIGHT,
             )
-            reference, _, accelerated, _ = self.inputs.both(problem, symmetry=symmetry)
+            with mock.patch.dict(os.environ, {"PARSEC_LOCAL_FILTER": "off"}):
+                reference, _, accelerated, _ = self.inputs.both(problem, symmetry=symmetry)
             label = (symmetry, bool(extra))
             self.assertTrue(reference.converged and accelerated.converged, label)
             self.assertAlmostEqual(accelerated.energies.total, reference.energies.total, delta=tolerance, msg=label)

@@ -201,12 +201,7 @@ class KPointHubbard:
         found = self._blocks.get(key)
         if found is not None and (projectors is None or found[0] is projectors):
             return found[1]
-        matrix = (self.projectors(k_index) if projectors is None else projectors).projectors.tocsc()
-        blocks = []
-        for atom in range(self.template.atom_count):
-            columns = matrix[:, 5 * atom : 5 * atom + 5].tocsr()
-            rows = np.flatnonzero(np.diff(columns.indptr))
-            blocks.append((rows, np.asarray(columns[rows].toarray(), dtype=np.complex128)))
+        blocks = _atom_blocks_of(self.projectors(k_index) if projectors is None else projectors, self.template.atom_count)
         self._blocks[key] = (projectors, blocks)
         return blocks
 
@@ -231,12 +226,7 @@ class KPointHubbard:
                 for rows, values in self._atom_blocks(k_index, projectors)
             ]
             self._device_blocks[key] = (projectors, blocks)
-        selected = vectors[:, : int(occupied[-1]) + 1]
-        weights = xp.asarray(occupations[: int(occupied[-1]) + 1])
-        dots = xp.stack([adjoint @ selected[rows] for rows, adjoint in blocks])
-        matrices = xp.einsum("amn,akn->akm", dots * weights[None, None, :], dots.conj())
-        host = getattr(matrices, "get", None)
-        return np.asarray(host() if host is not None else matrices, dtype=np.complex128)
+        return _occupation_of_blocks(blocks, vectors, occupations, occupied, xp)
 
     def terms(self, summed: Sequence[np.ndarray]) -> HubbardTerms:
         """``D`` and ``E_U`` of the k-summed matrices of every channel, up first."""
@@ -247,4 +237,82 @@ class KPointHubbard:
         return hubbard_terms(self.template, list(matrices))
 
 
-__all__ = ["BlochHubbardHamiltonian", "KPointHubbard", "kpoint_backend"]
+def _atom_blocks_of(projectors: HubbardProjectors, atom_count: int) -> list:
+    """``(rows, values)`` of every LDA+U atom of ``projectors``: its support rows and the ``(rows, 5)`` values of its
+    five projectors there."""
+
+    matrix = projectors.projectors.tocsc()
+    blocks = []
+    for atom in range(int(atom_count)):
+        columns = matrix[:, 5 * atom : 5 * atom + 5].tocsr()
+        rows = np.flatnonzero(np.diff(columns.indptr))
+        blocks.append((rows, np.asarray(columns[rows].toarray(), dtype=np.complex128)))
+    return blocks
+
+
+def _occupation_of_blocks(blocks, vectors, occupations: np.ndarray, occupied: np.ndarray, xp) -> np.ndarray:
+    """``sum_n f_n <phi|u_n><u_n|phi>`` of device orbitals from the device ``(rows, P^H)`` of every atom (``occupied``:
+    the indices of the nonzero occupations, at least one)."""
+
+    selected = vectors[:, : int(occupied[-1]) + 1]
+    weights = xp.asarray(occupations[: int(occupied[-1]) + 1])
+    dots = xp.stack([adjoint @ selected[rows] for rows, adjoint in blocks])
+    matrices = xp.einsum("amn,akn->akm", dots * weights[None, None, :], dots.conj())
+    host = getattr(matrices, "get", None)
+    return np.asarray(host() if host is not None else matrices, dtype=np.complex128)
+
+
+class SectorOccupation:
+    """:meth:`KPointHubbard.occupation_with` without the state of a loop: ``w N`` of the states of a sector from the
+    projectors reduced to its rows (``HubbardProjectors``, whose atoms are those of the loop), the device copies of their
+    atom blocks kept by projectors.  The worker processes of the k-point sectors
+    (``acceleration/SCF/kpoint_processes.py``) form the occupation matrices of their sectors with it: the same
+    operations as the loop's own method, so the same numbers."""
+
+    def __init__(self) -> None:
+        self._blocks: dict[int, tuple] = {}  # id(projectors) -> (projectors, host blocks)
+        self._device_blocks: dict[tuple, tuple] = {}  # (id(projectors), device) -> (projectors, device blocks)
+
+    def __call__(self, projectors: HubbardProjectors, vectors, occupations, weight: float, xp=np) -> np.ndarray:
+        if xp is np or isinstance(vectors, np.ndarray):
+            return kpoint_occupation_matrix(projectors, np.asarray(vectors), occupations, weight)
+        occupations = np.asarray(occupations, dtype=np.float64)
+        occupied = np.flatnonzero(occupations != 0.0)
+        atoms = projectors.atom_count
+        if occupied.size == 0:
+            return float(weight) * np.zeros((atoms, 5, 5), dtype=np.complex128)
+        device = getattr(getattr(vectors, "device", None), "id", None)
+        found = self._device_blocks.get((id(projectors), device))
+        if found is not None and found[0] is projectors:
+            blocks = found[1]
+        else:
+            host = self._blocks.get(id(projectors))
+            if host is None or host[0] is not projectors:
+                host = (projectors, _atom_blocks_of(projectors, atoms))
+                self._blocks[id(projectors)] = host
+            blocks = [(xp.asarray(rows), xp.asarray(values.conj().T)) for rows, values in host[1]]
+            self._device_blocks[(id(projectors), device)] = (projectors, blocks)
+        return float(weight) * _occupation_of_blocks(blocks, vectors, occupations, occupied, xp)
+
+
+class SectorHubbardPart:
+    """The ``hubbard_part`` of the sector geometry of a k-point loop with LDA+U (``PARSEC_KPOINT_SECTOR_LDAU``):
+    ``part(task, projectors, vectors, occupations, xp)`` is ``{name: w N}`` of the states of a sector of task ``task``
+    with the projectors reduced to its rows, ``labels(task)`` the ``(name, w)`` of the task (the part of the density and
+    the weight of its k-point).  :meth:`recipe` gives a worker process of the sectors what it needs besides the
+    projectors (:class:`SectorOccupation`)."""
+
+    def __init__(self, hubbard: KPointHubbard, labels) -> None:
+        self.hubbard = hubbard
+        self._labels = labels
+
+    def __call__(self, task: int, projectors: HubbardProjectors, vectors, occupations, xp=np) -> dict:
+        name, weight = self._labels(task)
+        return {name: self.hubbard.occupation_with(projectors, vectors, occupations, weight, xp=xp)}
+
+    def recipe(self, task: int) -> tuple[str, float]:
+        name, weight = self._labels(task)
+        return str(name), float(weight)
+
+
+__all__ = ["BlochHubbardHamiltonian", "KPointHubbard", "SectorHubbardPart", "SectorOccupation", "kpoint_backend"]

@@ -138,18 +138,64 @@ def hybrid_kernel_source() -> str:
     return device_xc.kernel_source() + "\n" + source
 
 
-_MODULES: dict[int, dict[str, object]] = {}
+_MODULES: dict[tuple, dict[str, object]] = {}
+#: Every component (bit c for component c of :data:`COMPONENTS`), the ``HX_COMPONENTS`` of the kernels.
+ALL_COMPONENTS = (1 << len(COMPONENTS)) - 1
 
 
-def _hybrid_kernels(cp, device_id: int) -> dict[str, object]:
-    kernels = _MODULES.get(int(device_id))
+def component_mask(weights) -> int:
+    """The components with a weight, as the bit mask ``HX_COMPONENTS`` of ``hybrid_xc_kernels.cu``."""
+
+    mask = 0
+    for index, weight in enumerate(np.asarray(weights, dtype=np.float64).ravel()):
+        if weight != 0.0:
+            mask |= 1 << index
+    return mask
+
+
+def evaluator_kernel_names(*, spin_polarized: bool) -> tuple[str, ...]:
+    """The kernels the unpolarized or the spin evaluator launches."""
+
+    return ("xc_gradient", "xc_adjoint", "hybrid_spin_gga" if spin_polarized else "hybrid_gga")
+
+
+def _hybrid_kernels(
+    cp, device_id: int, names: tuple[str, ...] = _KERNEL_NAMES, components: int = ALL_COMPONENTS
+) -> dict[str, object]:
+    """The kernels ``names`` with the components of the mask ``components``, compiled for ``device_id`` once per process.
+
+    A module holds only the kernels asked for and the components a functional weights: NVRTC took 15 s for every
+    kernel and component on a first run (an empty kernel cache), the three kernels of the unpolarized evaluator
+    of PBE0 take a fraction of it.  A weight of zero skips its component in the kernels, so the components that are
+    compiled do the same arithmetic in either module.
+    """
+
+    key = (int(device_id), tuple(sorted(names)), int(components))
+    kernels = _MODULES.get(key)
     if kernels is None:
-        options = ("-std=c++11", "--fmad=false") + tuple(f"-DKERNEL_{name}" for name in _KERNEL_NAMES)
+        options = (
+            ("-std=c++11", "--fmad=false")
+            + tuple(f"-DKERNEL_{name}" for name in key[1])
+            + (f"-DHX_COMPONENTS={int(components)}",)
+        )
         with cp.cuda.Device(device_id):
             module = cp.RawModule(code=hybrid_kernel_source(), options=options)
-            kernels = {name: module.get_function(name) for name in _KERNEL_NAMES}
-        _MODULES[int(device_id)] = kernels
+            kernels = {name: module.get_function(name) for name in key[1]}
+        _MODULES[key] = kernels
     return kernels
+
+
+def evaluator_kernels(cp, device_id: int, semilocal, *, spin_polarized: bool) -> dict[str, object]:
+    """The kernels of the evaluator of ``semilocal`` (a ``ComponentSemilocal``), compiled once per process.
+
+    The evaluators take theirs here, and so does a compilation ahead of the run
+    (:mod:`..backends.compile_ahead`), which finds the same module.
+    """
+
+    weights, _ = component_parameters(semilocal)
+    return _hybrid_kernels(
+        cp, device_id, evaluator_kernel_names(spin_polarized=spin_polarized), component_mask(weights)
+    )
 
 
 def component_parameters(semilocal) -> tuple[np.ndarray, np.ndarray]:
@@ -198,7 +244,9 @@ class _HybridEvaluatorBase(_DeviceEvaluatorBase):
         self._core_device = None
         reduction = None if reducer is None else reducer.reduction
         with cp.cuda.Device(self.device_id):
-            self._kernels = _hybrid_kernels(cp, self.device_id)
+            self._kernels = evaluator_kernels(
+                cp, self.device_id, functional.semilocal, spin_polarized=self.spin_polarized
+            )
             self.geometry = _StencilGeometry(cp, grid, reduction, flips=True)
             self._multiplicities = (
                 None
@@ -349,7 +397,7 @@ def device_semilocal_points(semilocal, *arrays, device_id: int | None = None) ->
         raise ValueError("pass (rho, sigma) or (rho_up, rho_down, sigma_uu, sigma_ud, sigma_dd)")
     device = int(cp.cuda.Device().id if device_id is None else device_id)
     with cp.cuda.Device(device):
-        kernels = _hybrid_kernels(cp, device)
+        kernels = _hybrid_kernels(cp, device, ("hybrid_points",), component_mask(weights))
         inputs = cp.asarray(np.ascontiguousarray(np.vstack([np.asarray(a, dtype=np.float64) for a in arrays])))
         count = int(inputs.shape[1])
         outputs = cp.empty((6 if polarized else 3, count), dtype=np.float64)
@@ -367,11 +415,15 @@ def device_semilocal_points(semilocal, *arrays, device_id: int | None = None) ->
 
 
 __all__ = [
+    "ALL_COMPONENTS",
     "COMPONENTS",
     "DeviceHybridXCEvaluator",
     "DeviceSpinHybridXCEvaluator",
+    "component_mask",
     "component_parameters",
     "device_hybrid_supported",
     "device_semilocal_points",
+    "evaluator_kernel_names",
+    "evaluator_kernels",
     "hybrid_kernel_source",
 ]

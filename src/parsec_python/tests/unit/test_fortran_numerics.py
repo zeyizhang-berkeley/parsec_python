@@ -32,8 +32,10 @@ def _settings():
     from parsec_python.Forces.wire_slab import wire_slab_gaussian_force_setting, wire_slab_gaussian_setting
     from parsec_python.Hartree.variational import hartree_variational_setting
     from parsec_python.Input.parsec_input import cubic_spline_default_setting
+    from parsec_python.Hamiltonian.hubbard import ldau_smooth_projectors_fraction
     from parsec_python.Occupations.fermi_dirac import fermi_gap_root_setting
     from parsec_python.Pseudopotential.fhipp import fhi_origin_setting
+    from parsec_python.Pseudopotential.local_filter import local_filter_setting
     from parsec_python.Pseudopotential.potre import projector_tail_setting, spline_coulomb_tail_setting
     from parsec_python.Pseudopotential.radial_derivatives import spline_force_center_setting
     from parsec_python.Pseudopotential.radial_quadrature import kb_quadrature_setting
@@ -61,6 +63,9 @@ def _settings():
         "PARSEC_FHI_ORIGIN": (fhi_origin_setting, "auto"),
         "PARSEC_FILTER_DEGREE_STALL": (filter_degree_stall_setting, "off"),
         "PARSEC_SPLINE_COULOMB_TAIL": (spline_coulomb_tail_setting, "auto"),
+        "PARSEC_LOCAL_FILTER": (local_filter_setting, "all"),
+        # ldau_smooth_projectors_fraction returns the width of the taper, 0.0 for off
+        "PARSEC_LDAU_SMOOTH_PROJECTORS": (ldau_smooth_projectors_fraction, 0.2),
     }
     return table
 
@@ -99,7 +104,9 @@ class UmbrellaSettingTests(unittest.TestCase):
                     self.assertEqual(setting(), default)
                 with _environment(PARSEC_FORTRAN_NUMERICS="on"):
                     value = setting()
-                    expected = None if name == "PARSEC_BAND_BUFFER" else FORTRAN_NUMERICS_VALUES[name]
+                    expected = {"PARSEC_BAND_BUFFER": None, "PARSEC_LDAU_SMOOTH_PROJECTORS": 0.0}.get(
+                        name, FORTRAN_NUMERICS_VALUES[name]
+                    )
                     self.assertEqual(value, expected)
                 # the value of PARSEC 1.5 set alone is the same
                 with _environment(**{name: FORTRAN_NUMERICS_VALUES[name]}):

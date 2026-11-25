@@ -89,6 +89,7 @@ from parsec_python.Eigensolvers.lapack_random import (
 )
 
 from ..backends.cupy import device_stage, require_cupy
+from ..backends.device_checks import all_finite
 from .chebyshev import FilterBlock
 from .distributed_filter import block_partitions, starting_sigmas
 from .distributed_state import (
@@ -292,7 +293,7 @@ def _device_shifted_cholesky(overlap, rows: int, *, shifted: bool):
         matrix[cp.diag_indices(states)] += shift * norm
     with cupyx.errstate(linalg="raise"):
         factor = cp.linalg.cholesky(matrix)
-    if not bool(cp.isfinite(factor).all().item()):
+    if not all_finite(factor):
         raise np.linalg.LinAlgError("the Cholesky factor of the overlap is not finite")
     return factor
 

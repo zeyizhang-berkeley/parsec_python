@@ -522,8 +522,10 @@ the energy is then a smooth function of the positions and the forces are its
 slope. `PARSEC_CUBIC_SPLINE_DEFAULT=off PARSEC_PROJECTOR_TAIL=off` (or
 `Cubic_Spline: .false.` where no table has such a tail) give PARSEC 1.5's
 linear interpolation, and `PARSEC_FORTRAN_NUMERICS=on` all of PARSEC 1.5's
-numerics at once (also its quadrature of the Kleinman-Bylander denominators
-and its CA correlation). Use `Correlation_Type: pbe` with
+numerics at once (also its quadrature of the Kleinman-Bylander denominators,
+its CA correlation and the tables sampled as the files give them, where this
+code filters the local potential and the projectors to the grid by default,
+`PARSEC_LOCAL_FILTER=all`). Use `Correlation_Type: pbe` with
 the potentials of `PBE/` and `Correlation_Type: ca` with those of `CA/`; the
 self-consistent hybrid functionals (`pbe0`, `hse06`, `b3lyp`, `hf`, ...; see
 [the package guide](src/parsec_python/README.md#self-consistent-hybrid-functionals))
@@ -1104,21 +1106,34 @@ within 4e-8 Ry and the forces within 6e-6 Ry/bohr of the whole mesh). `Ignore_Sy
 single point takes the wedge of the operations that also keep the grid's finite-difference operators, on any grid and
 either set of routines (`PARSEC_HYBRID_KPOINT_WEDGE`): its exchange sums over the whole mesh, and the points outside
 the wedge are the images of the wedge's Bloch factors under the operations (their grid points permuted, as Quantum
-ESPRESSO's `exxinit` rotates the wavefunctions of its irreducible points). Under `auto` (since 20 November 2026) its
-semilocal start runs on the time-reversal pairs, bit for bit as `off`; where that start fills every state to 0 or 1
-(an insulator: no occupation within 1e-6 of the inside of [0, 1]) the Fock loop moves to the wedge from the
-representatives' orbitals of the start, and a start with a partly filled state keeps the pairs for the whole run,
-bit for bit as `off` (a NOTE in `parsec.out` names the route). The reason is the metal, not the grid: a level partly
-filled at the Fermi level at equivalent k-points can be filled unequally by the Fock loop of the pairs (exact exchange
-favours integer occupations), a state that breaks the crystal symmetry and lies below the symmetric one, which is all
-the wedge can hold (hcp Au2 PBE0 4x4x2: the electron of the doublet at the two L points gathers at one of them, 9.7e-4
-Ry lower at 0.3 and 0.2 bohr; primitive fcc Au 4x4x4: one of the three X points, 6.9e-4 Ry; the conventional cubic fcc
-Au cell on its orthogonal grid, 2x2x2: 5.8e-3 Ry, where neither route converges its Fock loop at `Exx_Tolerance`
-1e-8: the exchange then breaks the face-centring translations of the cube as well and creeps on through nearly
-degenerate states of that kind; `PARSEC_HYBRID_KPOINT_SECTORS=on` keeps them and converges both routes, see
-[src/parsec_python/README.md](src/parsec_python/README.md), "Diagnostics of the Fock loop"). Insulators take the wedge to the discretization on any grid
-(primitive Si 1e-10 Ry, hexagonal Si 5.4e-8 Ry, the 8-atom Si cube 1e-10 Ry; A100). `PARSEC_HYBRID_KPOINT_WEDGE=on`
-runs the wedge always, its start too: the symmetric state, also for a metal. The wedge and the images take only the
+ESPRESSO's `exxinit` rotates the wavefunctions of its irreducible points). Since 23 November 2026 (`on`, the default)
+its semilocal start and its Fock loop run on the wedge, metals included: equivalent k-points of the mesh are filled
+alike (within the little group of a k-point the wedge's own Fock loop can still break). On the time-reversal pairs
+(`off`) the Fock loop of a metal at a small smearing can fill a level that is partly filled at the Fermi level at
+equivalent k-points unequally (exact exchange favours integer occupations) and end below that state; the lower state is
+an artefact of the finite mesh: its gain falls with the mesh and the smearing (primitive fcc Au PBE0, `F = E - TS` of
+the pairs minus the wedge: at the default 80 K -2.28e-3 Ry on 3x3x3, -6.33e-4 Ry on 4x4x4, -3.06e-4 Ry on 6x6x6; at
+1000 K -2.9e-4 Ry on 4x4x4, -8.3e-5 Ry on 6x6x6 and none on 8x8x8, while the total moves by 1.06e-2 Ry from 4x4x4 to
+6x6x6; on 4x4x4 -1.2e-4 Ry at 1500 K and none at 2000 K), and Quantum ESPRESSO's exchange through rotated orbitals
+gives the symmetric state (the same X level at E_F + 0.0044 Ry, f 0.332, as here). The limit: the forces of the wedge
+are the slope of the free energy for displacements that keep a subgroup of the wedge's operations; a structure of lower
+symmetry (and molecular dynamics, `manual` movements, spin with forces, a `Kpoint_List`, slabs, spinors) runs on the
+pairs, whose Fock loop can end in the broken state, so at a tight `Exx_Tolerance`, a coarse mesh and a low smearing its
+energy is not comparable with that of a symmetric structure (fcc Au at 80 K on 4x4x4: the crystal translated by
+(1e-4, 2e-4, 0) bohr lies 6.33e-4 Ry below the symmetric one at `Exx_Tolerance` 1e-10 and 7.6e-7 Ry below at the
+default 1e-6, where these pairs stop before the instability, while those of the CA table of `examples/0d_AuH` end broken
+there too, 6.6e-4 Ry below the wedge);
+`parsec.out` names the state at the end of the Fock loop of a metal.
+Under `auto`, the default from 20 to 22 November 2026, its semilocal start runs on the time-reversal pairs, bit for bit
+as `off`; where that start fills every state to 0 or 1 (an insulator: no occupation within 1e-6 of the inside of
+[0, 1]) the Fock loop moves to the wedge from the representatives' orbitals of the start, and a start with a partly
+filled state keeps the pairs for the whole run, bit for bit as `off` (a NOTE in `parsec.out` names the route). The
+conventional cubic fcc Au cell (2x2x2) breaks the face-centring translations of the cube on either route and creeps on
+through nearly degenerate states of that kind at `Exx_Tolerance` 1e-8; `PARSEC_HYBRID_KPOINT_SECTORS=on` keeps them
+and converges both routes, see [src/parsec_python/README.md](src/parsec_python/README.md), "Diagnostics of the Fock
+loop". Insulators take the wedge to the discretization on any grid (primitive Si 1e-10 Ry, hexagonal Si 5.4e-8 Ry, the
+8-atom Si cube 1e-10 Ry; A100), under `on` 12 to 31 % faster than under `auto` (Si64 2x2x2 on 4 A100 137.7 -> 121.1
+s, the same total within 1e-8 Ry). The wedge and the images take only the
 operations that map the mesh onto itself, also on the Fortran-derived routines, whose density average keeps the whole
 space group (the exchange of the mesh commutes with those operations alone: the 8-atom cube with a 2x2x1 or 2x2x4 mesh
 keeps 16 of its 48). The forces and `bfgs`/`simple` relaxations of a hybrid take the same route
@@ -1262,7 +1277,10 @@ tables, h 0.4 bohr, A100 against a 1.5 build on 8 MPI ranks, CH4, H2, H2O and NH
 either shift (CH4 and NH4 also at h 0.3), Si5H12 likewise with `Hartree_Boundary_Tolerance: off` (with the default
 boundary plan of this code, whose atomic tail engages there, within 3.4e-5 Ry). The default grids give, this code
 minus 1.5 at h 0.4: CH4 -11.2 mRy, H2 +5.0, H2O +65.6, NH4 +49.0, Si5H12 +31.1 mRy; at h 0.3 CH4 -1.8 and NH4
-+1.1 mRy (the egg-box term of the grid, which shrinks with h). The point counts differ too (a sphere of 8 bohr at
++1.1 mRy (the egg-box term of the grid, which shrinks with h; these are the numbers of PARSEC 1.5's numerics, which
+`PARSEC_FORTRAN_NUMERICS=on` gives to every digit; with the tables filtered to the grid, the default, the half-step
+shift moves the energies of this code by CH4 +5.2, H2 +1.5, H2O +46.5, NH4 +36.1 and Si5H12 -7.3 mRy at h 0.4, CH4
+-0.2 and NH4 -0.7 mRy at h 0.3). The point counts differ too (a sphere of 8 bohr at
 h 0.4: 33,552 points with the shift, 33,377 without). To compare with a 1.5 result of an input without the line,
 write `Ignore_Symmetry: .true.` (the full grid) or a `Grid_Shift` block of zeros (the same grid, with the symmetry
 sectors) here, or a `Grid_Shift` block of 0.5 in the 1.5 input.

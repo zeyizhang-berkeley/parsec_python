@@ -1008,6 +1008,12 @@ formed once.
   spin-polarized hybrid runs both channels in the sectors by default
   (`Spin_Symmetry_Sectors: auto`, with the symmetry guard of
   [Spin channels in the symmetry sectors](#spin-channels-in-the-symmetry-sectors)).
+  Where the point group of a cluster is larger than its abelian subgroup
+  (Td, Oh, D4h), the hybrid of one process can solve the weighted sectors of
+  a subgroup as a semilocal run does (`PARSEC_ORBITAL_GROUP_HYBRID`,
+  `acceleration/README.md`, "Hybrid functionals"): the partners that its
+  sectors do not hold enter the exchange as the coset images of the solved
+  states.
 - Orbitals of symmetry sectors are never unfolded to the full grid for the
   pair densities: where the Kronecker box is symmetric about the origin
   (every cluster domain with the default grid shift 1/2 or shift 0), a pair
@@ -1067,16 +1073,35 @@ host loop to round-off ([acceleration/README.md](acceleration/README.md),
 
 - **k-points.** The exchange operator sums over the full mesh. A single
   point with a Monkhorst-Pack mesh solves its irreducible wedge
-  (`PARSEC_HYBRID_KPOINT_WEDGE`): under `auto` (since 20 November 2026) the
-  semilocal start runs on the time-reversal pairs, bit for bit as `off`, and
-  the Fock loop moves to the wedge where that start has no partly filled state
-  (`Grid/kpoints.py`, `partly_filled_states`: no occupation within 1e-6 of the
-  inside of [0, 1]; `SCF/hybrid_periodic.py`, `BlochExchange.after_start`),
-  else keeps the pairs for the whole run, bit for bit as `off`: a metal's
-  level partly filled at equivalent k-points can break the crystal symmetry in
-  the Fock loop of the pairs (exact exchange favours integer occupations; hcp
-  and fcc Au 7e-4 to 1e-3 Ry below the symmetric state), which the wedge cannot
-  hold; `on` runs the wedge always, the symmetric state. The wedge takes the
+  (`PARSEC_HYBRID_KPOINT_WEDGE`): under `on` (the default since 23 November
+  2026) the semilocal start and the Fock loop run on the wedge, metals
+  included: equivalent k-points of the mesh are filled alike (within the
+  little group of a k-point the wedge's own Fock loop can still break). On
+  the time-reversal pairs (`off`) the Fock loop of a metal at a small
+  smearing can fill a level that is partly filled at the Fermi level at
+  equivalent k-points unequally (exact exchange favours integer occupations)
+  and end lower; that state is an artefact of the finite mesh, whose gain
+  falls with the mesh and the smearing (primitive fcc Au PBE0, `F = E - TS`
+  of the pairs minus the wedge: at the default 80 K -2.28e-3 Ry on 3x3x3,
+  -6.33e-4 Ry on 4x4x4, -3.06e-4 Ry on 6x6x6; at 1000 K -2.9e-4 Ry on 4x4x4,
+  -8.3e-5 Ry on 6x6x6, none on 8x8x8; the total moves by 1.06e-2 Ry from
+  4x4x4 to 6x6x6), and the symmetric state is the one Quantum ESPRESSO's
+  exchange through rotated orbitals gives. The limit: the forces of the
+  wedge are the slope of the free energy for displacements that keep a
+  subgroup of its operations; a structure of lower symmetry runs on the
+  pairs (as molecular dynamics, `manual` movements, spin with forces, a
+  `Kpoint_List`, slabs and spinors do), whose Fock loop can end in the
+  broken state, so at a tight `Exx_Tolerance`, a coarse mesh and a low
+  smearing its energy is not comparable with that of a symmetric structure
+  (fcc Au at 80 K on 4x4x4: 6.33e-4 Ry below for a rigid translation by
+  (1e-4, 2e-4, 0) bohr at `Exx_Tolerance` 1e-10); `parsec.out` names the state at the
+  end of the Fock loop of a metal (`BlochExchange.after_loop`). Under `auto` (the
+  default from 20 to 22 November 2026) the semilocal start runs on the
+  time-reversal pairs, bit for bit as `off`, and the Fock loop moves to the
+  wedge where that start has no partly filled state (`Grid/kpoints.py`,
+  `partly_filled_states`: no occupation within 1e-6 of the inside of [0, 1];
+  `SCF/hybrid_periodic.py`, `BlochExchange.after_start`), else keeps the pairs
+  for the whole run, bit for bit as `off`. The wedge takes the
   operations of the space group that map the grid, its finite-difference
   operators and the mesh onto themselves, on any grid, with time
   reversal, the density symmetrized over them; the
@@ -1277,9 +1302,9 @@ behaves as 0.3).
 For H2, H2O, CH4, CO, N2, O2 (triplet) and benzene with PBE0, HSE06, HSE03,
 B3LYP, B3LYP5, B3PW91 and HF, against Quantum ESPRESSO 7.5 with the same
 FHI98PP pseudopotentials and geometries, `E_hyb - E_PBE` agrees within
-`9.4e-5 Ry` in all 49 cases (the largest, B3LYP and B3LYP5 of O2, are QE's
-cutoff error for LYP: `1.1e-5 Ry` against QE at 250 Ry), the Fock energies
-`a_x E_x` within `5.9e-5 Ry` and the HOMOs within 1.94 meV (HSE03 against
+`9.3e-5 Ry` in all 49 cases (the largest, B3LYP and B3LYP5 of O2, are QE's
+cutoff error for LYP: `1.0e-5 Ry` against QE at 250 Ry), the Fock energies
+`a_x E_x` within `4.6e-5 Ry` and the HOMOs within 2.29 meV (HSE03 against
 a reference derived from QE's HSE and libxc's HSE03, since QE has no HSE03
 of this form). Inputs, references and tables: [`examples/0d_hybrid_functionals`](../../examples/0d_hybrid_functionals/).
 
@@ -1421,56 +1446,64 @@ PBE; the default form of the density gradient (`auto`: density form for TPSS
 and TPSSh, orbital form for the others); one A100, `Exx_Tolerance` 1e-8 Ry,
 `Convergence_Criterion` 1e-6 Ry, `Max_Iter` 200. M06-2X and the O2 TPSSh and
 r2SCAN0 have no Quantum ESPRESSO reference (Quantum ESPRESSO 7.5 aborts on
-M06-2X, and its O2 TPSSh and r2SCAN0 diverge before the exact exchange starts):
+M06-2X, and its O2 TPSSh and r2SCAN0 diverge before the exact exchange starts).
+The rows without a mark are the logs of
+[`examples/0d_meta_gga`](../../examples/0d_meta_gga/README.md) (24 November
+2026, the tables filtered to the grid, `PARSEC_LOCAL_FILTER=all`; `s` the
+program wall time of its "Costs"); the rows marked * (SCAN0, M06-2X and the
+O2 hybrids) are separate runs on the tables of the files, made before that
+default and not made again (the filter moves a total by up to 2e-4 Ry, the
+same for every functional of a molecule, so `E - E_PBE` by at most about
+0.01 mRy):
 
 | molecule | functional | dE this code (mRy) | dE QE (mRy) | ours - QE (mRy) | a_x E_x - QE (mRy) | inner iterations | s |
 |---|---|---|---|---|---|---|---|
-| H2O | tpssh | -8.113 | -8.186 | +0.073 | +0.005 | [6, 9, 14] | 39.1 |
-| H2O | r2scan0 | +11.265 | +11.303 | -0.038 | +0.014 | [11, 12, 17, 8] | 53.7 |
-| H2O | scan0 | +14.166 | +14.242 | -0.076 | +0.174 | [6, 13, 12, 6] | 52.2 |
-| H2O | m062x | -14.492 | - | - | - | [14, 10, 12, 11, 9, 8] | 58.5 |
-| H2O | r2scan | -2.132 | -2.038 | -0.094 |  |  | 32.1 |
-| H2O | scan | +1.397 | +1.543 | -0.147 |  |  | 37.0 |
-| H2O | tpss | -11.075 | -11.145 | +0.070 |  |  | 30.5 |
-| CH4 | tpssh | -41.476 | -41.426 | -0.050 | -0.003 | [12, 10, 15, 9] | 41.5 |
-| CH4 | r2scan0 | -3.799 | -3.745 | -0.054 | +0.001 | [7, 14, 9, 7] | 53.4 |
-| CH4 | scan0 | -5.614 | -5.488 | -0.126 | +0.019 | [7, 21, 14, 8] | 58.1 |
-| CH4 | m062x | +3.441 | - | - | - | [42, 53, 39, 29, 24, 9] | 124.0 |
-| CH4 | r2scan | -1.511 | -1.422 | -0.088 |  |  | 34.5 |
-| CH4 | scan (not converged) | -4.046 | -3.821 | -0.225 |  |  | 112.7 |
-| CH4 | tpss | -39.429 | -39.357 | -0.072 |  |  | 29.9 |
-| N2 | tpssh | +18.447 | +18.419 | +0.028 | +0.003 | [6, 6, 9] | 26.5 |
-| N2 | r2scan0 | +61.904 | +61.921 | -0.018 | -0.010 | [8, 6, 17, 5] | 34.4 |
-| N2 | scan0 | +64.839 | +65.073 | -0.234 | -0.162 | [5, 10, 16, 11] | 32.0 |
-| N2 | m062x | +19.136 | - | - | - | [5, 8, 11, 11, 10, 4] | 36.8 |
-| N2 | r2scan | +35.224 | +35.240 | -0.016 |  |  | 27.6 |
-| N2 | scan | +38.779 | +39.273 | -0.493 |  |  | 34.9 |
-| N2 | tpss | +8.420 | +8.392 | +0.028 |  |  | 25.0 |
-| CO | tpssh | +9.782 | +9.795 | -0.013 | +0.005 | [6, 9, 9] | 34.0 |
-| CO | r2scan0 | +43.956 | +44.056 | -0.100 | -0.005 | [6, 15, 13, 10, 9] | 46.4 |
-| CO | scan0 | +46.601 | +46.508 | +0.093 | -0.107 | [7, 17, 120, 168, 13] | 137.2 |
-| CO | m062x | +3.032 | - | - | - | [6, 13, 13, 13, 11, 9] | 51.6 |
-| CO | r2scan | +19.591 | +19.736 | -0.145 |  |  | 32.4 |
-| CO | scan (not converged) | +22.765 | +22.822 | -0.057 |  |  | 94.8 |
-| CO | tpss | +1.575 | +1.589 | -0.014 |  |  | 28.3 |
-| NH3 | tpssh | -16.874 | -16.873 | -0.001 | +0.003 | [7, 15, 11] | 50.0 |
-| NH3 | r2scan0 | +11.177 | +11.158 | +0.019 | +0.007 | [12, 20, 16, 16] | 82.8 |
-| NH3 | scan0 | +12.380 | +12.512 | -0.132 | -0.057 | [10, 15, 26, 12] | 85.7 |
-| NH3 | m062x | +3.175 | - | - | - | [7, 11, 13, 14, 11, 6] | 76.7 |
-| NH3 | r2scan | +4.850 | +4.828 | +0.022 |  |  | 64.9 |
-| NH3 | scan (not converged) | +6.216 | +6.491 | -0.275 |  |  | 148.1 |
-| NH3 | tpss | -17.648 | -17.640 | -0.008 |  |  | 39.7 |
-| O2 | tpssh | +17.023 | - | - | - | [7, 12, 10] | 41.9 |
-| O2 | r2scan0 | +55.269 | - | - | - | [7, 9, 11, 9, 7] | 52.6 |
-| O2 | scan0 | +59.848 | +58.758 | +1.090 | +0.066 | [6, 16, 13, 11, 9] | 63.3 |
-| O2 | m062x | +31.271 | - | - | - | [6, 12, 11, 8, 10, 5] | 58.6 |
-| O2 | r2scan | +13.137 | +13.351 | -0.214 |  |  | 36.5 |
-| O2 | scan | +19.193 | +18.074 | +1.119 |  |  | 43.4 |
-| O2 | tpss | +1.759 | +1.681 | +0.079 |  |  | 33.1 |
+| H2O | tpssh | -8.107 | -8.186 | +0.079 | -0.001 | [6, 9, 16] | 30 |
+| H2O | r2scan0 | +11.277 | +11.303 | -0.026 | +0.000 | [11, 11, 14, 7] | 47 |
+| H2O | scan0 * | +14.166 | +14.242 | -0.076 | +0.174 | [6, 13, 12, 6] | 52.2 |
+| H2O | m062x * | -14.492 | - | - | - | [14, 10, 12, 11, 9, 8] | 58.5 |
+| H2O | r2scan | -2.122 | -2.038 | -0.084 |  |  | 25 |
+| H2O | scan | +1.406 | +1.543 | -0.137 |  |  | 30 |
+| H2O | tpss | -11.070 | -11.145 | +0.075 |  |  | 21 |
+| CH4 | tpssh | -41.475 | -41.426 | -0.049 | -0.003 | [12, 10, 20, 8] | 34 |
+| CH4 | r2scan0 | -3.794 | -3.745 | -0.049 | +0.001 | [7, 14, 9, 7] | 46 |
+| CH4 | scan0 * | -5.614 | -5.488 | -0.126 | +0.019 | [7, 21, 14, 8] | 58.1 |
+| CH4 | m062x * | +3.441 | - | - | - | [42, 53, 39, 29, 24, 9] | 124.0 |
+| CH4 | r2scan | -1.505 | -1.422 | -0.083 |  |  | 19 |
+| CH4 | scan (not converged) | -4.041 | -3.821 | -0.220 |  |  | 54 |
+| CH4 | tpss | -39.429 | -39.357 | -0.072 |  |  | 17 |
+| N2 | tpssh | +18.460 | +18.419 | +0.041 | +0.007 | [6, 6, 9] | 20 |
+| N2 | r2scan0 | +61.929 | +61.921 | +0.008 | -0.002 | [8, 6, 17, 5] | 29 |
+| N2 | scan0 * | +64.839 | +65.073 | -0.234 | -0.162 | [5, 10, 16, 11] | 32.0 |
+| N2 | m062x * | +19.136 | - | - | - | [5, 8, 11, 11, 10, 4] | 36.8 |
+| N2 | r2scan | +35.246 | +35.240 | +0.006 |  |  | 20 |
+| N2 | scan | +38.798 | +39.273 | -0.475 |  |  | 22 |
+| N2 | tpss | +8.429 | +8.392 | +0.037 |  |  | 16 |
+| CO | tpssh | +9.791 | +9.795 | -0.004 | +0.004 | [6, 9, 9] | 26 |
+| CO | r2scan0 | +43.973 | +44.056 | -0.083 | -0.009 | [6, 15, 13, 10, 9] | 41 |
+| CO | scan0 * | +46.601 | +46.508 | +0.093 | -0.107 | [7, 17, 120, 168, 13] | 137.2 |
+| CO | m062x * | +3.032 | - | - | - | [6, 13, 13, 13, 11, 9] | 51.6 |
+| CO | r2scan | +19.605 | +19.736 | -0.131 |  |  | 22 |
+| CO | scan (not converged) | +22.778 | +22.822 | -0.044 |  |  | 77 |
+| CO | tpss | +1.582 | +1.589 | -0.007 |  |  | 17 |
+| NH3 | tpssh | -16.870 | -16.873 | +0.003 | +0.001 | [7, 15, 19] | 48 |
+| NH3 | r2scan0 | +11.187 | +11.158 | +0.029 | +0.002 | [12, 19, 14, 8] | 74 |
+| NH3 | scan0 * | +12.380 | +12.512 | -0.132 | -0.057 | [10, 15, 26, 12] | 85.7 |
+| NH3 | m062x * | +3.175 | - | - | - | [7, 11, 13, 14, 11, 6] | 76.7 |
+| NH3 | r2scan | +4.861 | +4.828 | +0.033 |  |  | 51 |
+| NH3 | scan (not converged) | +6.226 | +6.491 | -0.265 |  |  | 145 |
+| NH3 | tpss | -17.645 | -17.640 | -0.005 |  |  | 34 |
+| O2 | tpssh * | +17.023 | - | - | - | [7, 12, 10] | 41.9 |
+| O2 | r2scan0 * | +55.269 | - | - | - | [7, 9, 11, 9, 7] | 52.6 |
+| O2 | scan0 * | +59.848 | +58.758 | +1.090 | +0.066 | [6, 16, 13, 11, 9] | 63.3 |
+| O2 | m062x * | +31.271 | - | - | - | [6, 12, 11, 8, 10, 5] | 58.6 |
+| O2 | r2scan | +13.151 | +13.351 | -0.200 |  |  | 28 |
+| O2 | scan | +19.207 | +18.074 | +1.133 |  |  | 36 |
+| O2 | tpss | +1.767 | +1.681 | +0.086 |  |  | 26 |
 
-r2SCAN, TPSS and their hybrids agree within 0.1 mRy (r2SCAN O2 0.2 mRy) and
-the exact exchange within 0.02 mRy; SCAN and SCAN0 within 0.1-0.5 mRy and O2
-1.1 mRy, the grid sensitivity of SCAN (Quantum ESPRESSO's own SCAN
+r2SCAN, TPSS and their hybrids agree within 0.13 mRy (r2SCAN O2 0.2 mRy) and
+the exact exchange of TPSSh and r2SCAN0 within 0.01 mRy; SCAN and SCAN0 within
+0.04-0.5 mRy and O2 1.1 mRy, the grid sensitivity of SCAN (Quantum ESPRESSO's own SCAN
 `E - E_PBE` of O2 moves by 0.7 mRy between 150 and 300 Ry; see
 [Accuracy and grid spacing](#accuracy-and-grid-spacing)). The SCAN runs of
 CH4, CO and NH3 stop at `Max_Iter` 200 with the energy settled (SCAN's
@@ -1502,7 +1535,7 @@ at fixed density with `LibXC_Density_Threshold: 1e-30`. On the molecules of
 digits (O2 triplet included), libxc's PBE and PBEh the code's PBE and PBE0
 within 1e-8 to 1.3e-7 Ry (the `A` above), and libxc's HSE06 and HSE03 through
 this code's exact exchange reproduce Quantum ESPRESSO with libxc within
-2.1e-5 Ry in `E_hyb - E_PBE` and 1.3e-5 Ry in `a_x E_x`.
+2.6e-5 Ry in `E_hyb - E_PBE` and 5.0e-6 Ry in `a_x E_x`.
 
 libxc 7.1 (7.1.2 checked) evaluates its polarized LYP inaccurately where one
 spin channel is almost empty (`n_u = 4.2e-11` beside `n_d = 9.1e-5`: on the
@@ -1658,13 +1691,18 @@ from one grid spacing to the next (a plane-wave code has the same error on its
 dense FFT grid). Against Quantum ESPRESSO 7.5 with libxc and the same
 FHI98PP potentials (`NCPPs/PBE` H, C, N, O; 300 Ry, 20 bohr box; H2O, CH4,
 NH3 and the O2 triplet), the difference of `E_mGGA - E_PBE` (mRy) and of the
-HOMO (meV):
+HOMO (meV); the column h = 0.16 bohr from the logs of
+[`examples/0d_meta_gga`](../../examples/0d_meta_gga/README.md) (24 November
+2026, tables filtered to the grid; TPSS against Quantum ESPRESSO at 250 Ry),
+the columns 0.20 and 0.13 from an earlier scan on the tables of the files
+(the example's own points at 0.13: r2SCAN H2O 0.06, O2 0.13 mRy and 0.1-0.7
+meV; SCAN H2O 0.22, O2 0.20 mRy and 13, 26 meV):
 
 | functional | h = 0.20 bohr | 0.16 | 0.13 |
 |---|---|---|---|
-| r2SCAN | 0.08-0.18, O2 1.0 / HOMO 0.3-2, O2 14 | 0.03-0.11, O2 0.34 / 0.1-1.4 | 0.01-0.05, O2 0.11 / 0.1-2.7 |
-| TPSS (H2O; O2 at 0.16) | 0.18 / 0.3 | 0.01, O2 0.03 / 0.3-0.9 | 0.02 / 0.9 |
-| SCAN | 0.2-0.8 / 5-50 | 0.1-0.9 / 1-40 | 0.03-0.2, O2 0.2 / 0.3-25 |
+| r2SCAN | 0.08-0.18, O2 1.0 / HOMO 0.3-2, O2 14 | 0.04-0.10, O2 0.32 / 0.1-0.8 | 0.01-0.05, O2 0.11 / 0.1-2.7 |
+| TPSS (H2O; O2 at 0.16) | 0.18 / 0.3 | 0.01, O2 0.02 / 0.1-0.6 | 0.02 / 0.9 |
+| SCAN | 0.2-0.8 / 5-50 | 0.12-0.36, O2 0.96 / 0.4-39 | 0.03-0.2, O2 0.2 / 0.3-25 |
 
 The derivative stencil of `sigma` and `tau` (against exact derivatives of the
 same orbitals: <= 0.07 mRy, < 0.3 meV), the boundary of the domain (3 bohr
@@ -1677,17 +1715,19 @@ function in `alpha` makes it grid-sensitive in every code (Quantum ESPRESSO's
 own SCAN `E - E_PBE` moves by 0.1-0.5 mRy between 200 and 300 Ry). Hence:
 
 - r2SCAN, TPSS and other smooth meta-GGAs: `Grid_Spacing` <= 0.16 bohr
-  (0.1 mRy, O2 0.35 mRy, levels to 2 meV); 0.13 bohr for energy differences
+  (0.1 mRy, O2 0.32 mRy, levels to 1 meV); 0.13 bohr for energy differences
   to 0.05-0.1 mRy with first-row atoms;
-- SCAN: 0.13 bohr or finer, and still up to 0.2 mRy and 25 meV; prefer
+- SCAN: 0.13 bohr or finer, and still up to 0.2 mRy and 26 meV; prefer
   r2SCAN (built to remove this sensitivity) unless SCAN is required;
 - forces: the force formulas of the GGAs are the derivatives of the
   meta-GGA's grid energy too (the orbital term does not depend on the atoms;
   a core charge adds its term, see
   [FORCES_AND_RELAXATION.md](FORCES_AND_RELAXATION.md)): finite differences of
   the energy match them as for PBE; against Quantum ESPRESSO (distorted H2O,
-  200 Ry) the largest component of r2SCAN differs by 1.5e-3 Ry/bohr at
-  h = 0.16 and 5e-4 at 0.13 (PBE: 1.0e-3 and 2.6e-4);
+  200 Ry) the largest component of r2SCAN differs by 1.3e-3 Ry/bohr at
+  h = 0.16 and 5.8e-4 at 0.13 (PBE: 2.4e-5 and 1.1e-4, the tables filtered
+  to the grid; 1.0e-3 at h = 0.16 on the tables of the files, the egg-box
+  force);
 - the LUMOs of small molecules near 0 eV are diffuse and confined by
   `Boundary_Sphere_Radius` (as by a plane-wave box): compare them with a larger
   sphere.

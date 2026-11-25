@@ -826,11 +826,19 @@ def make_solver(job: KPointJob, **options):
     (:class:`.kpoint_pools.MPIPoolKPointSolver`), or for a job with per-task extras (the spin-orbit and
     non-collinear drivers, forces) the basis split by rows over the ranks (:class:`.kpoint_mpi.MPIKPointSolver`);
     else the pool of threads and devices of this process.  A job whose k-points split into the sectors of their
-    little groups (``PARSEC_KPOINT_SECTORS``, :mod:`.kpoint_sectors`) gets that solver of its sectors."""
+    little groups (``PARSEC_KPOINT_SECTORS``, :mod:`.kpoint_sectors`) gets that solver of its sectors; a spin-orbit
+    job whose geometry says so (``spinor``) the solver of its double-group sectors (``PARSEC_SOC_KPOINT_SECTORS``,
+    :mod:`.kpoint_spinor_sectors`)."""
     from .kpoint_sectors import sector_solver
 
     notes: list[str] = []
-    solver = sector_solver(job, _plain_solver, notes=notes, **options)
+    geometry = getattr(job, "geometry", None)
+    if isinstance(geometry, dict) and geometry.get("spinor"):
+        from .kpoint_spinor_sectors import spinor_sector_solver
+
+        solver = spinor_sector_solver(job, _plain_solver, notes=notes, **options)
+    else:
+        solver = sector_solver(job, _plain_solver, notes=notes, **options)
     chosen = _plain_solver(job, **options) if solver is None else solver
     if notes:
         # the cell group of the sectors and its tolerance, or why there are none: the kpoint_symmetry_detection line
@@ -948,7 +956,17 @@ def describe() -> list[str]:
             for host, gpus in nodes.items():
                 lines.append(f"   node {host}: GPU index {','.join(str(g) for g in gpus)}")
     elif plan is not None and plan.name == "cupy":
-        lines.append(" Workers           = one thread per GPU; the k-points and spin channels are dealt out to them")
+        line = " Workers           = one thread per GPU; the k-points and spin channels are dealt out to them"
+        from .kpoint_processes import processes_expected
+
+        try:
+            if processes_expected():
+                # PARSEC_KPOINT_SECTOR_PROCESSES: the tasks of the k-point sectors (.kpoint_processes), where a loop
+                # takes them; the K-point sectors block of the timings says which did
+                line += "; the small sectors of the k-points to one worker process per GPU where a loop takes them"
+        except ValueError:  # (an unknown value of the switch is refused at the preparation of the run)
+            pass
+        lines.append(line)
     return lines
 
 

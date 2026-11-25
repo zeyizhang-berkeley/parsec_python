@@ -4,7 +4,7 @@
   PARSEC-PYTHON - Modular real-space DFT program
   PARSEC-like report; Python real-space implementation
 
- starting run on 23-Nov-2026 05:11:16 -0800
+ starting run on 24-Nov-2026 03:27:24 -0800
  input file: examples/0d_hybrid_functionals/CO/b3lyp5/parsec.in
 
  =================================================================
@@ -82,9 +82,10 @@
   pseudopotential format : new Martins
   pseudopotential file   : examples/0d_hybrid_functionals/C_FHIPP.DAT
   radial points/channels : 652 / 3
-  inner radial samples   : 191 from 9.857e-06 bohr and the first 57 of the file: even fit of the table (PARSEC_FHI_ORIGIN=off: none)
+  inner radial samples   : 191 from 9.857e-06 bohr and the first 57 of the file: even fit (PARSEC_FHI_ORIGIN=off: none)
   selected local channel : l=2
   KB quadrature          : logarithmic mesh (default); PARSEC_KB_QUADRATURE=trapezoid: pseudo.f90
+  Fourier filter         : local potential and projectors filtered to the grid (PARSEC_LOCAL_FILTER=off: the tables)
  There are      1 C  atoms
  and their initial coordinates are:
 
@@ -97,9 +98,10 @@
   pseudopotential format : new Martins
   pseudopotential file   : examples/0d_hybrid_functionals/O_FHIPP.DAT
   radial points/channels : 652 / 3
-  inner radial samples   : 179 from 9.908e-06 bohr and the first 57 of the file: even fit of the table (PARSEC_FHI_ORIGIN=off: none)
+  inner radial samples   : 179 from 9.908e-06 bohr and the first 57 of the file: even fit (PARSEC_FHI_ORIGIN=off: none)
   selected local channel : l=2
   KB quadrature          : logarithmic mesh (default); PARSEC_KB_QUADRATURE=trapezoid: pseudo.f90
+  Fourier filter         : local potential and projectors filtered to the grid (PARSEC_LOCAL_FILTER=off: the tables)
  There are      1 O  atoms
  and their initial coordinates are:
 
@@ -178,19 +180,21 @@
 
  Setup timings [sec]
  --------------------------------------------------
- Pseudopotential loading       :     0.020857
- Grid-domain construction      :     0.035071
- Finite-difference construction:     0.010291
- Local ionic potential setup   :     0.299031
- Nonlocal ionic projector setup:     0.011358
- Initial valence-density setup :     0.010328
- Core-density setup            :     0.000803
- Ion-ion energy setup           :     0.000112
- Hartree boundary estimate/tail :     0.061665
- Preparation wall time          :     0.139463
+ Pseudopotential loading       :     0.022468
+ Grid-domain construction      :     0.033544
+ Finite-difference construction:     0.008365
+ Local ionic potential setup   :     0.011876
+ Nonlocal ionic projector setup:     0.019928
+ Initial valence-density setup :     0.031093
+ Core-density setup            :     0.004642
+ Ion-ion energy setup           :     0.000099
+ Hartree boundary estimate/tail :     0.064364
+ Preparation wall time          :     0.213449
  --------------------------------------------------
 
- The local ionic, density and ion-ion setups above ran on a thread beside the symmetry and sector setup and are not part of the preparation wall time.  Thread [sec] = 0.310277, wait at its join [sec] = 0.000026.
+ The symmetry block above lists PARSEC's Abelian subgroup; the orbitals use the weighted sectors that symmetry_detection names below.
+
+ The local ionic, density and ion-ion setups above ran on a thread beside the symmetry and sector setup and are not part of the preparation wall time.  Thread [sec] = 0.047781, wait at its join [sec] = 0.000029.
 
  The reference setup above describes the constructed full grid.  The GPU orbital solve is decomposed into the exact symmetry representations reported below.
 
@@ -202,7 +206,7 @@
  Device            = CUDA:0 (NVIDIA A100-SXM4-80GB)
  gpu_stencil_kernel = deferred_to_symmetry_sector_operators
  gpu_later_subspace_filter_precision = deferred_to_symmetry_sector_operators
- symmetry_detection = exact Cartesian axis-reflection subgroup detected
+ symmetry_detection = exact point group of 8 signed permutations detected; the orbitals use the one-dimensional sectors of a subgroup of 4 (weights 1, 1, 2)
  symmetry_cache_directory = disabled
  orbital_symmetry = CuPy real one-dimensional reflection representations
  finite_difference_builder = C++17 compressed-grid CSR builder (exact stencil parity)
@@ -214,7 +218,7 @@
  hartree_symmetry = normalized Cartesian axis-reflection wedge
  native_openmp_max_threads = 16
  Detailed backend settings: set Output_Level: 2
- Backend initialization [sec] =     0.074001
+ Backend initialization [sec] =     0.077277
 
  Execution resources:
  --------------------
@@ -224,2272 +228,2059 @@
 
  SCF iter #   1
 
- Diagonalization time [sec] :       1.29,      tdiag_sum =        1.29
- Iteration time [sec]       :       1.36
+ Diagonalization time [sec] :       0.98,      tdiag_sum =        0.98
+ Iteration time [sec]       :       1.02
 
- Eigensolver residual max [Ry] :   2.9502e-04
+ Eigensolver residual max [Ry] :   6.5559e-04
 
  Fermi level at    -0.5224 [Ry]
 
    State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
-    1        -2.3775820355       -32.3489056590    1.0000        1
-    2        -1.2137176621       -16.5135997666    1.0000        1
-    3        -1.0250709471       -13.9469102926    1.0000        3
-    4        -1.0250709471       -13.9469102923    1.0000        2
-    5        -0.7900370840       -10.7490865582    1.0000        1
-    6        -0.2543422854        -3.4605302671    0.0000        2
-    7        -0.2543422854        -3.4605302669    0.0000        3
-    8         0.0037804188         0.0514356222    0.0000        1
-    9         0.0724993998         0.9864123334    0.0000        1
+    1        -2.3775211276       -32.3480769578    1.0000        1
+    2        -1.2136707350       -16.5129612865    1.0000        1
+    3        -1.0250697128       -13.9468934978    1.0000        3
+    4        -1.0250697128       -13.9468934978    1.0000        3
+    5        -0.7900384208       -10.7491047454    1.0000        1
+    6        -0.2543333179        -3.4604082568    0.0000        3
+    7        -0.2543333179        -3.4604082568    0.0000        3
+    8         0.0037838257         0.0514819757    0.0000        1
+    9         0.0725024057         0.9864532314    0.0000        1
 
- Max and min values of charge density [e/bohr^3]:   1.1465E+00   5.8817E-13
+ Max and min values of charge density [e/bohr^3]:   1.1464E+00   5.7833E-13
 
- Hartree potential time [sec]:       0.05
+ Hartree potential time [sec]:       0.03
 
-   Eigenvalue Energy             =         -12.86295735 [Ry]
-   Hartree Energy                =          59.58939335 [Ry]
-   Integral_{Vxc*rho}            =         -13.63623541 [Ry]
-   Exc = Integral{eps_xc*rho}    =         -10.50936039 [Ry]
-   Electron-Ion energy           =        -144.95874285 [Ry]
+   Eigenvalue Energy             =         -12.86273942 [Ry]
+   Hartree Energy                =          59.58905085 [Ry]
+   Integral_{Vxc*rho}            =         -13.63616005 [Ry]
+   Exc = Integral{eps_xc*rho}    =         -10.50930471 [Ry]
+   Electron-Ion energy           =        -144.95761177 [Ry]
    Ion-Ion Energy                =          22.51219190 [Ry]
 
-   Total Energy =           -43.24912679 [Ry]
-   Energy/atom  =          -294.21948461 [eV]
+   Total Energy =           -43.24892954 [Ry]
+   Energy/atom  =          -294.21814279 [eV]
 
-  0-  1    SRE of pot. & charge weighted pot =   2.6642992368   0.4264785323
+  0-  1    SRE of pot. & charge weighted pot =   2.6641518862   0.4264456423
 
  SCF iter #   2
 
- Diagonalization time [sec] :       0.05,      tdiag_sum =        1.35
- Iteration time [sec]       :       0.13
+ Diagonalization time [sec] :       0.05,      tdiag_sum =        1.03
+ Iteration time [sec]       :       0.09
 
  Fermi level at    -0.4671 [Ry]
 
    State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
-    1        -2.2373631805       -30.4411159617    1.0000        1
-    2        -1.0918957926       -14.8561157745    1.0000        1
-    3        -0.9181563663       -12.4922518889    1.0000        3
-    4        -0.9181563481       -12.4922516404    1.0000        2
-    5        -0.7393640528       -10.0596394298    1.0000        1
-    6        -0.1945435099        -2.6469200865    0.0000        3
-    7        -0.1945433996        -2.6469185866    0.0000        2
-    8         0.0172075404         0.2341223525    0.0000        1
-    9         0.0833710420         1.1343297236    0.0000        1
+    1        -2.2373166295       -30.4404825973    1.0000        1
+    2        -1.0918587516       -14.8556118024    1.0000        1
+    3        -0.9181640684       -12.4923566825    1.0000        3
+    4        -0.9181640684       -12.4923566825    1.0000        3
+    5        -0.7393799406       -10.0598555959    1.0000        1
+    6        -0.1945466425        -2.6469627079    0.0000        3
+    7        -0.1945466425        -2.6469627079    0.0000        3
+    8         0.0171979892         0.2339924021    0.0000        1
+    9         0.0833743461         1.1343746778    0.0000        1
 
- Max and min values of charge density [e/bohr^3]:   1.1023E+00   4.7320E-12
+ Max and min values of charge density [e/bohr^3]:   1.1020E+00   4.9543E-12
 
- Hartree potential time [sec]:       0.05
+ Hartree potential time [sec]:       0.03
 
-   Eigenvalue Energy             =         -11.80987148 [Ry]
-   Hartree Energy                =          58.29318774 [Ry]
-   Integral_{Vxc*rho}            =         -13.34430360 [Ry]
-   Exc = Integral{eps_xc*rho}    =         -10.28440129 [Ry]
-   Electron-Ion energy           =        -142.91760011 [Ry]
+   Eigenvalue Energy             =         -11.80976692 [Ry]
+   Hartree Energy                =          58.29123922 [Ry]
+   Integral_{Vxc*rho}            =         -13.34379087 [Ry]
+   Exc = Integral{eps_xc*rho}    =         -10.28401118 [Ry]
+   Electron-Ion energy           =        -142.91397726 [Ry]
    Ion-Ion Energy                =          22.51219190 [Ry]
-   (E(new)-E(old))/atom  =            -0.36931255 [eV]
+   (E(new)-E(old))/atom  =            -0.36945505 [eV]
 
-   Total Energy =           -43.30341430 [Ry]
-   Energy/atom  =          -294.58879715 [eV]
+   Total Energy =           -43.30323801 [Ry]
+   Energy/atom  =          -294.58759784 [eV]
 
-  0-  2    SRE of pot. & charge weighted pot =   1.2919202749   0.1467890098
+  0-  2    SRE of pot. & charge weighted pot =   1.2885679174   0.1466608197
 
  SCF iter #   3
 
- Diagonalization time [sec] :       0.05,      tdiag_sum =        1.39
- Iteration time [sec]       :       0.12
+ Diagonalization time [sec] :       0.04,      tdiag_sum =        1.07
+ Iteration time [sec]       :       0.08
 
- Fermi level at    -0.4237 [Ry]
+ Fermi level at    -0.4236 [Ry]
 
    State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
-    1        -2.1813781053       -29.6793942252    1.0000        1
-    2        -1.0566934535       -14.3771597902    1.0000        1
-    3        -0.8826749314       -12.0094985813    1.0000        3
-    4        -0.8826748107       -12.0094969388    1.0000        2
-    5        -0.6888077543        -9.3717805431    1.0000        1
-    6        -0.1582251248        -2.1527794024    0.0000        3
-    7        -0.1582247356        -2.1527741079    0.0000        2
-    8         0.0228524954         0.3109264817    0.0000        1
-    9         0.0910130567         1.2383054462    0.0000        1
+    1        -2.1811922445       -29.6768654404    1.0000        1
+    2        -1.0566365805       -14.3763859867    1.0000        1
+    3        -0.8826198164       -12.0087486979    1.0000        3
+    4        -0.8826198164       -12.0087486979    1.0000        3
+    5        -0.6886696450        -9.3699014559    1.0000        1
+    6        -0.1581365774        -2.1515746450    0.0000        3
+    7        -0.1581365774        -2.1515746450    0.0000        3
+    8         0.0228656234         0.3111050984    0.0000        1
+    9         0.0910652194         1.2390151619    0.0000        1
 
- Max and min values of charge density [e/bohr^3]:   1.0909E+00   1.0068E-11
+ Max and min values of charge density [e/bohr^3]:   1.0907E+00   1.0078E-11
 
- Hartree potential time [sec]:       0.05
+ Hartree potential time [sec]:       0.03
 
-   Eigenvalue Energy             =         -11.38445811 [Ry]
-   Hartree Energy                =          57.99704079 [Ry]
-   Integral_{Vxc*rho}            =         -13.26719419 [Ry]
-   Exc = Integral{eps_xc*rho}    =         -10.22491973 [Ry]
-   Electron-Ion energy           =        -142.39840558 [Ry]
+   Eigenvalue Energy             =         -11.38347621 [Ry]
+   Hartree Energy                =          57.99546776 [Ry]
+   Integral_{Vxc*rho}            =         -13.26675988 [Ry]
+   Exc = Integral{eps_xc*rho}    =         -10.22458968 [Ry]
+   Electron-Ion energy           =        -142.39512274 [Ry]
    Ion-Ion Energy                =          22.51219190 [Ry]
-   (E(new)-E(old))/atom  =            -0.06566190 [eV]
+   (E(new)-E(old))/atom  =            -0.06567196 [eV]
 
-   Total Energy =           -43.31306635 [Ry]
-   Energy/atom  =          -294.65445905 [eV]
+   Total Energy =           -43.31289153 [Ry]
+   Energy/atom  =          -294.65326980 [eV]
 
-  0-  3    SRE of pot. & charge weighted pot =   0.5018952797   0.0619480945
+  0-  3    SRE of pot. & charge weighted pot =   0.4986240196   0.0616741443
 
  SCF iter #   4
 
- Diagonalization time [sec] :       0.05,      tdiag_sum =        1.44
- Iteration time [sec]       :       0.13
+ Diagonalization time [sec] :       0.04,      tdiag_sum =        1.11
+ Iteration time [sec]       :       0.09
 
- Fermi level at    -0.3976 [Ry]
+ Fermi level at    -0.3975 [Ry]
 
    State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
-    1        -2.1437452993       -29.1673697934    1.0000        1
-    2        -1.0307471183       -14.0241391422    1.0000        1
-    3        -0.8594855112       -11.6939879682    1.0000        3
-    4        -0.8594854097       -11.6939865869    1.0000        2
-    5        -0.6579110017        -8.9514055064    1.0000        1
-    6        -0.1368389385        -1.8618032298    0.0000        3
-    7        -0.1368376813        -1.8617861247    0.0000        2
-    8         0.0263068507         0.3579257487    0.0000        1
-    9         0.0954604332         1.2988155622    0.0000        1
+    1        -2.1436225177       -29.1656992516    1.0000        1
+    2        -1.0307359525       -14.0239872222    1.0000        1
+    3        -0.8594700906       -11.6937781591    1.0000        3
+    4        -0.8594700906       -11.6937781591    1.0000        3
+    5        -0.6578793443        -8.9509747833    1.0000        1
+    6        -0.1368173511        -1.8615095153    0.0000        3
+    7        -0.1368173511        -1.8615095153    0.0000        3
+    8         0.0263272301         0.3582030271    0.0000        1
+    9         0.0955208257         1.2996372501    0.0000        1
 
- Max and min values of charge density [e/bohr^3]:   1.0795E+00   1.2124E-11
+ Max and min values of charge density [e/bohr^3]:   1.0793E+00   1.2145E-11
 
- Hartree potential time [sec]:       0.05
+ Hartree potential time [sec]:       0.03
 
-   Eigenvalue Energy             =         -11.10274868 [Ry]
-   Hartree Energy                =          57.72224810 [Ry]
-   Integral_{Vxc*rho}            =         -13.19835578 [Ry]
-   Exc = Integral{eps_xc*rho}    =         -10.17184013 [Ry]
-   Electron-Ion energy           =        -141.91384557 [Ry]
+   Eigenvalue Energy             =         -11.10235599 [Ry]
+   Hartree Energy                =          57.72064969 [Ry]
+   Integral_{Vxc*rho}            =         -13.19794794 [Ry]
+   Exc = Integral{eps_xc*rho}    =         -10.17153008 [Ry]
+   Electron-Ion energy           =        -141.91068368 [Ry]
    Ion-Ion Energy                =          22.51219190 [Ry]
-   (E(new)-E(old))/atom  =            -0.02027349 [eV]
+   (E(new)-E(old))/atom  =            -0.02011340 [eV]
 
-   Total Energy =           -43.31604647 [Ry]
-   Energy/atom  =          -294.67473254 [eV]
+   Total Energy =           -43.31584812 [Ry]
+   Energy/atom  =          -294.67338321 [eV]
 
-  0-  4    SRE of pot. & charge weighted pot =   0.1538813396   0.0091738683
+  0-  4    SRE of pot. & charge weighted pot =   0.1720123143   0.0092249927
 
  SCF iter #   5
 
- Diagonalization time [sec] :       0.05,      tdiag_sum =        1.49
- Iteration time [sec]       :       0.12
+ Diagonalization time [sec] :       0.04,      tdiag_sum =        1.15
+ Iteration time [sec]       :       0.09
 
- Fermi level at    -0.3991 [Ry]
+ Fermi level at    -0.3987 [Ry]
 
    State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
-    1        -2.1453200925       -29.1887961143    1.0000        1
-    2        -1.0315119695       -14.0345455552    1.0000        1
-    3        -0.8615877037       -11.7225899788    1.0000        3
-    4        -0.8615876540       -11.7225893032    1.0000        2
-    5        -0.6590189425        -8.9664799279    1.0000        1
-    6        -0.1388409321        -1.8890419543    0.0000        3
-    7        -0.1388395179        -1.8890227120    0.0000        2
-    8         0.0260728474         0.3547419477    0.0000        1
-    9         0.0952314678         1.2957003041    0.0000        1
+    1        -2.1448391944       -29.1822531117    1.0000        1
+    2        -1.0313432098       -14.0322494435    1.0000        1
+    3        -0.8610898648       -11.7158164831    1.0000        3
+    4        -0.8610898648       -11.7158164831    1.0000        3
+    5        -0.6587493627        -8.9628120787    1.0000        1
+    6        -0.1383956136        -1.8829830392    0.0000        3
+    7        -0.1383956136        -1.8829830392    0.0000        3
+    8         0.0261455457         0.3557310654    0.0000        1
+    9         0.0953300076         1.2970410168    0.0000        1
 
- Max and min values of charge density [e/bohr^3]:   1.0781E+00   4.9346E-12
+ Max and min values of charge density [e/bohr^3]:   1.0777E+00   4.7074E-12
 
- Hartree potential time [sec]:       0.05
+ Hartree potential time [sec]:       0.03
 
-   Eigenvalue Energy             =         -11.11805272 [Ry]
-   Hartree Energy                =          57.65571727 [Ry]
-   Integral_{Vxc*rho}            =         -13.18128546 [Ry]
-   Exc = Integral{eps_xc*rho}    =         -10.15863566 [Ry]
-   Electron-Ion energy           =        -141.80315844 [Ry]
+   Eigenvalue Energy             =         -11.11422299 [Ry]
+   Hartree Energy                =          57.65172026 [Ry]
+   Integral_{Vxc*rho}            =         -13.18036464 [Ry]
+   Exc = Integral{eps_xc*rho}    =         -10.15792896 [Ry]
+   Electron-Ion energy           =        -141.79530597 [Ry]
    Ion-Ion Energy                =          22.51219190 [Ry]
-   (E(new)-E(old))/atom  =            -0.00331212 [eV]
+   (E(new)-E(old))/atom  =            -0.00322646 [eV]
 
-   Total Energy =           -43.31653334 [Ry]
-   Energy/atom  =          -294.67804466 [eV]
+   Total Energy =           -43.31632240 [Ry]
+   Energy/atom  =          -294.67660967 [eV]
 
-  0-  5    SRE of pot. & charge weighted pot =   0.1555301389   0.0108019832
+  0-  5    SRE of pot. & charge weighted pot =   0.1577750520   0.0117819076
 
  SCF iter #   6
 
- Diagonalization time [sec] :       0.05,      tdiag_sum =        1.54
- Iteration time [sec]       :       0.12
+ Diagonalization time [sec] :       0.04,      tdiag_sum =        1.19
+ Iteration time [sec]       :       0.09
 
  Fermi level at    -0.4000 [Ry]
 
    State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
-    1        -2.1466427262       -29.2067916035    1.0000        1
-    2        -1.0324902767       -14.0478562066    1.0000        1
-    3        -0.8629542606       -11.7411830795    1.0000        3
-    4        -0.8629542324       -11.7411826956    1.0000        2
-    5        -0.6597356798        -8.9762317119    1.0000        1
-    6        -0.1399478468        -1.9041024145    0.0000        3
-    7        -0.1399464909        -1.9040839656    0.0000        2
-    8         0.0260524463         0.3544643742    0.0000        1
-    9         0.0952706803         1.2962338226    0.0000        1
+    1        -2.1466064887       -29.2062985643    1.0000        1
+    2        -1.0326000888       -14.0493502879    1.0000        1
+    3        -0.8628720835       -11.7400649935    1.0000        3
+    4        -0.8628720835       -11.7400649935    1.0000        3
+    5        -0.6597594616        -8.9765552827    1.0000        1
+    6        -0.1398479599        -1.9027433725    0.0000        3
+    7        -0.1398479599        -1.9027433725    0.0000        3
+    8         0.0260928500         0.3550140990    0.0000        1
+    9         0.0953390206         1.2971636463    0.0000        1
 
- Max and min values of charge density [e/bohr^3]:   1.0762E+00   1.0286E-12
+ Max and min values of charge density [e/bohr^3]:   1.0761E+00   8.3955E-13
 
- Hartree potential time [sec]:       0.05
+ Hartree potential time [sec]:       0.03
 
-   Eigenvalue Energy             =         -11.12955435 [Ry]
-   Hartree Energy                =          57.62241512 [Ry]
-   Integral_{Vxc*rho}            =         -13.17276256 [Ry]
-   Exc = Integral{eps_xc*rho}    =         -10.15206996 [Ry]
-   Electron-Ion energy           =        -141.74278738 [Ry]
+   Eigenvalue Energy             =         -11.12942041 [Ry]
+   Hartree Energy                =          57.62141820 [Ry]
+   Integral_{Vxc*rho}            =         -13.17255493 [Ry]
+   Exc = Integral{eps_xc*rho}    =         -10.15191307 [Ry]
+   Electron-Ion energy           =        -141.74057680 [Ry]
    Ion-Ion Energy                =          22.51219190 [Ry]
-   (E(new)-E(old))/atom  =            -0.00090525 [eV]
+   (E(new)-E(old))/atom  =            -0.00093500 [eV]
 
-   Total Energy =           -43.31666641 [Ry]
-   Energy/atom  =          -294.67894991 [eV]
+   Total Energy =           -43.31645984 [Ry]
+   Energy/atom  =          -294.67754467 [eV]
 
-  0-  6    SRE of pot. & charge weighted pot =   0.1809037283   0.0123165343
+  0-  6    SRE of pot. & charge weighted pot =   0.1804062474   0.0125416177
 
  SCF iter #   7
 
- Diagonalization time [sec] :       0.05,      tdiag_sum =        1.59
- Iteration time [sec]       :       0.12
+ Diagonalization time [sec] :       0.04,      tdiag_sum =        1.23
+ Iteration time [sec]       :       0.09
 
- Fermi level at    -0.4005 [Ry]
+ Fermi level at    -0.4006 [Ry]
 
    State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
-    1        -2.1472417545       -29.2149418633    1.0000        1
-    2        -1.0328794140       -14.0531507304    1.0000        1
-    3        -0.8634343482       -11.7477150548    1.0000        3
-    4        -0.8634343239       -11.7477147247    1.0000        2
-    5        -0.6602232281        -8.9828651971    1.0000        1
-    6        -0.1404409014        -1.9108108163    0.0000        3
-    7        -0.1404395397        -1.9107922893    0.0000        2
-    8         0.0260052968         0.3538228668    0.0000        1
-    9         0.0952143337         1.2954671808    0.0000        1
+    1        -2.1474351307       -29.2175729014    1.0000        1
+    2        -1.0331323479       -14.0565920990    1.0000        1
+    3        -0.8635452975       -11.7492246090    1.0000        3
+    4        -0.8635452975       -11.7492246090    1.0000        3
+    5        -0.6604240438        -8.9855974548    1.0000        1
+    6        -0.1405131002        -1.9117931393    0.0000        3
+    7        -0.1405131002        -1.9117931393    0.0000        3
+    8         0.0260348142         0.3542244752    0.0000        1
+    9         0.0952714558         1.2962443734    0.0000        1
 
- Max and min values of charge density [e/bohr^3]:   1.0757E+00   5.7617E-14
+ Max and min values of charge density [e/bohr^3]:   1.0757E+00   7.5033E-14
 
- Hartree potential time [sec]:       0.05
+ Hartree potential time [sec]:       0.03
 
-   Eigenvalue Energy             =         -11.13442614 [Ry]
-   Hartree Energy                =          57.60292147 [Ry]
-   Integral_{Vxc*rho}            =         -13.16783030 [Ry]
-   Exc = Integral{eps_xc*rho}    =         -10.14826159 [Ry]
-   Electron-Ion energy           =        -141.71136730 [Ry]
+   Eigenvalue Energy             =         -11.13616423 [Ry]
+   Hartree Energy                =          57.60348996 [Ry]
+   Integral_{Vxc*rho}            =         -13.16800689 [Ry]
+   Exc = Integral{eps_xc*rho}    =         -10.14840085 [Ry]
+   Electron-Ion energy           =        -141.71163690 [Ry]
    Ion-Ion Energy                =          22.51219190 [Ry]
-   (E(new)-E(old))/atom  =            -0.00021996 [eV]
+   (E(new)-E(old))/atom  =            -0.00022450 [eV]
 
-   Total Energy =           -43.31669874 [Ry]
-   Energy/atom  =          -294.67916987 [eV]
+   Total Energy =           -43.31649284 [Ry]
+   Energy/atom  =          -294.67776917 [eV]
 
-  0-  7    SRE of pot. & charge weighted pot =   0.2059510023   0.0136545566
+  0-  7    SRE of pot. & charge weighted pot =   0.2018083599   0.0135040263
 
  SCF iter #   8
 
- Diagonalization time [sec] :       0.05,      tdiag_sum =        1.64
- Iteration time [sec]       :       0.13
+ Diagonalization time [sec] :       0.04,      tdiag_sum =        1.27
+ Iteration time [sec]       :       0.08
 
- Fermi level at    -0.4005 [Ry]
+ Fermi level at    -0.4007 [Ry]
 
    State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
-    1        -2.1472246631       -29.2147093208    1.0000        1
-    2        -1.0328864808       -14.0532468799    1.0000        1
-    3        -0.8634013866       -11.7472665855    1.0000        3
-    4        -0.8634013632       -11.7472662669    1.0000        2
-    5        -0.6602215198        -8.9828419543    1.0000        1
-    6        -0.1404478138        -1.9109048649    0.0000        3
-    7        -0.1404464937        -1.9108869033    0.0000        2
-    8         0.0260043533         0.3538100307    0.0000        1
-    9         0.0952098683         1.2954064258    0.0000        1
+    1        -2.1474732767       -29.2180919077    1.0000        1
+    2        -1.0331667890       -14.0570606972    1.0000        1
+    3        -0.8635953828       -11.7499060594    1.0000        3
+    4        -0.8635953828       -11.7499060594    1.0000        3
+    5        -0.6604606501        -8.9860955130    1.0000        1
+    6        -0.1405930002        -1.9128802419    0.0000        3
+    7        -0.1405930002        -1.9128802419    0.0000        3
+    8         0.0260133505         0.3539324441    0.0000        1
+    9         0.0952448495         1.2958823740    0.0000        1
 
- Max and min values of charge density [e/bohr^3]:   1.0749E+00   1.9544E-13
+ Max and min values of charge density [e/bohr^3]:   1.0750E+00   2.9468E-13
 
- Hartree potential time [sec]:       0.05
+ Hartree potential time [sec]:       0.03
 
-   Eigenvalue Energy             =         -11.13427083 [Ry]
-   Hartree Energy                =          57.58840827 [Ry]
-   Integral_{Vxc*rho}            =         -13.16426579 [Ry]
-   Exc = Integral{eps_xc*rho}    =         -10.14552080 [Ry]
-   Electron-Ion energy           =        -141.68620243 [Ry]
+   Eigenvalue Energy             =         -11.13658296 [Ry]
+   Hartree Energy                =          57.58985416 [Ry]
+   Integral_{Vxc*rho}            =         -13.16464811 [Ry]
+   Exc = Integral{eps_xc*rho}    =         -10.14581880 [Ry]
+   Electron-Ion energy           =        -141.68819398 [Ry]
    Ion-Ion Energy                =          22.51219190 [Ry]
-   (E(new)-E(old))/atom  =             0.00001187 [eV]
+   (E(new)-E(old))/atom  =            -0.00001066 [eV]
 
-   Total Energy =           -43.31669700 [Ry]
-   Energy/atom  =          -294.67915800 [eV]
+   Total Energy =           -43.31649441 [Ry]
+   Energy/atom  =          -294.67777984 [eV]
 
-  0-  8    SRE of pot. & charge weighted pot =   0.2222964306   0.0151315990
+  0-  8    SRE of pot. & charge weighted pot =   0.2185101337   0.0147846630
 
  SCF iter #   9
 
- Diagonalization time [sec] :       0.05,      tdiag_sum =        1.69
- Iteration time [sec]       :       0.12
+ Diagonalization time [sec] :       0.04,      tdiag_sum =        1.31
+ Iteration time [sec]       :       0.08
 
- Fermi level at    -0.4000 [Ry]
+ Fermi level at    -0.4001 [Ry]
 
    State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
-    1        -2.1464269607       -29.2038559414    1.0000        1
-    2        -1.0323272810       -14.0456385192    1.0000        1
-    3        -0.8629616210       -11.7412832236    1.0000        3
-    4        -0.8629616017       -11.7412829603    1.0000        2
-    5        -0.6595359031        -8.9735135907    1.0000        1
-    6        -0.1400490353        -1.9054791641    0.0000        3
-    7        -0.1400477175        -1.9054612343    0.0000        2
-    8         0.0260680492         0.3546766637    0.0000        1
-    9         0.0952976411         1.2966006449    0.0000        1
+    1        -2.1465930042       -29.2061150968    1.0000        1
+    2        -1.0325623900       -14.0488373659    1.0000        1
+    3        -0.8631386785       -11.7436922324    1.0000        3
+    4        -0.8631386785       -11.7436922324    1.0000        3
+    5        -0.6596974226        -8.9757111921    1.0000        1
+    6        -0.1401685015        -1.9071045978    0.0000        3
+    7        -0.1401685015        -1.9071045978    0.0000        3
+    8         0.0260938794         0.3550281041    0.0000        1
+    9         0.0953568287         1.2974059399    0.0000        1
 
- Max and min values of charge density [e/bohr^3]:   1.0747E+00   5.4420E-13
+ Max and min values of charge density [e/bohr^3]:   1.0747E+00   6.4949E-13
 
- Hartree potential time [sec]:       0.05
+ Hartree potential time [sec]:       0.03
 
-   Eigenvalue Energy             =         -11.12842673 [Ry]
-   Hartree Energy                =          57.57692306 [Ry]
-   Integral_{Vxc*rho}            =         -13.16137800 [Ry]
-   Exc = Integral{eps_xc*rho}    =         -10.14329435 [Ry]
-   Electron-Ion energy           =        -141.66741251 [Ry]
+   Eigenvalue Energy             =         -11.13026035 [Ry]
+   Hartree Energy                =          57.57854784 [Ry]
+   Integral_{Vxc*rho}            =         -13.16178945 [Ry]
+   Exc = Integral{eps_xc*rho}    =         -10.14361475 [Ry]
+   Electron-Ion energy           =        -141.66955871 [Ry]
    Ion-Ion Energy                =          22.51219190 [Ry]
-   (E(new)-E(old))/atom  =             0.00007458 [eV]
+   (E(new)-E(old))/atom  =             0.00007004 [eV]
 
-   Total Energy =           -43.31668603 [Ry]
-   Energy/atom  =          -294.67908342 [eV]
+   Total Energy =           -43.31648412 [Ry]
+   Energy/atom  =          -294.67770980 [eV]
 
-  0-  9    SRE of pot. & charge weighted pot =   0.2353098552   0.0167197185
+  0-  9    SRE of pot. & charge weighted pot =   0.2292479876   0.0163602542
 
  SCF iter #  10
 
- Diagonalization time [sec] :       0.05,      tdiag_sum =        1.74
- Iteration time [sec]       :       0.12
+ Diagonalization time [sec] :       0.04,      tdiag_sum =        1.35
+ Iteration time [sec]       :       0.08
 
- Fermi level at    -0.4005 [Ry]
+ Fermi level at    -0.4002 [Ry]
 
    State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
-    1        -2.1472912951       -29.2156159030    1.0000        1
-    2        -1.0328330605       -14.0525200542    1.0000        1
-    3        -0.8638524953       -11.7534042800    1.0000        2
-    4        -0.8638524916       -11.7534042308    1.0000        3
-    5        -0.6599217595        -8.9787634748    1.0000        1
-    6        -0.1407139103        -1.9145253204    0.0000        3
-    7        -0.1407125594        -1.9145069410    0.0000        2
-    8         0.0260432529         0.3543392904    0.0000        1
-    9         0.0952908395         1.2965081037    0.0000        1
+    1        -2.1466391026       -29.2067423017    1.0000        1
+    2        -1.0325607717       -14.0488153471    1.0000        1
+    3        -0.8635044177       -11.7486684063    1.0000        3
+    4        -0.8635044177       -11.7486684063    1.0000        3
+    5        -0.6595670361        -8.9739371794    1.0000        1
+    6        -0.1404200607        -1.9105272615    0.0000        3
+    7        -0.1404200607        -1.9105272615    0.0000        3
+    8         0.0261230053         0.3554243857    0.0000        1
+    9         0.0954087333         1.2981121441    0.0000        1
 
- Max and min values of charge density [e/bohr^3]:   1.0748E+00   1.0073E-12
+ Max and min values of charge density [e/bohr^3]:   1.0746E+00   1.0386E-12
 
- Hartree potential time [sec]:       0.05
+ Hartree potential time [sec]:       0.03
 
-   Eigenvalue Energy             =         -11.13550220 [Ry]
-   Hartree Energy                =          57.57869278 [Ry]
-   Integral_{Vxc*rho}            =         -13.16163115 [Ry]
-   Exc = Integral{eps_xc*rho}    =         -10.14349283 [Ry]
-   Electron-Ion energy           =        -141.67063221 [Ry]
+   Eigenvalue Energy             =         -11.13155149 [Ry]
+   Hartree Energy                =          57.57527850 [Ry]
+   Integral_{Vxc*rho}            =         -13.16085086 [Ry]
+   Exc = Integral{eps_xc*rho}    =         -10.14289422 [Ry]
+   Electron-Ion energy           =        -141.66413958 [Ry]
    Ion-Ion Energy                =          22.51219190 [Ry]
-   (E(new)-E(old))/atom  =            -0.00009097 [eV]
+   (E(new)-E(old))/atom  =            -0.00001510 [eV]
 
-   Total Energy =           -43.31669941 [Ry]
-   Energy/atom  =          -294.67917439 [eV]
+   Total Energy =           -43.31648634 [Ry]
+   Energy/atom  =          -294.67772490 [eV]
 
-  0- 10    SRE of pot. & charge weighted pot =   0.2423747860   0.0154869893
+  0- 10    SRE of pot. & charge weighted pot =   0.2341355976   0.0162954215
 
  SCF iter #  11
 
- Diagonalization time [sec] :       0.05,      tdiag_sum =        1.79
- Iteration time [sec]       :       0.12
+ Diagonalization time [sec] :       0.04,      tdiag_sum =        1.40
+ Iteration time [sec]       :       0.09
 
- Fermi level at    -0.4016 [Ry]
+ Fermi level at    -0.4015 [Ry]
 
    State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
-    1        -2.1481486441       -29.2272808224    1.0000        1
-    2        -1.0324987929       -14.0479720758    1.0000        1
-    3        -0.8652966784       -11.7730535469    1.0000        2
-    4        -0.8652965688       -11.7730520555    1.0000        3
-    5        -0.6606397459        -8.9885322549    1.0000        1
-    6        -0.1422013467        -1.9347630827    0.0000        3
-    7        -0.1421997375        -1.9347411890    0.0000        2
-    8         0.0261772983         0.3561630859    0.0000        1
-    9         0.0953958069         1.2979362691    0.0000        1
+    1        -2.1476796993       -29.2209004529    1.0000        1
+    2        -1.0325735635       -14.0489893903    1.0000        1
+    3        -0.8653490560       -11.7737661868    1.0000        3
+    4        -0.8653490560       -11.7737661868    1.0000        3
+    5        -0.6603919391        -8.9851606452    1.0000        1
+    6        -0.1421827201        -1.9345096532    0.0000        3
+    7        -0.1421827201        -1.9345096532    0.0000        3
+    8         0.0262839690         0.3576144261    0.0000        1
+    9         0.0955295049         1.2997553373    0.0000        1
 
- Max and min values of charge density [e/bohr^3]:   1.0754E+00   1.4452E-12
+ Max and min values of charge density [e/bohr^3]:   1.0753E+00   1.4649E-12
 
- Hartree potential time [sec]:       0.05
+ Hartree potential time [sec]:       0.03
 
-   Eigenvalue Energy             =         -11.14376086 [Ry]
-   Hartree Energy                =          57.58074384 [Ry]
-   Integral_{Vxc*rho}            =         -13.16197833 [Ry]
-   Exc = Integral{eps_xc*rho}    =         -10.14376612 [Ry]
-   Electron-Ion energy           =        -141.67819989 [Ry]
+   Eigenvalue Energy             =         -11.14268663 [Ry]
+   Hartree Energy                =          57.57910827 [Ry]
+   Integral_{Vxc*rho}            =         -13.16156291 [Ry]
+   Exc = Integral{eps_xc*rho}    =         -10.14344665 [Ry]
+   Electron-Ion energy           =        -141.67439903 [Ry]
    Ion-Ion Energy                =          22.51219190 [Ry]
-   (E(new)-E(old))/atom  =            -0.00016193 [eV]
+   (E(new)-E(old))/atom  =            -0.00019603 [eV]
 
-   Total Energy =           -43.31672321 [Ry]
-   Energy/atom  =          -294.67933632 [eV]
+   Total Energy =           -43.31651515 [Ry]
+   Energy/atom  =          -294.67792093 [eV]
 
-  0- 11    SRE of pot. & charge weighted pot =   0.2657621143   0.0138568272
+  0- 11    SRE of pot. & charge weighted pot =   0.2522736579   0.0141590292
 
  SCF iter #  12
 
- Diagonalization time [sec] :       0.05,      tdiag_sum =        1.84
- Iteration time [sec]       :       0.13
+ Diagonalization time [sec] :       0.04,      tdiag_sum =        1.44
+ Iteration time [sec]       :       0.09
 
- Fermi level at    -0.4022 [Ry]
+ Fermi level at    -0.4013 [Ry]
 
    State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
-    1        -2.1488635407       -29.2370075615    1.0000        1
-    2        -1.0333154534       -14.0590833960    1.0000        1
-    3        -0.8663041691       -11.7867612637    1.0000        2
-    4        -0.8663040659       -11.7867598604    1.0000        3
-    5        -0.6610610706        -8.9942647146    1.0000        1
-    6        -0.1429318801        -1.9447025743    0.0000        3
-    7        -0.1429302834        -1.9446808503    0.0000        2
-    8         0.0262159776         0.3566893482    0.0000        1
-    9         0.0955124148         1.2995228129    0.0000        1
+    1        -2.1474257766       -29.2174456314    1.0000        1
+    2        -1.0324745953       -14.0476428490    1.0000        1
+    3        -0.8655126987       -11.7759926759    1.0000        3
+    4        -0.8655126987       -11.7759926759    1.0000        3
+    5        -0.6600895999        -8.9810470781    1.0000        1
+    6        -0.1422348023        -1.9352182728    0.0000        3
+    7        -0.1422348023        -1.9352182728    0.0000        3
+    8         0.0265010310         0.3605677280    0.0000        1
+    9         0.0957917224         1.3033230161    0.0000        1
 
- Max and min values of charge density [e/bohr^3]:   1.0755E+00   1.6869E-12
+ Max and min values of charge density [e/bohr^3]:   1.0751E+00   1.5972E-12
 
- Hartree potential time [sec]:       0.05
+ Hartree potential time [sec]:       0.03
 
-   Eigenvalue Energy             =         -11.15169660 [Ry]
-   Hartree Energy                =          57.58865762 [Ry]
-   Integral_{Vxc*rho}            =         -13.16364213 [Ry]
-   Exc = Integral{eps_xc*rho}    =         -10.14504744 [Ry]
-   Electron-Ion energy           =        -141.69013158 [Ry]
+   Eigenvalue Energy             =         -11.14203074 [Ry]
+   Hartree Energy                =          57.58052252 [Ry]
+   Integral_{Vxc*rho}            =         -13.16167962 [Ry]
+   Exc = Integral{eps_xc*rho}    =         -10.14353643 [Ry]
+   Electron-Ion energy           =        -141.67534322 [Ry]
    Ion-Ion Energy                =          22.51219190 [Ry]
-   (E(new)-E(old))/atom  =            -0.00010869 [eV]
+   (E(new)-E(old))/atom  =            -0.00002033 [eV]
 
-   Total Energy =           -43.31673919 [Ry]
-   Energy/atom  =          -294.67944501 [eV]
+   Total Energy =           -43.31651814 [Ry]
+   Energy/atom  =          -294.67794125 [eV]
 
-  0- 12    SRE of pot. & charge weighted pot =   0.2534410230   0.0120190234
+  0- 12    SRE of pot. & charge weighted pot =   0.2534084693   0.0139721179
 
  SCF iter #  13
 
- Diagonalization time [sec] :       0.05,      tdiag_sum =        1.89
- Iteration time [sec]       :       0.12
+ Diagonalization time [sec] :       0.04,      tdiag_sum =        1.48
+ Iteration time [sec]       :       0.09
 
- Fermi level at    -0.4040 [Ry]
+ Fermi level at    -0.4042 [Ry]
 
    State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
-    1        -2.1514246425       -29.2718534014    1.0000        1
-    2        -1.0358403074       -14.0934360545    1.0000        1
-    3        -0.8682367983       -11.8130562309    1.0000        2
-    4        -0.8682367475       -11.8130555395    1.0000        3
-    5        -0.6631734907        -9.0230058802    1.0000        1
-    6        -0.1444711423        -1.9656454683    0.0000        3
-    7        -0.1444697311        -1.9656262678    0.0000        2
-    8         0.0263741068         0.3588408229    0.0000        1
-    9         0.0957122877         1.3022422436    0.0000        1
+    1        -2.1523806543       -29.2848607059    1.0000        1
+    2        -1.0365426464       -14.1029919382    1.0000        1
+    3        -0.8679795981       -11.8095568163    1.0000        3
+    4        -0.8679795981       -11.8095568163    1.0000        3
+    5        -0.6638461278        -9.0321576460    1.0000        1
+    6        -0.1441831852        -1.9617275811    0.0000        3
+    7        -0.1441831852        -1.9617275811    0.0000        3
+    8         0.0264923355         0.3604494178    0.0000        1
+    9         0.0957456277         1.3026958620    0.0000        1
 
- Max and min values of charge density [e/bohr^3]:   1.0762E+00   2.1537E-12
+ Max and min values of charge density [e/bohr^3]:   1.0760E+00   2.4319E-12
 
- Hartree potential time [sec]:       0.05
+ Hartree potential time [sec]:       0.03
 
-   Eigenvalue Energy             =         -11.17382397 [Ry]
-   Hartree Energy                =          57.60901664 [Ry]
-   Integral_{Vxc*rho}            =         -13.16849866 [Ry]
-   Exc = Integral{eps_xc*rho}    =         -10.14879026 [Ry]
-   Electron-Ion energy           =        -141.72438345 [Ry]
+   Eigenvalue Energy             =         -11.17745725 [Ry]
+   Hartree Energy                =          57.61079702 [Ry]
+   Integral_{Vxc*rho}            =         -13.16907401 [Ry]
+   Exc = Integral{eps_xc*rho}    =         -10.14923232 [Ry]
+   Electron-Ion energy           =        -141.72564790 [Ry]
    Ion-Ion Energy                =          22.51219190 [Ry]
-   (E(new)-E(old))/atom  =            -0.00019690 [eV]
+   (E(new)-E(old))/atom  =            -0.00025904 [eV]
 
-   Total Energy =           -43.31676813 [Ry]
-   Energy/atom  =          -294.67964191 [eV]
+   Total Energy =           -43.31655622 [Ry]
+   Energy/atom  =          -294.67820030 [eV]
 
-  0- 13    SRE of pot. & charge weighted pot =   0.2411698283   0.0074631294
+  0- 13    SRE of pot. & charge weighted pot =   0.2321492588   0.0074571935
 
  SCF iter #  14
 
- Diagonalization time [sec] :       0.04,      tdiag_sum =        1.93
- Iteration time [sec]       :       0.12
+ Diagonalization time [sec] :       0.04,      tdiag_sum =        1.52
+ Iteration time [sec]       :       0.08
 
- Fermi level at    -0.4018 [Ry]
+ Fermi level at    -0.4019 [Ry]
 
    State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
-    1        -2.1483688581       -29.2302770096    1.0000        1
-    2        -1.0339758731       -14.0680689338    1.0000        1
-    3        -0.8663516905       -11.7874078305    1.0000        2
-    4        -0.8663516376       -11.7874071107    1.0000        3
-    5        -0.6606189976        -8.9882499569    1.0000        1
-    6        -0.1426545928        -1.9409298592    0.0000        3
-    7        -0.1426531686        -1.9409104817    0.0000        2
-    8         0.0265809318         0.3616548413    0.0000        1
-    9         0.0960830810         1.3072871838    0.0000        1
+    1        -2.1493457958       -29.2435690287    1.0000        1
+    2        -1.0344190693       -14.0740989726    1.0000        1
+    3        -0.8660039695       -11.7826768084    1.0000        3
+    4        -0.8660039695       -11.7826768084    1.0000        3
+    5        -0.6612313173        -8.9965810567    1.0000        1
+    6        -0.1423136879        -1.9362915753    0.0000        3
+    7        -0.1423136879        -1.9362915753    0.0000        3
+    8         0.0266446935         0.3625223712    0.0000        1
+    9         0.0959451506         1.3054105303    0.0000        1
 
- Max and min values of charge density [e/bohr^3]:   1.0758E+00   1.6360E-12
+ Max and min values of charge density [e/bohr^3]:   1.0757E+00   1.8375E-12
 
- Hartree potential time [sec]:       0.05
+ Hartree potential time [sec]:       0.03
 
-   Eigenvalue Energy             =         -11.15133411 [Ry]
-   Hartree Energy                =          57.59882314 [Ry]
-   Integral_{Vxc*rho}            =         -13.16588927 [Ry]
-   Exc = Integral{eps_xc*rho}    =         -10.14678369 [Ry]
-   Electron-Ion energy           =        -141.70541176 [Ry]
+   Eigenvalue Energy             =         -11.15400824 [Ry]
+   Hartree Energy                =          57.60064791 [Ry]
+   Integral_{Vxc*rho}            =         -13.16653908 [Ry]
+   Exc = Integral{eps_xc*rho}    =         -10.14728767 [Ry]
+   Electron-Ion energy           =        -141.70806592 [Ry]
    Ion-Ion Energy                =          22.51219190 [Ry]
-   (E(new)-E(old))/atom  =             0.00015610 [eV]
+   (E(new)-E(old))/atom  =             0.00008734 [eV]
 
-   Total Energy =           -43.31674518 [Ry]
-   Energy/atom  =          -294.67948581 [eV]
+   Total Energy =           -43.31654338 [Ry]
+   Energy/atom  =          -294.67811296 [eV]
 
-  0- 14    SRE of pot. & charge weighted pot =   0.2232781678   0.0111331784
+  0- 14    SRE of pot. & charge weighted pot =   0.2342511570   0.0106620822
 
  SCF iter #  15
 
- Diagonalization time [sec] :       0.04,      tdiag_sum =        1.98
- Iteration time [sec]       :       0.12
+ Diagonalization time [sec] :       0.04,      tdiag_sum =        1.56
+ Iteration time [sec]       :       0.09
 
- Fermi level at    -0.4033 [Ry]
+ Fermi level at    -0.4056 [Ry]
 
    State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
-    1        -2.1514859779       -29.2726879180    1.0000        1
-    2        -1.0360438535       -14.0962054624    1.0000        1
-    3        -0.8670847572       -11.7973817892    1.0000        3
-    4        -0.8670847566       -11.7973817814    1.0000        2
-    5        -0.6630414426        -9.0212092595    1.0000        1
-    6        -0.1433055384        -1.9497864941    0.0000        3
-    7        -0.1433047118        -1.9497752473    0.0000        2
-    8         0.0267544057         0.3640150930    0.0000        1
-    9         0.0963869322         1.3114213223    0.0000        1
+    1        -2.1539609936       -29.3063624867    1.0000        1
+    2        -1.0386942401       -14.1322660920    1.0000        1
+    3        -0.8705625393       -11.8446997970    1.0000        3
+    4        -0.8705625393       -11.8446997970    1.0000        3
+    5        -0.6646969225        -9.0437333888    1.0000        1
+    6        -0.1460564183        -1.9872144164    0.0000        3
+    7        -0.1460564183        -1.9872144164    0.0000        3
+    8         0.0264578610         0.3599803648    0.0000        1
+    9         0.0962572371         1.3096567159    0.0000        1
 
- Max and min values of charge density [e/bohr^3]:   1.0758E+00   2.2720E-12
+ Max and min values of charge density [e/bohr^3]:   1.0771E+00   2.4114E-12
 
- Hartree potential time [sec]:       0.05
+ Hartree potential time [sec]:       0.03
 
-   Eigenvalue Energy             =         -11.16948158 [Ry]
-   Hartree Energy                =          57.60960071 [Ry]
-   Integral_{Vxc*rho}            =         -13.16873013 [Ry]
-   Exc = Integral{eps_xc*rho}    =         -10.14896643 [Ry]
-   Electron-Ion energy           =        -141.72289851 [Ry]
+   Eigenvalue Energy             =         -11.19695447 [Ry]
+   Hartree Energy                =          57.63175623 [Ry]
+   Integral_{Vxc*rho}            =         -13.17384737 [Ry]
+   Exc = Integral{eps_xc*rho}    =         -10.15290991 [Ry]
+   Electron-Ion energy           =        -141.76055529 [Ry]
    Ion-Ion Energy                =          22.51219190 [Ry]
-   (E(new)-E(old))/atom  =            -0.00006572 [eV]
+   (E(new)-E(old))/atom  =            -0.00016627 [eV]
 
-   Total Energy =           -43.31675484 [Ry]
-   Energy/atom  =          -294.67955152 [eV]
+   Total Energy =           -43.31656782 [Ry]
+   Energy/atom  =          -294.67827923 [eV]
 
-  0- 15    SRE of pot. & charge weighted pot =   0.1656435973   0.0084457600
+  0- 15    SRE of pot. & charge weighted pot =   0.1562779629   0.0043578416
 
  SCF iter #  16
 
- Diagonalization time [sec] :       0.04,      tdiag_sum =        2.02
- Iteration time [sec]       :       0.12
+ Diagonalization time [sec] :       0.04,      tdiag_sum =        1.60
+ Iteration time [sec]       :       0.08
 
- Fermi level at    -0.4081 [Ry]
+ Fermi level at    -0.4069 [Ry]
 
    State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
-    1        -2.1575667496       -29.3554216819    1.0000        1
-    2        -1.0403926420       -14.1553742080    1.0000        1
-    3        -0.8728714101       -11.8761138315    1.0000        3
-    4        -0.8728713936       -11.8761136076    1.0000        2
-    5        -0.6676141547        -9.0834246660    1.0000        1
-    6        -0.1482609145        -2.0172083499    0.0000        2
-    7        -0.1482605691        -2.0172036507    0.0000        3
-    8         0.0272239172         0.3704031720    0.0000        1
-    9         0.0979442319         1.3326096309    0.0000        1
+    1        -2.1542933904       -29.3108850105    1.0000        1
+    2        -1.0385279040       -14.1300029558    1.0000        1
+    3        -0.8720577379       -11.8650431697    1.0000        3
+    4        -0.8720577379       -11.8650431697    1.0000        3
+    5        -0.6656757798        -9.0570515243    1.0000        1
+    6        -0.1478083489        -2.0110508332    0.0000        3
+    7        -0.1478083489        -2.0110508332    0.0000        3
+    8         0.0268757710         0.3656663646    0.0000        1
+    9         0.0970998708         1.3211214216    0.0000        1
 
- Max and min values of charge density [e/bohr^3]:   1.0778E+00   2.6659E-12
+ Max and min values of charge density [e/bohr^3]:   1.0775E+00   2.3592E-12
 
- Hartree potential time [sec]:       0.05
+ Hartree potential time [sec]:       0.03
 
-   Eigenvalue Energy             =         -11.22263270 [Ry]
-   Hartree Energy                =          57.64654917 [Ry]
-   Integral_{Vxc*rho}            =         -13.17752420 [Ry]
-   Exc = Integral{eps_xc*rho}    =         -10.15574945 [Ry]
-   Electron-Ion energy           =        -141.78910932 [Ry]
+   Eigenvalue Energy             =         -11.20522510 [Ry]
+   Hartree Energy                =          57.63223139 [Ry]
+   Integral_{Vxc*rho}            =         -13.17410134 [Ry]
+   Exc = Integral{eps_xc*rho}    =         -10.15311479 [Ry]
+   Electron-Ion energy           =        -141.76498619 [Ry]
    Ion-Ion Energy                =          22.51219190 [Ry]
-   (E(new)-E(old))/atom  =            -0.00021774 [eV]
+   (E(new)-E(old))/atom  =            -0.00009330 [eV]
 
-   Total Energy =           -43.31678685 [Ry]
-   Energy/atom  =          -294.67976926 [eV]
+   Total Energy =           -43.31658154 [Ry]
+   Energy/atom  =          -294.67837253 [eV]
 
-  0- 16    SRE of pot. & charge weighted pot =   0.0632296134   0.0024972118
+  0- 16    SRE of pot. & charge weighted pot =   0.0951135948   0.0026086555
 
  SCF iter #  17
 
- Diagonalization time [sec] :       0.05,      tdiag_sum =        2.07
- Iteration time [sec]       :       0.12
+ Diagonalization time [sec] :       0.04,      tdiag_sum =        1.64
+ Iteration time [sec]       :       0.08
 
- Fermi level at    -0.4077 [Ry]
+ Fermi level at    -0.4066 [Ry]
 
    State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
-    1        -2.1562235938       -29.3371469728    1.0000        1
-    2        -1.0392841279       -14.1402919880    1.0000        1
-    3        -0.8726956827       -11.8737229195    1.0000        2
-    4        -0.8726956660       -11.8737226928    1.0000        3
-    5        -0.6668035788        -9.0723961330    1.0000        1
-    6        -0.1482701004        -2.0173333322    0.0000        2
-    7        -0.1482700987        -2.0173333093    0.0000        3
-    8         0.0271877821         0.3699115253    0.0000        1
-    9         0.0977899184         1.3305100712    0.0000        1
+    1        -2.1538575898       -29.3049555957    1.0000        1
+    2        -1.0377383635       -14.1192606263    1.0000        1
+    3        -0.8718811231       -11.8626401840    1.0000        3
+    4        -0.8718811231       -11.8626401840    1.0000        3
+    5        -0.6651919148        -9.0504681539    1.0000        1
+    6        -0.1476158378        -2.0084315665    0.0000        3
+    7        -0.1476158378        -2.0084315665    0.0000        3
+    8         0.0273425998         0.3720179441    0.0000        1
+    9         0.0978980750         1.3319816284    0.0000        1
 
- Max and min values of charge density [e/bohr^3]:   1.0777E+00   2.4402E-12
+ Max and min values of charge density [e/bohr^3]:   1.0775E+00   2.1595E-12
 
- Hartree potential time [sec]:       0.05
+ Hartree potential time [sec]:       0.03
 
-   Eigenvalue Energy             =         -11.21540530 [Ry]
-   Hartree Energy                =          57.64476557 [Ry]
-   Integral_{Vxc*rho}            =         -13.17708669 [Ry]
-   Exc = Integral{eps_xc*rho}    =         -10.15541914 [Ry]
-   Electron-Ion energy           =        -141.78678951 [Ry]
+   Eigenvalue Energy             =         -11.20110023 [Ry]
+   Hartree Energy                =          57.63336897 [Ry]
+   Integral_{Vxc*rho}            =         -13.17422322 [Ry]
+   Exc = Integral{eps_xc*rho}    =         -10.15321077 [Ry]
+   Electron-Ion energy           =        -141.76713014 [Ry]
    Ion-Ion Energy                =          22.51219190 [Ry]
-   (E(new)-E(old))/atom  =            -0.00003115 [eV]
+   (E(new)-E(old))/atom  =            -0.00001057 [eV]
 
-   Total Energy =           -43.31679143 [Ry]
-   Energy/atom  =          -294.67980042 [eV]
+   Total Energy =           -43.31658309 [Ry]
+   Energy/atom  =          -294.67838310 [eV]
 
-  0- 17    SRE of pot. & charge weighted pot =   0.0185412787   0.0011465105
+  0- 17    SRE of pot. & charge weighted pot =   0.0454821451   0.0029220865
 
  SCF iter #  18
 
- Diagonalization time [sec] :       0.04,      tdiag_sum =        2.11
- Iteration time [sec]       :       0.11
+ Diagonalization time [sec] :       0.04,      tdiag_sum =        1.68
+ Iteration time [sec]       :       0.08
 
- Fermi level at    -0.4070 [Ry]
+ Fermi level at    -0.4071 [Ry]
 
    State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
-    1        -2.1552869297       -29.3244029078    1.0000        1
-    2        -1.0385957694       -14.1309263191    1.0000        1
-    3        -0.8718730785       -11.8625307321    1.0000        2
-    4        -0.8718730613       -11.8625304979    1.0000        3
-    5        -0.6661238827        -9.0631483228    1.0000        1
-    6        -0.1475668010        -2.0077643816    0.0000        3
-    7        -0.1475667567        -2.0077637777    0.0000        2
-    8         0.0273125108         0.3716085599    0.0000        1
-    9         0.0978849634         1.3318032354    0.0000        1
+    1        -2.1551448710       -29.3224700863    1.0000        1
+    2        -1.0385082255       -14.1297352150    1.0000        1
+    3        -0.8720982453       -11.8655943062    1.0000        3
+    4        -0.8720982453       -11.8655943062    1.0000        3
+    5        -0.6660609939        -9.0622926705    1.0000        1
+    6        -0.1477377474        -2.0100902440    0.0000        3
+    7        -0.1477377474        -2.0100902440    0.0000        3
+    8         0.0273773760         0.3724911020    0.0000        1
+    9         0.0979431278         1.3325946084    0.0000        1
 
- Max and min values of charge density [e/bohr^3]:   1.0777E+00   2.3149E-12
+ Max and min values of charge density [e/bohr^3]:   1.0776E+00   2.3203E-12
 
- Hartree potential time [sec]:       0.05
+ Hartree potential time [sec]:       0.03
 
-   Eigenvalue Energy             =         -11.20750544 [Ry]
-   Hartree Energy                =          57.64247047 [Ry]
-   Integral_{Vxc*rho}            =         -13.17651450 [Ry]
-   Exc = Integral{eps_xc*rho}    =         -10.15497998 [Ry]
-   Electron-Ion energy           =        -141.78316812 [Ry]
+   Eigenvalue Energy             =         -11.20782116 [Ry]
+   Hartree Energy                =          57.64002021 [Ry]
+   Integral_{Vxc*rho}            =         -13.17580088 [Ry]
+   Exc = Integral{eps_xc*rho}    =         -10.15442525 [Ry]
+   Electron-Ion energy           =        -141.77773938 [Ry]
    Ion-Ion Energy                =          22.51219190 [Ry]
-   (E(new)-E(old))/atom  =            -0.00000618 [eV]
+   (E(new)-E(old))/atom  =            -0.00002502 [eV]
 
-   Total Energy =           -43.31679234 [Ry]
-   Energy/atom  =          -294.67980660 [eV]
+   Total Energy =           -43.31658677 [Ry]
+   Energy/atom  =          -294.67840812 [eV]
 
-  0- 18    SRE of pot. & charge weighted pot =   0.0080817063   0.0003651388
+  0- 18    SRE of pot. & charge weighted pot =   0.0262408980   0.0010018134
 
  SCF iter #  19
 
- Diagonalization time [sec] :       0.04,      tdiag_sum =        2.15
- Iteration time [sec]       :       0.11
+ Diagonalization time [sec] :       0.04,      tdiag_sum =        1.71
+ Iteration time [sec]       :       0.08
 
- Fermi level at    -0.4069 [Ry]
+ Fermi level at    -0.4074 [Ry]
 
    State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
-    1        -2.1552273568       -29.3235923711    1.0000        1
-    2        -1.0385555495       -14.1303790958    1.0000        1
-    3        -0.8716965617       -11.8601290786    1.0000        2
-    4        -0.8716965484       -11.8601288976    1.0000        3
-    5        -0.6660695901        -9.0624096296    1.0000        1
-    6        -0.1474006731        -2.0055040786    0.0000        3
-    7        -0.1474006232        -2.0055033989    0.0000        2
-    8         0.0273407091         0.3719922193    0.0000        1
-    9         0.0978823500         1.3317676773    0.0000        1
+    1        -2.1558573574       -29.3321640331    1.0000        1
+    2        -1.0389740207       -14.1360727309    1.0000        1
+    3        -0.8721394594       -11.8661550569    1.0000        3
+    4        -0.8721394594       -11.8661550569    1.0000        3
+    5        -0.6666118116        -9.0697869863    1.0000        1
+    6        -0.1477736170        -2.0105782776    0.0000        3
+    7        -0.1477736170        -2.0105782776    0.0000        3
+    8         0.0273602491         0.3722580775    0.0000        1
+    9         0.0978830381         1.3317770394    0.0000        1
 
- Max and min values of charge density [e/bohr^3]:   1.0776E+00   2.3011E-12
+ Max and min values of charge density [e/bohr^3]:   1.0776E+00   2.4410E-12
 
- Hartree potential time [sec]:       0.05
+ Hartree potential time [sec]:       0.03
 
-   Eigenvalue Energy             =         -11.20649121 [Ry]
-   Hartree Energy                =          57.64296849 [Ry]
-   Integral_{Vxc*rho}            =         -13.17661886 [Ry]
-   Exc = Integral{eps_xc*rho}    =         -10.15505992 [Ry]
-   Electron-Ion energy           =        -141.78369102 [Ry]
+   Eigenvalue Energy             =         -11.21144422 [Ry]
+   Hartree Energy                =          57.64384858 [Ry]
+   Integral_{Vxc*rho}            =         -13.17676090 [Ry]
+   Exc = Integral{eps_xc*rho}    =         -10.15516541 [Ry]
+   Electron-Ion energy           =        -141.78410762 [Ry]
    Ion-Ion Energy                =          22.51219190 [Ry]
-   (E(new)-E(old))/atom  =            -0.00000245 [eV]
+   (E(new)-E(old))/atom  =            -0.00000839 [eV]
 
-   Total Energy =           -43.31679270 [Ry]
-   Energy/atom  =          -294.67980905 [eV]
+   Total Energy =           -43.31658800 [Ry]
+   Energy/atom  =          -294.67841651 [eV]
 
-  0- 19    SRE of pot. & charge weighted pot =   0.0037480308   0.0001762307
+  0- 19    SRE of pot. & charge weighted pot =   0.0149611124   0.0005491384
 
  SCF iter #  20
 
- Diagonalization time [sec] :       0.04,      tdiag_sum =        2.19
- Iteration time [sec]       :       0.11
+ Diagonalization time [sec] :       0.04,      tdiag_sum =        1.75
+ Iteration time [sec]       :       0.08
 
  Fermi level at    -0.4070 [Ry]
 
    State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
-    1        -2.1553577511       -29.3253664894    1.0000        1
-    2        -1.0386565279       -14.1317529878    1.0000        1
-    3        -0.8717315684       -11.8606053739    1.0000        2
-    4        -0.8717315586       -11.8606052405    1.0000        3
-    5        -0.6661844959        -9.0639730146    1.0000        1
-    6        -0.1474336962        -2.0059533838    0.0000        3
-    7        -0.1474336605        -2.0059528978    0.0000        2
-    8         0.0273373011         0.3719458518    0.0000        1
-    9         0.0978558309         1.3314068637    0.0000        1
+    1        -2.1553207449       -29.3248629905    1.0000        1
+    2        -1.0386170701       -14.1312161325    1.0000        1
+    3        -0.8716956458       -11.8601166171    1.0000        3
+    4        -0.8716956458       -11.8601166171    1.0000        3
+    5        -0.6662202721        -9.0644597778    1.0000        1
+    6        -0.1474004259        -2.0055007148    0.0000        3
+    7        -0.1474004259        -2.0055007148    0.0000        3
+    8         0.0273704143         0.3723963829    0.0000        1
+    9         0.0978548446         1.3313934448    0.0000        1
 
- Max and min values of charge density [e/bohr^3]:   1.0776E+00   2.2887E-12
+ Max and min values of charge density [e/bohr^3]:   1.0776E+00   2.3250E-12
 
- Hartree potential time [sec]:       0.05
+ Hartree potential time [sec]:       0.03
 
-   Eigenvalue Energy             =         -11.20732380 [Ry]
-   Hartree Energy                =          57.64413925 [Ry]
-   Integral_{Vxc*rho}            =         -13.17689022 [Ry]
-   Exc = Integral{eps_xc*rho}    =         -10.15526795 [Ry]
-   Electron-Ion energy           =        -141.78558260 [Ry]
+   Eigenvalue Energy             =         -11.20709876 [Ry]
+   Hartree Energy                =          57.64326867 [Ry]
+   Integral_{Vxc*rho}            =         -13.17663354 [Ry]
+   Exc = Integral{eps_xc*rho}    =         -10.15507005 [Ry]
+   Electron-Ion energy           =        -141.78336382 [Ry]
    Ion-Ion Energy                =          22.51219190 [Ry]
-   (E(new)-E(old))/atom  =            -0.00000137 [eV]
+   (E(new)-E(old))/atom  =            -0.00000298 [eV]
 
-   Total Energy =           -43.31679290 [Ry]
-   Energy/atom  =          -294.67981042 [eV]
+   Total Energy =           -43.31658844 [Ry]
+   Energy/atom  =          -294.67841949 [eV]
 
-  0- 20    SRE of pot. & charge weighted pot =   0.0016985591   0.0001012829
-
- SCF iter #  21
-
- Diagonalization time [sec] :       0.04,      tdiag_sum =        2.23
- Iteration time [sec]       :       0.11
-
- Fermi level at    -0.4070 [Ry]
-
-   State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
-
-    1        -2.1553280212       -29.3249619907    1.0000        1
-    2        -1.0386410211       -14.1315420050    1.0000        1
-    3        -0.8717111923       -11.8603281406    1.0000        2
-    4        -0.8717111836       -11.8603280217    1.0000        3
-    5        -0.6661741203        -9.0638318456    1.0000        1
-    6        -0.1474208142        -2.0057781132    0.0000        3
-    7        -0.1474207831        -2.0057776909    0.0000        2
-    8         0.0273363246         0.3719325647    0.0000        1
-    9         0.0978482622         1.3313038852    0.0000        1
-
- Max and min values of charge density [e/bohr^3]:   1.0776E+00   2.2450E-12
-
- Hartree potential time [sec]:       0.05
-
-   Eigenvalue Energy             =         -11.20713108 [Ry]
-   Hartree Energy                =          57.64464193 [Ry]
-   Integral_{Vxc*rho}            =         -13.17700534 [Ry]
-   Exc = Integral{eps_xc*rho}    =         -10.15535676 [Ry]
-   Electron-Ion energy           =        -141.78640171 [Ry]
-   Ion-Ion Energy                =          22.51219190 [Ry]
-   (E(new)-E(old))/atom  =            -0.00000084 [eV]
-
-   Total Energy =           -43.31679302 [Ry]
-   Energy/atom  =          -294.67981125 [eV]
-
-  0- 21    SRE of pot. & charge weighted pot =   0.0020341845   0.0001313671
-
- SCF iter #  22
-
- Diagonalization time [sec] :       0.04,      tdiag_sum =        2.27
- Iteration time [sec]       :       0.10
-
- Fermi level at    -0.4069 [Ry]
-
-   State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
-
-    1        -2.1552802383       -29.3243118659    1.0000        1
-    2        -1.0386130086       -14.1311608728    1.0000        1
-    3        -0.8716759228       -11.8598482701    1.0000        2
-    4        -0.8716759150       -11.8598481638    1.0000        3
-    5        -0.6661495733        -9.0634978644    1.0000        1
-    6        -0.1473946166        -2.0054216747    0.0000        3
-    7        -0.1473945902        -2.0054213156    0.0000        2
-    8         0.0273364193         0.3719338544    0.0000        1
-    9         0.0978420892         1.3312198969    0.0000        1
-
- Max and min values of charge density [e/bohr^3]:   1.0776E+00   2.2046E-12
-
- Hartree potential time [sec]:       0.05
-
-   Eigenvalue Energy             =         -11.20678932 [Ry]
-   Hartree Energy                =          57.64495926 [Ry]
-   Integral_{Vxc*rho}            =         -13.17707466 [Ry]
-   Exc = Integral{eps_xc*rho}    =         -10.15540984 [Ry]
-   Electron-Ion energy           =        -141.78694122 [Ry]
-   Ion-Ion Energy                =          22.51219190 [Ry]
-   (E(new)-E(old))/atom  =            -0.00000056 [eV]
-
-   Total Energy =           -43.31679311 [Ry]
-   Energy/atom  =          -294.67981181 [eV]
-
-  0- 22    SRE of pot. & charge weighted pot =   0.0023844470   0.0001262272
-
- SCF iter #  23
-
- Diagonalization time [sec] :       0.04,      tdiag_sum =        2.32
- Iteration time [sec]       :       0.11
-
- Fermi level at    -0.4070 [Ry]
-
-   State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
-
-    1        -2.1553452495       -29.3251963951    1.0000        1
-    2        -1.0386519422       -14.1316905958    1.0000        1
-    3        -0.8717244799       -11.8605089280    1.0000        2
-    4        -0.8717244707       -11.8605088032    1.0000        3
-    5        -0.6661838022        -9.0639635754    1.0000        1
-    6        -0.1474310195        -2.0059169646    0.0000        3
-    7        -0.1474309880        -2.0059165365    0.0000        2
-    8         0.0273373775         0.3719468908    0.0000        1
-    9         0.0978518967         1.3313533360    0.0000        1
-
- Max and min values of charge density [e/bohr^3]:   1.0776E+00   2.1841E-12
-
- Hartree potential time [sec]:       0.05
-
-   Eigenvalue Energy             =         -11.20725989 [Ry]
-   Hartree Energy                =          57.64559604 [Ry]
-   Integral_{Vxc*rho}            =         -13.17721966 [Ry]
-   Exc = Integral{eps_xc*rho}    =         -10.15552139 [Ry]
-   Electron-Ion energy           =        -141.78797620 [Ry]
-   Ion-Ion Energy                =          22.51219190 [Ry]
-   (E(new)-E(old))/atom  =            -0.00000034 [eV]
-
-   Total Energy =           -43.31679315 [Ry]
-   Energy/atom  =          -294.67981215 [eV]
-
-  0- 23    SRE of pot. & charge weighted pot =   0.0039835189   0.0002469124
-
- SCF iter #  24
-
- Diagonalization time [sec] :       0.04,      tdiag_sum =        2.35
- Iteration time [sec]       :       0.11
-
- Fermi level at    -0.4069 [Ry]
-
-   State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
-
-    1        -2.1552207045       -29.3235018612    1.0000        1
-    2        -1.0385804549       -14.1307179535    1.0000        1
-    3        -0.8716323265       -11.8592551079    1.0000        2
-    4        -0.8716323204       -11.8592550247    1.0000        3
-    5        -0.6661197160        -9.0630916317    1.0000        1
-    6        -0.1473620705        -2.0049788586    0.0000        3
-    7        -0.1473620507        -2.0049785901    0.0000        2
-    8         0.0273323410         0.3718783647    0.0000        1
-    9         0.0978269176         1.3310134752    0.0000        1
-
- Max and min values of charge density [e/bohr^3]:   1.0776E+00   2.1433E-12
-
- Hartree potential time [sec]:       0.05
-
-   Eigenvalue Energy             =         -11.20637104 [Ry]
-   Hartree Energy                =          57.64551136 [Ry]
-   Integral_{Vxc*rho}            =         -13.17719762 [Ry]
-   Exc = Integral{eps_xc*rho}    =         -10.15550441 [Ry]
-   Electron-Ion energy           =        -141.78785027 [Ry]
-   Ion-Ion Energy                =          22.51219190 [Ry]
-   (E(new)-E(old))/atom  =            -0.00000031 [eV]
-
-   Total Energy =           -43.31679320 [Ry]
-   Energy/atom  =          -294.67981246 [eV]
-
-  0- 24    SRE of pot. & charge weighted pot =   0.0028201467   0.0001358079
-
- SCF iter #  25
-
- Diagonalization time [sec] :       0.04,      tdiag_sum =        2.40
- Iteration time [sec]       :       0.11
-
- Fermi level at    -0.4069 [Ry]
-
-   State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
-
-    1        -2.1551971535       -29.3231814309    1.0000        1
-    2        -1.0385665246       -14.1305284201    1.0000        1
-    3        -0.8716144739       -11.8590122092    1.0000        2
-    4        -0.8716144686       -11.8590121365    1.0000        3
-    5        -0.6661094443        -9.0629518771    1.0000        1
-    6        -0.1473496791        -2.0048102636    0.0000        3
-    7        -0.1473496618        -2.0048100280    0.0000        2
-    8         0.0273284230         0.3718250572    0.0000        1
-    9         0.0978162071         1.3308677510    0.0000        1
-
- Max and min values of charge density [e/bohr^3]:   1.0776E+00   2.1213E-12
-
- Hartree potential time [sec]:       0.05
-
-   Eigenvalue Energy             =         -11.20620413 [Ry]
-   Hartree Energy                =          57.64564413 [Ry]
-   Integral_{Vxc*rho}            =         -13.17722824 [Ry]
-   Exc = Integral{eps_xc*rho}    =         -10.15552803 [Ry]
-   Electron-Ion energy           =        -141.78805703 [Ry]
-   Ion-Ion Energy                =          22.51219190 [Ry]
-   (E(new)-E(old))/atom  =            -0.00000018 [eV]
-
-   Total Energy =           -43.31679323 [Ry]
-   Energy/atom  =          -294.67981264 [eV]
-
-  0- 25    SRE of pot. & charge weighted pot =   0.0026325299   0.0001300533
-
- SCF iter #  26
-
- Diagonalization time [sec] :       0.04,      tdiag_sum =        2.44
- Iteration time [sec]       :       0.11
-
- Fermi level at    -0.4069 [Ry]
-
-   State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
-
-    1        -2.1551672420       -29.3227744608    1.0000        1
-    2        -1.0385464926       -14.1302558692    1.0000        1
-    3        -0.8715907466       -11.8586893797    1.0000        2
-    4        -0.8715907420       -11.8586893181    1.0000        3
-    5        -0.6660930702        -9.0627290944    1.0000        1
-    6        -0.1473317848        -2.0045667971    0.0000        3
-    7        -0.1473317698        -2.0045665936    0.0000        2
-    8         0.0273250301         0.3717788940    0.0000        1
-    9         0.0978045175         1.3307087045    0.0000        1
-
- Max and min values of charge density [e/bohr^3]:   1.0776E+00   2.1014E-12
-
- Hartree potential time [sec]:       0.05
-
-   Eigenvalue Energy             =         -11.20597659 [Ry]
-   Hartree Energy                =          57.64571335 [Ry]
-   Integral_{Vxc*rho}            =         -13.17724245 [Ry]
-   Exc = Integral{eps_xc*rho}    =         -10.15553876 [Ry]
-   Electron-Ion energy           =        -141.78816460 [Ry]
-   Ion-Ion Energy                =          22.51219190 [Ry]
-   (E(new)-E(old))/atom  =            -0.00000013 [eV]
-
-   Total Energy =           -43.31679325 [Ry]
-   Energy/atom  =          -294.67981277 [eV]
-
-  0- 26    SRE of pot. & charge weighted pot =   0.0021806873   0.0001117144
-
- SCF iter #  27
-
- Diagonalization time [sec] :       0.04,      tdiag_sum =        2.48
- Iteration time [sec]       :       0.11
-
- Fermi level at    -0.4069 [Ry]
-
-   State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
-
-    1        -2.1551333185       -29.3223129055    1.0000        1
-    2        -1.0385228847       -14.1299346641    1.0000        1
-    3        -0.8715635095       -11.8583187980    1.0000        2
-    4        -0.8715635059       -11.8583187481    1.0000        3
-    5        -0.6660738849        -9.0624680631    1.0000        1
-    6        -0.1473111110        -2.0042855145    0.0000        3
-    7        -0.1473110984        -2.0042853421    0.0000        2
-    8         0.0273218933         0.3717362162    0.0000        1
-    9         0.0977921810         1.3305408568    0.0000        1
-
- Max and min values of charge density [e/bohr^3]:   1.0776E+00   2.0838E-12
-
- Hartree potential time [sec]:       0.05
-
-   Eigenvalue Energy             =         -11.20571421 [Ry]
-   Hartree Energy                =          57.64571920 [Ry]
-   Integral_{Vxc*rho}            =         -13.17724340 [Ry]
-   Exc = Integral{eps_xc*rho}    =         -10.15553953 [Ry]
-   Electron-Ion energy           =        -141.78816482 [Ry]
-   Ion-Ion Energy                =          22.51219190 [Ry]
-   (E(new)-E(old))/atom  =            -0.00000009 [eV]
-
-   Total Energy =           -43.31679326 [Ry]
-   Energy/atom  =          -294.67981287 [eV]
-
-  0- 27    SRE of pot. & charge weighted pot =   0.0015495980   0.0000830682
+  0- 20    SRE of pot. & charge weighted pot =   0.0028057719   0.0000742326
 
 
  Fock loop (B3LYP5 (VWN5)): exchange operator of the PBE start orbitals
  ------------------------------------------------------------------
-   E_x (start orbitals)          =          -9.33715603 [Ry]
-   Total Energy (B3LYP5 (VWN5)) of them   =         -43.27932639 [Ry]
+   E_x (start orbitals)          =          -9.33672330 [Ry]
+   Total Energy (B3LYP5 (VWN5)) of them   =         -43.27912889 [Ry]
    The start stopped below a residual of 1.00E-04 Ry (adaptive criterion): its energy is that of a start, not a converged semilocal energy
-   ACE operator: 9 orbitals, max|M - M^T|/max|M| = 4.2E-12
-   Exact exchange: 35 pair-density Poisson solves, 0.03 s of 0.27 s (FP64 CUDA Kronecker-product FD Poisson solve (order 12) on the 138x138x138 box, multipole boundary of order 9, 1/r kernel; devices take tiles of 32-column orbital blocks; the pair densities of symmetry-sector orbitals in reflection-parity classes on the 69x69x69 octant)
+   ACE operator: 7 orbitals, max|M - M^T|/max|M| = 4.0E-12
+   Exact exchange: 29 pair-density Poisson solves, 0.03 s of 0.72 s (FP64 CUDA Kronecker-product FD Poisson solve (order 12) on the 138x138x138 box, multipole boundary of order 9, 1/r kernel; devices take tiles of 32-column orbital blocks; the pair densities of symmetry-sector orbitals in reflection-parity classes on the 69x69x69 octant)
 
  SCF iter #   1
 
- Diagonalization time [sec] :       0.07,      tdiag_sum =        2.55
- Iteration time [sec]       :       0.13
+ Diagonalization time [sec] :       0.05,      tdiag_sum =        1.80
+ Iteration time [sec]       :       0.09
 
- Fermi level at    -0.4154 [Ry]
+ Fermi level at    -0.4155 [Ry]
 
    State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
-    1        -2.3520008780       -32.0008535458    1.0000        1
-    2        -1.1720903654       -15.9472270939    1.0000        1
-    3        -0.9647350361       -13.1259919547    1.0000        2
-    4        -0.9647350297       -13.1259918671    1.0000        3
-    5        -0.7613110944       -10.3582464888    1.0000        1
-    6        -0.0690620201        -0.9396440330    0.0000        2
-    7        -0.0690619263        -0.9396427562    0.0000        3
-    8         0.0397707552         0.5411129407    0.0000        1
-    9         0.1085869723         1.4774126271    0.0000        1
+    1        -2.3522383190       -32.0040841205    1.0000        1
+    2        -1.1722468474       -15.9493561565    1.0000        1
+    3        -0.9649512799       -13.1289341246    1.0000        3
+    4        -0.9649512799       -13.1289341246    1.0000        3
+    5        -0.7615100389       -10.3609532875    1.0000        1
+    6        -0.0692138726        -0.9417101072    0.0000        3
+    7        -0.0692138726        -0.9417101072    0.0000        3
+    8         0.0397310308         0.5405724587    0.0000        1
+    9         0.1085705540         1.4771892437    0.0000        1
 
- Max and min values of charge density [e/bohr^3]:   1.0851E+00   1.0701E-12
+ Max and min values of charge density [e/bohr^3]:   1.0851E+00   9.3847E-13
 
- Hartree potential time [sec]:       0.05
+ Hartree potential time [sec]:       0.03
 
-   Eigenvalue Energy             =         -12.42974481 [Ry]
-   Hartree Energy                =          57.80692124 [Ry]
-   Integral_{Vxc*rho}            =         -10.69261523 [Ry]
-   Exc = Integral{eps_xc*rho}    =         -10.14697911 [Ry]
-   Electron-Ion energy           =        -141.99814467 [Ry]
+   Eigenvalue Energy             =         -12.43179553 [Ry]
+   Hartree Energy                =          57.80677550 [Ry]
+   Integral_{Vxc*rho}            =         -10.69258569 [Ry]
+   Exc = Integral{eps_xc*rho}    =         -10.14695776 [Ry]
+   Electron-Ion energy           =        -141.99736709 [Ry]
    Ion-Ion Energy                =          22.51219190 [Ry]
-   Exc semilocal part            =          -8.27229360 [Ry]
-   Exact exchange a_x*E_x        =          -1.87468551 [Ry]   (linearized: fixed operator)
-   Exact exchange in eigenvalues =          -3.74211671 [Ry]
-   (E(new)-E(old))/atom  =             0.25323945 [eV]
+   Exc semilocal part            =          -8.27227309 [Ry]
+   Exact exchange a_x*E_x        =          -1.87468467 [Ry]   (linearized: fixed operator)
+   Exact exchange in eigenvalues =          -3.74202933 [Ry]
+   (E(new)-E(old))/atom  =             0.25324890 [eV]
 
-   Total Energy =           -43.27956804 [Ry]
-   Energy/atom  =          -294.42657341 [eV]
+   Total Energy =           -43.27936183 [Ry]
+   Energy/atom  =          -294.42517059 [eV]
 
-  0-  1    SRE of pot. & charge weighted pot =   0.3574100050   0.0375375867
+  0-  1    SRE of pot. & charge weighted pot =   0.3563940937   0.0377106440
 
  SCF iter #   2
 
- Diagonalization time [sec] :       0.07,      tdiag_sum =        2.61
- Iteration time [sec]       :       0.13
+ Diagonalization time [sec] :       0.05,      tdiag_sum =        1.85
+ Iteration time [sec]       :       0.09
 
- Fermi level at    -0.4189 [Ry]
+ Fermi level at    -0.4190 [Ry]
 
    State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
-    1        -2.3448782488       -31.9039444781    1.0000        1
-    2        -1.1632311925       -15.8266909594    1.0000        1
-    3        -0.9582769085       -13.0381239623    1.0000        3
-    4        -0.9582768915       -13.0381237310    1.0000        2
-    5        -0.7668684224       -10.4338583810    1.0000        1
-    6        -0.0705043161        -0.9592676237    0.0000        2
-    7        -0.0705042755        -0.9592670721    0.0000        3
-    8         0.0403066167         0.5484037654    0.0000        1
-    9         0.1080366789         1.4699254464    0.0000        1
+    1        -2.3450274740       -31.9059748056    1.0000        1
+    2        -1.1633152931       -15.8278352142    1.0000        1
+    3        -0.9584274438       -13.0401721147    1.0000        3
+    4        -0.9584274438       -13.0401721147    1.0000        3
+    5        -0.7670284597       -10.4360358174    1.0000        1
+    6        -0.0706184054        -0.9608199002    0.0000        3
+    7        -0.0706184054        -0.9608199002    0.0000        3
+    8         0.0402746454         0.5479687709    0.0000        1
+    9         0.1080332247         1.4698784488    0.0000        1
 
- Max and min values of charge density [e/bohr^3]:   1.0815E+00   1.6978E-12
+ Max and min values of charge density [e/bohr^3]:   1.0815E+00   1.8089E-12
 
- Hartree potential time [sec]:       0.05
+ Hartree potential time [sec]:       0.03
 
-   Eigenvalue Energy             =         -12.38306333 [Ry]
-   Hartree Energy                =          57.67010926 [Ry]
-   Integral_{Vxc*rho}            =         -10.66883913 [Ry]
-   Exc = Integral{eps_xc*rho}    =         -10.12371344 [Ry]
-   Electron-Ion energy           =        -141.79039744 [Ry]
+   Eigenvalue Energy             =         -12.38445223 [Ry]
+   Hartree Energy                =          57.67000612 [Ry]
+   Integral_{Vxc*rho}            =         -10.66882847 [Ry]
+   Exc = Integral{eps_xc*rho}    =         -10.12370637 [Ry]
+   Electron-Ion energy           =        -141.78978683 [Ry]
    Ion-Ion Energy                =          22.51219190 [Ry]
-   Exc semilocal part            =          -8.25384932 [Ry]
-   Exact exchange a_x*E_x        =          -1.86986412 [Ry]   (linearized: fixed operator)
-   Exact exchange in eigenvalues =          -3.73729532 [Ry]
-   (E(new)-E(old))/atom  =            -0.00873743 [eV]
+   Exc semilocal part            =          -8.25384323 [Ry]
+   Exact exchange a_x*E_x        =          -1.86986313 [Ry]   (linearized: fixed operator)
+   Exact exchange in eigenvalues =          -3.73720779 [Ry]
+   (E(new)-E(old))/atom  =            -0.00877279 [eV]
 
-   Total Energy =           -43.28085241 [Ry]
-   Energy/atom  =          -294.43531085 [eV]
+   Total Energy =           -43.28065140 [Ry]
+   Energy/atom  =          -294.43394338 [eV]
 
-  0-  2    SRE of pot. & charge weighted pot =   0.0520364038   0.0037190130
+  0-  2    SRE of pot. & charge weighted pot =   0.0506811058   0.0035684010
 
  SCF iter #   3
 
- Diagonalization time [sec] :       0.07,      tdiag_sum =        2.68
- Iteration time [sec]       :       0.14
+ Diagonalization time [sec] :       0.05,      tdiag_sum =        1.90
+ Iteration time [sec]       :       0.09
 
- Fermi level at    -0.4200 [Ry]
+ Fermi level at    -0.4201 [Ry]
 
    State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
-    1        -2.3457310295       -31.9155472413    1.0000        1
-    2        -1.1636059619       -15.8317899959    1.0000        1
-    3        -0.9589107616       -13.0467480405    1.0000        3
-    4        -0.9589107186       -13.0467474553    1.0000        2
-    5        -0.7680724297       -10.4502398645    1.0000        1
-    6        -0.0715785021        -0.9738827836    0.0000        2
-    7        -0.0715783838        -0.9738811749    0.0000        3
-    8         0.0403639673         0.5491840668    0.0000        1
-    9         0.1079610002         1.4688957771    0.0000        1
+    1        -2.3458094837       -31.9166146728    1.0000        1
+    2        -1.1636498634       -15.8323873112    1.0000        1
+    3        -0.9590140910       -13.0481539189    1.0000        3
+    4        -0.9590140910       -13.0481539189    1.0000        3
+    5        -0.7681789234       -10.4516887963    1.0000        1
+    6        -0.0716547361        -0.9749200090    0.0000        3
+    7        -0.0716547361        -0.9749200090    0.0000        3
+    8         0.0403406339         0.5488665971    0.0000        1
+    9         0.1079654367         1.4689561385    0.0000        1
 
- Max and min values of charge density [e/bohr^3]:   1.0824E+00   1.7219E-12
+ Max and min values of charge density [e/bohr^3]:   1.0823E+00   1.7466E-12
 
- Hartree potential time [sec]:       0.05
+ Hartree potential time [sec]:       0.03
 
-   Eigenvalue Energy             =         -12.39046180 [Ry]
-   Hartree Energy                =          57.65946496 [Ry]
-   Integral_{Vxc*rho}            =         -10.66724380 [Ry]
-   Exc = Integral{eps_xc*rho}    =         -10.12226200 [Ry]
-   Electron-Ion energy           =        -141.77447826 [Ry]
+   Eigenvalue Energy             =         -12.39133290 [Ry]
+   Hartree Energy                =          57.65944096 [Ry]
+   Integral_{Vxc*rho}            =         -10.66724845 [Ry]
+   Exc = Integral{eps_xc*rho}    =         -10.12226918 [Ry]
+   Electron-Ion energy           =        -141.77399660 [Ry]
    Ion-Ion Energy                =          22.51219190 [Ry]
-   Exc semilocal part            =          -8.25267371 [Ry]
-   Exact exchange a_x*E_x        =          -1.86958830 [Ry]   (linearized: fixed operator)
-   Exact exchange in eigenvalues =          -3.73701950 [Ry]
-   (E(new)-E(old))/atom  =            -0.00027834 [eV]
+   Exc semilocal part            =          -8.25267918 [Ry]
+   Exact exchange a_x*E_x        =          -1.86959000 [Ry]   (linearized: fixed operator)
+   Exact exchange in eigenvalues =          -3.73693466 [Ry]
+   (E(new)-E(old))/atom  =            -0.00027459 [eV]
 
-   Total Energy =           -43.28089332 [Ry]
-   Energy/atom  =          -294.43558919 [eV]
+   Total Energy =           -43.28069176 [Ry]
+   Energy/atom  =          -294.43421797 [eV]
 
-  0-  3    SRE of pot. & charge weighted pot =   0.0292508070   0.0033865451
+  0-  3    SRE of pot. & charge weighted pot =   0.0278837280   0.0032825962
 
  SCF iter #   4
 
- Diagonalization time [sec] :       0.10,      tdiag_sum =        2.78
- Iteration time [sec]       :       0.17
+ Diagonalization time [sec] :       0.05,      tdiag_sum =        1.95
+ Iteration time [sec]       :       0.09
 
  Fermi level at    -0.4208 [Ry]
 
    State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
-    1        -2.3475053023       -31.9396876421    1.0000        1
-    2        -1.1652983055       -15.8548156845    1.0000        1
-    3        -0.9605260097       -13.0687247823    1.0000        3
-    4        -0.9605259526       -13.0687240059    1.0000        2
-    5        -0.7686066505       -10.4575083653    1.0000        1
-    6        -0.0726247274        -0.9881175159    0.0000        2
-    7        -0.0726245451        -0.9881150358    0.0000        3
-    8         0.0404390847         0.5502060991    0.0000        1
-    9         0.1080352728         1.4699063149    0.0000        1
+    1        -2.3474658598       -31.9391509949    1.0000        1
+    2        -1.1652585600       -15.8542749154    1.0000        1
+    3        -0.9605408763       -13.0689270544    1.0000        3
+    4        -0.9605408763       -13.0689270544    1.0000        3
+    5        -0.7686434181       -10.4580086182    1.0000        1
+    6        -0.0726392097        -0.9883145598    0.0000        3
+    7        -0.0726392097        -0.9883145598    0.0000        3
+    8         0.0404201128         0.5499479708    0.0000        1
+    9         0.1080386719         1.4699525626    0.0000        1
 
- Max and min values of charge density [e/bohr^3]:   1.0829E+00   1.5796E-12
+ Max and min values of charge density [e/bohr^3]:   1.0828E+00   1.5877E-12
 
- Hartree potential time [sec]:       0.05
+ Hartree potential time [sec]:       0.03
 
-   Eigenvalue Energy             =         -12.40492444 [Ry]
-   Hartree Energy                =          57.66996768 [Ry]
-   Integral_{Vxc*rho}            =         -10.66920878 [Ry]
-   Exc = Integral{eps_xc*rho}    =         -10.12416689 [Ry]
-   Electron-Ion energy           =        -141.79254851 [Ry]
+   Eigenvalue Energy             =         -12.40489918 [Ry]
+   Hartree Energy                =          57.66939800 [Ry]
+   Integral_{Vxc*rho}            =         -10.66911231 [Ry]
+   Exc = Integral{eps_xc*rho}    =         -10.12407731 [Ry]
+   Electron-Ion energy           =        -141.79109762 [Ry]
    Ion-Ion Energy                =          22.51219190 [Ry]
-   Exc semilocal part            =          -8.25418438 [Ry]
-   Exact exchange a_x*E_x        =          -1.86998250 [Ry]   (linearized: fixed operator)
-   Exact exchange in eigenvalues =          -3.73741371 [Ry]
-   (E(new)-E(old))/atom  =            -0.00008418 [eV]
+   Exc semilocal part            =          -8.25411177 [Ry]
+   Exact exchange a_x*E_x        =          -1.86996554 [Ry]   (linearized: fixed operator)
+   Exact exchange in eigenvalues =          -3.73731020 [Ry]
+   (E(new)-E(old))/atom  =            -0.00008305 [eV]
 
-   Total Energy =           -43.28090570 [Ry]
-   Energy/atom  =          -294.43567337 [eV]
+   Total Energy =           -43.28070397 [Ry]
+   Energy/atom  =          -294.43430103 [eV]
 
-  0-  4    SRE of pot. & charge weighted pot =   0.0177251793   0.0008037252
+  0-  4    SRE of pot. & charge weighted pot =   0.0172188222   0.0007858690
 
  SCF iter #   5
 
- Diagonalization time [sec] :       0.11,      tdiag_sum =        2.89
- Iteration time [sec]       :       0.18
+ Diagonalization time [sec] :       0.05,      tdiag_sum =        2.00
+ Iteration time [sec]       :       0.09
 
  Fermi level at    -0.4211 [Ry]
 
    State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
-    1        -2.3478031923       -31.9437406743    1.0000        1
-    2        -1.1653454793       -15.8554575226    1.0000        1
-    3        -0.9607238462       -13.0714165067    1.0000        3
-    4        -0.9607237970       -13.0714158374    1.0000        2
-    5        -0.7689257173       -10.4618495248    1.0000        1
-    6        -0.0729863497        -0.9930376761    0.0000        2
-    7        -0.0729861781        -0.9930353422    0.0000        3
-    8         0.0405560477         0.5517974742    0.0000        1
-    9         0.1080945534         1.4707128752    0.0000        1
+    1        -2.3477559718       -31.9430982005    1.0000        1
+    2        -1.1653096338       -15.8549698160    1.0000        1
+    3        -0.9607374578       -13.0716017037    1.0000        3
+    4        -0.9607374578       -13.0716017037    1.0000        3
+    5        -0.7689396379       -10.4620389251    1.0000        1
+    6        -0.0729912731        -0.9931046636    0.0000        3
+    7        -0.0729912731        -0.9931046636    0.0000        3
+    8         0.0405373468         0.5515430336    0.0000        1
+    9         0.1080950349         1.4707194259    0.0000        1
 
- Max and min values of charge density [e/bohr^3]:   1.0832E+00   1.6263E-12
+ Max and min values of charge density [e/bohr^3]:   1.0832E+00   1.6264E-12
 
- Hartree potential time [sec]:       0.05
+ Hartree potential time [sec]:       0.03
 
-   Eigenvalue Energy             =         -12.40704406 [Ry]
-   Hartree Energy                =          57.66903970 [Ry]
-   Integral_{Vxc*rho}            =         -10.66917122 [Ry]
-   Exc = Integral{eps_xc*rho}    =         -10.12413736 [Ry]
-   Electron-Ion energy           =        -141.79157658 [Ry]
+   Eigenvalue Energy             =         -12.40696032 [Ry]
+   Hartree Energy                =          57.66858329 [Ry]
+   Integral_{Vxc*rho}            =         -10.66909173 [Ry]
+   Exc = Integral{eps_xc*rho}    =         -10.12406482 [Ry]
+   Electron-Ion energy           =        -141.79029470 [Ry]
    Ion-Ion Energy                =          22.51219190 [Ry]
-   Exc semilocal part            =          -8.25416753 [Ry]
-   Exact exchange a_x*E_x        =          -1.86996983 [Ry]   (linearized: fixed operator)
-   Exact exchange in eigenvalues =          -3.73740104 [Ry]
-   (E(new)-E(old))/atom  =            -0.00002254 [eV]
+   Exc semilocal part            =          -8.25410817 [Ry]
+   Exact exchange a_x*E_x        =          -1.86995666 [Ry]   (linearized: fixed operator)
+   Exact exchange in eigenvalues =          -3.73730132 [Ry]
+   (E(new)-E(old))/atom  =            -0.00002206 [eV]
 
-   Total Energy =           -43.28090901 [Ry]
-   Energy/atom  =          -294.43569591 [eV]
+   Total Energy =           -43.28070721 [Ry]
+   Energy/atom  =          -294.43432308 [eV]
 
-  0-  5    SRE of pot. & charge weighted pot =   0.0090325097   0.0005007982
+  0-  5    SRE of pot. & charge weighted pot =   0.0087903509   0.0004936867
 
  SCF iter #   6
 
- Diagonalization time [sec] :       0.07,      tdiag_sum =        2.96
- Iteration time [sec]       :       0.14
+ Diagonalization time [sec] :       0.05,      tdiag_sum =        2.05
+ Iteration time [sec]       :       0.09
 
- Fermi level at    -0.4209 [Ry]
+ Fermi level at    -0.4210 [Ry]
 
    State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
-    1        -2.3475937698       -31.9408913137    1.0000        1
-    2        -1.1651757713       -15.8531485091    1.0000        1
-    3        -0.9605600584       -13.0691880423    1.0000        3
-    4        -0.9605600241       -13.0691875761    1.0000        2
-    5        -0.7686848569       -10.4585724262    1.0000        1
-    6        -0.0728538661        -0.9912351309    0.0000        2
-    7        -0.0728537179        -0.9912331144    0.0000        3
-    8         0.0406124985         0.5525655324    0.0000        1
-    9         0.1081346577         1.4712585253    0.0000        1
+    1        -2.3475812338       -31.9407207514    1.0000        1
+    2        -1.1651621802       -15.8529635909    1.0000        1
+    3        -0.9606013104       -13.0697493094    1.0000        3
+    4        -0.9606013104       -13.0697493094    1.0000        3
+    5        -0.7687200086       -10.4590506935    1.0000        1
+    6        -0.0728840638        -0.9916459948    0.0000        3
+    7        -0.0728840638        -0.9916459948    0.0000        3
+    8         0.0405999692         0.5523950606    0.0000        1
+    9         0.1081368982         1.4712890095    0.0000        1
 
- Max and min values of charge density [e/bohr^3]:   1.0831E+00   1.6197E-12
+ Max and min values of charge density [e/bohr^3]:   1.0831E+00   1.6119E-12
 
- Hartree potential time [sec]:       0.05
+ Hartree potential time [sec]:       0.03
 
-   Eigenvalue Energy             =         -12.40514896 [Ry]
-   Hartree Energy                =          57.66773846 [Ry]
-   Integral_{Vxc*rho}            =         -10.66890911 [Ry]
-   Exc = Integral{eps_xc*rho}    =         -10.12388482 [Ry]
-   Electron-Ion energy           =        -141.78952683 [Ry]
+   Eigenvalue Energy             =         -12.40533209 [Ry]
+   Hartree Energy                =          57.66744679 [Ry]
+   Integral_{Vxc*rho}            =         -10.66886062 [Ry]
+   Exc = Integral{eps_xc*rho}    =         -10.12384119 [Ry]
+   Electron-Ion energy           =        -141.78854740 [Ry]
    Ion-Ion Energy                =          22.51219190 [Ry]
-   Exc semilocal part            =          -8.25396063 [Ry]
-   Exact exchange a_x*E_x        =          -1.86992418 [Ry]   (linearized: fixed operator)
-   Exact exchange in eigenvalues =          -3.73735539 [Ry]
-   (E(new)-E(old))/atom  =            -0.00000723 [eV]
+   Exc semilocal part            =          -8.25392511 [Ry]
+   Exact exchange a_x*E_x        =          -1.86991609 [Ry]   (linearized: fixed operator)
+   Exact exchange in eigenvalues =          -3.73726075 [Ry]
+   (E(new)-E(old))/atom  =            -0.00000713 [eV]
 
-   Total Energy =           -43.28091007 [Ry]
-   Energy/atom  =          -294.43570314 [eV]
+   Total Energy =           -43.28070826 [Ry]
+   Energy/atom  =          -294.43433021 [eV]
 
-  0-  6    SRE of pot. & charge weighted pot =   0.0061589949   0.0005374604
+  0-  6    SRE of pot. & charge weighted pot =   0.0058400178   0.0005219554
 
  SCF iter #   7
 
- Diagonalization time [sec] :       0.07,      tdiag_sum =        3.02
- Iteration time [sec]       :       0.14
+ Diagonalization time [sec] :       0.05,      tdiag_sum =        2.10
+ Iteration time [sec]       :       0.09
 
  Fermi level at    -0.4209 [Ry]
 
    State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
-    1        -2.3476067723       -31.9410682222    1.0000        1
-    2        -1.1652042742       -15.8535363135    1.0000        1
-    3        -0.9605748384       -13.0693891357    1.0000        3
-    4        -0.9605748106       -13.0693887583    1.0000        2
-    5        -0.7685935817       -10.4573305541    1.0000        1
-    6        -0.0728317422        -0.9909341175    0.0000        2
-    7        -0.0728316276        -0.9909325584    0.0000        3
-    8         0.0406239453         0.5527212745    0.0000        1
-    9         0.1081419103         1.4713572033    0.0000        1
+    1        -2.3475990070       -31.9409625700    1.0000        1
+    2        -1.1651950002       -15.8534101332    1.0000        1
+    3        -0.9606204221       -13.0700093388    1.0000        3
+    4        -0.9606204221       -13.0700093388    1.0000        3
+    5        -0.7686212461       -10.4577069503    1.0000        1
+    6        -0.0728617662        -0.9913426182    0.0000        3
+    7        -0.0728617662        -0.9913426182    0.0000        3
+    8         0.0406177988         0.5526376469    0.0000        1
+    9         0.1081477996         1.4714373324    0.0000        1
 
- Max and min values of charge density [e/bohr^3]:   1.0832E+00   1.5844E-12
+ Max and min values of charge density [e/bohr^3]:   1.0832E+00   1.5791E-12
 
- Hartree potential time [sec]:       0.05
+ Hartree potential time [sec]:       0.03
 
-   Eigenvalue Energy             =         -12.40510855 [Ry]
-   Hartree Energy                =          57.66833778 [Ry]
-   Integral_{Vxc*rho}            =         -10.66903520 [Ry]
-   Exc = Integral{eps_xc*rho}    =         -10.12401991 [Ry]
-   Electron-Ion energy           =        -141.79027174 [Ry]
+   Eigenvalue Energy             =         -12.40531219 [Ry]
+   Hartree Energy                =          57.66816665 [Ry]
+   Integral_{Vxc*rho}            =         -10.66900641 [Ry]
+   Exc = Integral{eps_xc*rho}    =         -10.12399521 [Ry]
+   Electron-Ion energy           =        -141.78948457 [Ry]
    Ion-Ion Energy                =          22.51219190 [Ry]
-   Exc semilocal part            =          -8.25406446 [Ry]
-   Exact exchange a_x*E_x        =          -1.86995545 [Ry]   (linearized: fixed operator)
-   Exact exchange in eigenvalues =          -3.73738665 [Ry]
-   (E(new)-E(old))/atom  =            -0.00000333 [eV]
+   Exc semilocal part            =          -8.25404406 [Ry]
+   Exact exchange a_x*E_x        =          -1.86995116 [Ry]   (linearized: fixed operator)
+   Exact exchange in eigenvalues =          -3.73729582 [Ry]
+   (E(new)-E(old))/atom  =            -0.00000337 [eV]
 
-   Total Energy =           -43.28091056 [Ry]
-   Energy/atom  =          -294.43570648 [eV]
+   Total Energy =           -43.28070875 [Ry]
+   Energy/atom  =          -294.43433358 [eV]
 
-  0-  7    SRE of pot. & charge weighted pot =   0.0049760449   0.0003608743
+  0-  7    SRE of pot. & charge weighted pot =   0.0042378690   0.0003165722
 
 
  Fock loop iteration   1 (B3LYP5 (VWN5)): inner SCF of 7 iterations
  ------------------------------------------------------------------
-   E_x (new orbitals)            =          -9.35058121 [Ry]
-   E_x (new with old operator)   =          -9.34346664 [Ry]
-   Change of E_x                 =          -0.01342517 [Ry]
-   Estimated exchange error      =            1.608E-04 [Ry]   (tolerance 1.0E-08): continue
-   Total Energy (B3LYP5 (VWN5))   =         -43.28107136 [Ry]
-   Inner SCF: stopped below a residual of 3.75E-04 Ry (adaptive criterion)
-   ACE operator: 9 orbitals, max|M - M^T|/max|M| = 4.0E-12
-   Exact exchange: 35 pair-density Poisson solves, 0.03 s of 0.05 s (FP64 CUDA Kronecker-product FD Poisson solve (order 12) on the 138x138x138 box, multipole boundary of order 9, 1/r kernel; devices take tiles of 32-column orbital blocks; the pair densities of symmetry-sector orbitals in reflection-parity classes on the 69x69x69 octant)
+   E_x (new orbitals)            =          -9.35055923 [Ry]
+   E_x (new with old operator)   =          -9.34323954 [Ry]
+   Change of E_x                 =          -0.01383593 [Ry]
+   Estimated exchange error      =            1.607E-04 [Ry]   (tolerance 1.0E-08): continue
+   Total Energy (B3LYP5 (VWN5))   =         -43.28086945 [Ry]
+   Inner SCF: stopped below a residual of 3.77E-04 Ry (adaptive criterion)
+   ACE operator: 7 orbitals, max|M - M^T|/max|M| = 4.0E-12
+   Exact exchange: 29 pair-density Poisson solves, 0.02 s of 0.04 s (FP64 CUDA Kronecker-product FD Poisson solve (order 12) on the 138x138x138 box, multipole boundary of order 9, 1/r kernel; devices take tiles of 32-column orbital blocks; the pair densities of symmetry-sector orbitals in reflection-parity classes on the 69x69x69 octant)
 
  SCF iter #   1
 
- Diagonalization time [sec] :       0.07,      tdiag_sum =        3.09
- Iteration time [sec]       :       0.13
+ Diagonalization time [sec] :       0.05,      tdiag_sum =        2.15
+ Iteration time [sec]       :       0.09
 
- Fermi level at    -0.4209 [Ry]
+ Fermi level at    -0.4210 [Ry]
 
    State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
-    1        -2.3481452271       -31.9483943310    1.0000        1
-    2        -1.1656472669       -15.8595635844    1.0000        1
-    3        -0.9606745609       -13.0707459401    1.0000        3
-    4        -0.9606745440       -13.0707457104    1.0000        2
-    5        -0.7692061559       -10.4656651160    1.0000        1
-    6        -0.0722944705        -0.9836241069    0.0000        2
-    7        -0.0722943448        -0.9836223963    0.0000        3
-    8         0.0405493531         0.5517063886    0.0000        1
-    9         0.1081740769         1.4717948561    0.0000        1
+    1        -2.3481313793       -31.9482059206    1.0000        1
+    2        -1.1656307269       -15.8593385442    1.0000        1
+    3        -0.9607091424       -13.0712164495    1.0000        3
+    4        -0.9607091424       -13.0712164495    1.0000        3
+    5        -0.7692342954       -10.4660479766    1.0000        1
+    6        -0.0723164491        -0.9839231427    0.0000        3
+    7        -0.0723164491        -0.9839231427    0.0000        3
+    8         0.0405480443         0.5516885816    0.0000        1
+    9         0.1081819715         1.4719022681    0.0000        1
 
- Max and min values of charge density [e/bohr^3]:   1.0838E+00   1.4824E-12
+ Max and min values of charge density [e/bohr^3]:   1.0837E+00   1.4831E-12
 
- Hartree potential time [sec]:       0.05
+ Hartree potential time [sec]:       0.03
 
-   Eigenvalue Energy             =         -12.40869551 [Ry]
-   Hartree Energy                =          57.68746915 [Ry]
-   Integral_{Vxc*rho}            =         -10.67251124 [Ry]
-   Exc = Integral{eps_xc*rho}    =         -10.12781484 [Ry]
-   Electron-Ion energy           =        -141.81588621 [Ry]
+   Eigenvalue Energy             =         -12.40882937 [Ry]
+   Hartree Energy                =          57.68741475 [Ry]
+   Integral_{Vxc*rho}            =         -10.67250641 [Ry]
+   Exc = Integral{eps_xc*rho}    =         -10.12781249 [Ry]
+   Electron-Ion energy           =        -141.81531285 [Ry]
    Ion-Ion Energy                =          22.51219190 [Ry]
-   Exc semilocal part            =          -8.25678651 [Ry]
-   Exact exchange a_x*E_x        =          -1.87102833 [Ry]   (linearized: fixed operator)
-   Exact exchange in eigenvalues =          -3.74114457 [Ry]
-   (E(new)-E(old))/atom  =            -0.00113150 [eV]
+   Exc semilocal part            =          -8.25678459 [Ry]
+   Exact exchange a_x*E_x        =          -1.87102789 [Ry]   (linearized: fixed operator)
+   Exact exchange in eigenvalues =          -3.74113974 [Ry]
+   (E(new)-E(old))/atom  =            -0.00112991 [eV]
 
-   Total Energy =           -43.28107689 [Ry]
-   Energy/atom  =          -294.43683798 [eV]
+   Total Energy =           -43.28087485 [Ry]
+   Energy/atom  =          -294.43546349 [eV]
 
-  0-  1    SRE of pot. & charge weighted pot =   0.0380982782   0.0040802498
+  0-  1    SRE of pot. & charge weighted pot =   0.0381136546   0.0041085059
 
  SCF iter #   2
 
- Diagonalization time [sec] :       0.07,      tdiag_sum =        3.16
- Iteration time [sec]       :       0.13
+ Diagonalization time [sec] :       0.05,      tdiag_sum =        2.20
+ Iteration time [sec]       :       0.09
 
  Fermi level at    -0.4213 [Ry]
 
    State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
-    1        -2.3474386972       -31.9387814261    1.0000        1
-    2        -1.1646544069       -15.8460549300    1.0000        1
-    3        -0.9599805675       -13.0613036056    1.0000        3
-    4        -0.9599805490       -13.0613033533    1.0000        2
-    5        -0.7697384112       -10.4729068750    1.0000        1
-    6        -0.0724122646        -0.9852267896    0.0000        2
-    7        -0.0724121367        -0.9852250500    0.0000        3
-    8         0.0406142779         0.5525897429    0.0000        1
-    9         0.1081424399         1.4713644091    0.0000        1
+    1        -2.3474112242       -31.9384076345    1.0000        1
+    2        -1.1646283936       -15.8457009977    1.0000        1
+    3        -0.9600050540       -13.0616367632    1.0000        3
+    4        -0.9600050540       -13.0616367632    1.0000        3
+    5        -0.7697665359       -10.4732895348    1.0000        1
+    6        -0.0724298255        -0.9854657192    0.0000        3
+    7        -0.0724298255        -0.9854657192    0.0000        3
+    8         0.0406126880         0.5525681098    0.0000        1
+    9         0.1081484441         1.4714461011    0.0000        1
 
- Max and min values of charge density [e/bohr^3]:   1.0834E+00   1.6195E-12
+ Max and min values of charge density [e/bohr^3]:   1.0834E+00   1.6061E-12
 
- Hartree potential time [sec]:       0.05
+ Hartree potential time [sec]:       0.03
 
-   Eigenvalue Energy             =         -12.40358526 [Ry]
-   Hartree Energy                =          57.67292506 [Ry]
-   Integral_{Vxc*rho}            =         -10.67005135 [Ry]
-   Exc = Integral{eps_xc*rho}    =         -10.12539814 [Ry]
-   Electron-Ion energy           =        -141.79382178 [Ry]
+   Eigenvalue Energy             =         -12.40363252 [Ry]
+   Hartree Energy                =          57.67281378 [Ry]
+   Integral_{Vxc*rho}            =         -10.67003710 [Ry]
+   Exc = Integral{eps_xc*rho}    =         -10.12538643 [Ry]
+   Electron-Ion energy           =        -141.79315863 [Ry]
    Ion-Ion Energy                =          22.51219190 [Ry]
-   Exc semilocal part            =          -8.25488527 [Ry]
-   Exact exchange a_x*E_x        =          -1.87051288 [Ry]   (linearized: fixed operator)
-   Exact exchange in eigenvalues =          -3.74062912 [Ry]
-   (E(new)-E(old))/atom  =            -0.00010867 [eV]
+   Exc semilocal part            =          -8.25487604 [Ry]
+   Exact exchange a_x*E_x        =          -1.87051040 [Ry]   (linearized: fixed operator)
+   Exact exchange in eigenvalues =          -3.74062224 [Ry]
+   (E(new)-E(old))/atom  =            -0.00010958 [eV]
 
-   Total Energy =           -43.28109286 [Ry]
-   Energy/atom  =          -294.43694665 [eV]
+   Total Energy =           -43.28089095 [Ry]
+   Energy/atom  =          -294.43557307 [eV]
 
-  0-  2    SRE of pot. & charge weighted pot =   0.0057761091   0.0004284471
+  0-  2    SRE of pot. & charge weighted pot =   0.0055491553   0.0004062793
 
  SCF iter #   3
 
- Diagonalization time [sec] :       0.07,      tdiag_sum =        3.22
- Iteration time [sec]       :       0.13
+ Diagonalization time [sec] :       0.05,      tdiag_sum =        2.25
+ Iteration time [sec]       :       0.09
 
  Fermi level at    -0.4213 [Ry]
 
    State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
-    1        -2.3475582675       -31.9404082765    1.0000        1
-    2        -1.1646890289       -15.8465259901    1.0000        1
-    3        -0.9600517979       -13.0622727524    1.0000        3
-    4        -0.9600517784       -13.0622724860    1.0000        2
-    5        -0.7697701926       -10.4733392860    1.0000        1
-    6        -0.0724861669        -0.9862322901    0.0000        2
-    7        -0.0724860425        -0.9862305969    0.0000        3
-    8         0.0406266312         0.5527578189    0.0000        1
-    9         0.1081525672         1.4715021993    0.0000        1
+    1        -2.3475230004       -31.9399284386    1.0000        1
+    2        -1.1646596116       -15.8461257440    1.0000        1
+    3        -0.9600710777       -13.0625350683    1.0000        3
+    4        -0.9600710777       -13.0625350683    1.0000        3
+    5        -0.7697960281       -10.4736907985    1.0000        1
+    6        -0.0725000499        -0.9864211787    0.0000        3
+    7        -0.0725000499        -0.9864211787    0.0000        3
+    8         0.0406249757         0.5527352941    0.0000        1
+    9         0.1081572865         1.4715664080    0.0000        1
 
- Max and min values of charge density [e/bohr^3]:   1.0834E+00   1.5844E-12
+ Max and min values of charge density [e/bohr^3]:   1.0834E+00   1.5749E-12
 
- Hartree potential time [sec]:       0.05
+ Hartree potential time [sec]:       0.03
 
-   Eigenvalue Energy             =         -12.40424213 [Ry]
-   Hartree Energy                =          57.67178468 [Ry]
-   Integral_{Vxc*rho}            =         -10.66987809 [Ry]
-   Exc = Integral{eps_xc*rho}    =         -10.12523788 [Ry]
-   Electron-Ion energy           =        -141.79221158 [Ry]
+   Eigenvalue Energy             =         -12.40424159 [Ry]
+   Hartree Energy                =          57.67166562 [Ry]
+   Integral_{Vxc*rho}            =         -10.66986304 [Ry]
+   Exc = Integral{eps_xc*rho}    =         -10.12522555 [Ry]
+   Electron-Ion energy           =        -141.79153008 [Ry]
    Ion-Ion Energy                =          22.51219190 [Ry]
-   Exc semilocal part            =          -8.25475388 [Ry]
-   Exact exchange a_x*E_x        =          -1.87048400 [Ry]   (linearized: fixed operator)
-   Exact exchange in eigenvalues =          -3.74060024 [Ry]
-   (E(new)-E(old))/atom  =            -0.00000408 [eV]
+   Exc semilocal part            =          -8.25474406 [Ry]
+   Exact exchange a_x*E_x        =          -1.87048149 [Ry]   (linearized: fixed operator)
+   Exact exchange in eigenvalues =          -3.74059333 [Ry]
+   (E(new)-E(old))/atom  =            -0.00000410 [eV]
 
-   Total Energy =           -43.28109346 [Ry]
-   Energy/atom  =          -294.43695073 [eV]
+   Total Energy =           -43.28089156 [Ry]
+   Energy/atom  =          -294.43557717 [eV]
 
-  0-  3    SRE of pot. & charge weighted pot =   0.0041039019   0.0004275533
+  0-  3    SRE of pot. & charge weighted pot =   0.0038553866   0.0004144760
 
  SCF iter #   4
 
- Diagonalization time [sec] :       0.07,      tdiag_sum =        3.29
- Iteration time [sec]       :       0.14
+ Diagonalization time [sec] :       0.05,      tdiag_sum =        2.31
+ Iteration time [sec]       :       0.09
 
  Fermi level at    -0.4213 [Ry]
 
    State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
-    1        -2.3477842619       -31.9434831106    1.0000        1
-    2        -1.1648477926       -15.8486860969    1.0000        1
-    3        -0.9602179868       -13.0645338851    1.0000        3
-    4        -0.9602179703       -13.0645336602    1.0000        2
-    5        -0.7697229093       -10.4726959594    1.0000        1
-    6        -0.0725539406        -0.9871544046    0.0000        2
-    7        -0.0725538332        -0.9871529444    0.0000        3
-    8         0.0406404631         0.5529460123    0.0000        1
-    9         0.1081737668         1.4717906359    0.0000        1
+    1        -2.3477544507       -31.9430775049    1.0000        1
+    2        -1.1648237959       -15.8483596022    1.0000        1
+    3        -0.9602416402       -13.0648557088    1.0000        3
+    4        -0.9602416402       -13.0648557088    1.0000        3
+    5        -0.7697438373       -10.4729807019    1.0000        1
+    6        -0.0725679880        -0.9873455313    0.0000        3
+    7        -0.0725679880        -0.9873455313    0.0000        3
+    8         0.0406389320         0.5529251816    0.0000        1
+    9         0.1081778664         1.4718464145    0.0000        1
 
- Max and min values of charge density [e/bohr^3]:   1.0835E+00   1.5489E-12
+ Max and min values of charge density [e/bohr^3]:   1.0835E+00   1.5414E-12
 
- Hartree potential time [sec]:       0.05
+ Hartree potential time [sec]:       0.03
 
-   Eigenvalue Energy             =         -12.40558184 [Ry]
-   Hartree Energy                =          57.67296593 [Ry]
-   Integral_{Vxc*rho}            =         -10.67009439 [Ry]
-   Exc = Integral{eps_xc*rho}    =         -10.12545288 [Ry]
-   Electron-Ion energy           =        -141.79412227 [Ry]
+   Eigenvalue Energy             =         -12.40561073 [Ry]
+   Hartree Energy                =          57.67291634 [Ry]
+   Integral_{Vxc*rho}            =         -10.67009117 [Ry]
+   Exc = Integral{eps_xc*rho}    =         -10.12545222 [Ry]
+   Electron-Ion energy           =        -141.79355068 [Ry]
    Ion-Ion Energy                =          22.51219190 [Ry]
-   Exc semilocal part            =          -8.25492231 [Ry]
+   Exc semilocal part            =          -8.25492165 [Ry]
    Exact exchange a_x*E_x        =          -1.87053057 [Ry]   (linearized: fixed operator)
-   Exact exchange in eigenvalues =          -3.74064681 [Ry]
-   (E(new)-E(old))/atom  =            -0.00000132 [eV]
+   Exact exchange in eigenvalues =          -3.74064242 [Ry]
+   (E(new)-E(old))/atom  =            -0.00000131 [eV]
 
-   Total Energy =           -43.28109366 [Ry]
-   Energy/atom  =          -294.43695205 [eV]
+   Total Energy =           -43.28089175 [Ry]
+   Energy/atom  =          -294.43557848 [eV]
 
-  0-  4    SRE of pot. & charge weighted pot =   0.0025215691   0.0001128714
+  0-  4    SRE of pot. & charge weighted pot =   0.0022137418   0.0001081010
 
  SCF iter #   5
 
- Diagonalization time [sec] :       0.07,      tdiag_sum =        3.36
- Iteration time [sec]       :       0.14
+ Diagonalization time [sec] :       0.06,      tdiag_sum =        2.36
+ Iteration time [sec]       :       0.10
 
  Fermi level at    -0.4213 [Ry]
 
    State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
-    1        -2.3478365920       -31.9441951029    1.0000        1
-    2        -1.1648616704       -15.8488749155    1.0000        1
-    3        -0.9602473940       -13.0649339927    1.0000        3
-    4        -0.9602473823       -13.0649338342    1.0000        2
-    5        -0.7697050563       -10.4724530553    1.0000        1
-    6        -0.0725794475        -0.9875014469    0.0000        2
-    7        -0.0725793574        -0.9875002206    0.0000        3
-    8         0.0406545857         0.5531381624    0.0000        1
-    9         0.1081864966         1.4719638354    0.0000        1
+    1        -2.3477997953       -31.9436944555    1.0000        1
+    2        -1.1648334388       -15.8484908012    1.0000        1
+    3        -0.9602661749       -13.0651895221    1.0000        3
+    4        -0.9602661749       -13.0651895221    1.0000        3
+    5        -0.7697275706       -10.4727593796    1.0000        1
+    6        -0.0725912667        -0.9876622563    0.0000        3
+    7        -0.0725912667        -0.9876622563    0.0000        3
+    8         0.0406522848         0.5531068562    0.0000        1
+    9         0.1081886416         1.4719930205    0.0000        1
 
- Max and min values of charge density [e/bohr^3]:   1.0835E+00   1.5293E-12
+ Max and min values of charge density [e/bohr^3]:   1.0835E+00   1.5242E-12
 
- Hartree potential time [sec]:       0.05
+ Hartree potential time [sec]:       0.03
 
-   Eigenvalue Energy             =         -12.40579619 [Ry]
-   Hartree Energy                =          57.67295625 [Ry]
-   Integral_{Vxc*rho}            =         -10.67009125 [Ry]
-   Exc = Integral{eps_xc*rho}    =         -10.12544944 [Ry]
-   Electron-Ion energy           =        -141.79418036 [Ry]
+   Eigenvalue Energy             =         -12.40578631 [Ry]
+   Hartree Energy                =          57.67286629 [Ry]
+   Integral_{Vxc*rho}            =         -10.67008152 [Ry]
+   Exc = Integral{eps_xc*rho}    =         -10.12544263 [Ry]
+   Electron-Ion energy           =        -141.79353488 [Ry]
    Ion-Ion Energy                =          22.51219190 [Ry]
-   Exc semilocal part            =          -8.25491958 [Ry]
-   Exact exchange a_x*E_x        =          -1.87052986 [Ry]   (linearized: fixed operator)
-   Exact exchange in eigenvalues =          -3.74064610 [Ry]
-   (E(new)-E(old))/atom  =            -0.00000035 [eV]
+   Exc semilocal part            =          -8.25491390 [Ry]
+   Exact exchange a_x*E_x        =          -1.87052873 [Ry]   (linearized: fixed operator)
+   Exact exchange in eigenvalues =          -3.74064058 [Ry]
+   (E(new)-E(old))/atom  =            -0.00000036 [eV]
 
-   Total Energy =           -43.28109371 [Ry]
-   Energy/atom  =          -294.43695240 [eV]
+   Total Energy =           -43.28089180 [Ry]
+   Energy/atom  =          -294.43557884 [eV]
 
-  0-  5    SRE of pot. & charge weighted pot =   0.0014889945   0.0000439588
+  0-  5    SRE of pot. & charge weighted pot =   0.0012407314   0.0000437143
 
  SCF iter #   6
 
- Diagonalization time [sec] :       0.07,      tdiag_sum =        3.42
+ Diagonalization time [sec] :       0.09,      tdiag_sum =        2.45
  Iteration time [sec]       :       0.13
 
  Fermi level at    -0.4213 [Ry]
 
    State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
-    1        -2.3477837643       -31.9434763405    1.0000        1
-    2        -1.1648209992       -15.8483215515    1.0000        1
-    3        -0.9602061286       -13.0643725441    1.0000        3
-    4        -0.9602061227       -13.0643724638    1.0000        2
-    5        -0.7696812855       -10.4721296338    1.0000        1
-    6        -0.0725612895        -0.9872543930    0.0000        2
-    7        -0.0725612201        -0.9872534488    0.0000        3
-    8         0.0406621468         0.5532410367    0.0000        1
-    9         0.1081916076         1.4720333750    0.0000        1
+    1        -2.3477449754       -31.9429485862    1.0000        1
+    2        -1.1647908971       -15.8479119876    1.0000        1
+    3        -0.9602233798       -13.0646072606    1.0000        3
+    4        -0.9602233798       -13.0646072606    1.0000        3
+    5        -0.7697072482       -10.4724828775    1.0000        1
+    6        -0.0725732455        -0.9874170633    0.0000        3
+    7        -0.0725732455        -0.9874170633    0.0000        3
+    8         0.0406595277         0.5532054024    0.0000        1
+    9         0.1081924209         1.4720444409    0.0000        1
 
- Max and min values of charge density [e/bohr^3]:   1.0835E+00   1.5154E-12
+ Max and min values of charge density [e/bohr^3]:   1.0835E+00   1.5121E-12
 
- Hartree potential time [sec]:       0.05
+ Hartree potential time [sec]:       0.03
 
-   Eigenvalue Energy             =         -12.40539660 [Ry]
-   Hartree Energy                =          57.67251509 [Ry]
-   Integral_{Vxc*rho}            =         -10.67001312 [Ry]
-   Exc = Integral{eps_xc*rho}    =         -10.12537386 [Ry]
-   Electron-Ion energy           =        -141.79346632 [Ry]
+   Eigenvalue Energy             =         -12.40537976 [Ry]
+   Hartree Energy                =          57.67240058 [Ry]
+   Integral_{Vxc*rho}            =         -10.66999973 [Ry]
+   Exc = Integral{eps_xc*rho}    =         -10.12536348 [Ry]
+   Electron-Ion energy           =        -141.79278445 [Ry]
    Ion-Ion Energy                =          22.51219190 [Ry]
-   Exc semilocal part            =          -8.25485944 [Ry]
-   Exact exchange a_x*E_x        =          -1.87051442 [Ry]   (linearized: fixed operator)
-   Exact exchange in eigenvalues =          -3.74063066 [Ry]
-   (E(new)-E(old))/atom  =            -0.00000003 [eV]
+   Exc semilocal part            =          -8.25485094 [Ry]
+   Exact exchange a_x*E_x        =          -1.87051254 [Ry]   (linearized: fixed operator)
+   Exact exchange in eigenvalues =          -3.74062439 [Ry]
+   (E(new)-E(old))/atom  =            -0.00000004 [eV]
 
-   Total Energy =           -43.28109371 [Ry]
-   Energy/atom  =          -294.43695243 [eV]
+   Total Energy =           -43.28089181 [Ry]
+   Energy/atom  =          -294.43557888 [eV]
 
-  0-  6    SRE of pot. & charge weighted pot =   0.0012129516   0.0001230828
+  0-  6    SRE of pot. & charge weighted pot =   0.0011325951   0.0001131428
 
  SCF iter #   7
 
- Diagonalization time [sec] :       0.11,      tdiag_sum =        3.53
- Iteration time [sec]       :       0.18
+ Diagonalization time [sec] :       0.05,      tdiag_sum =        2.50
+ Iteration time [sec]       :       0.09
 
  Fermi level at    -0.4213 [Ry]
 
    State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
-    1        -2.3477889647       -31.9435470953    1.0000        1
-    2        -1.1648328018       -15.8484821348    1.0000        1
-    3        -0.9602123984       -13.0644578504    1.0000        3
-    4        -0.9602123950       -13.0644578033    1.0000        2
-    5        -0.7696648870       -10.4719065189    1.0000        1
-    6        -0.0725577902        -0.9872067821    0.0000        2
-    7        -0.0725577302        -0.9872059651    0.0000        3
-    8         0.0406630729         0.5532536369    0.0000        1
-    9         0.1081937691         1.4720627835    0.0000        1
+    1        -2.3477478077       -31.9429871222    1.0000        1
+    2        -1.1648002841       -15.8480397052    1.0000        1
+    3        -0.9602276235       -13.0646650002    1.0000        3
+    4        -0.9602276235       -13.0646650002    1.0000        3
+    5        -0.7696914277       -10.4722676264    1.0000        1
+    6        -0.0725693070        -0.9873634768    0.0000        3
+    7        -0.0725693070        -0.9873634768    0.0000        3
+    8         0.0406611124         0.5532269625    0.0000        1
+    9         0.1081943097         1.4720701389    0.0000        1
 
- Max and min values of charge density [e/bohr^3]:   1.0835E+00   1.5058E-12
+ Max and min values of charge density [e/bohr^3]:   1.0835E+00   1.5032E-12
 
- Hartree potential time [sec]:       0.05
+ Hartree potential time [sec]:       0.03
 
-   Eigenvalue Energy             =         -12.40542289 [Ry]
-   Hartree Energy                =          57.67263453 [Ry]
-   Integral_{Vxc*rho}            =         -10.67003211 [Ry]
-   Exc = Integral{eps_xc*rho}    =         -10.12539345 [Ry]
-   Electron-Ion energy           =        -141.79364789 [Ry]
+   Eigenvalue Energy             =         -12.40538953 [Ry]
+   Hartree Energy                =          57.67248650 [Ry]
+   Integral_{Vxc*rho}            =         -10.67001306 [Ry]
+   Exc = Integral{eps_xc*rho}    =         -10.12537758 [Ry]
+   Electron-Ion energy           =        -141.79291221 [Ry]
    Ion-Ion Energy                =          22.51219190 [Ry]
-   Exc semilocal part            =          -8.25487417 [Ry]
-   Exact exchange a_x*E_x        =          -1.87051928 [Ry]   (linearized: fixed operator)
-   Exact exchange in eigenvalues =          -3.74063552 [Ry]
+   Exc semilocal part            =          -8.25486132 [Ry]
+   Exact exchange a_x*E_x        =          -1.87051626 [Ry]   (linearized: fixed operator)
+   Exact exchange in eigenvalues =          -3.74062811 [Ry]
    (E(new)-E(old))/atom  =            -0.00000007 [eV]
 
-   Total Energy =           -43.28109373 [Ry]
-   Energy/atom  =          -294.43695251 [eV]
+   Total Energy =           -43.28089182 [Ry]
+   Energy/atom  =          -294.43557894 [eV]
 
-  0-  7    SRE of pot. & charge weighted pot =   0.0008491636   0.0000802165
+  0-  7    SRE of pot. & charge weighted pot =   0.0008181606   0.0000784276
 
  SCF iter #   8
 
- Diagonalization time [sec] :       0.06,      tdiag_sum =        3.59
- Iteration time [sec]       :       0.13
+ Diagonalization time [sec] :       0.05,      tdiag_sum =        2.55
+ Iteration time [sec]       :       0.09
 
  Fermi level at    -0.4213 [Ry]
 
    State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
-    1        -2.3478114893       -31.9438535610    1.0000        1
-    2        -1.1648580115       -15.8488251329    1.0000        1
-    3        -0.9602317540       -13.0647211991    1.0000        3
-    4        -0.9602317538       -13.0647211963    1.0000        2
-    5        -0.7696500356       -10.4717044544    1.0000        1
-    6        -0.0725595551        -0.9872307947    0.0000        2
-    7        -0.0725595097        -0.9872301770    0.0000        3
-    8         0.0406639895         0.5532661078    0.0000        1
-    9         0.1081959247         1.4720921122    0.0000        1
+    1        -2.3477708561       -31.9433007136    1.0000        1
+    2        -1.1648256617       -15.8483849877    1.0000        1
+    3        -0.9602472522       -13.0649320644    1.0000        3
+    4        -0.9602472522       -13.0649320644    1.0000        3
+    5        -0.7696762246       -10.4720607771    1.0000        1
+    6        -0.0725710040        -0.9873865668    0.0000        3
+    7        -0.0725710040        -0.9873865668    0.0000        3
+    8         0.0406623591         0.5532439248    0.0000        1
+    9         0.1081962506         1.4720965459    0.0000        1
 
- Max and min values of charge density [e/bohr^3]:   1.0835E+00   1.4988E-12
+ Max and min values of charge density [e/bohr^3]:   1.0835E+00   1.4967E-12
 
- Hartree potential time [sec]:       0.05
+ Hartree potential time [sec]:       0.03
 
-   Eigenvalue Energy             =         -12.40556609 [Ry]
-   Hartree Energy                =          57.67291554 [Ry]
-   Integral_{Vxc*rho}            =         -10.67008114 [Ry]
-   Exc = Integral{eps_xc*rho}    =         -10.12544218 [Ry]
-   Electron-Ion energy           =        -141.79407377 [Ry]
+   Eigenvalue Energy             =         -12.40553449 [Ry]
+   Hartree Energy                =          57.67276577 [Ry]
+   Integral_{Vxc*rho}            =         -10.67006177 [Ry]
+   Exc = Integral{eps_xc*rho}    =         -10.12542601 [Ry]
+   Electron-Ion energy           =        -141.79333551 [Ry]
    Ion-Ion Energy                =          22.51219190 [Ry]
-   Exc semilocal part            =          -8.25491231 [Ry]
-   Exact exchange a_x*E_x        =          -1.87052988 [Ry]   (linearized: fixed operator)
-   Exact exchange in eigenvalues =          -3.74064612 [Ry]
+   Exc semilocal part            =          -8.25489920 [Ry]
+   Exact exchange a_x*E_x        =          -1.87052681 [Ry]   (linearized: fixed operator)
+   Exact exchange in eigenvalues =          -3.74063866 [Ry]
    (E(new)-E(old))/atom  =            -0.00000004 [eV]
 
-   Total Energy =           -43.28109373 [Ry]
-   Energy/atom  =          -294.43695254 [eV]
+   Total Energy =           -43.28089182 [Ry]
+   Energy/atom  =          -294.43557898 [eV]
 
-  0-  8    SRE of pot. & charge weighted pot =   0.0003041599   0.0000179382
+  0-  8    SRE of pot. & charge weighted pot =   0.0003000759   0.0000151459
 
 
  Fock loop iteration   2 (B3LYP5 (VWN5)): inner SCF of 8 iterations
  ------------------------------------------------------------------
-   E_x (new orbitals)            =          -9.35266551 [Ry]
-   E_x (new with old operator)   =          -9.35161529 [Ry]
-   Change of E_x                 =          -0.00208431 [Ry]
-   Estimated exchange error      =            3.226E-06 [Ry]   (tolerance 1.0E-08): continue
-   Total Energy (B3LYP5 (VWN5))   =         -43.28109696 [Ry]
-   Inner SCF: stopped below a residual of 4.08E-05 Ry (adaptive criterion)
-   ACE operator: 9 orbitals, max|M - M^T|/max|M| = 4.0E-12
-   Exact exchange: 35 pair-density Poisson solves, 0.06 s of 0.09 s (FP64 CUDA Kronecker-product FD Poisson solve (order 12) on the 138x138x138 box, multipole boundary of order 9, 1/r kernel; devices take tiles of 32-column orbital blocks; the pair densities of symmetry-sector orbitals in reflection-parity classes on the 69x69x69 octant)
+   E_x (new orbitals)            =          -9.35265022 [Ry]
+   E_x (new with old operator)   =          -9.35159665 [Ry]
+   Change of E_x                 =          -0.00209099 [Ry]
+   Estimated exchange error      =            3.231E-06 [Ry]   (tolerance 1.0E-08): continue
+   Total Energy (B3LYP5 (VWN5))   =         -43.28089505 [Ry]
+   Inner SCF: stopped below a residual of 4.11E-05 Ry (adaptive criterion)
+   ACE operator: 7 orbitals, max|M - M^T|/max|M| = 4.0E-12
+   Exact exchange: 29 pair-density Poisson solves, 0.02 s of 0.04 s (FP64 CUDA Kronecker-product FD Poisson solve (order 12) on the 138x138x138 box, multipole boundary of order 9, 1/r kernel; devices take tiles of 32-column orbital blocks; the pair densities of symmetry-sector orbitals in reflection-parity classes on the 69x69x69 octant)
 
  SCF iter #   1
 
- Diagonalization time [sec] :       0.07,      tdiag_sum =        3.66
- Iteration time [sec]       :       0.13
+ Diagonalization time [sec] :       0.05,      tdiag_sum =        2.60
+ Iteration time [sec]       :       0.09
 
  Fermi level at    -0.4213 [Ry]
 
    State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
-    1        -2.3478363620       -31.9441919742    1.0000        1
-    2        -1.1648878850       -15.8492315853    1.0000        1
-    3        -0.9602551416       -13.0650394060    1.0000        3
-    4        -0.9602551382       -13.0650393599    1.0000        2
-    5        -0.7697821599       -10.4735021112    1.0000        1
-    6        -0.0724907336        -0.9862944235    0.0000        2
-    7        -0.0724907035        -0.9862940130    0.0000        3
-    8         0.0406484958         0.5530553043    0.0000        1
-    9         0.1081986540         1.4721292465    0.0000        1
+    1        -2.3477931005       -31.9436033665    1.0000        1
+    2        -1.1648545003       -15.8487773601    1.0000        1
+    3        -0.9602681482       -13.0652163712    1.0000        3
+    4        -0.9602681482       -13.0652163712    1.0000        3
+    5        -0.7698070386       -10.4738406053    1.0000        1
+    6        -0.0725002924        -0.9864244788    0.0000        3
+    7        -0.0725002924        -0.9864244788    0.0000        3
+    8         0.0406480794         0.5530496393    0.0000        1
+    9         0.1081994593         1.4721402031    0.0000        1
 
- Max and min values of charge density [e/bohr^3]:   1.0836E+00   1.5102E-12
+ Max and min values of charge density [e/bohr^3]:   1.0835E+00   1.5066E-12
 
- Hartree potential time [sec]:       0.05
+ Hartree potential time [sec]:       0.03
 
-   Eigenvalue Energy             =         -12.40603337 [Ry]
-   Hartree Energy                =          57.67584482 [Ry]
-   Integral_{Vxc*rho}            =         -10.67064069 [Ry]
-   Exc = Integral{eps_xc*rho}    =         -10.12602292 [Ry]
-   Electron-Ion energy           =        -141.79811995 [Ry]
+   Eigenvalue Energy             =         -12.40598187 [Ry]
+   Hartree Energy                =          57.67567058 [Ry]
+   Integral_{Vxc*rho}            =         -10.67061733 [Ry]
+   Exc = Integral{eps_xc*rho}    =         -10.12600289 [Ry]
+   Electron-Ion energy           =        -141.79734284 [Ry]
    Ion-Ion Energy                =          22.51219190 [Ry]
-   Exc semilocal part            =          -8.25534974 [Ry]
-   Exact exchange a_x*E_x        =          -1.87067318 [Ry]   (linearized: fixed operator)
-   Exact exchange in eigenvalues =          -3.74120628 [Ry]
-   (E(new)-E(old))/atom  =            -0.00002294 [eV]
+   Exc semilocal part            =          -8.25533357 [Ry]
+   Exact exchange a_x*E_x        =          -1.87066931 [Ry]   (linearized: fixed operator)
+   Exact exchange in eigenvalues =          -3.74119936 [Ry]
+   (E(new)-E(old))/atom  =            -0.00002301 [eV]
 
-   Total Energy =           -43.28109710 [Ry]
-   Energy/atom  =          -294.43697549 [eV]
+   Total Energy =           -43.28089520 [Ry]
+   Energy/atom  =          -294.43560199 [eV]
 
-  0-  1    SRE of pot. & charge weighted pot =   0.0053196697   0.0006038292
+  0-  1    SRE of pot. & charge weighted pot =   0.0052949926   0.0006006458
 
  SCF iter #   2
 
- Diagonalization time [sec] :       0.07,      tdiag_sum =        3.73
- Iteration time [sec]       :       0.13
+ Diagonalization time [sec] :       0.05,      tdiag_sum =        2.65
+ Iteration time [sec]       :       0.09
 
- Fermi level at    -0.4213 [Ry]
+ Fermi level at    -0.4214 [Ry]
 
    State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
-    1        -2.3477291817       -31.9427337008    1.0000        1
-    2        -1.1647339819       -15.8471376109    1.0000        1
-    3        -0.9601462988       -13.0635585117    1.0000        3
-    4        -0.9601462947       -13.0635584566    1.0000        2
-    5        -0.7698462313       -10.4743738542    1.0000        1
-    6        -0.0724974313        -0.9863855514    0.0000        2
-    7        -0.0724973993        -0.9863851158    0.0000        3
-    8         0.0406578670         0.5531828068    0.0000        1
-    9         0.1081954495         1.4720856467    0.0000        1
+    1        -2.3476865442       -31.9421535834    1.0000        1
+    2        -1.1647013247       -15.8466932835    1.0000        1
+    3        -0.9601598670       -13.0637431180    1.0000        3
+    4        -0.9601598670       -13.0637431180    1.0000        3
+    5        -0.7698706740       -10.4747064157    1.0000        1
+    6        -0.0725069051        -0.9865144491    0.0000        3
+    7        -0.0725069051        -0.9865144491    0.0000        3
+    8         0.0406579281         0.5531836380    0.0000        1
+    9         0.1081962797         1.4720969423    0.0000        1
 
- Max and min values of charge density [e/bohr^3]:   1.0835E+00   1.5142E-12
+ Max and min values of charge density [e/bohr^3]:   1.0835E+00   1.5110E-12
 
- Hartree potential time [sec]:       0.05
+ Hartree potential time [sec]:       0.03
 
-   Eigenvalue Energy             =         -12.40520398 [Ry]
-   Hartree Energy                =          57.67372338 [Ry]
-   Integral_{Vxc*rho}            =         -10.67028461 [Ry]
-   Exc = Integral{eps_xc*rho}    =         -10.12567255 [Ry]
-   Electron-Ion energy           =        -141.79491490 [Ry]
+   Eigenvalue Energy             =         -12.40515655 [Ry]
+   Hartree Energy                =          57.67355609 [Ry]
+   Integral_{Vxc*rho}            =         -10.67026248 [Ry]
+   Exc = Integral{eps_xc*rho}    =         -10.12565376 [Ry]
+   Electron-Ion energy           =        -141.79414868 [Ry]
    Ion-Ion Energy                =          22.51219190 [Ry]
-   Exc semilocal part            =          -8.25507443 [Ry]
-   Exact exchange a_x*E_x        =          -1.87059813 [Ry]   (linearized: fixed operator)
-   Exact exchange in eigenvalues =          -3.74113123 [Ry]
-   (E(new)-E(old))/atom  =            -0.00000237 [eV]
+   Exc semilocal part            =          -8.25505922 [Ry]
+   Exact exchange a_x*E_x        =          -1.87059454 [Ry]   (linearized: fixed operator)
+   Exact exchange in eigenvalues =          -3.74112458 [Ry]
+   (E(new)-E(old))/atom  =            -0.00000235 [eV]
 
-   Total Energy =           -43.28109745 [Ry]
-   Energy/atom  =          -294.43697785 [eV]
+   Total Energy =           -43.28089555 [Ry]
+   Energy/atom  =          -294.43560433 [eV]
 
-  0-  2    SRE of pot. & charge weighted pot =   0.0007600544   0.0000583155
+  0-  2    SRE of pot. & charge weighted pot =   0.0007608788   0.0000583277
 
  SCF iter #   3
 
- Diagonalization time [sec] :       0.07,      tdiag_sum =        3.79
- Iteration time [sec]       :       0.13
+ Diagonalization time [sec] :       0.05,      tdiag_sum =        2.70
+ Iteration time [sec]       :       0.09
 
- Fermi level at    -0.4213 [Ry]
+ Fermi level at    -0.4214 [Ry]
 
    State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
-    1        -2.3477429543       -31.9429210872    1.0000        1
-    2        -1.1647341242       -15.8471395476    1.0000        1
-    3        -0.9601513583       -13.0636273507    1.0000        3
-    4        -0.9601513540       -13.0636272926    1.0000        2
-    5        -0.7698382939       -10.4742658590    1.0000        1
-    6        -0.0724994349        -0.9864128115    0.0000        2
-    7        -0.0724994037        -0.9864123871    0.0000        3
-    8         0.0406592128         0.5532011181    0.0000        1
-    9         0.1081977130         1.4721164440    0.0000        1
+    1        -2.3477004601       -31.9423429205    1.0000        1
+    2        -1.1647016752       -15.8466980521    1.0000        1
+    3        -0.9601650574       -13.0638137375    1.0000        3
+    4        -0.9601650574       -13.0638137375    1.0000        3
+    5        -0.7698625559       -10.4745959624    1.0000        1
+    6        -0.0725088527        -0.9865409483    0.0000        3
+    7        -0.0725088527        -0.9865409483    0.0000        3
+    8         0.0406597256         0.5532080950    0.0000        1
+    9         0.1081985759         1.4721281841    0.0000        1
 
- Max and min values of charge density [e/bohr^3]:   1.0835E+00   1.5037E-12
+ Max and min values of charge density [e/bohr^3]:   1.0835E+00   1.5014E-12
 
- Hartree potential time [sec]:       0.05
+ Hartree potential time [sec]:       0.03
 
-   Eigenvalue Energy             =         -12.40523617 [Ry]
-   Hartree Energy                =          57.67355433 [Ry]
-   Integral_{Vxc*rho}            =         -10.67026047 [Ry]
-   Exc = Integral{eps_xc*rho}    =         -10.12565037 [Ry]
-   Electron-Ion energy           =        -141.79467115 [Ry]
+   Eigenvalue Energy             =         -12.40518961 [Ry]
+   Hartree Energy                =          57.67339167 [Ry]
+   Integral_{Vxc*rho}            =         -10.67023918 [Ry]
+   Exc = Integral{eps_xc*rho}    =         -10.12563242 [Ry]
+   Electron-Ion energy           =        -141.79391160 [Ry]
    Ion-Ion Energy                =          22.51219190 [Ry]
-   Exc semilocal part            =          -8.25505622 [Ry]
-   Exact exchange a_x*E_x        =          -1.87059416 [Ry]   (linearized: fixed operator)
-   Exact exchange in eigenvalues =          -3.74112726 [Ry]
+   Exc semilocal part            =          -8.25504167 [Ry]
+   Exact exchange a_x*E_x        =          -1.87059075 [Ry]   (linearized: fixed operator)
+   Exact exchange in eigenvalues =          -3.74112080 [Ry]
    (E(new)-E(old))/atom  =            -0.00000010 [eV]
 
-   Total Energy =           -43.28109747 [Ry]
-   Energy/atom  =          -294.43697795 [eV]
+   Total Energy =           -43.28089556 [Ry]
+   Energy/atom  =          -294.43560443 [eV]
 
-  0-  3    SRE of pot. & charge weighted pot =   0.0006102092   0.0000627378
+  0-  3    SRE of pot. & charge weighted pot =   0.0005971339   0.0000623838
 
  SCF iter #   4
 
- Diagonalization time [sec] :       0.07,      tdiag_sum =        3.86
- Iteration time [sec]       :       0.14
+ Diagonalization time [sec] :       0.05,      tdiag_sum =        2.75
+ Iteration time [sec]       :       0.09
 
- Fermi level at    -0.4213 [Ry]
+ Fermi level at    -0.4214 [Ry]
 
    State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
-    1        -2.3477652233       -31.9432240753    1.0000        1
-    2        -1.1647474098       -15.8473203077    1.0000        1
-    3        -0.9601651228       -13.0638146276    1.0000        3
-    4        -0.9601651191       -13.0638145772    1.0000        2
-    5        -0.7698227567       -10.4740544629    1.0000        1
-    6        -0.0725001490        -0.9864225267    0.0000        2
-    7        -0.0725001206        -0.9864221412    0.0000        3
-    8         0.0406600555         0.5532125829    0.0000        1
-    9         0.1082003484         1.4721523003    0.0000        1
+    1        -2.3477274700       -31.9427104109    1.0000        1
+    2        -1.1647176444       -15.8469153255    1.0000        1
+    3        -0.9601816889       -13.0640400235    1.0000        3
+    4        -0.9601816889       -13.0640400235    1.0000        3
+    5        -0.7698436316       -10.4743384828    1.0000        1
+    6        -0.0725096477        -0.9865517651    0.0000        3
+    7        -0.0725096477        -0.9865517651    0.0000        3
+    8         0.0406612563         0.5532289206    0.0000        1
+    9         0.1082018002         1.4721720530    0.0000        1
 
- Max and min values of charge density [e/bohr^3]:   1.0835E+00   1.4942E-12
+ Max and min values of charge density [e/bohr^3]:   1.0835E+00   1.4921E-12
 
- Hartree potential time [sec]:       0.05
+ Hartree potential time [sec]:       0.03
 
-   Eigenvalue Energy             =         -12.40533126 [Ry]
-   Hartree Energy                =          57.67364737 [Ry]
-   Integral_{Vxc*rho}            =         -10.67027752 [Ry]
-   Exc = Integral{eps_xc*rho}    =         -10.12566796 [Ry]
-   Electron-Ion energy           =        -141.79481183 [Ry]
+   Eigenvalue Energy             =         -12.40530425 [Ry]
+   Hartree Energy                =          57.67352265 [Ry]
+   Integral_{Vxc*rho}            =         -10.67026213 [Ry]
+   Exc = Integral{eps_xc*rho}    =         -10.12565577 [Ry]
+   Electron-Ion energy           =        -141.79411271 [Ry]
    Ion-Ion Energy                =          22.51219190 [Ry]
-   Exc semilocal part            =          -8.25506954 [Ry]
-   Exact exchange a_x*E_x        =          -1.87059842 [Ry]   (linearized: fixed operator)
-   Exact exchange in eigenvalues =          -3.74113152 [Ry]
+   Exc semilocal part            =          -8.25505955 [Ry]
+   Exact exchange a_x*E_x        =          -1.87059622 [Ry]   (linearized: fixed operator)
+   Exact exchange in eigenvalues =          -3.74112626 [Ry]
    (E(new)-E(old))/atom  =            -0.00000003 [eV]
 
-   Total Energy =           -43.28109747 [Ry]
-   Energy/atom  =          -294.43697798 [eV]
+   Total Energy =           -43.28089557 [Ry]
+   Energy/atom  =          -294.43560447 [eV]
 
-  0-  4    SRE of pot. & charge weighted pot =   0.0004451773   0.0000283652
+  0-  4    SRE of pot. & charge weighted pot =   0.0003560725   0.0000211637
 
  SCF iter #   5
 
- Diagonalization time [sec] :       0.07,      tdiag_sum =        3.93
- Iteration time [sec]       :       0.14
+ Diagonalization time [sec] :       0.05,      tdiag_sum =        2.80
+ Iteration time [sec]       :       0.09
 
  Fermi level at    -0.4213 [Ry]
 
    State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
-    1        -2.3477710865       -31.9433038482    1.0000        1
-    2        -1.1647468040       -15.8473120656    1.0000        1
-    3        -0.9601662178       -13.0638295264    1.0000        3
-    4        -0.9601662155       -13.0638294942    1.0000        2
-    5        -0.7698143985       -10.4739407430    1.0000        1
-    6        -0.0724999563        -0.9864199056    0.0000        2
-    7        -0.0724999330        -0.9864195889    0.0000        3
-    8         0.0406612537         0.5532288856    0.0000        1
-    9         0.1082019939         1.4721746889    0.0000        1
+    1        -2.3477320789       -31.9427731193    1.0000        1
+    2        -1.1647152185       -15.8468823193    1.0000        1
+    3        -0.9601815404       -13.0640380020    1.0000        3
+    4        -0.9601815404       -13.0640380020    1.0000        3
+    5        -0.7698359649       -10.4742341717    1.0000        1
+    6        -0.0725095044        -0.9865498156    0.0000        3
+    7        -0.0725095044        -0.9865498156    0.0000        3
+    8         0.0406629230         0.5532515975    0.0000        1
+    9         0.1082034453         1.4721944356    0.0000        1
 
- Max and min values of charge density [e/bohr^3]:   1.0835E+00   1.4885E-12
+ Max and min values of charge density [e/bohr^3]:   1.0835E+00   1.4872E-12
 
- Hartree potential time [sec]:       0.05
+ Hartree potential time [sec]:       0.03
 
-   Eigenvalue Energy             =         -12.40532944 [Ry]
-   Hartree Energy                =          57.67361282 [Ry]
-   Integral_{Vxc*rho}            =         -10.67027093 [Ry]
-   Exc = Integral{eps_xc*rho}    =         -10.12566165 [Ry]
-   Electron-Ion energy           =        -141.79476345 [Ry]
+   Eigenvalue Energy             =         -12.40529269 [Ry]
+   Hartree Energy                =          57.67346896 [Ry]
+   Integral_{Vxc*rho}            =         -10.67025196 [Ry]
+   Exc = Integral{eps_xc*rho}    =         -10.12564590 [Ry]
+   Electron-Ion energy           =        -141.79403365 [Ry]
    Ion-Ion Energy                =          22.51219190 [Ry]
-   Exc semilocal part            =          -8.25506447 [Ry]
-   Exact exchange a_x*E_x        =          -1.87059719 [Ry]   (linearized: fixed operator)
-   Exact exchange in eigenvalues =          -3.74113029 [Ry]
+   Exc semilocal part            =          -8.25505169 [Ry]
+   Exact exchange a_x*E_x        =          -1.87059421 [Ry]   (linearized: fixed operator)
+   Exact exchange in eigenvalues =          -3.74112426 [Ry]
    (E(new)-E(old))/atom  =            -0.00000001 [eV]
 
-   Total Energy =           -43.28109747 [Ry]
-   Energy/atom  =          -294.43697799 [eV]
+   Total Energy =           -43.28089557 [Ry]
+   Energy/atom  =          -294.43560447 [eV]
 
-  0-  5    SRE of pot. & charge weighted pot =   0.0003203772   0.0000234631
+  0-  5    SRE of pot. & charge weighted pot =   0.0002423608   0.0000166717
 
  SCF iter #   6
 
- Diagonalization time [sec] :       0.06,      tdiag_sum =        3.99
- Iteration time [sec]       :       0.14
+ Diagonalization time [sec] :       0.05,      tdiag_sum =        2.85
+ Iteration time [sec]       :       0.09
 
  Fermi level at    -0.4213 [Ry]
 
    State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
-    1        -2.3477761274       -31.9433724346    1.0000        1
-    2        -1.1647494116       -15.8473475446    1.0000        1
-    3        -0.9601682566       -13.0638572659    1.0000        3
-    4        -0.9601682561       -13.0638572587    1.0000        2
-    5        -0.7698050712       -10.4738138380    1.0000        1
-    6        -0.0724989608        -0.9864063615    0.0000        2
-    7        -0.0724989447        -0.9864061423    0.0000        3
-    8         0.0406621181         0.5532406459    0.0000        1
-    9         0.1082034726         1.4721948074    0.0000        1
+    1        -2.3477321134       -31.9427735880    1.0000        1
+    2        -1.1647154363       -15.8468852829    1.0000        1
+    3        -0.9601809147       -13.0640294887    1.0000        3
+    4        -0.9601809147       -13.0640294887    1.0000        3
+    5        -0.7698310287       -10.4741670102    1.0000        1
+    6        -0.0725085101        -0.9865362863    0.0000        3
+    7        -0.0725085101        -0.9865362863    0.0000        3
+    8         0.0406635510         0.5532601422    0.0000        1
+    9         0.1082041727         1.4722043325    0.0000        1
 
- Max and min values of charge density [e/bohr^3]:   1.0835E+00   1.4843E-12
+ Max and min values of charge density [e/bohr^3]:   1.0835E+00   1.4840E-12
 
- Hartree potential time [sec]:       0.05
+ Hartree potential time [sec]:       0.03
 
-   Eigenvalue Energy             =         -12.40533425 [Ry]
-   Hartree Energy                =          57.67362625 [Ry]
-   Integral_{Vxc*rho}            =         -10.67027177 [Ry]
-   Exc = Integral{eps_xc*rho}    =         -10.12566253 [Ry]
-   Electron-Ion energy           =        -141.79478476 [Ry]
+   Eigenvalue Energy             =         -12.40528082 [Ry]
+   Hartree Energy                =          57.67345501 [Ry]
+   Integral_{Vxc*rho}            =         -10.67024888 [Ry]
+   Exc = Integral{eps_xc*rho}    =         -10.12564298 [Ry]
+   Electron-Ion energy           =        -141.79401154 [Ry]
    Ion-Ion Energy                =          22.51219190 [Ry]
-   Exc semilocal part            =          -8.25506511 [Ry]
-   Exact exchange a_x*E_x        =          -1.87059743 [Ry]   (linearized: fixed operator)
-   Exact exchange in eigenvalues =          -3.74113053 [Ry]
+   Exc semilocal part            =          -8.25504931 [Ry]
+   Exact exchange a_x*E_x        =          -1.87059367 [Ry]   (linearized: fixed operator)
+   Exact exchange in eigenvalues =          -3.74112371 [Ry]
    (E(new)-E(old))/atom  =            -0.00000000 [eV]
 
-   Total Energy =           -43.28109747 [Ry]
-   Energy/atom  =          -294.43697800 [eV]
+   Total Energy =           -43.28089557 [Ry]
+   Energy/atom  =          -294.43560448 [eV]
 
-  0-  6    SRE of pot. & charge weighted pot =   0.0001166631   0.0000132614
+  0-  6    SRE of pot. & charge weighted pot =   0.0001621055   0.0000167905
 
  SCF iter #   7
 
- Diagonalization time [sec] :       0.06,      tdiag_sum =        4.05
- Iteration time [sec]       :       0.13
+ Diagonalization time [sec] :       0.05,      tdiag_sum =        2.90
+ Iteration time [sec]       :       0.09
 
  Fermi level at    -0.4213 [Ry]
 
    State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
-    1        -2.3477792650       -31.9434151233    1.0000        1
-    2        -1.1647527578       -15.8473930721    1.0000        1
-    3        -0.9601708287       -13.0638922609    1.0000        3
-    4        -0.9601708284       -13.0638922573    1.0000        2
-    5        -0.7698030174       -10.4737858937    1.0000        1
-    6        -0.0724990383        -0.9864074148    0.0000        2
-    7        -0.0724990234        -0.9864072129    0.0000        3
-    8         0.0406618882         0.5532375191    0.0000        1
-    9         0.1082037244         1.4721982338    0.0000        1
+    1        -2.3477340077       -31.9427993615    1.0000        1
+    2        -1.1647180738       -15.8469211686    1.0000        1
+    3        -0.9601825728       -13.0640520489    1.0000        3
+    4        -0.9601825728       -13.0640520489    1.0000        3
+    5        -0.7698287911       -10.4741365663    1.0000        1
+    6        -0.0725082810        -0.9865331703    0.0000        3
+    7        -0.0725082810        -0.9865331703    0.0000        3
+    8         0.0406635457         0.5532600706    0.0000        1
+    9         0.1082044018         1.4722074506    0.0000        1
 
- Max and min values of charge density [e/bohr^3]:   1.0835E+00   1.4826E-12
+ Max and min values of charge density [e/bohr^3]:   1.0835E+00   1.4822E-12
 
- Hartree potential time [sec]:       0.05
+ Hartree potential time [sec]:       0.03
 
-   Eigenvalue Energy             =         -12.40535339 [Ry]
-   Hartree Energy                =          57.67366661 [Ry]
-   Integral_{Vxc*rho}            =         -10.67027852 [Ry]
-   Exc = Integral{eps_xc*rho}    =         -10.12566928 [Ry]
-   Electron-Ion energy           =        -141.79484492 [Ry]
+   Eigenvalue Energy             =         -12.40529204 [Ry]
+   Hartree Energy                =          57.67348133 [Ry]
+   Integral_{Vxc*rho}            =         -10.67025331 [Ry]
+   Exc = Integral{eps_xc*rho}    =         -10.12564744 [Ry]
+   Electron-Ion energy           =        -141.79405057 [Ry]
    Ion-Ion Energy                =          22.51219190 [Ry]
-   Exc semilocal part            =          -8.25507033 [Ry]
-   Exact exchange a_x*E_x        =          -1.87059895 [Ry]   (linearized: fixed operator)
-   Exact exchange in eigenvalues =          -3.74113205 [Ry]
+   Exc semilocal part            =          -8.25505274 [Ry]
+   Exact exchange a_x*E_x        =          -1.87059470 [Ry]   (linearized: fixed operator)
+   Exact exchange in eigenvalues =          -3.74112475 [Ry]
    (E(new)-E(old))/atom  =            -0.00000000 [eV]
 
-   Total Energy =           -43.28109747 [Ry]
-   Energy/atom  =          -294.43697800 [eV]
+   Total Energy =           -43.28089557 [Ry]
+   Energy/atom  =          -294.43560448 [eV]
 
-  0-  7    SRE of pot. & charge weighted pot =   0.0000633197   0.0000019336
+  0-  7    SRE of pot. & charge weighted pot =   0.0000981358   0.0000084647
 
  SCF iter #   8
 
- Diagonalization time [sec] :       0.06,      tdiag_sum =        4.11
- Iteration time [sec]       :       0.13
+ Diagonalization time [sec] :       0.04,      tdiag_sum =        2.94
+ Iteration time [sec]       :       0.09
 
  Fermi level at    -0.4213 [Ry]
 
    State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
-    1        -2.3477795803       -31.9434194132    1.0000        1
-    2        -1.1647533149       -15.8474006522    1.0000        1
-    3        -0.9601711625       -13.0638968025    1.0000        3
-    4        -0.9601711623       -13.0638968003    1.0000        2
-    5        -0.7698028173       -10.4737831711    1.0000        1
-    6        -0.0724990754        -0.9864079206    0.0000        2
-    7        -0.0724990612        -0.9864077271    0.0000        3
-    8         0.0406617234         0.5532352765    0.0000        1
-    9         0.1082037397         1.4721984411    0.0000        1
+    1        -2.3477359636       -31.9428259741    1.0000        1
+    2        -1.1647208136       -15.8469584451    1.0000        1
+    3        -0.9601842943       -13.0640754712    1.0000        3
+    4        -0.9601842943       -13.0640754712    1.0000        3
+    5        -0.7698267367       -10.4741086138    1.0000        1
+    6        -0.0725081026        -0.9865307420    0.0000        3
+    7        -0.0725081026        -0.9865307420    0.0000        3
+    8         0.0406635212         0.5532597366    0.0000        1
+    9         0.1082045928         1.4722100480    0.0000        1
 
- Max and min values of charge density [e/bohr^3]:   1.0835E+00   1.4818E-12
+ Max and min values of charge density [e/bohr^3]:   1.0835E+00   1.4810E-12
 
- Hartree potential time [sec]:       0.05
+ Hartree potential time [sec]:       0.03
 
-   Eigenvalue Energy             =         -12.40535607 [Ry]
-   Hartree Energy                =          57.67367651 [Ry]
-   Integral_{Vxc*rho}            =         -10.67028024 [Ry]
-   Exc = Integral{eps_xc*rho}    =         -10.12567098 [Ry]
-   Electron-Ion energy           =        -141.79486022 [Ry]
+   Eigenvalue Energy             =         -12.40530420 [Ry]
+   Hartree Energy                =          57.67351111 [Ry]
+   Integral_{Vxc*rho}            =         -10.67025838 [Ry]
+   Exc = Integral{eps_xc*rho}    =         -10.12565250 [Ry]
+   Electron-Ion energy           =        -141.79409576 [Ry]
    Ion-Ion Energy                =          22.51219190 [Ry]
-   Exc semilocal part            =          -8.25507166 [Ry]
-   Exact exchange a_x*E_x        =          -1.87059933 [Ry]   (linearized: fixed operator)
-   Exact exchange in eigenvalues =          -3.74113243 [Ry]
+   Exc semilocal part            =          -8.25505667 [Ry]
+   Exact exchange a_x*E_x        =          -1.87059582 [Ry]   (linearized: fixed operator)
+   Exact exchange in eigenvalues =          -3.74112587 [Ry]
    (E(new)-E(old))/atom  =            -0.00000000 [eV]
 
-   Total Energy =           -43.28109747 [Ry]
-   Energy/atom  =          -294.43697800 [eV]
+   Total Energy =           -43.28089557 [Ry]
+   Energy/atom  =          -294.43560448 [eV]
 
-  0-  8    SRE of pot. & charge weighted pot =   0.0000584256   0.0000008474
+  0-  8    SRE of pot. & charge weighted pot =   0.0000296078   0.0000014983
 
  SCF iter #   9
 
- Diagonalization time [sec] :       1.61,      tdiag_sum =        5.72
- Iteration time [sec]       :       1.68
+ Diagonalization time [sec] :       0.04,      tdiag_sum =        2.98
+ Iteration time [sec]       :       0.09
 
  Fermi level at    -0.4213 [Ry]
 
    State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
-    1        -2.3477795803       -31.9434194132    1.0000        1
-    2        -1.1647533149       -15.8474006523    1.0000        1
-    3        -0.9601711625       -13.0638968025    1.0000        3
-    4        -0.9601711623       -13.0638968004    1.0000        2
-    5        -0.7698028173       -10.4737831713    1.0000        1
-    6        -0.0724991665        -0.9864091599    0.0000        2
-    7        -0.0724991524        -0.9864089678    0.0000        3
-    8         0.0406605682         0.5532195584    0.0000        1
-    9         0.1082037231         1.4721982157    0.0000        1
+    1        -2.3477362700       -31.9428301419    1.0000        1
+    2        -1.1647205482       -15.8469548347    1.0000        1
+    3        -0.9601843935       -13.0640768210    1.0000        3
+    4        -0.9601843935       -13.0640768210    1.0000        3
+    5        -0.7698274524       -10.4741183519    1.0000        1
+    6        -0.0725083850        -0.9865345840    0.0000        3
+    7        -0.0725083850        -0.9865345840    0.0000        3
+    8         0.0406634731         0.5532590820    0.0000        1
+    9         0.1082045178         1.4722090282    0.0000        1
 
- Max and min values of charge density [e/bohr^3]:   1.0835E+00   1.4781E-12
+ Max and min values of charge density [e/bohr^3]:   1.0835E+00   1.4807E-12
 
- Hartree potential time [sec]:       0.05
+ Hartree potential time [sec]:       0.03
 
-   Eigenvalue Energy             =         -12.40535607 [Ry]
-   Hartree Energy                =          57.67368675 [Ry]
-   Integral_{Vxc*rho}            =         -10.67028220 [Ry]
-   Exc = Integral{eps_xc*rho}    =         -10.12567295 [Ry]
-   Electron-Ion energy           =        -141.79487576 [Ry]
+   Eigenvalue Energy             =         -12.40530612 [Ry]
+   Hartree Energy                =          57.67351185 [Ry]
+   Integral_{Vxc*rho}            =         -10.67025862 [Ry]
+   Exc = Integral{eps_xc*rho}    =         -10.12565273 [Ry]
+   Electron-Ion energy           =        -141.79409720 [Ry]
    Ion-Ion Energy                =          22.51219190 [Ry]
-   Exc semilocal part            =          -8.25507317 [Ry]
-   Exact exchange a_x*E_x        =          -1.87059979 [Ry]   (linearized: fixed operator)
-   Exact exchange in eigenvalues =          -3.74113289 [Ry]
+   Exc semilocal part            =          -8.25505685 [Ry]
+   Exact exchange a_x*E_x        =          -1.87059587 [Ry]   (linearized: fixed operator)
+   Exact exchange in eigenvalues =          -3.74112592 [Ry]
    (E(new)-E(old))/atom  =            -0.00000000 [eV]
 
-   Total Energy =           -43.28109747 [Ry]
-   Energy/atom  =          -294.43697800 [eV]
+   Total Energy =           -43.28089557 [Ry]
+   Energy/atom  =          -294.43560448 [eV]
 
-  0-  9    SRE of pot. & charge weighted pot =   0.0001616375   0.0000017218
+  0-  9    SRE of pot. & charge weighted pot =   0.0000344142   0.0000004223
+
+ SCF iter #  10
+
+ Diagonalization time [sec] :       0.08,      tdiag_sum =        3.06
+ Iteration time [sec]       :       0.12
+
+ Fermi level at    -0.4213 [Ry]
+
+   State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
+
+    1        -2.3477362700       -31.9428301419    1.0000        1
+    2        -1.1647205482       -15.8469548347    1.0000        1
+    3        -0.9601843935       -13.0640768210    1.0000        3
+    4        -0.9601843935       -13.0640768210    1.0000        3
+    5        -0.7698274524       -10.4741183519    1.0000        1
+    6        -0.0725084042        -0.9865348454    0.0000        3
+    7        -0.0725084042        -0.9865348454    0.0000        3
+    8         0.0406634573         0.5532588677    0.0000        1
+    9         0.1082045144         1.4722089823    0.0000        1
+
+ Max and min values of charge density [e/bohr^3]:   1.0835E+00   1.4800E-12
+
+ Hartree potential time [sec]:       0.03
+
+   Eigenvalue Energy             =         -12.40530612 [Ry]
+   Hartree Energy                =          57.67351462 [Ry]
+   Integral_{Vxc*rho}            =         -10.67025917 [Ry]
+   Exc = Integral{eps_xc*rho}    =         -10.12565327 [Ry]
+   Electron-Ion energy           =        -141.79410167 [Ry]
+   Ion-Ion Energy                =          22.51219190 [Ry]
+   Exc semilocal part            =          -8.25505728 [Ry]
+   Exact exchange a_x*E_x        =          -1.87059600 [Ry]   (linearized: fixed operator)
+   Exact exchange in eigenvalues =          -3.74112604 [Ry]
+   (E(new)-E(old))/atom  =            -0.00000000 [eV]
+
+   Total Energy =           -43.28089557 [Ry]
+   Energy/atom  =          -294.43560448 [eV]
+
+  0- 10    SRE of pot. & charge weighted pot =   0.0000494328   0.0000004693
 
 
- Fock loop iteration   3 (B3LYP5 (VWN5)): inner SCF of 9 iterations
+ Fock loop iteration   3 (B3LYP5 (VWN5)): inner SCF of 10 iterations
  ------------------------------------------------------------------
-   E_x (new orbitals)            =          -9.35299936 [Ry]
-   E_x (new with old operator)   =          -9.35283222 [Ry]
-   Change of E_x                 =          -0.00033384 [Ry]
-   Estimated exchange error      =            8.451E-08 [Ry]   (tolerance 1.0E-08): continue
-   Total Energy (B3LYP5 (VWN5))   =         -43.28109756 [Ry]
-   Inner SCF: levels converged by 29 eigensolver passes at its last Hamiltonian (last move 9.9E-09 Ry)
-   ACE operator: 9 orbitals, max|M - M^T|/max|M| = 4.0E-12
-   Exact exchange: 35 pair-density Poisson solves, 0.03 s of 0.05 s (FP64 CUDA Kronecker-product FD Poisson solve (order 12) on the 138x138x138 box, multipole boundary of order 9, 1/r kernel; devices take tiles of 32-column orbital blocks; the pair densities of symmetry-sector orbitals in reflection-parity classes on the 69x69x69 octant)
+   E_x (new orbitals)            =          -9.35298041 [Ry]
+   E_x (new with old operator)   =          -9.35281511 [Ry]
+   Change of E_x                 =          -0.00033018 [Ry]
+   Estimated exchange error      =            8.401E-08 [Ry]   (tolerance 1.0E-08): continue
+   Total Energy (B3LYP5 (VWN5))   =         -43.28089565 [Ry]
+   Inner SCF: levels converged by 2 eigensolver passes at its last Hamiltonian (last move 8.9E-09 Ry)
+   ACE operator: 7 orbitals, max|M - M^T|/max|M| = 4.0E-12
+   Exact exchange: 29 pair-density Poisson solves, 0.02 s of 0.04 s (FP64 CUDA Kronecker-product FD Poisson solve (order 12) on the 138x138x138 box, multipole boundary of order 9, 1/r kernel; devices take tiles of 32-column orbital blocks; the pair densities of symmetry-sector orbitals in reflection-parity classes on the 69x69x69 octant)
 
  SCF iter #   1
 
- Diagonalization time [sec] :       0.07,      tdiag_sum =        5.79
- Iteration time [sec]       :       0.13
+ Diagonalization time [sec] :       0.05,      tdiag_sum =        3.12
+ Iteration time [sec]       :       0.09
 
- Fermi level at    -0.4213 [Ry]
+ Fermi level at    -0.4214 [Ry]
 
    State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
-    1        -2.3477791503       -31.9434135630    1.0000        1
-    2        -1.1647542053       -15.8474127665    1.0000        1
-    3        -0.9601763475       -13.0639673492    1.0000        3
-    4        -0.9601763463       -13.0639673323    1.0000        2
-    5        -0.7698259110       -10.4740973805    1.0000        1
-    6        -0.0724891862        -0.9862733693    0.0000        2
-    7        -0.0724891792        -0.9862732743    0.0000        3
-    8         0.0406581931         0.5531872436    0.0000        1
-    9         0.1082042607         1.4722055297    0.0000        1
+    1        -2.3477361640       -31.9428286996    1.0000        1
+    2        -1.1647212739       -15.8469647081    1.0000        1
+    3        -0.9601895868       -13.0641474804    1.0000        3
+    4        -0.9601895868       -13.0641474804    1.0000        3
+    5        -0.7698504387       -10.4744310987    1.0000        1
+    6        -0.0724984112        -0.9863988826    0.0000        3
+    7        -0.0724984112        -0.9863988826    0.0000        3
+    8         0.0406611205         0.5532270738    0.0000        1
+    9         0.1082050710         1.4722165548    0.0000        1
 
- Max and min values of charge density [e/bohr^3]:   1.0835E+00   1.4836E-12
+ Max and min values of charge density [e/bohr^3]:   1.0835E+00   1.4843E-12
 
- Hartree potential time [sec]:       0.05
+ Hartree potential time [sec]:       0.03
 
-   Eigenvalue Energy             =         -12.40542392 [Ry]
-   Hartree Energy                =          57.67415376 [Ry]
-   Integral_{Vxc*rho}            =         -10.67037368 [Ry]
-   Exc = Integral{eps_xc*rho}    =         -10.12576685 [Ry]
-   Electron-Ion energy           =        -141.79552959 [Ry]
+   Eigenvalue Energy             =         -12.40537410 [Ry]
+   Hartree Energy                =          57.67398080 [Ry]
+   Integral_{Vxc*rho}            =         -10.67035052 [Ry]
+   Exc = Integral{eps_xc*rho}    =         -10.12574705 [Ry]
+   Electron-Ion energy           =        -141.79475418 [Ry]
    Ion-Ion Energy                =          22.51219190 [Ry]
-   Exc semilocal part            =          -8.25514462 [Ry]
-   Exact exchange a_x*E_x        =          -1.87062223 [Ry]   (linearized: fixed operator)
-   Exact exchange in eigenvalues =          -3.74122210 [Ry]
-   (E(new)-E(old))/atom  =            -0.00000062 [eV]
+   Exc semilocal part            =          -8.25512863 [Ry]
+   Exact exchange a_x*E_x        =          -1.87061842 [Ry]   (linearized: fixed operator)
+   Exact exchange in eigenvalues =          -3.74121450 [Ry]
+   (E(new)-E(old))/atom  =            -0.00000061 [eV]
 
-   Total Energy =           -43.28109756 [Ry]
-   Energy/atom  =          -294.43697861 [eV]
+   Total Energy =           -43.28089566 [Ry]
+   Energy/atom  =          -294.43560509 [eV]
 
-  0-  1    SRE of pot. & charge weighted pot =   0.0007641642   0.0000907182
+  0-  1    SRE of pot. & charge weighted pot =   0.0007628153   0.0000894154
 
  SCF iter #   2
 
- Diagonalization time [sec] :       0.07,      tdiag_sum =        5.85
- Iteration time [sec]       :       0.13
+ Diagonalization time [sec] :       0.05,      tdiag_sum =        3.17
+ Iteration time [sec]       :       0.09
 
- Fermi level at    -0.4213 [Ry]
+ Fermi level at    -0.4214 [Ry]
 
    State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
-    1        -2.3477619049       -31.9431789260    1.0000        1
-    2        -1.1647302945       -15.8470874415    1.0000        1
-    3        -0.9601589021       -13.0637299896    1.0000        3
-    4        -0.9601589009       -13.0637299743    1.0000        2
-    5        -0.7698330688       -10.4741947668    1.0000        1
-    6        -0.0724886891        -0.9862666065    0.0000        2
-    7        -0.0724886829        -0.9862665223    0.0000        3
-    8         0.0406599098         0.5532106008    0.0000        1
-    9         0.1082040746         1.4722029979    0.0000        1
+    1        -2.3477193548       -31.9425999979    1.0000        1
+    2        -1.1646977117       -15.8466441257    1.0000        1
+    3        -0.9601724990       -13.0639149865    1.0000        3
+    4        -0.9601724990       -13.0639149865    1.0000        3
+    5        -0.7698575830       -10.4745283032    1.0000        1
+    6        -0.0724980356        -0.9863937732    0.0000        3
+    7        -0.0724980356        -0.9863937732    0.0000        3
+    8         0.0406628138         0.5532501124    0.0000        1
+    9         0.1082048905         1.4722140990    0.0000        1
 
- Max and min values of charge density [e/bohr^3]:   1.0835E+00   1.4833E-12
+ Max and min values of charge density [e/bohr^3]:   1.0835E+00   1.4837E-12
 
- Hartree potential time [sec]:       0.05
+ Hartree potential time [sec]:       0.03
 
-   Eigenvalue Energy             =         -12.40528614 [Ry]
-   Hartree Energy                =          57.67382877 [Ry]
-   Integral_{Vxc*rho}            =         -10.67031940 [Ry]
-   Exc = Integral{eps_xc*rho}    =         -10.12571343 [Ry]
-   Electron-Ion energy           =        -141.79504024 [Ry]
+   Eigenvalue Energy             =         -12.40523929 [Ry]
+   Hartree Energy                =          57.67366064 [Ry]
+   Integral_{Vxc*rho}            =         -10.67029709 [Ry]
+   Exc = Integral{eps_xc*rho}    =         -10.12569448 [Ry]
+   Electron-Ion energy           =        -141.79427224 [Ry]
    Ion-Ion Energy                =          22.51219190 [Ry]
-   Exc semilocal part            =          -8.25510265 [Ry]
-   Exact exchange a_x*E_x        =          -1.87061078 [Ry]   (linearized: fixed operator)
-   Exact exchange in eigenvalues =          -3.74121065 [Ry]
+   Exc semilocal part            =          -8.25508733 [Ry]
+   Exact exchange a_x*E_x        =          -1.87060715 [Ry]   (linearized: fixed operator)
+   Exact exchange in eigenvalues =          -3.74120324 [Ry]
    (E(new)-E(old))/atom  =            -0.00000005 [eV]
 
-   Total Energy =           -43.28109757 [Ry]
-   Energy/atom  =          -294.43697867 [eV]
+   Total Energy =           -43.28089567 [Ry]
+   Energy/atom  =          -294.43560515 [eV]
 
-  0-  2    SRE of pot. & charge weighted pot =   0.0001457602   0.0000103869
+  0-  2    SRE of pot. & charge weighted pot =   0.0001365681   0.0000104258
 
  SCF iter #   3
 
- Diagonalization time [sec] :       0.07,      tdiag_sum =        5.92
- Iteration time [sec]       :       0.13
+ Diagonalization time [sec] :       0.05,      tdiag_sum =        3.22
+ Iteration time [sec]       :       0.09
 
- Fermi level at    -0.4213 [Ry]
+ Fermi level at    -0.4214 [Ry]
 
    State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
-    1        -2.3477633804       -31.9431990014    1.0000        1
-    2        -1.1647300456       -15.8470840551    1.0000        1
-    3        -0.9601591008       -13.0637326940    1.0000        3
-    4        -0.9601590998       -13.0637326807    1.0000        2
-    5        -0.7698301502       -10.4741550572    1.0000        1
-    6        -0.0724880002        -0.9862572332    0.0000        2
-    7        -0.0724879947        -0.9862571589    0.0000        3
-    8         0.0406602803         0.5532156420    0.0000        1
-    9         0.1082045908         1.4722100213    0.0000        1
+    1        -2.3477209443       -31.9426216236    1.0000        1
+    2        -1.1646975146       -15.8466414436    1.0000        1
+    3        -0.9601727789       -13.0639187952    1.0000        3
+    4        -0.9601727789       -13.0639187952    1.0000        3
+    5        -0.7698546689       -10.4744886539    1.0000        1
+    6        -0.0724973958        -0.9863850673    0.0000        3
+    7        -0.0724973958        -0.9863850673    0.0000        3
+    8         0.0406631843         0.5532551528    0.0000        1
+    9         0.1082054136         1.4722212164    0.0000        1
 
- Max and min values of charge density [e/bohr^3]:   1.0835E+00   1.4811E-12
+ Max and min values of charge density [e/bohr^3]:   1.0835E+00   1.4813E-12
 
- Hartree potential time [sec]:       0.05
+ Hartree potential time [sec]:       0.03
 
-   Eigenvalue Energy             =         -12.40528355 [Ry]
-   Hartree Energy                =          57.67380104 [Ry]
-   Integral_{Vxc*rho}            =         -10.67031553 [Ry]
-   Exc = Integral{eps_xc*rho}    =         -10.12570988 [Ry]
-   Electron-Ion energy           =        -141.79499936 [Ry]
+   Eigenvalue Energy             =         -12.40523737 [Ry]
+   Hartree Energy                =          57.67363461 [Ry]
+   Integral_{Vxc*rho}            =         -10.67029352 [Ry]
+   Exc = Integral{eps_xc*rho}    =         -10.12569123 [Ry]
+   Electron-Ion energy           =        -141.79423391 [Ry]
    Ion-Ion Energy                =          22.51219190 [Ry]
-   Exc semilocal part            =          -8.25509974 [Ry]
-   Exact exchange a_x*E_x        =          -1.87061014 [Ry]   (linearized: fixed operator)
-   Exact exchange in eigenvalues =          -3.74121001 [Ry]
+   Exc semilocal part            =          -8.25508464 [Ry]
+   Exact exchange a_x*E_x        =          -1.87060658 [Ry]   (linearized: fixed operator)
+   Exact exchange in eigenvalues =          -3.74120267 [Ry]
    (E(new)-E(old))/atom  =            -0.00000000 [eV]
 
-   Total Energy =           -43.28109757 [Ry]
-   Energy/atom  =          -294.43697867 [eV]
+   Total Energy =           -43.28089567 [Ry]
+   Energy/atom  =          -294.43560515 [eV]
 
-  0-  3    SRE of pot. & charge weighted pot =   0.0001272734   0.0000107975
+  0-  3    SRE of pot. & charge weighted pot =   0.0001099489   0.0000106952
 
  SCF iter #   4
 
- Diagonalization time [sec] :       0.07,      tdiag_sum =        5.99
- Iteration time [sec]       :       0.14
+ Diagonalization time [sec] :       0.05,      tdiag_sum =        3.27
+ Iteration time [sec]       :       0.09
 
  Fermi level at    -0.4213 [Ry]
 
    State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
-    1        -2.3477666697       -31.9432437539    1.0000        1
-    2        -1.1647320029       -15.8471106846    1.0000        1
-    3        -0.9601608896       -13.0637570323    1.0000        3
-    4        -0.9601608889       -13.0637570228    1.0000        2
-    5        -0.7698260955       -10.4740998896    1.0000        1
-    6        -0.0724873199        -0.9862479769    0.0000        2
-    7        -0.0724873155        -0.9862479171    0.0000        3
-    8         0.0406605488         0.5532192951    0.0000        1
-    9         0.1082051755         1.4722179768    0.0000        1
+    1        -2.3477246330       -31.9426718120    1.0000        1
+    2        -1.1646996649       -15.8466707002    1.0000        1
+    3        -0.9601747799       -13.0639460203    1.0000        3
+    4        -0.9601747799       -13.0639460203    1.0000        3
+    5        -0.7698501397       -10.4744270310    1.0000        1
+    6        -0.0724966563        -0.9863750061    0.0000        3
+    7        -0.0724966563        -0.9863750061    0.0000        3
+    8         0.0406634935         0.5532593604    0.0000        1
+    9         0.1082060694         1.4722301388    0.0000        1
 
- Max and min values of charge density [e/bohr^3]:   1.0835E+00   1.4793E-12
+ Max and min values of charge density [e/bohr^3]:   1.0835E+00   1.4794E-12
 
- Hartree potential time [sec]:       0.05
+ Hartree potential time [sec]:       0.03
 
-   Eigenvalue Energy             =         -12.40529309 [Ry]
-   Hartree Energy                =          57.67381542 [Ry]
-   Integral_{Vxc*rho}            =         -10.67031799 [Ry]
-   Exc = Integral{eps_xc*rho}    =         -10.12571245 [Ry]
-   Electron-Ion energy           =        -141.79502069 [Ry]
+   Eigenvalue Energy             =         -12.40524799 [Ry]
+   Hartree Energy                =          57.67365260 [Ry]
+   Integral_{Vxc*rho}            =         -10.67029652 [Ry]
+   Exc = Integral{eps_xc*rho}    =         -10.12569433 [Ry]
+   Electron-Ion energy           =        -141.79426078 [Ry]
    Ion-Ion Energy                =          22.51219190 [Ry]
-   Exc semilocal part            =          -8.25510167 [Ry]
-   Exact exchange a_x*E_x        =          -1.87061079 [Ry]   (linearized: fixed operator)
-   Exact exchange in eigenvalues =          -3.74121066 [Ry]
+   Exc semilocal part            =          -8.25508699 [Ry]
+   Exact exchange a_x*E_x        =          -1.87060735 [Ry]   (linearized: fixed operator)
+   Exact exchange in eigenvalues =          -3.74120343 [Ry]
    (E(new)-E(old))/atom  =            -0.00000000 [eV]
 
-   Total Energy =           -43.28109757 [Ry]
-   Energy/atom  =          -294.43697867 [eV]
+   Total Energy =           -43.28089567 [Ry]
+   Energy/atom  =          -294.43560515 [eV]
 
-  0-  4    SRE of pot. & charge weighted pot =   0.0000875561   0.0000046295
+  0-  4    SRE of pot. & charge weighted pot =   0.0000630600   0.0000039925
 
  SCF iter #   5
 
- Diagonalization time [sec] :       0.07,      tdiag_sum =        6.06
- Iteration time [sec]       :       0.14
+ Diagonalization time [sec] :       0.05,      tdiag_sum =        3.32
+ Iteration time [sec]       :       0.09
 
  Fermi level at    -0.4213 [Ry]
 
    State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
-    1        -2.3477672706       -31.9432519309    1.0000        1
-    2        -1.1647309089       -15.8470958008    1.0000        1
-    3        -0.9601602149       -13.0637478524    1.0000        3
-    4        -0.9601602148       -13.0637478503    1.0000        2
-    5        -0.7698234759       -10.4740642477    1.0000        1
-    6        -0.0724868176        -0.9862411425    0.0000        2
-    7        -0.0724868151        -0.9862411085    0.0000        3
-    8         0.0406609478         0.5532247241    0.0000        1
-    9         0.1082056488         1.4722244165    0.0000        1
+    1        -2.3477248199       -31.9426743544    1.0000        1
+    2        -1.1646984127       -15.8466536639    1.0000        1
+    3        -0.9601739648       -13.0639349307    1.0000        3
+    4        -0.9601739648       -13.0639349307    1.0000        3
+    5        -0.7698481425       -10.4743998572    1.0000        1
+    6        -0.0724962478        -0.9863694482    0.0000        3
+    7        -0.0724962478        -0.9863694482    0.0000        3
+    8         0.0406638441         0.5532641306    0.0000        1
+    9         0.1082064391         1.4722351695    0.0000        1
 
  Max and min values of charge density [e/bohr^3]:   1.0835E+00   1.4783E-12
 
- Hartree potential time [sec]:       0.05
+ Hartree potential time [sec]:       0.03
 
-   Eigenvalue Energy             =         -12.40528417 [Ry]
-   Hartree Energy                =          57.67379491 [Ry]
-   Integral_{Vxc*rho}            =         -10.67031393 [Ry]
-   Exc = Integral{eps_xc*rho}    =         -10.12570847 [Ry]
-   Electron-Ion energy           =        -141.79498951 [Ry]
+   Eigenvalue Energy             =         -12.40523861 [Ry]
+   Hartree Energy                =          57.67363092 [Ry]
+   Integral_{Vxc*rho}            =         -10.67029239 [Ry]
+   Exc = Integral{eps_xc*rho}    =         -10.12569029 [Ry]
+   Electron-Ion energy           =        -141.79422745 [Ry]
    Ion-Ion Energy                =          22.51219190 [Ry]
-   Exc semilocal part            =          -8.25509853 [Ry]
-   Exact exchange a_x*E_x        =          -1.87060994 [Ry]   (linearized: fixed operator)
-   Exact exchange in eigenvalues =          -3.74120982 [Ry]
+   Exc semilocal part            =          -8.25508379 [Ry]
+   Exact exchange a_x*E_x        =          -1.87060650 [Ry]   (linearized: fixed operator)
+   Exact exchange in eigenvalues =          -3.74120258 [Ry]
    (E(new)-E(old))/atom  =            -0.00000000 [eV]
 
-   Total Energy =           -43.28109757 [Ry]
-   Energy/atom  =          -294.43697867 [eV]
+   Total Energy =           -43.28089567 [Ry]
+   Energy/atom  =          -294.43560515 [eV]
 
-  0-  5    SRE of pot. & charge weighted pot =   0.0000509158   0.0000056103
+  0-  5    SRE of pot. & charge weighted pot =   0.0000475068   0.0000050726
 
  SCF iter #   6
 
- Diagonalization time [sec] :       0.06,      tdiag_sum =        6.12
- Iteration time [sec]       :       0.13
+ Diagonalization time [sec] :       0.05,      tdiag_sum =        3.37
+ Iteration time [sec]       :       0.09
 
  Fermi level at    -0.4213 [Ry]
 
    State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
-    1        -2.3477685456       -31.9432692782    1.0000        1
-    2        -1.1647325887       -15.8471186550    1.0000        1
-    3        -0.9601613542       -13.0637633528    1.0000        2
-    4        -0.9601613542       -13.0637633526    1.0000        3
-    5        -0.7698225167       -10.4740511972    1.0000        1
-    6        -0.0724867964        -0.9862408541    0.0000        2
-    7        -0.0724867945        -0.9862408282    0.0000        3
-    8         0.0406608740         0.5532237196    0.0000        1
-    9         0.1082057518         1.4722258172    0.0000        1
+    1        -2.3477258501       -31.9426883708    1.0000        1
+    2        -1.1646998315       -15.8466729672    1.0000        1
+    3        -0.9601748696       -13.0639472411    1.0000        3
+    4        -0.9601748696       -13.0639472411    1.0000        3
+    5        -0.7698472434       -10.4743876237    1.0000        1
+    6        -0.0724962320        -0.9863692337    0.0000        3
+    7        -0.0724962320        -0.9863692337    0.0000        3
+    8         0.0406637894         0.5532633863    0.0000        1
+    9         0.1082065358         1.4722364848    0.0000        1
 
  Max and min values of charge density [e/bohr^3]:   1.0835E+00   1.4777E-12
 
- Hartree potential time [sec]:       0.05
+ Hartree potential time [sec]:       0.03
 
-   Eigenvalue Energy             =         -12.40529272 [Ry]
-   Hartree Energy                =          57.67381151 [Ry]
-   Integral_{Vxc*rho}            =         -10.67031676 [Ry]
-   Exc = Integral{eps_xc*rho}    =         -10.12571129 [Ry]
-   Electron-Ion energy           =        -141.79501452 [Ry]
+   Eigenvalue Energy             =         -12.40524533 [Ry]
+   Hartree Energy                =          57.67364339 [Ry]
+   Integral_{Vxc*rho}            =         -10.67029450 [Ry]
+   Exc = Integral{eps_xc*rho}    =         -10.12569239 [Ry]
+   Electron-Ion energy           =        -141.79424648 [Ry]
    Ion-Ion Energy                =          22.51219190 [Ry]
-   Exc semilocal part            =          -8.25510071 [Ry]
-   Exact exchange a_x*E_x        =          -1.87061058 [Ry]   (linearized: fixed operator)
-   Exact exchange in eigenvalues =          -3.74121045 [Ry]
+   Exc semilocal part            =          -8.25508542 [Ry]
+   Exact exchange a_x*E_x        =          -1.87060697 [Ry]   (linearized: fixed operator)
+   Exact exchange in eigenvalues =          -3.74120305 [Ry]
    (E(new)-E(old))/atom  =            -0.00000000 [eV]
 
-   Total Energy =           -43.28109757 [Ry]
-   Energy/atom  =          -294.43697867 [eV]
+   Total Energy =           -43.28089567 [Ry]
+   Energy/atom  =          -294.43560515 [eV]
 
-  0-  6    SRE of pot. & charge weighted pot =   0.0000109160   0.0000003452
+  0-  6    SRE of pot. & charge weighted pot =   0.0000135786   0.0000009626
 
  SCF iter #   7
 
- Diagonalization time [sec] :       0.06,      tdiag_sum =        6.18
- Iteration time [sec]       :       0.13
+ Diagonalization time [sec] :       0.05,      tdiag_sum =        3.41
+ Iteration time [sec]       :       0.09
 
  Fermi level at    -0.4213 [Ry]
 
    State   Eigenvalue [Ry]      Eigenvalue [eV]    Occup.     Repr.
 
-    1        -2.3477685456       -31.9432692782    1.0000        1
-    2        -1.1647325887       -15.8471186550    1.0000        1
-    3        -0.9601613542       -13.0637633528    1.0000        2
-    4        -0.9601613542       -13.0637633526    1.0000        3
-    5        -0.7698225167       -10.4740511972    1.0000        1
-    6        -0.0724867964        -0.9862408544    0.0000        2
-    7        -0.0724867945        -0.9862408286    0.0000        3
-    8         0.0406608692         0.5532236536    0.0000        1
-    9         0.1082057517         1.4722258172    0.0000        1
+    1        -2.3477258501       -31.9426883708    1.0000        1
+    2        -1.1646998315       -15.8466729672    1.0000        1
+    3        -0.9601748696       -13.0639472411    1.0000        3
+    4        -0.9601748696       -13.0639472411    1.0000        3
+    5        -0.7698472434       -10.4743876237    1.0000        1
+    6        -0.0724962335        -0.9863692534    0.0000        3
+    7        -0.0724962335        -0.9863692534    0.0000        3
+    8         0.0406637857         0.5532633351    0.0000        1
+    9         0.1082065357         1.4722364835    0.0000        1
 
- Max and min values of charge density [e/bohr^3]:   1.0835E+00   1.4776E-12
+ Max and min values of charge density [e/bohr^3]:   1.0835E+00   1.4775E-12
 
- Hartree potential time [sec]:       0.05
+ Hartree potential time [sec]:       0.03
 
-   Eigenvalue Energy             =         -12.40529272 [Ry]
-   Hartree Energy                =          57.67381185 [Ry]
-   Integral_{Vxc*rho}            =         -10.67031684 [Ry]
-   Exc = Integral{eps_xc*rho}    =         -10.12571138 [Ry]
-   Electron-Ion energy           =        -141.79501486 [Ry]
+   Eigenvalue Energy             =         -12.40524533 [Ry]
+   Hartree Energy                =          57.67364346 [Ry]
+   Integral_{Vxc*rho}            =         -10.67029454 [Ry]
+   Exc = Integral{eps_xc*rho}    =         -10.12569245 [Ry]
+   Electron-Ion energy           =        -141.79424627 [Ry]
    Ion-Ion Energy                =          22.51219190 [Ry]
-   Exc semilocal part            =          -8.25510078 [Ry]
-   Exact exchange a_x*E_x        =          -1.87061060 [Ry]   (linearized: fixed operator)
-   Exact exchange in eigenvalues =          -3.74121047 [Ry]
+   Exc semilocal part            =          -8.25508545 [Ry]
+   Exact exchange a_x*E_x        =          -1.87060699 [Ry]   (linearized: fixed operator)
+   Exact exchange in eigenvalues =          -3.74120307 [Ry]
    (E(new)-E(old))/atom  =            -0.00000000 [eV]
 
-   Total Energy =           -43.28109757 [Ry]
-   Energy/atom  =          -294.43697867 [eV]
+   Total Energy =           -43.28089567 [Ry]
+   Energy/atom  =          -294.43560515 [eV]
 
-  0-  7    SRE of pot. & charge weighted pot =   0.0000159800   0.0000003398
+  0-  7    SRE of pot. & charge weighted pot =   0.0000185828   0.0000009982
 
 
  Fock loop iteration   4 (B3LYP5 (VWN5)): inner SCF of 7 iterations
  ------------------------------------------------------------------
-   E_x (new orbitals)            =          -9.35305302 [Ry]
-   E_x (new with old operator)   =          -9.35302618 [Ry]
-   Change of E_x                 =          -0.00005367 [Ry]
-   Estimated exchange error      =            2.517E-09 [Ry]   (tolerance 1.0E-08): converged
-   Total Energy (B3LYP5 (VWN5))   =         -43.28109757 [Ry]
-   Inner SCF: levels converged by 1 eigensolver passes at its last Hamiltonian (last move 4.8E-09 Ry)
-   Exact exchange: 15 pair-density Poisson solves, 0.01 s of 0.02 s (FP64 CUDA Kronecker-product FD Poisson solve (order 12) on the 138x138x138 box, multipole boundary of order 9, 1/r kernel; devices take tiles of 32-column orbital blocks; the pair densities of symmetry-sector orbitals in reflection-parity classes on the 69x69x69 octant)
+   E_x (new orbitals)            =          -9.35303497 [Ry]
+   E_x (new with old operator)   =          -9.35300768 [Ry]
+   Change of E_x                 =          -0.00005456 [Ry]
+   Estimated exchange error      =            2.268E-09 [Ry]   (tolerance 1.0E-08): converged
+   Total Energy (B3LYP5 (VWN5))   =         -43.28089567 [Ry]
+   Inner SCF: levels converged by 1 eigensolver passes at its last Hamiltonian (last move 3.8E-09 Ry)
+   Exact exchange: 14 pair-density Poisson solves, 0.01 s of 0.02 s (FP64 CUDA Kronecker-product FD Poisson solve (order 12) on the 138x138x138 box, multipole boundary of order 9, 1/r kernel; devices take tiles of 32-column orbital blocks; the pair densities of symmetry-sector orbitals in reflection-parity classes on the 69x69x69 octant)
 
 
  Hybrid functional B3LYP5 (VWN5): generalized Kohn-Sham energies
  ------------------------------------------------------------------
-   Eigenvalue Energy             =         -12.40529272 [Ry]
-   Hartree Energy                =          57.67381185 [Ry]
-   Exc semilocal part            =          -8.25510078 [Ry]
-   Exact exchange E_x            =          -9.35305302 [Ry]
-   Exact exchange a_x*E_x        =          -1.87061060 [Ry]
-   Exact exchange in eigenvalues =          -3.74121047 [Ry]
-   Exc = semilocal + a_x*E_x     =         -10.12571138 [Ry]
-   Electron-Ion energy           =        -141.79501486 [Ry]
+   Eigenvalue Energy             =         -12.40524533 [Ry]
+   Hartree Energy                =          57.67364346 [Ry]
+   Exc semilocal part            =          -8.25508545 [Ry]
+   Exact exchange E_x            =          -9.35303497 [Ry]
+   Exact exchange a_x*E_x        =          -1.87060699 [Ry]
+   Exact exchange in eigenvalues =          -3.74120307 [Ry]
+   Exc = semilocal + a_x*E_x     =         -10.12569245 [Ry]
+   Electron-Ion energy           =        -141.79424627 [Ry]
    Ion-Ion Energy                =          22.51219190 [Ry]
 
-   Total Energy (B3LYP5 (VWN5)) =           -43.28109757 [Ry]
+   Total Energy (B3LYP5 (VWN5)) =           -43.28089567 [Ry]
 
- Fock loop converged after 4 outer iterations (estimated exchange error 2.52E-09 Ry < 1.0E-08 Ry).
- Exact exchange: 155 pair-density Poisson solves in 0.48 s (0.15 s in the solver); Fock loop 11.67 s, 27 SCF iterations of the PBE start
+ Fock loop converged after 4 outer iterations (estimated exchange error 2.27E-09 Ry < 1.0E-08 Ry).
+ Exact exchange: 130 pair-density Poisson solves in 0.85 s (0.10 s in the solver); Fock loop 7.18 s, 20 SCF iterations of the PBE start
  Pair-density Poisson solver: FP64 CUDA Kronecker-product FD Poisson solve (order 12) on the 138x138x138 box, multipole boundary of order 9, 1/r kernel; devices take tiles of 32-column orbital blocks; the pair densities of symmetry-sector orbitals in reflection-parity classes on the 69x69x69 octant
 
 Self-consistency convergence achieved.
 
-Time for self-consistent field [sec] :      11.79,    tdiag_sum =        6.18
-Time spent on Hartree potential [sec] :        2.93
+Time for self-consistent field [sec] :       7.40,    tdiag_sum =        3.41
+Time spent on Hartree potential [sec] :        1.51
 
  Tot. charge (user input) [e] =   0.00000000
- Tot. charge (computed) [e] =   0.00000000
+ Tot. charge (computed) [e] =  -0.00000000
  Dipole components [Debye]:
- x-component =  -0.00000000
+ x-component =   0.00000000
  y-component =  -0.00000000
- z-component =   0.07643422
+ z-component =   0.07619247
 
  Density at the sphere: the sphere adds an estimated 2.2E-06 Ry to the total energy (decay constant 0.86 /bohr: a factor 10 per 0.71 ang)
    Wall share of Domain_Energy_Tolerance (5.0E-04 Ry): within it.
@@ -2500,24 +2291,24 @@ Time spent on Hartree potential [sec] :        2.93
 
  Initial Hamiltonian component timings [sec]
  --------------------------------------------------
- Finite-difference (-nabla^2) :     0.010291
- V_ion diagonal/local         :     0.299031
- V_ion nonlocal projectors    :     0.011358
- Initial V_xc (B3LYP5)             :     0.011307
- Component subtotal             :     0.331987
+ Finite-difference (-nabla^2) :     0.008365
+ V_ion diagonal/local         :     0.011876
+ V_ion nonlocal projectors    :     0.019928
+ Initial V_xc (B3LYP5)             :     0.009893
+ Component subtotal             :     0.050062
  --------------------------------------------------
 
  SCF timing analysis [sec]
  --------------------------------------------------
- Initial Hartree potential      :     0.108758
- Initial exchange-correlation   :     0.011307
- Hamiltonian binding subtotal  :     0.019830
- Diagonalization subtotal       :     6.180668
- Occupation/density subtotal   :     0.347110
- Hartree potential subtotal     :     2.928082
- Exchange-correlation subtotal  :     0.112163
- Mixing/energy subtotal         :     0.591791
- SCF wall time                   :    11.669851
+ Initial Hartree potential      :     0.055456
+ Initial exchange-correlation   :     0.009893
+ Hamiltonian binding subtotal  :     0.009075
+ Diagonalization subtotal       :     3.413628
+ Occupation/density subtotal   :     0.273249
+ Hartree potential subtotal     :     1.505551
+ Exchange-correlation subtotal  :     0.064076
+ Mixing/energy subtotal         :     0.293263
+ SCF wall time                   :     7.183239
  --------------------------------------------------
 
 Forces and MPI statistics
@@ -2528,33 +2319,33 @@ are not calculated by this Python single-point implementation.
  Accelerated Hamiltonian statistics:
  -----------------------------------
  Backend = cupy
- H applications =        12296
- Orbital vectors applied =        49354
+ H applications =         7234
+ Orbital vectors applied =        27827
  Total H application time [sec] =     0.000000
  Average H application [sec] =     0.000000
- Local-potential updates =           58
- Local update time [sec] =     0.017898
+ Local-potential updates =           52
+ Local update time [sec] =     0.007652
  Per-H device timing = disabled (would synchronize every recurrence)
- GPU initial-eigensolver calls =            4
- GPU initial-eigensolver synchronized time [sec] =     1.289714
- GPU SUBSPACE calls =          340
- GPU SUBSPACE synchronized time [sec] =     4.710069
- GPU representation scheduler batches =           86
- GPU representation scheduler wall time [sec] =     6.033883
- Final active states by representation = 8 8 8 6
- Requested-eigenpair download [sec] =     0.015427
- GPU density builds =          174
- GPU density build/download [sec] =     0.070313
- Final wavefunction download [sec] =     0.121758
- Accelerated Hartree solves =           59
- Accelerated Hartree total [sec] =     3.035298
- Hartree boundary/RHS [sec] =     0.105050
- Hartree linear solve [sec] =     2.909983
+ GPU initial-eigensolver calls =            3
+ GPU initial-eigensolver synchronized time [sec] =     0.973609
+ GPU SUBSPACE calls =          156
+ GPU SUBSPACE synchronized time [sec] =     2.308222
+ GPU representation scheduler batches =           53
+ GPU representation scheduler wall time [sec] =     3.298360
+ Final active states by representation = 9 6 8
+ Requested-eigenpair download [sec] =     0.007378
+ GPU density builds =          104
+ GPU density build/download [sec] =     0.040848
+ Final wavefunction download [sec] =     0.215102
+ Accelerated Hartree solves =           53
+ Accelerated Hartree total [sec] =     1.559836
+ Hartree boundary/RHS [sec] =     0.072157
+ Hartree linear solve [sec] =     1.476539
  Host-to-device time [sec] =     0.000000
- Device kernel time [sec] =     5.999783
- Device-to-host time [sec] =     0.015427
- Pre-SCF setup/reporting wall time [sec] :    1.416502
- Post-SCF finalization/reporting [sec] :    0.039603
- Total accelerated Python wall time [sec] :       13.25
+ Device kernel time [sec] =     3.281831
+ Device-to-host time [sec] =     0.007378
+ Pre-SCF setup/reporting wall time [sec] :    1.283437
+ Post-SCF finalization/reporting [sec] :    0.030214
+ Total accelerated Python wall time [sec] :        8.71
  parsec.dat: examples/0d_hybrid_functionals/CO/b3lyp5/parsec.dat (potential and density of 1 spin channel(s) on 1387496 points, 5 wavefunction(s))
 Text log: examples/0d_hybrid_functionals/CO/b3lyp5/parsec.out

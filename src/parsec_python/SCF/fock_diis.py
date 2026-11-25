@@ -514,8 +514,10 @@ class OuterDIIS:
         """
 
         latest = self.window[-1]
+        # (a block of a weighted symmetry sector counts each state for the ``partners`` it stands for; 1 otherwise)
         electrons = [
-            sum(float(block.occupations.sum()) for block in channel.values()) for channel in latest.channels
+            sum(float(block.occupations.sum()) * _partners(block) for block in channel.values())
+            for channel in latest.channels
         ]
         occupied_counts = [
             {key: int(block.occupations.size) for key, block in channel.items()} for channel in latest.channels
@@ -569,7 +571,7 @@ class OuterDIIS:
                     self.last_note = "another occupation pattern: plain step"
                     return None
                 natural = np.clip(natural, 0.0, 1.0)
-                kept_sum += float(natural.sum())
+                kept_sum += float(natural.sum()) * _partners(members[0][0].channels[channel][key])
                 combination = basis @ rotation[:, chosen]
                 terms = [
                     (entry.channels[channel][key], combination[offsets[i] : offsets[i + 1]])
@@ -585,6 +587,12 @@ class OuterDIIS:
                     blocks[key][1] = np.minimum(blocks[key][1] * (float(total) / kept_sum), 1.0)
             channels.append({key: (phi, natural) for key, (phi, natural) in blocks.items()})
         return channels
+
+
+def _partners(block) -> float:
+    """The partners each state of ``block`` stands for: those of a weighted symmetry sector, 1 for any other block."""
+
+    return float(getattr(block, "partners", 1.0))
 
 
 def _same_place(term, reference):

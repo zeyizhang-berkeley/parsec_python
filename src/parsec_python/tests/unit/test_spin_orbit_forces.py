@@ -15,10 +15,12 @@ energy) is in the report of the parity round.
 # here are those of the Fortran parity round.
 from __future__ import annotations
 
+import os
 import shutil
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import numpy as np
 
@@ -242,8 +244,14 @@ class CommandLineTests(unittest.TestCase):
         perturbative = self.base.replace("SO_from_scratch: .true.\n", "Spin_Polarization: .true.\n")
         self.assertEqual(main([str(self.write("Skip_force: .false.\n", perturbative)), "--quiet"]), 2)
         translation = parse_parsec_input(self.write("Molecular_Dynamics: .true.\n"))
-        features = _reference_only_features(translation, accelerated_backend_selected=True)
+        # PARSEC_SOC_DEVICE_FORCES=off: the reference solver's spinor loop; auto (the default): the device forces of
+        # the accelerated spinor loop (acceleration/Forces/spinor_device.py)
+        with mock.patch.dict(os.environ, {"PARSEC_SOC_DEVICE_FORCES": "off"}):
+            features = _reference_only_features(translation, accelerated_backend_selected=True)
         self.assertTrue(any("spin-orbit coupling or non-collinear" in item for item in features))
+        with mock.patch.dict(os.environ, {"PARSEC_SOC_DEVICE_FORCES": "auto"}):
+            features = _reference_only_features(translation, accelerated_backend_selected=True)
+        self.assertFalse(any("spin-orbit coupling or non-collinear" in item for item in features))
 
 
 if __name__ == "__main__":

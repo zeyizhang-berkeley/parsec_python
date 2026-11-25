@@ -3,8 +3,11 @@
 A species without ``Cubic_Spline`` takes the cubic spline by default (``PARSEC_CUBIC_SPLINE_DEFAULT=on``), the
 projectors of a converted ``MARTINS_NEW`` table end at its channel cutoffs (``PARSEC_PROJECTOR_TAIL=auto``), the
 Kleinman-Bylander denominators take the exact quadrature of the logarithmic mesh (``PARSEC_KB_QUADRATURE=auto``), the
-Perdew-Zunger correlation is continuous (``PARSEC_CA_CONTINUITY=on``) and a slab with forces takes the Hartree
-potential that makes its energy stationary (``PARSEC_HARTREE_VARIATIONAL=slab``).  A test whose reference comes from
+Perdew-Zunger correlation is continuous (``PARSEC_CA_CONTINUITY=on``), a slab with forces takes the Hartree
+potential that makes its energy stationary (``PARSEC_HARTREE_VARIATIONAL=slab``), the spline of a local potential
+hands over to ``-2 Z/r`` at its Coulomb onset (``PARSEC_SPLINE_COULOMB_TAIL=auto``), the local potential and the
+projectors are Fourier-filtered to the grid (``PARSEC_LOCAL_FILTER=all``) and the LDA+U projectors are smooth
+(``PARSEC_LDAU_SMOOTH_PROJECTORS=on``).  A test whose reference comes from
 PARSEC 1.5 (or from this package before those defaults) runs under their off values: ``setUpModule =
 parsec15_tables_module`` for a whole module, :func:`parsec15_tables` around a block, or :func:`start_parsec15_tables`
 in ``setUpClass``.
@@ -17,13 +20,17 @@ import unittest
 from unittest import mock
 
 #: The off values of those defaults: the linear tables, the tabulated tails, the KB quadrature and the correlation of
-#: PARSEC 1.5, and the Poisson potential of a slab.
+#: PARSEC 1.5, the Poisson potential of a slab, the spline out to the end of the table, the unfiltered tables and the
+#: LDA+U projectors of upot.F90.
 PARSEC15_TABLES = {
     "PARSEC_CUBIC_SPLINE_DEFAULT": "off",
     "PARSEC_PROJECTOR_TAIL": "off",
     "PARSEC_KB_QUADRATURE": "trapezoid",
     "PARSEC_CA_CONTINUITY": "off",
     "PARSEC_HARTREE_VARIATIONAL": "off",
+    "PARSEC_SPLINE_COULOMB_TAIL": "off",
+    "PARSEC_LOCAL_FILTER": "off",
+    "PARSEC_LDAU_SMOOTH_PROJECTORS": "off",
 }
 
 

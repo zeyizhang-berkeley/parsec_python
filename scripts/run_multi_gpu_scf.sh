@@ -53,6 +53,9 @@
 # layout: every sector on one GPU of its rank and the pair densities of its
 # exchange on all GPUs of all ranks; a structure without symmetry then needs
 # no --rank-per-gpu (see "Hybrid functionals on several nodes" in MULTI_GPU.md).
+# It runs without the distributed filter set below (the runner takes
+# PARSEC_CUPY_DISTRIBUTED_FILTER=0 for it and says so in parsec.out); a 1 set
+# before calling the script is refused with a hybrid.
 #
 # Call the script by its path in the checkout, from a batch script or from the
 # shell of an interactive allocation, after loading the MPI and CUDA modules
@@ -177,6 +180,9 @@ export PARSEC_NATIVE_SECTOR_ASSEMBLY="${PARSEC_NATIVE_SECTOR_ASSEMBLY:-1}"
 # step, the small Ritz problem solved on the GPU, states kept between steps.
 export PARSEC_CUPY_FILTER_GRAPHS="${PARSEC_CUPY_FILTER_GRAPHS:-1}"
 export PARSEC_CUPY_FILTER_COLUMN_MAJOR="${PARSEC_CUPY_FILTER_COLUMN_MAJOR:-1}"
+# (the distributed filter given to this script, empty where the default 1 below stands: the runner then runs a
+# hybrid functional with 0, whose exchange operator a filter spread over GPUs does not hold, and says so)
+export PARSEC_LAUNCH_DISTRIBUTED_FILTER="${PARSEC_CUPY_DISTRIBUTED_FILTER:-}"
 export PARSEC_CUPY_DISTRIBUTED_FILTER="${PARSEC_CUPY_DISTRIBUTED_FILTER:-1}"
 export PARSEC_CUPY_CHEBFF_GENERALIZED_RITZ="${PARSEC_CUPY_CHEBFF_GENERALIZED_RITZ:-1}"
 export PARSEC_CUPY_DEVICE_RANDOM="${PARSEC_CUPY_DEVICE_RANDOM:-1}"

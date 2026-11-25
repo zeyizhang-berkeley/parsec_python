@@ -14,15 +14,17 @@ through ``r - R_a``, so
 
 with ``grad`` the gradient with respect to the electron coordinate and
 ``D`` built from the final orbitals.  The gradient of a sampled projector is
-``sqrt(h^3) [R_d grad Y + R_d' Y d/|d|]`` with ``R_d'`` the slope of the
-linear interpolant of :func:`parsec_python.Hamiltonian.hubbard.interpolate_hubbard_radial`:
-the exact derivative of the sampled projector, so the forces are the exact
-derivative of the discrete energy except where a grid point crosses the
-projector radius (the projector is cut where ``R_d`` is not zero: the energy
+``sqrt(h^3) [R_d grad Y + R_d' Y d/|d|]`` with ``R_d'`` the slope of
+:func:`parsec_python.Hamiltonian.hubbard.interpolate_hubbard_radial`: the
+exact derivative of the sampled projector.  With the smooth projectors of
+``PARSEC_LDAU_SMOOTH_PROJECTORS`` (the default) the energy is twice
+differentiable in the positions and the forces are its derivative.  Under
+``off`` (the projectors of ``upot.F90``, cut where ``R_d`` is not zero and
+interpolated linearly) the forces are the exact derivative of the discrete
+energy except where a grid point crosses the projector radius (the energy
 jumps) or the distance of a point crosses a sample of the radial table (the
-derivative jumps).  Over finite steps the slope of the energy then differs from
-the force; the smooth projectors of ``PARSEC_LDAU_SMOOTH_PROJECTORS`` (opt-in)
-remove both events.
+derivative jumps), so over finite steps the slope of the energy differs from
+the force there.
 
 With ``J != 0`` the potential matrix of PARSEC is not symmetric and not the
 derivative of its energy (see the module of the term), so there is no force

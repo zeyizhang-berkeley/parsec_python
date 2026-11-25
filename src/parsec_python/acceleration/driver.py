@@ -214,6 +214,14 @@ def _reference_cache_key(
         from .V_ion.setup_options import hash_pseudopotential_setup
 
         hash_pseudopotential_setup(digest, specification)
+        if getattr(specification, "has_hubbard", False):
+            # the shape of the LDA+U projectors (PARSEC_LDAU_SMOOTH_PROJECTORS); the projectors of upot.F90 (off) add
+            # nothing, the key of before
+            from parsec_python.Hamiltonian.hubbard import ldau_smooth_projectors_fraction
+
+            fraction = ldau_smooth_projectors_fraction()
+            if fraction:
+                digest.update(f"ldau-smooth-{fraction!r}".encode("ascii"))
         if specification.pseudopotential_format != "martins_new":
             # What the input adds to an old Martins file: the occupations,
             # hence the ionic charge, and the radius of the projectors.
@@ -303,6 +311,24 @@ def _cupy_installed() -> bool:
         return find_spec("cupy") is not None
     except (ImportError, ValueError):
         return False
+
+
+def _start_compile_ahead(problem, backend) -> bool:
+    """Compile the kernels of ``problem`` ahead on background threads where the backend may be CuPy
+    (``PARSEC_CUPY_COMPILE_AHEAD``, :mod:`.backends.compile_ahead`; ``ValueError`` for a value it does not know).
+
+    Not on the CPU (``PARSEC_DEVICE=cpu``), for a host backend or where CuPy is not installed.
+    """
+
+    from .backends.compile_ahead import compile_ahead_setting, start
+
+    if compile_ahead_setting() == "off":
+        return False
+    if str(backend).strip().lower() not in {"auto", "cupy"}:
+        return False
+    if os.environ.get("PARSEC_DEVICE", "auto").strip().lower() == "cpu" or not _cupy_installed():
+        return False
+    return start(problem)
 
 
 def _reference_with_matrix(reference):
@@ -647,7 +673,36 @@ def _symmetry_index_frame(grid, problem, mpi_context=None):
         return None
     if _oblique_sector_refusal(problem, features=mpi_context is None) is not None:
         return None
-    return index_frame(grid)
+    return index_frame(grid, general=_oblique_full_group(problem))
+
+
+def _oblique_full_group(problem) -> bool:
+    """Whether the frame of an oblique bulk cell also takes the integer operations of its grid indices that are no
+    signed permutation (``PARSEC_OBLIQUE_FULL_GROUP=auto``, :func:`.Symmetry.oblique_frame.general_index_operations`):
+    a functional without a density gradient (:data:`.Symmetry.oblique_frame.GRADIENT_FREE_FUNCTIONALS`) at the Gamma
+    point of a bulk cell, whose discrete Hamiltonian commutes with them (the gradient of a GGA and the k-point term do
+    not)."""
+
+    from .Symmetry.oblique_frame import GRADIENT_FREE_FUNCTIONALS, oblique_full_group_setting
+
+    if oblique_full_group_setting() != "auto":
+        return False
+    cell = getattr(problem, "periodic_cell", None)
+    if (
+        cell is None
+        or int(getattr(cell, "dimensions", 3)) != 3
+        or int(getattr(problem.grid, "periodicity", 3)) != 3
+    ):
+        return False
+    if str(getattr(problem.scf, "xc_functional", "")).strip().lower() not in GRADIENT_FREE_FUNCTIONALS:
+        return False
+    if getattr(problem, "has_kpoint_sampling", False):
+        from parsec_python.Grid import kpoint_sampling
+
+        sampling = kpoint_sampling(problem)
+        if sampling is None or len(sampling[0]) != 1 or np.any(sampling[0]):
+            return False
+    return True
 
 
 def _index_frame_cell(problem) -> bool:
@@ -1080,9 +1135,10 @@ def _orbital_group_refusal(problem, spin_polarized: bool, mpi_context, *, basis:
 
     The sectors of a subgroup with weights (:class:`.Symmetry.PointGroupReduction`) solve one partner of a
     degenerate level where others exist: what reads every partner of every occupied state is refused here
-    (exact exchange; the meta-GGA kinetic density of a periodic cell, and of a cluster only under
-    ``PARSEC_ORBITAL_GROUP_META_GGA=off``, whose ``auto`` averages ``tau`` and ``g`` over the full group since
-    2026-11-23; LDA+U only under ``PARSEC_LDAU_WEIGHTED_SECTORS=off``, whose
+    (exact exchange where :func:`_weighted_hybrid_refusal` says so, which is every hybrid under
+    ``PARSEC_ORBITAL_GROUP_HYBRID=off``; the meta-GGA kinetic density only under ``PARSEC_ORBITAL_GROUP_META_GGA=off``,
+    and that of a periodic cell under ``PARSEC_ORBITAL_GROUP_META_GGA_CELL=off`` too, whose ``auto`` values average
+    ``tau`` and ``g`` over the full group since 2026-11-23; LDA+U only under ``PARSEC_LDAU_WEIGHTED_SECTORS=off``, whose
     ``auto`` averages its occupation matrices over the full group since 2026-11-21), as is spin-orbit coupling.  Since 2026-11-19 four
     inputs take the weighted sectors where their switch is ``auto`` (``Symmetry/weighted_inputs.py``):
     ``Fix_Number_Eigenvalues``, a libxc LDA or GGA, ``occup.in`` (equal occupations of partners, else the run
@@ -1114,12 +1170,18 @@ def _orbital_group_refusal(problem, spin_polarized: bool, mpi_context, *, basis:
         if spin_refusal is not None:
             return spin_refusal
     if getattr(scf, "is_hybrid", False) or bool(getattr(mpi_context, "exchange", False)):
-        return "a hybrid functional"
+        # (the hybrid of a cluster in one process takes them under PARSEC_ORBITAL_GROUP_HYBRID=auto: its exchange
+        # through the coset images of the weighted states, Hamiltonian/exchange_device.WeightedExchange)
+        hybrid_refusal = _weighted_hybrid_refusal(problem, mpi_context)
+        if hybrid_refusal is not None:
+            return hybrid_refusal
     if getattr(scf, "is_meta_gga", False) and (
-        weighted_input_setting("meta_gga") == "off" or getattr(problem, "periodic_cell", None) is not None
+        weighted_input_setting("meta_gga") == "off"
+        or (getattr(problem, "periodic_cell", None) is not None and weighted_input_setting("meta_gga_cell") == "off")
     ):
         # (a cluster's meta-GGA takes them under PARSEC_ORBITAL_GROUP_META_GGA=auto: tau and g of the solved states
-        # averaged over the full group, Hamiltonian/meta_gga_device.py; a periodic cell keeps the abelian group)
+        # averaged over the full group, Hamiltonian/meta_gga_device.py; a cell's, which the sectors take only as a
+        # bulk cell at the Gamma point, under PARSEC_ORBITAL_GROUP_META_GGA_CELL=auto as well)
         return "a meta-GGA functional"
     if is_libxc_functional(getattr(scf, "xc_functional", "ca")) and weighted_input_setting("libxc") == "off":
         return "a libxc functional"
@@ -1145,6 +1207,34 @@ def _orbital_group_refusal(problem, spin_polarized: bool, mpi_context, *, basis:
 
 
 _MPI_WEIGHTED_OFF = "PARSEC_ORBITAL_GROUP_MPI=off"
+
+
+def _weighted_hybrid_refusal(problem, mpi_context) -> str | None:
+    """Why a hybrid functional keeps the abelian group, or ``None`` where its exchange reads the weighted sectors.
+
+    ``PARSEC_ORBITAL_GROUP_HYBRID=auto`` admits the self-consistent hybrid of a cluster in one process: the exchange of
+    :class:`.Hamiltonian.exchange_device.WeightedExchange` (the coset images of the weighted states), in the plans
+    and with the rules of every other input (spin and ``occup.in`` by their own switches above).  The exchange
+    service of several MPI ranks (``SCF/hybrid_mpi.py``), a periodic cell's (the sectors of its little group,
+    ``SCF/gamma_hybrid_route.py``), a meta-GGA hybrid and the units of ``PARSEC_ORBITAL_IRREPS`` keep the abelian
+    group, as does every hybrid under ``off``, as before.
+    """
+
+    from .Symmetry.axis_reflection import orbital_irreps_setting
+    from .Symmetry.weighted_inputs import weighted_input_setting
+
+    scf = getattr(problem, "scf", None)
+    if weighted_input_setting("hybrid") == "off":
+        return "a hybrid functional"
+    if mpi_context is not None or bool(getattr(mpi_context, "exchange", False)):
+        return "a hybrid functional on several MPI ranks"
+    if getattr(problem, "periodic_cell", None) is not None:
+        return "a hybrid functional of a periodic cell"
+    if getattr(scf, "is_meta_gga", False):
+        return "a meta-GGA hybrid functional"
+    if orbital_irreps_setting() != "off":
+        return "a hybrid functional with the units of PARSEC_ORBITAL_IRREPS"
+    return None
 
 
 def _weighted_spin_refusal(problem, mpi_context, *, basis: int | None = None) -> str | None:
@@ -1402,17 +1492,20 @@ def _symmetry_detection_text(candidate) -> str:
     """The ``symmetry_detection`` of the backend details for the group the orbitals of a run take."""
 
     from .Symmetry import PointGroupReduction, SignedPermutationReduction
+    from .Symmetry.axis_reflection import holds_general_operations
 
+    # (the frame of an oblique cell under PARSEC_OBLIQUE_FULL_GROUP=auto: integer maps of its grid indices, some of
+    # them no signed permutation)
+    kind = "integer maps of the grid indices" if holds_general_operations(candidate) else "signed permutations"
     return (
         (
-            f"exact group of {candidate.full_operations.shape[0]} operations detected (signed "
-            f"permutations, "
+            f"exact group of {candidate.full_operations.shape[0]} operations detected ({kind}, "
             f"{int(np.count_nonzero(np.any(np.asarray(candidate.full_translations) != 0, axis=1)))}"
             f" of them with a translation, by half the cell or, non-symmorphic, a fraction of it, or "
             f"about a symmetric site off the origin; PARSEC_PERIODIC_TRANSLATIONS, "
             f"PARSEC_PERIODIC_SYMMETRY_CENTRE)"
             if getattr(candidate, "full_translations", None) is not None
-            else f"exact point group of {candidate.full_operations.shape[0]} signed permutations detected"
+            else f"exact point group of {candidate.full_operations.shape[0]} {kind} detected"
         )
         + f"; the orbitals use the one-dimensional sectors of a subgroup of {candidate.group_order} "
         f"(weights {', '.join(str(int(w)) for w in candidate.sector_weights)})"
@@ -4601,6 +4694,9 @@ def prepare_single_point(
         _refuse_hybrid_routes(problem, backend=backend, mpi_context=mpi_context)
     if getattr(getattr(problem, "scf", None), "is_meta_gga", False):
         _refuse_meta_gga_routes(problem, mpi_context=mpi_context)
+    # PARSEC_CUPY_COMPILE_AHEAD: the kernels the input will need, compiled on background threads beside the
+    # preparation (the same binaries; nothing where the command line has handed them over already)
+    _start_compile_ahead(problem, backend)
     preparation = _Preparation()
     try:
         return _prepare_single_point(
@@ -5101,10 +5197,13 @@ def _prepare_single_point(
     from .Symmetry.axis_reflection import slab_wire_sectors_setting
     from .Symmetry.oblique_frame import oblique_sectors_setting
 
-    # (PARSEC_SLAB_WIRE_SECTORS and PARSEC_OBLIQUE_SECTORS, the sectors of a wire, slab or oblique cell: read in every
-    # run, so that a value they do not know is refused before the SCF)
+    # (PARSEC_SLAB_WIRE_SECTORS, PARSEC_OBLIQUE_SECTORS and PARSEC_OBLIQUE_FULL_GROUP, the sectors of a wire, slab or
+    # oblique cell: read in every run, so that a value they do not know is refused before the SCF)
+    from .Symmetry.oblique_frame import oblique_full_group_setting
+
     slab_wire_sectors_setting()
     oblique_sectors_setting()
+    oblique_full_group_setting()
     # A periodic cell in an MPI sector context: one sector of the identity
     # whose basis the ranks share (a bulk cell at Gamma; see
     # periodic_sector_refusal for what that route does not take).
@@ -5469,6 +5568,14 @@ def _prepare_single_point(
                         orbits_of_real_atoms(candidate, len(real_atoms))
                 if candidate is not origin_group and not _ranks_divide_sectors(candidate, mpi_context):
                     candidate, undivided = origin_group, candidate
+            if symmetry_frame is not None and symmetry_frame.general:
+                from .Symmetry.axis_reflection import holds_general_operations
+
+                if not holds_general_operations(candidate):
+                    # PARSEC_OBLIQUE_FULL_GROUP=auto, where the sectors of the signed permutations solve as little (or
+                    # no weighted plan is taken): the frame of the signed permutations alone, as before
+                    symmetry_frame = symmetry_frame.signed()
+                    detection_grid = symmetry_frame.frame_grid
             from .Symmetry import PointGroupReduction
 
             if is_periodic and (candidate.group_order > 1 or search_cell) and not isinstance(
@@ -5738,10 +5845,20 @@ def _prepare_single_point(
         # (Symmetry/oblique_frame.py; the Cartesian ones are S W S^-1): kept on it for the readers that turn vectors
         # (the forces refuse such sectors, Forces/compute.py).
         object.__setattr__(symmetry_reduction, "index_frame", symmetry_frame)
-        symmetry_detection += (
-            f"; detected in the frame of the grid indices (PARSEC_OBLIQUE_SECTORS=auto: {symmetry_frame.order} "
-            "signed permutations of the grid axes are isometries of the cell that keep its finite-difference operators)"
-        )
+        if symmetry_frame.general:
+            symmetry_detection += (
+                f"; detected in the frame of the grid indices (PARSEC_OBLIQUE_SECTORS=auto: {symmetry_frame.order} "
+                f"operations of the grid indices are isometries of the cell that keep its Laplacian, "
+                f"{symmetry_frame.order - len(symmetry_frame.general)} signed permutations of the grid axes and "
+                f"{len(symmetry_frame.general)} other integer maps, PARSEC_OBLIQUE_FULL_GROUP=auto for a functional "
+                "without a density gradient)"
+            )
+        else:
+            symmetry_detection += (
+                f"; detected in the frame of the grid indices (PARSEC_OBLIQUE_SECTORS=auto: {symmetry_frame.order} "
+                "signed permutations of the grid axes are isometries of the cell that keep its finite-difference "
+                "operators)"
+            )
     # Without a point group the orbitals may still take the route of the
     # sectors, as one sector of the identity, so that the devices of the
     # process share its basis (PARSEC_CUPY_SINGLE_SECTOR).
@@ -8535,11 +8652,13 @@ def _prepare_single_point(
         )
     elif (
         getattr(getattr(getattr(reference, "input", None), "scf", None), "fixed_occupations", None) is not None
-        and _weighted_sectors(symmetry_eigensolver)
-    ):
+        or getattr(getattr(getattr(reference, "input", None), "scf", None), "is_hybrid", False)
+    ) and _weighted_sectors(symmetry_eigensolver):
         # occup.in in the weighted sectors: a run whose file fills partners unequally starts again in the
         # abelian sectors (PARSEC_ORBITAL_GROUP_OCCUPATIONS), on several MPI ranks too (every rank prepares them again,
-        # PARSEC_ORBITAL_GROUP_MPI=auto).
+        # PARSEC_ORBITAL_GROUP_MPI=auto).  An unpolarized hybrid in them (PARSEC_ORBITAL_GROUP_HYBRID) whose start or
+        # inner loop ends with a partly filled degenerate level starts again there too (SCF/hybrid.py,
+        # WeightedHybridAbandoned).
         spin_sector_fallback = _SpinSectorFallback(
             given_problem,
             tuple(reference.atoms),
@@ -9191,10 +9310,13 @@ class _SpinSectorFallback:
 
         from parsec_python.Occupations import UnequalPartnerOccupations
 
+        from .SCF.hybrid import WeightedHybridAbandoned
         from .SCF.spin_sectors import FractionalOccupations, SpinSectorsAbandoned
 
         while True:
             abandoned = None
+            # (the record of a hybrid that left the weighted sectors names the hybrid's reason)
+            route = "weighted"
             weighted = _weighted_sectors(getattr(system.backend, "symmetry_eigensolver", None))
             try:
                 result = run(system, callback=callback, warm_start=warm_start, **keywords)
@@ -9219,6 +9341,13 @@ class _SpinSectorFallback:
                         measure="largest difference of the occupations of the partners",
                     ),
                 )
+            except WeightedHybridAbandoned as error:
+                # an unpolarized hybrid with a partly filled degenerate level (SCF/hybrid.py): the abelian sectors,
+                # where the exact exchange can split it
+                if not weighted:
+                    raise
+                abandoned = (error.stage, error.report)
+                route = "weighted_hybrid"
             if not weighted:
                 break
             stage, report = abandoned
@@ -9237,7 +9366,7 @@ class _SpinSectorFallback:
                         multiplets=report.lines,
                         reason=report.reason,
                         measure=report.measure,
-                        route="weighted",
+                        route=route,
                         **({"abelian_skipped": True} if skip_abelian else {}),
                         **({"doublet": True} if doublet else {}),
                     )
@@ -9594,6 +9723,46 @@ def _say_floor_doublet(system, result, callback) -> None:
     )
 
 
+def _say_symmetric_level(system, result, callback) -> None:
+    """The NOTE of an unpolarized run in the weighted sectors that ends with a partly filled degenerate level at the
+    Fermi level (Fermi-Dirac occupations, not ``occup.in``): the sectors keep the density of the full group, so every
+    partner of the level holds one occupation, while a run without that constraint may reach a broken-symmetry state
+    that lies lower or higher (:func:`.SCF.spin_sectors.weighted_partly_filled_levels`).  It reads the final levels
+    and changes nothing.  Not for a hybrid: the guard of its Fock loop (``SCF/hybrid.py``, ``weighted_guard``) reads
+    the same levels and starts such a run again in the abelian sectors (NOTE route ``weighted_hybrid``)."""
+
+    sectors = getattr(getattr(system, "backend", None), "symmetry_eigensolver", None)
+    if callback is None or not _weighted_sectors(sectors):
+        return
+    inner = getattr(result, "result", result)
+    if getattr(inner, "spin", None) is not None:
+        return
+    scf = getattr(getattr(system, "input", None), "scf", None)
+    if scf is None or getattr(scf, "spin_polarized", False) or getattr(scf, "fixed_occupations", None) is not None:
+        return
+    if getattr(scf, "is_hybrid", False):
+        return
+    from parsec_python.models import SpinSectorFallbackRecord
+
+    from .SCF.spin_sectors import weighted_partly_filled_levels
+
+    report = weighted_partly_filled_levels(inner)
+    if report is None:
+        return
+    callback(
+        SpinSectorFallbackRecord(
+            stage="the SCF loop",
+            largest_fractional_occupation=report.largest,
+            tolerance=report.tolerance,
+            multiplets=report.lines,
+            reason=report.reason,
+            measure=report.measure,
+            route="symmetric_level",
+            doublet=True,
+        )
+    )
+
+
 def run_scf(
     system: AcceleratedPreparedSinglePointSystem,
     *,
@@ -9630,6 +9799,7 @@ def run_scf(
             system, callback=callback, warm_start=warm_start, **keywords
         )
         _say_floor_doublet(system, result, callback)
+        _say_symmetric_level(system, result, callback)
     else:
         result = fallback.run(
             system, run_accelerated_scf, callback=callback, warm_start=warm_start, **keywords

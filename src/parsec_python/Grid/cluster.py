@@ -69,9 +69,44 @@ class RealSpaceGrid:
         return float(np.sum(values) * self.volume_element)
 
 
+SPHERE_TIES_SWITCH = "PARSEC_SPHERE_TIES"
+_SPHERE_TIES = ("dot", "symmetric")
+
+
+def sphere_ties_setting() -> str:
+    """``PARSEC_SPHERE_TIES``: how a point exactly on the sphere is decided.
+
+    ``dot`` (the default): ``x^2 + y^2 + z^2 <= R^2`` with the squares summed as ``np.einsum`` sums them, as before.
+    A point on the sphere (on a grid through the origin, ``Grid_Shift`` zero, whose ``(R/h)^2`` is an integer; on the
+    shifted grid ``(R/h)^2 = 2 k + 3/4``) is then decided by the round-off of that sum, which depends on the order of
+    its coordinates: of ``(12, 20, 9) h`` and ``(20, 12, 9) h`` at ``R = 25 h`` one is in and the other out, and the
+    domain loses the operations that permute the axes (C4z, S4z, the threefold axes).  ``symmetric`` (opt-in): the
+    three squares summed in ascending order, a value every signed permutation of the axes leaves unchanged, so a point
+    and its images under those operations are in or out together (the points off the sphere are decided as before).
+    Another value is an error when the grid is built.
+    """
+
+    import os
+
+    text = os.environ.get(SPHERE_TIES_SWITCH, "dot").strip().lower() or "dot"
+    if text not in _SPHERE_TIES:
+        raise ValueError(f"{SPHERE_TIES_SWITCH} must be one of {', '.join(_SPHERE_TIES)}, not {text!r}")
+    return text
+
+
+def _squared_radii(coordinates: np.ndarray) -> np.ndarray:
+    """``|r|^2`` of every point as the sphere test takes it (:func:`sphere_ties_setting`)."""
+
+    if sphere_ties_setting() == "symmetric":
+        values = np.asarray(coordinates, dtype=np.float64)
+        squares = np.sort(values * values, axis=1)
+        return (squares[:, 0] + squares[:, 1]) + squares[:, 2]
+    return np.einsum("ij,ij->i", coordinates, coordinates)
+
+
 def _inside_domain(settings: GridSettings, coordinates: np.ndarray) -> np.ndarray:
     if settings.domain_shape == "sphere":
-        return np.einsum("ij,ij->i", coordinates, coordinates) <= settings.radius**2
+        return _squared_radii(coordinates) <= settings.radius**2
     if settings.domain_shape == "ellipsoid":
         # grid_partition.f90 outside_domain, case 1.
         radii = np.asarray(settings.domain_parameters, dtype=float)

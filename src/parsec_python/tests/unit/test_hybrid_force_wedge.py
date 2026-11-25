@@ -65,8 +65,15 @@ class HybridForceWedgeTests(unittest.TestCase):
             mesh = f"Use_Fortran_Routines: {'.true.' if fortran else '.false.'}\n" + _UNSHIFTED_MESH
             for extra in ("Skip_Force: .false.\n", "Minimization: bfgs\n"):
                 label = (fortran, extra)
-                semilocal_off = self._parse_with(extra, {"PARSEC_KPOINT_FORCE_WEDGE": "off"}, mesh=mesh)
+                # (auto, the default of PARSEC_HYBRID_KPOINT_WEDGE before 2026-11-23, keeps the wedge aside; on, the
+                # default since, takes it at once)
+                semilocal_off = self._parse_with(
+                    extra, {"PARSEC_KPOINT_FORCE_WEDGE": "off", "PARSEC_HYBRID_KPOINT_WEDGE": "auto"}, mesh=mesh
+                )
                 self.assertEqual(semilocal_off.problem.hybrid_kpoint_wedge_deferred is not None, fortran, label)
+                semilocal_default = self._parse_with(extra, {"PARSEC_KPOINT_FORCE_WEDGE": "off"}, mesh=mesh)
+                self.assertEqual(semilocal_default.problem.hybrid_kpoint_wedge, fortran, label)
+                self.assertIsNone(semilocal_default.problem.hybrid_kpoint_wedge_deferred, label)
                 hybrid_off = self._parse_with(extra, {"PARSEC_HYBRID_KPOINT_FORCE_WEDGE": "off"}, mesh=mesh)
                 self.assertIsNone(hybrid_off.problem.hybrid_kpoint_wedge_deferred, label)
                 self.assertFalse(hybrid_off.problem.hybrid_kpoint_wedge, label)
@@ -86,10 +93,15 @@ class HybridForceWedgeTests(unittest.TestCase):
 
         mesh = "Use_Fortran_Routines: .false.\n" + _UNSHIFTED_MESH
         free = self._parse_with("Minimization: bfgs\n", {}, mesh=mesh)
-        self.assertIsNotNone(free.problem.hybrid_kpoint_wedge_deferred)
-        fixed = self._parse_with("Minimization: bfgs\n", {}, mesh=mesh, flag="Move_Flag: 1")
-        self.assertIsNone(fixed.problem.hybrid_kpoint_wedge_deferred)
-        self.assertFalse(fixed.problem.hybrid_kpoint_wedge)
+        self.assertTrue(free.problem.hybrid_kpoint_wedge)
+        deferred = self._parse_with("Minimization: bfgs\n", {"PARSEC_HYBRID_KPOINT_WEDGE": "auto"}, mesh=mesh)
+        self.assertIsNotNone(deferred.problem.hybrid_kpoint_wedge_deferred)
+        for wedge in ("on", "auto"):
+            fixed = self._parse_with(
+                "Minimization: bfgs\n", {"PARSEC_HYBRID_KPOINT_WEDGE": wedge}, mesh=mesh, flag="Move_Flag: 1"
+            )
+            self.assertIsNone(fixed.problem.hybrid_kpoint_wedge_deferred)
+            self.assertFalse(fixed.problem.hybrid_kpoint_wedge)
         note = self._mesh_note(fixed)
         self.assertIn("keeps the fixed atoms (Move_Flag) apart from the movable ones", note)
         self.assertFalse(any(text.startswith("Forces of the hybrid") for text in fixed.warnings))
@@ -185,7 +197,7 @@ class HybridForceWedgeTests(unittest.TestCase):
         self.assertEqual(found["auto"][2].count("The Fock loop runs on the irreducible wedge"), 1)
         # an insulator's Fock loops on the wedge end with every state 0 or 1: no note of a metal on the wedge
         for label in ("on", "auto", "off"):
-            self.assertNotIn("a metal, held in the symmetric state of the wedge", found[label][2], label)
+            self.assertNotIn("a metal, held in the state of the wedge", found[label][2], label)
 
     def test_a_metallic_end_on_the_wedge_is_noted(self) -> None:
         """A Fock loop that ``auto`` moved to the wedge and that ends with a partly filled state gets a NOTE (the
@@ -208,7 +220,7 @@ class HybridForceWedgeTests(unittest.TestCase):
             folder = self._run(extra, "auto", "auto")
         text = (folder / "parsec.out").read_text()
         self.assertEqual(text.count("The Fock loop runs on the irreducible wedge"), 1)
-        notes = text.count("a metal, held in the symmetric state of the wedge")
+        notes = text.count("a metal, held in the state of the wedge")
         carried = text.count("This structure kept the wedge its relaxation took at the first structure")
         self.assertGreaterEqual(carried, 1)
         # one note per Fock loop on the wedge: the first structure's (after its start) and every later one's
@@ -217,34 +229,86 @@ class HybridForceWedgeTests(unittest.TestCase):
 
 
 class MetallicWedgeNoteTests(unittest.TestCase):
-    """``BlochExchange.after_loop`` and the lines of its record, without a run."""
+    """``BlochExchange.after_loop`` and the lines of its record, without a run: the state a metal's Fock loop ends in,
+    on the wedge or on the time-reversal pairs, and the outer iteration at which it became unstable."""
 
     def test_the_record_and_its_lines(self) -> None:
         from types import SimpleNamespace
 
         from parsec_python.Output.parsec_output import hybrid_mesh_route_lines
         from parsec_python.SCF.hybrid_periodic import BlochExchange
+        from parsec_python.models import ExchangeLoopIteration
 
         engine = object.__new__(BlochExchange)
         engine.k_points = np.zeros((4, 3))
         records = []
         metal = SimpleNamespace(occupations=[np.array([1.0, 1.0, 0.5, 0.0]), np.array([1.0, 1.0, 0.5, 0.0])])
         insulator = SimpleNamespace(occupations=[np.array([1.0, 1.0, 0.0]), np.array([1.0, 1.0, 0.0])])
-        # the pairs (no wedge taken): nothing
-        engine.after_loop(None, metal, callback=records.append)
+        # dexx 1e-3, 1e-6, 1e-4: rose tenfold at outer iteration 3
+        loop = tuple(
+            mock.Mock(spec=ExchangeLoopIteration, iteration=i, estimated_error=e, total_energy=None)
+            for i, e in ((0, None), (1, 1.0e-3), (2, 1.0e-6), (3, 1.0e-4))
+        )
+        # the pairs of a mesh of 8 points: the NOTE of a metal on the pairs, with the outer iteration of the instability
+        engine.mesh = (2, 2, 2)
+        engine.after_loop(None, insulator, callback=records.append, records=loop)
         self.assertEqual(records, [])
+        engine.after_loop(None, metal, callback=records.append, records=loop)
+        record = records.pop()
+        self.assertEqual((record.route, record.points, record.pairs_points, record.mesh_points), ("pairs_partly_filled", 4, 4, 8))
+        self.assertEqual((record.partly_filled, record.instability), (2, 3))
+        text = "\n".join(hybrid_mesh_route_lines(record))
+        self.assertIn("the Fock loop on the 4 time-reversal pairs of the 8-point mesh", text)
+        self.assertIn("ends with 2 partly filled state(s) at the Fermi level", text)
+        self.assertIn("became unstable at outer iteration 3", text)
+        self.assertIn("are not comparable with those of structures that keep a group", text)
+        engine.after_loop(None, metal, callback=records.append)
+        self.assertIsNone(records.pop().instability)
+        # a metal's start (partly filled) whose Fock loop ends with every state 0 or 1: the broken state of the pairs
+        engine._start_partly_filled = 3
+        engine.after_loop(None, insulator, callback=records.append, records=loop)
+        record = records.pop()
+        self.assertEqual((record.route, record.partly_filled, record.start_partly_filled), ("pairs_partly_filled", 0, 3))
+        text = "\n".join(hybrid_mesh_route_lines(record))
+        self.assertIn("ends with every state 0 or 1, its semilocal start with 3 partly filled state(s)", text)
+        self.assertIn("became unstable at outer iteration 3", text)
+        engine.after_loop(None, insulator, callback=records.append)
+        text = "\n".join(hybrid_mesh_route_lines(records.pop()))
+        self.assertIn("filled the levels the start held partly to 0 or 1", text)
+        engine.after_loop(None, metal, callback=records.append)
+        text = "\n".join(hybrid_mesh_route_lines(records.pop()))
+        self.assertIn("did not become unstable", text)
+        engine._start_partly_filled = 0
+        # one point: no equivalent k-points, no NOTE
+        engine.mesh = (1, 1, 1)
+        engine.after_loop(None, metal, callback=records.append, records=loop)
+        self.assertEqual(records, [])
+        # the wedge from the start (PARSEC_HYBRID_KPOINT_WEDGE=on, the default)
+        engine.mesh = (2, 2, 2)
+        engine.stars = SimpleNamespace(gathers=[None] * 16)
+        engine.after_loop(None, insulator, callback=records.append, records=loop)
+        self.assertEqual(records, [])
+        engine.after_loop(None, metal, callback=records.append)
+        record = records.pop()
+        self.assertEqual((record.route, record.reason, record.operations, record.pairs_points), ("wedge_partly_filled", "wedge", 16, 0))
+        text = "\n".join(hybrid_mesh_route_lines(record))
+        self.assertIn("a metal, held in the state of the wedge", text)
+        self.assertIn("On the time-reversal pairs of the mesh its Fock loop may fill", text)
+        self.assertNotIn("became unstable", text)
+        # the wedge that auto took after an insulating start, or that a relaxation carried
         for how in ("start", "carried"):
             engine._wedge_taken = (how, 8, 8, 16)
             engine.after_loop(None, insulator, callback=records.append)
             self.assertEqual(records, [])
-            engine.after_loop(None, metal, callback=records.append)
+            engine.after_loop(None, metal, callback=records.append, records=loop)
             record = records.pop()
             self.assertEqual((record.route, record.points, record.pairs_points, record.mesh_points), ("wedge_partly_filled", 4, 8, 8))
-            self.assertEqual((record.operations, record.partly_filled, record.reason), (16, 2, how))
+            self.assertEqual((record.operations, record.partly_filled, record.reason, record.instability), (16, 2, how, 3))
             self.assertAlmostEqual(record.largest_fractional_occupation, 0.5)
             text = "\n".join(hybrid_mesh_route_lines(record))
             self.assertIn("ends with 2 partly filled state(s)", text)
-            self.assertIn("on the 8 time-reversal pairs of the 8-point mesh", text)
+            self.assertIn("On the 8 time-reversal pairs of the 8-point mesh", text)
+            self.assertIn("became unstable at outer iteration 3", text)
             self.assertEqual("This structure kept the wedge" in text, how == "carried")
             self.assertIn("PARSEC_HYBRID_KPOINT_FORCE_WEDGE=off", text)
 

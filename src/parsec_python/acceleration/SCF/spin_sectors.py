@@ -1222,6 +1222,72 @@ def partly_filled_doublets(channels, tolerance: float = SPIN_SECTOR_OCCUPATION_T
     )
 
 
+#: The reason of :func:`weighted_partly_filled_levels`.
+SYMMETRIC_LEVEL_REASON = "a partly filled degenerate level at the Fermi level"
+
+
+def weighted_partly_filled_levels(
+    result,
+    tolerance: float = SPIN_SECTOR_OCCUPATION_TOLERANCE,
+    *,
+    reason: str = SYMMETRIC_LEVEL_REASON,
+    both_spins: bool = False,
+):
+    """:class:`FractionalOccupations` of the partly filled degenerate levels of an unpolarized result of weighted
+    sectors, ``None`` where there are none.
+
+    ``result`` holds the lists of the run (``eigenvalues`` in Ry and ``occupations`` of every listed state, the
+    partners of a solved state of weight ``w`` listed ``w`` times) and ``sector_states`` (the sector labels, the
+    occupations and the listed partners of the solved states, ``acceleration.SCF.single_point``).  Every listed
+    partner is a level of its own label (:func:`partner_levels`), so a level counts where its levels lie within
+    :data:`MULTIPLET_WIDTH` of each other over two or more labels (the partners of one weighted state, or of a level
+    that solved states of several sectors hold) and ``min(f, 1 - f)`` of one of them is at least ``tolerance``: the
+    weighted sectors give every partner of such a level one occupation and the density keeps the full group, while the
+    abelian sectors or the full grid may reach a different, broken-symmetry state, which can lie lower (the neutral
+    vacancy of Si63 with SCAN at 10 K: 1.7e-3 Ry) or higher.  Degenerate states of one label mix as on the full grid
+    and do not count.  It reads the lists only and changes nothing.  ``reason`` names the report; ``both_spins``
+    counts the electrons of a level for both spins in its line (the guard of a weighted hybrid,
+    ``acceleration/SCF/hybrid.partly_filled_partner_levels``, reads the same levels).
+    """
+
+    states = getattr(result, "sector_states", None)
+    if states is None:
+        return None
+    sectors, _, repeats = states
+    repeats = np.asarray(repeats, dtype=np.int64)
+    values = np.asarray(getattr(result, "eigenvalues", ()), dtype=np.float64)
+    filled = np.asarray(getattr(result, "occupations", ()), dtype=np.float64)
+    if values.size == 0 or values.size != int(repeats.sum()) or filled.shape != values.shape:
+        return None
+    if float(np.max(filled)) > 1.0 + 1.0e-9:
+        # (two electrons per listed state where a list counts both spins)
+        filled = 0.5 * filled
+    partners = np.arange(values.size, dtype=np.int64) - np.repeat(np.cumsum(repeats) - repeats, repeats)
+    labels = np.repeat(np.asarray(sectors, dtype=np.int64), repeats) * PARTNER_LABEL_STRIDE + partners
+    fractional = np.minimum(filled, 1.0 - filled)
+    largest = 0.0
+    lines: list[str] = []
+    for group in _multiplets(values, MULTIPLET_WIDTH):
+        if np.unique(labels[group]).size < 2:
+            continue
+        measure = float(np.max(fractional[group]))
+        if measure < tolerance:
+            continue
+        largest = max(largest, measure)
+        levels = " ".join(f"{values[member] * _RYDBERG_TO_EV:.4f}" for member in group)
+        shares = " ".join(f"{filled[member]:.4f}" for member in group)
+        names = " ".join(_sector_label(labels[member]) for member in group)
+        held = (
+            f"{2.0 * float(np.sum(filled[group])):.4f} electrons"
+            if both_spins
+            else f"{float(np.sum(filled[group])):.4f} electrons per spin"
+        )
+        lines.append(f"{len(group)} levels at {levels} eV hold {held} (occupations {shares}; sectors {names})")
+    if not lines:
+        return None
+    return FractionalOccupations(largest=largest, tolerance=float(tolerance), lines=tuple(lines), reason=reason)
+
+
 class _ChannelPair:
     """The two channels' orbit values as one vector, for a mixer of :mod:`.symmetry_fields`.
 
@@ -1752,6 +1818,8 @@ __all__ = [
     "spin_guard_doublets_setting",
     "partly_filled_doublets",
     "partly_filled_multiplets",
+    "SYMMETRIC_LEVEL_REASON",
+    "weighted_partly_filled_levels",
     "abelian_partner_labels",
     "partner_levels",
     "HostSpinXCOnOrbits",

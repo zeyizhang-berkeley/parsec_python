@@ -6,7 +6,8 @@ The switches ``PARSEC_GAMMA_TS_SECTORS``, ``PARSEC_GAMMA_LDAU_SECTORS``, ``PARSE
 line); ``off`` refuses it as before, and so do the callers without ``features`` (the MPI runner, the supercell of a
 k-point mesh).  A TS input says ``Ignore_Symmetry: true`` (PARSEC error 159); the command line reads it as that
 requirement under ``auto`` or ``on`` (the default of TS is ``off``) where the sectors of a CuPy run take the cell.
-On a GPU the sectors give the energies and forces of the full grid.
+On a GPU the sectors give the energies and forces of the full grid, and the weighted sectors of a meta-GGA
+(``PARSEC_ORBITAL_GROUP_META_GGA_CELL``, Si8 in Td) those of the abelian sectors, unpolarized and spin-polarized.
 """
 
 from __future__ import annotations
@@ -73,13 +74,20 @@ def _coordinates(positions) -> str:
     return "".join(f"  {x:.8f} {y:.8f} {z:.8f}\n" for x, y, z in positions)
 
 
+_BONDS = np.array([(1.0, 1.0, 1.0), (1.0, -1.0, -1.0), (-1.0, 1.0, -1.0), (-1.0, -1.0, 1.0)]) / np.sqrt(3.0)
+
+
 def write_silicon(
-    folder: Path, functional: str = "Correlation_Type: pbe", extra: str = "", *, moved: float = 0.0
+    folder: Path, functional: str = "Correlation_Type: pbe", extra: str = "", *, moved: float = 0.0,
+    breathing: float = 0.0,
 ) -> Path:
-    """The 8-atom Si cube (24 points a side), ``moved`` bohr of the atom at the origin along z."""
+    """The 8-atom Si cube (24 points a side), ``moved`` bohr of the atom at the origin along z; ``breathing`` bohr of
+    its four neighbours along their bonds to it (Td about the origin, without the face-centring translations)."""
 
     positions = np.vstack([_FCC, _FCC + 0.25]) * 10.26
     positions[0, 2] += moved
+    if breathing:
+        positions[4:] = np.mod((0.25 * 10.26 * np.sqrt(3.0) + breathing) * _BONDS, 10.26)
     folder.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(_SI_PP, folder / "Si_POTRE.DAT")
     path = folder / "parsec.in"
@@ -156,14 +164,29 @@ class SwitchTests(unittest.TestCase):
                         gamma_features.gamma_feature_settings()
 
     def test_floors(self) -> None:
-        # measured on A100 (gamma_features.MINIMUM_ENTRIES): TS and meta-GGAs from 2^27, libxc from 2^28, LDA+U (one
-        # atom per orbit, weighted sectors) from 2^26 since 2026-11-21 on any number of devices
+        # measured on A100 (gamma_features.MINIMUM_ENTRIES): TS from 2^27, libxc from 2^28, LDA+U (one atom per orbit,
+        # weighted sectors) from 2^26 since 2026-11-21 on any number of devices, a meta-GGA from 2^24 since 2026-11-23
+        # (2^27 before, PARSEC_GAMMA_META_GGA_FLOOR=former)
         self.assertEqual(set(gamma_features.MINIMUM_ENTRIES), set(_SWITCHES))
         self.assertEqual(gamma_features.MINIMUM_ENTRIES[gamma_features.TS_SWITCH], 1 << 27)
-        self.assertEqual(gamma_features.MINIMUM_ENTRIES[gamma_features.META_GGA_SWITCH], 1 << 27)
+        self.assertEqual(gamma_features.MINIMUM_ENTRIES[gamma_features.META_GGA_SWITCH], 1 << 24)
+        self.assertEqual(gamma_features.META_GGA_FORMER_FLOOR, 1 << 27)
         self.assertEqual(gamma_features.MINIMUM_ENTRIES[gamma_features.LDAU_SWITCH], 1 << 26)
         self.assertEqual(gamma_features.MINIMUM_ENTRIES[gamma_features.LIBXC_SWITCH], 1 << 28)
         self.assertEqual(gamma_features.MINIMUM_DEVICES, {})
+
+    def test_the_floor_of_a_meta_gga(self) -> None:
+        switch = gamma_features.META_GGA_FLOOR_SWITCH
+        for value, expected in (
+            ("", (1 << 24, False)), ("auto", (1 << 24, False)), (" FORMER ", (1 << 27, True)), ("0", (0, False)),
+            ("100000000", (100000000, False)),
+        ):
+            with mock.patch.dict(os.environ, {switch: value}):
+                self.assertEqual(gamma_features.meta_gga_floor_setting(), expected)
+        for wrong in ("off", "-1", "2^24", "on"):
+            with mock.patch.dict(os.environ, {switch: wrong}):
+                with self.assertRaisesRegex(ValueError, f"{switch} must be auto, former or a number"):
+                    gamma_features.gamma_feature_settings()
 
     def test_defaults(self) -> None:
         # a meta-GGA, libxc, LDA+U and TS auto (since 2026-11-21: LDA+U with one atom per orbit in the weighted
@@ -253,6 +276,32 @@ class RefusalTests(unittest.TestCase):
         self.assertIsNone(self.refusal(problem, both, features=True))
         self.assertIn("meta-GGA", self.refusal(problem, {**both, gamma_features.META_GGA_SWITCH: "off"}, features=True))
         self.assertIn("libxc", self.refusal(problem, {**both, gamma_features.LIBXC_SWITCH: "off"}, features=True))
+
+    def test_the_floor_of_a_libxc_meta_gga(self) -> None:
+        # under auto a libxc meta-GGA takes the floor of the meta-GGA alone since 2026-11-23; former: that of libxc
+        # too, as before (the basis of this cell is 13,824 x 24 entries)
+        problem = replace(
+            self.silicon, scf=replace(self.silicon.scf, xc_functional="libxc:mgga_x_r2scan+mgga_c_r2scan")
+        )
+        entries = gamma_features.basis_entries(problem)
+        auto = {gamma_features.META_GGA_SWITCH: "auto", gamma_features.LIBXC_SWITCH: "auto"}
+        floor = gamma_features.META_GGA_FLOOR_SWITCH
+        self.assertIn("meta-GGA", self.refusal(problem, auto, features=True))
+        self.assertIsNone(self.refusal(problem, {**auto, floor: str(entries)}, features=True))
+        self.assertIsNone(self.refusal(problem, {**auto, floor: "0"}, features=True))
+        self.assertIn("meta-GGA", self.refusal(problem, {**auto, floor: str(entries + 1)}, features=True))
+        self.assertIn("a basis below 134217728", self.refusal(problem, {**auto, floor: "former"}, features=True))
+        with mock.patch.object(gamma_features, "META_GGA_FORMER_FLOOR", entries):
+            former = self.refusal(problem, {**auto, floor: "former"}, features=True)
+        self.assertIn("libxc", former)
+        self.assertIn("a basis below 268435456", former)
+        # the libxc switch still has to take it, and native SCAN follows the floor as well
+        self.assertIn("libxc", self.refusal(problem, {**auto, floor: "0", gamma_features.LIBXC_SWITCH: "off"},
+                                            features=True))
+        scan = replace(self.silicon, scf=replace(self.silicon.scf, xc_functional="scan"))
+        self.assertIsNone(self.refusal(scan, {gamma_features.META_GGA_SWITCH: "auto", floor: "0"}, features=True))
+        self.assertIn("a basis below 16777216", self.refusal(scan, {gamma_features.META_GGA_SWITCH: "auto"},
+                                                              features=True))
 
     def test_hybrids_and_spin_ldau_keep_the_refusal(self) -> None:
         scf = self.silicon.scf
@@ -766,6 +815,73 @@ class DeviceTests(unittest.TestCase):
         self.assertIn("does not take a meta-GGA functional", texts["off"])
         self.assertIn("Forces of the periodic cell in the sectors of its point group", texts["on"])
         np.testing.assert_allclose(_forces(logs["on"]), _forces(logs["off"]), atol=2.0e-5)
+
+    def run_routes(self, writer, routes):
+        """``{route: (parsec.out, energy, forces)}`` of ``main.py`` under the switches of each route (the archive's
+        full-precision numbers)."""
+
+        folder = Path(tempfile.mkdtemp(prefix="parsec_gamma_features_gpu_"))
+        self.addCleanup(shutil.rmtree, folder, True)
+        results = {}
+        for route, switches in routes.items():
+            path = writer(folder / route)
+            with mock.patch.dict(os.environ, switches), redirect_stdout(StringIO()), redirect_stderr(
+                StringIO()
+            ), warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                self.assertEqual(cli_module.main([str(path)]), 0, route)
+            with np.load(path.parent / "parsec_python_results.npz") as data:
+                energy = float(data["energy_total_ry"])
+                forces = None
+                if "forces_total" in data.files:
+                    total = np.asarray(data["forces_total"], float)
+                    forces = total + np.asarray(data["forces_net"], float) / total.shape[0]
+            results[route] = ((path.parent / "parsec.out").read_text(), energy, forces)
+        return results
+
+    def _weighted_cell_routes(self, writer, *, full: bool = True):
+        on = {gamma_features.META_GGA_SWITCH: "on", "PARSEC_ORBITAL_GROUP_META_GGA_CELL": "auto"}
+        routes = {"weighted": on, "abelian": {**on, "PARSEC_ORBITAL_GROUP_META_GGA_CELL": "off"}}
+        if full:
+            routes["full"] = {gamma_features.META_GGA_SWITCH: "off"}
+        return self.run_routes(writer, routes)
+
+    def test_meta_gga_weighted_sectors(self) -> None:
+        # Si8 with the four neighbours of the atom at the origin 0.12 bohr out along their bonds (Td about the origin):
+        # the weighted sectors of PARSEC_ORBITAL_GROUP_META_GGA_CELL=auto (tau and g averaged over Td, the forces
+        # completed over it) against the abelian sectors (off) and the full grid, energies and forces.
+        runs = self._weighted_cell_routes(
+            lambda folder: write_silicon(folder, "Correlation_Type: scan", "Skip_force: .false.\n", breathing=0.12)
+        )
+        self.assertIn("one-dimensional sectors of a subgroup", runs["weighted"][0])
+        self.assertNotIn("one-dimensional sectors of a subgroup", runs["abelian"][0])
+        self.assertIn("does not take a meta-GGA functional", runs["full"][0])
+        energies = {route: run[1] for route, run in runs.items()}
+        self.assertAlmostEqual(energies["weighted"], energies["abelian"], delta=1.0e-8, msg=str(energies))
+        self.assertAlmostEqual(energies["weighted"], energies["full"], delta=5.0e-7, msg=str(energies))
+        self.assertGreater(float(np.abs(runs["full"][2]).max()), 1.0e-3)
+        np.testing.assert_allclose(runs["weighted"][2], runs["abelian"][2], rtol=0, atol=2.0e-6)
+        np.testing.assert_allclose(runs["weighted"][2], runs["full"][2], rtol=0, atol=2.0e-5)
+
+    def test_meta_gga_weighted_spin_sectors(self) -> None:
+        # The same cell spin-polarized (no moment): both channels in the weighted sectors against the abelian ones.
+        # (A100: the weighted sectors converge in 59 SCF steps, the abelian ones in 174, the 1x1x1 k-point driver of
+        # the full grid not in 400 at this criterion, with the energy within 2.2e-10 Ry and the forces within 4.5e-9
+        # Ry/bohr.)
+        def writer(folder):
+            path = write_silicon(
+                folder, "Correlation_Type: scan", "Spin_Polarization: .true.\nSkip_force: .false.\n", breathing=0.12
+            )
+            path.write_text(path.read_text().replace("Max_Iter: 150", "Max_Iter: 300"))
+            return path
+
+        runs = self._weighted_cell_routes(writer, full=False)
+        self.assertIn("one-dimensional sectors of a subgroup", runs["weighted"][0])
+        self.assertNotIn("one-dimensional sectors of a subgroup", runs["abelian"][0])
+        energies = {route: run[1] for route, run in runs.items()}
+        self.assertAlmostEqual(energies["weighted"], energies["abelian"], delta=1.0e-8, msg=str(energies))
+        self.assertGreater(float(np.abs(runs["weighted"][2]).max()), 1.0e-3)
+        np.testing.assert_allclose(runs["weighted"][2], runs["abelian"][2], rtol=0, atol=2.0e-6)
 
     @unittest.skipUnless(_device_libxc(), "a CUDA build of libxc >= 7.1 (PARSEC_LIBXC_LIBRARY) is required")
     def test_libxc_forces(self) -> None:

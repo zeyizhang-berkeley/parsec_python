@@ -48,6 +48,9 @@ from parsec_python.models import Atom, GridSettings, SCFSettings, SpeciesPotenti
 
 DATA = Path(__file__).resolve().parents[1] / "data"
 AG = DATA / "Ag_POTRE.DAT"
+#: The projectors of ``upot.F90`` (``PARSEC_LDAU_SMOOTH_PROJECTORS=off``) for the comparisons with its loops; the
+#: smooth projectors are the default.
+UPOT = {"PARSEC_LDAU_SMOOTH_PROJECTORS": "off"}
 
 
 def _fortran_source(name: str) -> Path | None:
@@ -204,6 +207,13 @@ class HubbardTensorSourceTest(unittest.TestCase):
 
 
 class HubbardProjectorTest(unittest.TestCase):
+    # the projectors of upot.F90, compared with its loops
+    @classmethod
+    def setUpClass(cls):
+        patcher = unittest.mock.patch.dict(os.environ, UPOT)
+        patcher.start()
+        cls.addClassCleanup(patcher.stop)
+
     def test_cutoff_radius_follows_the_fortran_loop(self):
         potential = read_parsec_pseudopotential(AG)
         self.assertEqual(hubbard_cutoff_radius(potential), _fortran_rc(potential))
@@ -539,7 +549,8 @@ class HubbardForceTest(unittest.TestCase):
             upper, _ = interpolate_hubbard_radial(potential, r + step)
             lower, _ = interpolate_hubbard_radial(potential, r - step)
             np.testing.assert_allclose(slopes, (upper - lower) / (2 * step), atol=1e-8)
-        linear, _ = interpolate_hubbard_radial(potential, r)
+        with unittest.mock.patch.dict(os.environ, UPOT):
+            linear, _ = interpolate_hubbard_radial(potential, r)
         inside = r < 0.85 * rc
         # Inside the taper the spline differs from the linear interpolation of the table by its truncation only.
         np.testing.assert_allclose(values[inside], linear[inside], atol=2e-4)
@@ -548,7 +559,8 @@ class HubbardForceTest(unittest.TestCase):
         x = np.linspace(-0.15 * rc, 0.15 * rc, 3001)
         with unittest.mock.patch.dict(os.environ, {"PARSEC_LDAU_SMOOTH_PROJECTORS": "0.3"}):
             tapered, _ = interpolate_hubbard_radial(potential, rc + x)
-        plain, _ = interpolate_hubbard_radial(potential, rc + x)
+        with unittest.mock.patch.dict(os.environ, UPOT):
+            plain, _ = interpolate_hubbard_radial(potential, rc + x)
         ratio = tapered / plain
         np.testing.assert_allclose(ratio + ratio[::-1], 1.0, atol=5e-3)
 
@@ -586,6 +598,15 @@ class HubbardForceTest(unittest.TestCase):
         )
         for value, expected in cases:
             with unittest.mock.patch.dict(os.environ, {"PARSEC_LDAU_SMOOTH_PROJECTORS": value}):
+                self.assertEqual(ldau_smooth_projectors_fraction(), expected)
+        # the default is on (unset or empty), off under PARSEC_FORTRAN_NUMERICS=on unless the switch is set
+        for environment, expected in (
+            ({}, 0.2), ({"PARSEC_LDAU_SMOOTH_PROJECTORS": ""}, 0.2), ({"PARSEC_FORTRAN_NUMERICS": "on"}, 0.0),
+            ({"PARSEC_FORTRAN_NUMERICS": "on", "PARSEC_LDAU_SMOOTH_PROJECTORS": "on"}, 0.2),
+        ):
+            names = ("PARSEC_LDAU_SMOOTH_PROJECTORS", "PARSEC_FORTRAN_NUMERICS")
+            others = {name: value for name, value in os.environ.items() if name not in names}
+            with unittest.mock.patch.dict(os.environ, {**others, **environment}, clear=True):
                 self.assertEqual(ldau_smooth_projectors_fraction(), expected)
         for value in ("smooth", "1.5", "-0.1", "nan"):
             with unittest.mock.patch.dict(os.environ, {"PARSEC_LDAU_SMOOTH_PROJECTORS": value}):

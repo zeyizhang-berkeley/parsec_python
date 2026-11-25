@@ -12,10 +12,12 @@ inputs apart that differ only in what they add to an old-format file.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 import tempfile
 from types import SimpleNamespace
 import unittest
+from unittest import mock
 
 import numpy as np
 
@@ -44,24 +46,31 @@ class NativeProjectorSupportTests(unittest.TestCase):
         from parsec_python.acceleration.V_ion import NativeIonicBuilders
 
         case = load_cases()["sina4_shifted_core_1.9"]
-        with tempfile.TemporaryDirectory() as directory:
-            translation = parse_parsec_input(write_case(case, Path(directory)))
-            system = prepare_single_point(translation.problem)
-        self.assertEqual(support_sizes(system), case["nonlocal_block_sizes"])
-        arguments = (
-            system.grid,
-            system.atoms,
-            system.pseudopotentials,
-            translation.problem.pseudopotentials,
-        )
-        native = NativeIonicBuilders().build_nonlocal_projectors(*arguments)
-        readable = build_nonlocal_projectors(*arguments)
-        self.assertEqual(native.labels, readable.labels)
-        np.testing.assert_array_equal(native.projectors.indptr, readable.projectors.indptr)
-        np.testing.assert_array_equal(native.projectors.indices, readable.projectors.indices)
-        np.testing.assert_allclose(
-            native.projectors.data, readable.projectors.data, rtol=0, atol=1e-13
-        )
+        sizes = {}
+        # PARSEC's block sizes: the projectors of the files (PARSEC_LOCAL_FILTER=off); the projectors filtered to the
+        # grid (the default) end at 1.5 times that radius, on both builders alike
+        for setting in ("off", "all"):
+            with self.subTest(setting=setting), mock.patch.dict(os.environ, {"PARSEC_LOCAL_FILTER": setting}):
+                with tempfile.TemporaryDirectory() as directory:
+                    translation = parse_parsec_input(write_case(case, Path(directory)))
+                    system = prepare_single_point(translation.problem)
+                sizes[setting] = support_sizes(system)
+                arguments = (
+                    system.grid,
+                    system.atoms,
+                    system.pseudopotentials,
+                    translation.problem.pseudopotentials,
+                )
+                native = NativeIonicBuilders().build_nonlocal_projectors(*arguments)
+                readable = build_nonlocal_projectors(*arguments)
+                self.assertEqual(native.labels, readable.labels)
+                np.testing.assert_array_equal(native.projectors.indptr, readable.projectors.indptr)
+                np.testing.assert_array_equal(native.projectors.indices, readable.projectors.indices)
+                np.testing.assert_allclose(
+                    native.projectors.data, readable.projectors.data, rtol=0, atol=1e-13
+                )
+        self.assertEqual(sizes["off"], case["nonlocal_block_sizes"])
+        self.assertTrue(all(wide > narrow for wide, narrow in zip(sizes["all"], sizes["off"])))
 
     def test_cache_key_reads_the_input_of_an_old_format_species(self) -> None:
         cases = load_cases()

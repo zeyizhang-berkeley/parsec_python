@@ -474,7 +474,7 @@ class HybridWedgeTests(unittest.TestCase):
         # on: the wedge from the start; auto: the start on the pairs, then the wedge where the start has no partly
         # filled state (the unpolarized cube at 1 K), else the pairs bit for bit as off (whichever the polarized start
         # gives: its initial moment may leave a multiplet partly filled)
-        from parsec_python.Grid.kpoints import kpoint_sampling
+        from parsec_python.Grid.kpoints import kpoint_sampling, partly_filled_states
         from parsec_python.models import HybridMeshRouteRecord
 
         results, counts, routes = {}, {}, {}
@@ -487,7 +487,17 @@ class HybridWedgeTests(unittest.TestCase):
             records: list = []
             results[wedge] = _run(problem, k_points, weights, {"PARSEC_HYBRID_KPOINT_WEDGE": wedge}, records.append)
             counts[wedge] = len(k_points)
-            routes[wedge] = [record for record in records if isinstance(record, HybridMeshRouteRecord)]
+            found = [record for record in records if isinstance(record, HybridMeshRouteRecord)]
+            # the NOTE at the end of a Fock loop whose last inner loop has a partly filled state (BlochExchange.
+            # after_loop): on the wedge, or on the pairs of off and of a polarized auto that kept them
+            ends = [record for record in found if record.route.endswith("_partly_filled")]
+            self.assertLessEqual(len(ends), 1)
+            for record in ends:
+                self.assertEqual(record.route, "pairs_partly_filled" if len(results[wedge].k_points) == 8
+                                 else "wedge_partly_filled")
+                self.assertGreater(record.partly_filled, 0)
+            self.assertEqual(bool(ends), bool(partly_filled_states(_final_channels(results[wedge]))[0]))
+            routes[wedge] = [record for record in found if not record.route.endswith("_partly_filled")]
         on, auto, off = results["on"], results["auto"], results["off"]
         self.assertEqual((counts["on"], counts["auto"], counts["off"]), (4, 8, 8))
         self.assertTrue(on.converged and auto.converged and off.converged)
@@ -515,6 +525,14 @@ class HybridWedgeTests(unittest.TestCase):
             self.assertAlmostEqual(
                 auto.exact_exchange.exchange_energy, off.exact_exchange.exchange_energy, delta=1.0e-6
             )
+
+
+def _final_channels(result) -> list:
+    """The occupations of a hybrid result per spin channel (as ``BlochExchange.after_loop`` reads them)."""
+
+    if hasattr(result, "occupations_up"):
+        return [np.asarray(result.occupations_up), np.asarray(result.occupations_down)]
+    return [np.asarray(result.occupations)]
 
 
 def _cubic_matrices() -> np.ndarray:
@@ -886,9 +904,13 @@ class AnyGridWedgeTests(unittest.TestCase):
     def test_the_switch(self) -> None:
         from parsec_python.Grid.kpoints import hybrid_kpoint_wedge_setting
 
-        for value, expected in (("", "auto"), ("ON", "on"), ("auto", "auto"), (" off ", "off")):
+        # on is the default since 2026-11-23 (auto, the former default, keeps its meaning)
+        for value, expected in (("", "on"), ("ON", "on"), ("auto", "auto"), (" off ", "off")):
             with mock.patch.dict(os.environ, {"PARSEC_HYBRID_KPOINT_WEDGE": value}):
                 self.assertEqual(hybrid_kpoint_wedge_setting(), expected)
+        with mock.patch.dict(os.environ):
+            os.environ.pop("PARSEC_HYBRID_KPOINT_WEDGE", None)
+            self.assertEqual(hybrid_kpoint_wedge_setting(), "on")
         # grid (the operations of scalar orbitals of 2026-11-19, which turn an oblique grid's stencil) is gone
         for value in ("grid", "yes", "1"):
             with mock.patch.dict(os.environ, {"PARSEC_HYBRID_KPOINT_WEDGE": value}), self.assertRaises(ValueError):
@@ -1024,7 +1046,7 @@ class AfterStartTests(unittest.TestCase):
 
         text = "\n".join(hybrid_mesh_route_lines(record))
         self.assertIn("8 partly filled state(s)", text)
-        self.assertIn("PARSEC_HYBRID_KPOINT_WEDGE=on runs the irreducible wedge of 4 k-points", text)
+        self.assertIn("PARSEC_HYBRID_KPOINT_WEDGE=on (the default) runs the irreducible wedge of 4 k-points", text)
 
     def test_an_insulating_start_takes_the_wedge(self) -> None:
         from parsec_python.models import HybridMeshRouteRecord
@@ -1184,10 +1206,14 @@ class AutoRouteTests(unittest.TestCase):
             routes[wedge] = [record for record in records if isinstance(record, HybridMeshRouteRecord)]
         auto, off = results["auto"], results["off"]
         self.assertEqual(handed, [(True, True), (True, True)])
-        self.assertEqual(routes["off"], [])
-        self.assertEqual([record.route for record in routes["auto"]], ["pairs"])
+        # the route after the start (auto), and the NOTE of a metal's Fock loop on the pairs at its end (both)
+        self.assertEqual([record.route for record in routes["off"]], ["pairs_partly_filled"])
+        self.assertEqual([record.route for record in routes["auto"]], ["pairs", "pairs_partly_filled"])
         self.assertGreater(routes["auto"][0].partly_filled, 0)
         self.assertEqual(routes["auto"][0].points, 4)
+        for route in (routes["off"][-1], routes["auto"][-1]):
+            self.assertEqual((route.points, route.pairs_points, route.mesh_points), (8, 8, 8))
+            self.assertGreater(route.partly_filled, 0)
         np.testing.assert_array_equal(auto.k_points, off.k_points)
         self.assertEqual(len(auto.exact_exchange.iterations), len(off.exact_exchange.iterations))
         self.assertAlmostEqual(auto.energies.total, off.energies.total, delta=1.0e-7)

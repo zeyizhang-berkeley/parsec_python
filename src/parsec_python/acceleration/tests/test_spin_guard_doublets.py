@@ -218,6 +218,17 @@ end Atom_Coord
 
 @unittest.skipUnless(_cupy_ready(), "needs a CUDA device")
 class DoubletRouteTests(unittest.TestCase):
+    # The charged Fe4 cell runs on the tables of the file (PARSEC_LOCAL_FILTER=off): its half-filled doublet at 100 K
+    # makes the SCF erratic whatever the tables (full grid, steps with the filtered / the file's tables: 247 / 69 at
+    # h 0.22, 47 / 50 at 0.18, 67 / 127 at 0.15; the filtered tables are the closer to the fine grid), and at h 0.22
+    # with the default tables it does not converge within 300 steps on the routes of the guard; the subject here is
+    # the routes.
+    @classmethod
+    def setUpClass(cls) -> None:
+        patcher = mock.patch.dict(os.environ, {"PARSEC_LOCAL_FILTER": "off"})
+        patcher.start()
+        cls.addClassCleanup(patcher.stop)
+
     def test_note_keeps_the_bits_and_stop_leaves_the_sectors(self) -> None:
         import parsec_python.acceleration.cli as cli_module
         from parsec_python.tests.spin_reference import pseudopotential_file

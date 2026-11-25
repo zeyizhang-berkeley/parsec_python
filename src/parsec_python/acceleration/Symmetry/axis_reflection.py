@@ -619,6 +619,44 @@ def _integer_signed_permutation_parameters(
     return sources, factors, offset
 
 
+def _general_frame_operations(grid) -> tuple:
+    """The integer operations of the frame of an oblique cell that are no signed permutation and that its detection
+    takes (``PARSEC_OBLIQUE_FULL_GROUP``, :func:`.oblique_frame.general_index_operations`), or ``()``."""
+
+    return tuple(getattr(grid, "index_frame_general_operations", None) or ())
+
+
+def _integer_operation_parameters(
+    grid: RealSpaceGrid,
+    operation: np.ndarray,
+    lattice_tolerance: float,
+) -> tuple[np.ndarray | None, np.ndarray | None, np.ndarray] | None:
+    """:func:`_integer_signed_permutation_parameters`, or ``(None, None, offset)`` for an operation of
+    :func:`_general_frame_operations` of ``grid`` (``R(n + s) - s = R n + (R s - s)``, the last term whole steps)."""
+
+    found = _integer_signed_permutation_parameters(grid, operation, lattice_tolerance)
+    if found is not None:
+        return found
+    general = _general_frame_operations(grid)
+    if not general:
+        return None
+    matrix = np.asarray(operation, dtype=np.int8)
+    if matrix.shape != (3, 3) or not any(np.array_equal(matrix, other) for other in general):
+        return None
+    shift = np.asarray(grid.settings.shift, dtype=np.float64)
+    floating_offset = shift @ matrix.T.astype(np.float64) - shift
+    offset = np.rint(floating_offset).astype(np.int64)
+    if np.max(np.abs(floating_offset - offset), initial=0.0) > lattice_tolerance:
+        return None
+    return None, None, offset
+
+
+def _candidate_operations(grid) -> tuple[np.ndarray, ...]:
+    """The 48 signed permutations, then the operations of :func:`_general_frame_operations` of ``grid``."""
+
+    return _signed_permutation_operations() + _general_frame_operations(grid)
+
+
 def _atoms_are_invariant_operation(
     atoms: Sequence[Atom] | dict[str, np.ndarray],
     operation: np.ndarray,
@@ -677,11 +715,28 @@ def _grid_row_mapping_operation(
     that the cell repeats (:func:`_half_cell_translations`).
     """
 
-    parameters = _integer_signed_permutation_parameters(
+    parameters = _integer_operation_parameters(
         grid, operation, lattice_tolerance
     )
     if parameters is None:
         return None
+    if parameters[0] is None:
+        # an integer operation of the frame of an oblique cell that is no signed permutation
+        # (PARSEC_OBLIQUE_FULL_GROUP): R n + offset (+ t), wrapped into the box
+        offset = parameters[2]
+        if translation is not None:
+            offset = offset + np.asarray(translation, dtype=np.int64)
+        if selected_rows is None and _periodic_row_major(grid):
+            from parsec_python.Grid.space_group import affine_grid_images
+
+            return affine_grid_images(
+                np.asarray(operation, dtype=np.int64), offset, grid.points_per_axis, np.int64
+            )
+        points = np.asarray(grid.integer_coordinates, dtype=np.int64)
+        if selected_rows is not None:
+            points = points[selected_rows]
+        rows = grid.rows_for_integer_coordinates(points @ np.asarray(operation, dtype=np.int64).T + offset)
+        return None if np.any(rows < 0) else rows
     if translation is not None and np.any(np.asarray(translation) != 0):
         if _lattice_period(grid) is None:
             return None
@@ -1595,12 +1650,14 @@ def _point_group_operations(
     period = _lattice_period(grid)
     identity = np.eye(3, dtype=np.int8)
     found = [identity]
-    for operation in _signed_permutation_operations():
+    # (the frame of an oblique cell under PARSEC_OBLIQUE_FULL_GROUP: its integer operations that are no signed
+    # permutation after these, _candidate_operations)
+    for operation in _candidate_operations(grid):
         if np.array_equal(operation, identity):
             continue
         if not _atoms_are_invariant_operation(species, operation, atom_tolerance, period):
             continue
-        if _integer_signed_permutation_parameters(grid, operation, lattice_tolerance) is None:
+        if _integer_operation_parameters(grid, operation, lattice_tolerance) is None:
             continue
         found.append(operation)
     return found
@@ -2317,9 +2374,9 @@ def _space_group_operations(grid, atoms, atom_tolerance, lattice_tolerance, *, f
     half_steps = [translations[0]] if len(translations) == 1 else _all_half_cell_steps(counts)
     admissible = [
         operation
-        for operation in _signed_permutation_operations()
+        for operation in _candidate_operations(grid)
         if not np.array_equal(operation, identity)
-        and _integer_signed_permutation_parameters(grid, operation, lattice_tolerance) is not None
+        and _integer_operation_parameters(grid, operation, lattice_tolerance) is not None
     ]
 
     def about(centre_steps, operation_steps):
@@ -2991,10 +3048,58 @@ def detect_point_group_reduction(
     cell in one process): the plan is that of the least rows x states plus ``sector_cost`` per solved sector, and it
     is compared with the abelian group with the cost of its sectors added on both sides.  ``0`` (the default) is the
     choice of before.
+
+    The grid of the frame of an oblique cell with operations that are no signed permutation
+    (``PARSEC_OBLIQUE_FULL_GROUP=auto``, :func:`_general_frame_operations`) is detected twice: with the signed
+    permutations alone (:func:`.oblique_frame.signed_frame_grid`, the reduction of before) and with those operations
+    too; the second is taken where it holds one of them and its sectors cost less, the rows times states of the
+    chosen sectors plus ``sector_cost`` per solved sector (those of ``abelian`` where the first keeps it), the first
+    otherwise.
     """
 
+    keywords = dict(atom_tolerance=atom_tolerance, lattice_tolerance=lattice_tolerance, sector_cost=sector_cost)
+    if not _general_frame_operations(grid):
+        return _detect_point_group_reduction(grid, atoms, abelian, **keywords)[0]
+    from .oblique_frame import signed_frame_grid
+
+    baseline, baseline_cost = _detect_point_group_reduction(signed_frame_grid(grid), atoms, abelian, **keywords)
+    extended, extended_cost = _detect_point_group_reduction(grid, atoms, abelian, **keywords)
+    if extended_cost is None or not holds_general_operations(extended):
+        return baseline
+    if baseline_cost is None:
+        order = float(abelian.group_order)
+        baseline_cost = 1.0 / order + max(float(sector_cost), 0.0) * order
+    return extended if extended_cost < baseline_cost - 1.0e-12 else baseline
+
+
+def holds_general_operations(reduction) -> bool:
+    """Whether the full group of ``reduction`` holds an operation that is no signed permutation (an oblique cell's
+    frame under ``PARSEC_OBLIQUE_FULL_GROUP=auto``)."""
+
+    operations = getattr(reduction, "full_operations", None)
+    if operations is None:
+        operations = getattr(reduction, "operations", None)
+    if operations is None:
+        return False
+    absolute = np.abs(np.asarray(operations, dtype=np.int64).reshape(-1, 3, 3))
+    signed = np.all(absolute.sum(axis=1) == 1, axis=1) & np.all(absolute.sum(axis=2) == 1, axis=1)
+    return not bool(np.all(signed))
+
+
+def _detect_point_group_reduction(
+    grid: RealSpaceGrid,
+    atoms: Sequence[Atom],
+    abelian: AxisReflectionReduction,
+    *,
+    atom_tolerance: float = 1.0e-7,
+    lattice_tolerance: float = 1.0e-10,
+    sector_cost: float = 0.0,
+) -> tuple[AxisReflectionReduction, float | None]:
+    """:func:`detect_point_group_reduction` on ``grid`` as it is, with the cost of the sectors taken (the rows times
+    states of the chosen plan plus ``sector_cost`` per solved sector; ``None`` where ``abelian`` is returned)."""
+
     if orbital_group_policy() == "abelian" or not atoms:
-        return abelian
+        return abelian, None
     from .orbital_groups import multiplication_table, orbital_group_plan
 
     table = _RowOrderTable(grid) if _fast_maps_requested() else None
@@ -3038,11 +3143,11 @@ def detect_point_group_reduction(
         return None if shifts is None else shifts[index]
 
     if len(elements) <= abelian.group_order:
-        return abelian
+        return abelian, None
     try:
         group_table = multiplication_table(elements, modulus=modulus)
     except ValueError:
-        return abelian
+        return abelian, None
     # the pure translations, in every candidate subgroup (orbital_group_plan, ``required``)
     required = (
         ()
@@ -3069,7 +3174,7 @@ def detect_point_group_reduction(
     # states (least_cost), so that the cell keeps the route of before (weighted sectors of G, or the abelian group) and
     # its full group G: the fixed cost chooses which subgroup's sectors solve it.
     if not plan.least_cost <= orbital_group_max_cost() / abelian.group_order + 1.0e-12:
-        return abelian
+        return abelian, None
     subgroup = [candidates[index] for index in plan.subgroup]
     # The smallest image of every row under H, map by map: the maps are not kept together (32 maps of the 46.7 M
     # points of a 20^3 diamond cell are 12 GB); _orbit_labels of that one array is _orbit_labels of all the maps.
@@ -3079,7 +3184,7 @@ def detect_point_group_reduction(
             grid, candidates[index], lattice_tolerance, table=table, translation=shift_of(index)
         )
         if mapping is None:
-            return abelian
+            return abelian, None
         if smallest is None:
             smallest = np.array(mapping, dtype=np.int64, copy=True)
         else:
@@ -3155,7 +3260,7 @@ def detect_point_group_reduction(
             grid, candidates[index], lattice_tolerance, table=table, translation=shift_of(index)
         )
         if mapping is None:
-            return abelian
+            return abelian, None
         rows = mapping[representative_rows]
         coset_images[c] = full_to_wedge[rows]
         if coset_rows is not None:
@@ -3177,7 +3282,7 @@ def detect_point_group_reduction(
     )
     if orbits is not None:
         translation_fields = dict(translation_fields, atom_representatives=orbits[0], atom_orbit_sizes=orbits[1])
-    return PointGroupReduction(
+    point_group = PointGroupReduction(
         **translation_fields,
         **unit_fields,
         signs=np.ones((order, 3), dtype=np.int8),
@@ -3197,6 +3302,7 @@ def detect_point_group_reduction(
         coset_operations=np.ascontiguousarray([candidates[index] for index in plan.cosets], dtype=np.int8),
         grid=grid,
     )
+    return point_group, float(plan.cost) + max(sector_cost, 0.0) * len(plan.characters)
 
 
 def periodic_abelian_reduction(

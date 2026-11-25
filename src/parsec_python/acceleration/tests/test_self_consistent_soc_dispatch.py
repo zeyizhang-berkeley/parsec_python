@@ -13,10 +13,14 @@ here without a GPU).
 
 from __future__ import annotations
 
+from contextlib import redirect_stderr
+import io
+import os
 import shutil
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import numpy as np
 
@@ -27,8 +31,10 @@ from parsec_python.acceleration.cli import (
     _accelerated_self_consistent_soc_eligible,
     _reference_only_features,
     _resolve_symmetry_mode,
+    _soc_device_forces,
     main as accelerated_main,
 )
+from parsec_python.acceleration.Forces.spinor_device import soc_device_forces_setting
 from parsec_python.tests.archives import read_archive
 
 GPU_AVAILABLE = cupy_available()
@@ -123,17 +129,69 @@ class EligibilityPredicateTests(unittest.TestCase):
         )
         self.assertIn("self-consistent spin-orbit coupling (SO_from_scratch)", features)
 
-    def test_forces_are_not_an_accelerated_shape(self) -> None:
-        # the CuPy spinor driver has no forces: the reference solver, which has, takes the input
-        for extra in ("Skip_Force: .false.\n", "Minimization: bfgs\nMovement_Num: 2\n"):
+    def test_forces_are_an_accelerated_shape_under_the_device_forces(self) -> None:
+        # PARSEC_SOC_DEVICE_FORCES=auto (the default): the CuPy spinor driver has the forces, relaxation and dynamics
+        # (acceleration/Forces/spinor_device.py); off hands them to the reference solver, as before
+        for extra in (
+            "Skip_Force: .false.\n",
+            "Minimization: bfgs\nMovement_Num: 2\n",
+            "Molecular_Dynamics: .true.\nStep_Num: 2\n",
+        ):
             with self.subTest(extra=extra):
                 translation = self._translation(extra=extra)
-                self.assertFalse(_accelerated_self_consistent_soc_eligible(translation))
-                features = _reference_only_features(translation, accelerated_backend_selected=False)
-                self.assertEqual(
-                    features,
-                    ["forces, relaxation or molecular dynamics with self-consistent spin-orbit coupling (SO_from_scratch)"],
-                )
+                with mock.patch.dict(os.environ, {"PARSEC_SOC_DEVICE_FORCES": "auto"}):
+                    self.assertTrue(_accelerated_self_consistent_soc_eligible(translation))
+                    self.assertEqual(_reference_only_features(translation, accelerated_backend_selected=True), [])
+                with mock.patch.dict(os.environ, {"PARSEC_SOC_DEVICE_FORCES": "off"}):
+                    self.assertFalse(_accelerated_self_consistent_soc_eligible(translation))
+                    features = _reference_only_features(translation, accelerated_backend_selected=False)
+                    self.assertEqual(
+                        features,
+                        [
+                            "forces, relaxation or molecular dynamics with self-consistent spin-orbit coupling "
+                            "(SO_from_scratch)"
+                        ],
+                    )
+
+    def test_the_reference_solver_keeps_what_the_device_route_does_not_write(self) -> None:
+        # Create_DOS of the last structure, spin polarization and an unknown value of the switch keep the reference
+        # solver's spinor loops
+        for extra in (
+            "Skip_Force: .false.\nCreate_DOS: .true.\n",
+            "Skip_Force: .false.\nSpin_Polarization: .true.\n",
+        ):
+            with self.subTest(extra=extra):
+                translation = self._translation(extra=extra)
+                with mock.patch.dict(os.environ, {"PARSEC_SOC_DEVICE_FORCES": "auto"}):
+                    self.assertFalse(_soc_device_forces(translation))
+        translation = self._translation(extra="Skip_Force: .false.\n")
+        with mock.patch.dict(os.environ, {"PARSEC_SOC_DEVICE_FORCES": "yes"}):
+            self.assertFalse(_soc_device_forces(translation))
+            with self.assertRaises(ValueError):
+                soc_device_forces_setting()
+
+    def test_the_fortran_derived_routines_take_the_device_forces_under_auto(self) -> None:
+        feature = "forces, relaxation or molecular dynamics with spin-orbit coupling or non-collinear magnetism"
+        for extra in ("Skip_Force: .false.\n", "Minimization: bfgs\nMovement_Num: 2\n"):
+            with self.subTest(extra=extra):
+                translation = self._translation(extra=extra + "Use_Fortran_Routines: .true.\n")
+                self.assertTrue(_accelerated_self_consistent_soc_eligible(translation))
+                with mock.patch.dict(os.environ, {"PARSEC_SOC_DEVICE_FORCES": "auto"}):
+                    self.assertTrue(_soc_device_forces(translation))
+                    self.assertEqual(_reference_only_features(translation, accelerated_backend_selected=True), [])
+                with mock.patch.dict(os.environ, {"PARSEC_SOC_DEVICE_FORCES": "off"}):
+                    self.assertEqual(
+                        _reference_only_features(translation, accelerated_backend_selected=True), [feature]
+                    )
+
+    def test_an_unknown_value_of_the_switch_is_refused_before_the_scf(self) -> None:
+        path = self.directory / "parsec.in"
+        path.write_text(_BASE_INPUT + "Skip_Force: .false.\n", encoding="utf-8")
+        stderr = io.StringIO()
+        with mock.patch.dict(os.environ, {"PARSEC_SOC_DEVICE_FORCES": "yes"}), redirect_stderr(stderr):
+            code = accelerated_main([str(path), "--quiet", "--backend", "scipy", "--no-archive"])
+        self.assertEqual(code, 2)
+        self.assertIn("PARSEC_SOC_DEVICE_FORCES", stderr.getvalue())
 
     def test_reference_only_features_flags_spin_polarized_combo_regardless(self) -> None:
         translation = self._translation(extra="Spin_Polarization: .true.\n")

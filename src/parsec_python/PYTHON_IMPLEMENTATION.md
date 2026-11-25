@@ -500,6 +500,19 @@ slope of the energy and of energies closer to the limit of their tables
   occupations of the empty levels, not the energy; PARSEC 1.5 reports the
   level where its bisection stops, anywhere in the gap where the thermal
   tails are below its tolerance.
+- The local potential and the Kleinman-Bylander projectors are
+  Fourier-filtered to the grid before they are sampled
+  (`PARSEC_LOCAL_FILTER=all`, since 2026-11-23), so that the energy hardly
+  depends on where an atom sits between the grid points (the egg-box effect:
+  2.3e-3 Ry for O2 at h 0.16 bohr with the tables as the files give them,
+  3e-5 Ry filtered); PARSEC 1.5 samples the tables as the files give them
+  (its filter `fourier_f.f90` acts on the projectors of a periodic species
+  with `Alpha_Filter` only).
+- The LDA+U projectors are the cubic spline of `R_d` tapered to zero about
+  the radius `r_c` of the 0.95 rule (`PARSEC_LDAU_SMOOTH_PROJECTORS=on`, since
+  2026-11-23), so that the LDA+U energy is a smooth function of the positions
+  and the forces follow its slope; PARSEC 1.5 interpolates `R_d` linearly and
+  cuts it at `r_c`, where it is not zero (`upot.F90`).
 
 `PARSEC_CUBIC_SPLINE_DEFAULT=off PARSEC_PROJECTOR_TAIL=off` (or `Cubic_Spline:
 .false.` for every species, where no table has such a tail) reproduce PARSEC

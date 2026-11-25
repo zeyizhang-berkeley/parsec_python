@@ -385,9 +385,12 @@ def _spinor_solver(
     weight: float = 1.0,
     compute_forces: bool = False,
     k_weights: np.ndarray | None = None,
+    geometry: dict | None = None,
 ) -> tuple[object, SpinorForceExtras]:
     """Parallel solver of the spinor Bloch problems, one task per k-point, and its ``extras`` (see
     :class:`SpinorForceExtras`; ``k_weights`` are the weights of unequally weighted k-points for the force).
+    ``geometry``: what a solver that splits the k-points into double-group sectors needs (``spinor``, the grid, the
+    atoms, the k-points and their weights, the lattice and the density group; :func:`_sector_geometry`), or ``None``.
 
     The Bloch-phase nonlocal and spin-orbit projectors of a k-point are built
     once, by the worker that owns it.  ``potentials`` carries ``V`` (the local
@@ -423,6 +426,7 @@ def _spinor_solver(
             make_hamiltonian,
             accumulate,
             extras=extras,
+            geometry=geometry,
         ),
         problem_size=system.grid.size,
     )
@@ -432,6 +436,39 @@ def _spinor_solver(
             "sums over row blocks, which does not apply to a product of overlaps"
         )
     return solver, extras
+
+
+def _sector_geometry(
+    system, k_points: np.ndarray, weighting: KPointWeights, compute_forces: bool, *, magnetic: bool = False
+) -> dict | None:
+    """What the solver of the double-group sectors of the k-points of a spin-orbit loop needs
+    (``PARSEC_SOC_KPOINT_SECTORS``, :mod:`parsec_python.acceleration.SCF.kpoint_spinor_sectors`), ``None`` under
+    ``off`` (the job of before) or where the accelerated package is not installed.  ``magnetic``: the loop of a
+    collinear magnetization along z, which takes them under ``PARSEC_SOC_SPIN_KPOINT_SECTORS=on`` only."""
+
+    try:
+        from ..acceleration.SCF.kpoint_spinor_sectors import (
+            soc_kpoint_sectors_setting,
+            soc_spin_kpoint_sectors_setting,
+        )
+    except ImportError:
+        return None
+    if soc_kpoint_sectors_setting() == "off":
+        return None
+    if magnetic and soc_spin_kpoint_sectors_setting() == "off":
+        return None
+    n_kpoints = int(np.asarray(k_points).reshape(-1, 3).shape[0])
+    return {
+        "spinor": True,
+        "grid": system.grid,
+        "atoms": tuple(system.cell_atoms),
+        "k_points": np.asarray(k_points, dtype=np.float64),
+        "weights": np.asarray([weighting.of_k(task) for task in range(n_kpoints)], dtype=np.float64),
+        "lattice": np.asarray(system.input.periodic_cell.lattice_vectors, dtype=np.float64),
+        "density_symmetry": getattr(system, "density_symmetry", None),
+        "forces": bool(compute_forces),
+        "magnetic": bool(magnetic),
+    }
 
 
 def run_self_consistent_soc_kpoints(
@@ -525,6 +562,8 @@ def run_self_consistent_soc_kpoints(
         weight=weighting.weight if weighting.uniform else 1.0,
         compute_forces=compute_forces,
         k_weights=None if weighting.uniform else weighting.weights,
+        # the double-group sectors of the k-points (PARSEC_SOC_KPOINT_SECTORS; None under off: the job of before)
+        geometry=_sector_geometry(system, k_points, weighting, compute_forces),
     )
     mixer = make_mixer(system.input.mixing)
     filter_degree = system.input.eigensolver.filter_degree
@@ -863,6 +902,8 @@ def run_self_consistent_soc_kpoints_spin_polarized(
         accumulate,
         weight=weighting.weight if weighting.uniform else 1.0,
         compute_forces=compute_forces,
+        # the sectors about z of the magnetization (PARSEC_SOC_SPIN_KPOINT_SECTORS=on, opt-in; None: the job of before)
+        geometry=_sector_geometry(system, k_points, weighting, compute_forces, magnetic=True),
     )
     mixer = make_mixer(system.input.mixing)
     filter_degree = system.input.eigensolver.filter_degree

@@ -1,6 +1,6 @@
 # H2 physical comparison result
 
-Date: 2026-11-23 (Python run; the run of 2026-11-05 took the abelian D_2h
+Date: 2026-11-24 (Python run; the run of 2026-11-05 took the abelian D_2h
 sectors and gave -2.29319727 Ry in 17 SCF iterations). The comparison of
 2026-07-28 used an earlier Python program, which diagonalized the full grid with an ARPACK first
 solve and converged in 7 SCF iterations to -2.293197288860 Ry; that program
@@ -13,55 +13,59 @@ order, CA-LDA functional, temperature, state count, and convergence criterion.
 The PARSEC values come from `parsec_reference.out`. The Python values come
 from `parsec_python.out`: `python src\parsec_python\main.py
 examples\h2_full_nonlocal\parsec.in --no-archive --log parsec_python.out`
-with the code of 23 November 2026 on one NVIDIA A100 (no symmetry cache,
+with the code of 24 November 2026 on one NVIDIA A100 (no symmetry cache,
 after one throwaway warm-up run on the GPU, four runs side by side on the
 node; paths shortened to repository paths). The input gives no
 `Cubic_Spline` line, so the H table is interpolated by cubic splines, the
 default since 22 November 2026, and since 23 November 2026 the projector
 norms take the quadrature of the logarithmic mesh and the CA correlation
-the continuous coefficients; the column "linear tables" is the same command
-with
-`PARSEC_FORTRAN_NUMERICS=on`, the numerics of PARSEC 1.5 (code of 23 November
-2026; `PARSEC_CUBIC_SPLINE_DEFAULT=off PARSEC_PROJECTOR_TAIL=off` gave the same
-digits on 22 November). The report prints the energy terms with eight
+the continuous coefficients, and since 24 November 2026 the local potential
+and the projectors are Fourier-filtered to the grid (`PARSEC_LOCAL_FILTER`);
+the column "linear tables" is the same command with
+`PARSEC_FORTRAN_NUMERICS=on`, the numerics of PARSEC 1.5 (code of 24 November
+2026, the same digits as on 23 November;
+`PARSEC_CUBIC_SPLINE_DEFAULT=off PARSEC_PROJECTOR_TAIL=off` gave them on 22
+November). The report prints the energy terms with eight
 decimals. Differences below are Python minus PARSEC.
 
 | Quantity | PARSEC [Ry] | Python [Ry] | Python - PARSEC [Ry] | Python, linear tables [Ry] | Linear - PARSEC [Ry] |
 |---|---:|---:|---:|---:|---:|
-| Total energy | -2.2931972800 | -2.2932195300 | -2.2250e-05 | -2.2931972800 | +0.0000e+00 |
-| Eigenvalue energy | -1.5116605700 | -1.5118884400 | -2.2787e-04 | -1.5118798700 | -2.1930e-04 |
-| Hartree energy | 2.5892819900 | 2.5894996700 | +2.1768e-04 | 2.5894847500 | +2.0276e-04 |
-| Integral Vxc*rho | -1.6953933500 | -1.6955308900 | -1.3754e-04 | -1.6955153800 | -1.2203e-04 |
-| Exchange-correlation energy | -1.2986859700 | -1.2987931500 | -1.0718e-04 | -1.2987789100 | -9.2940e-05 |
-| Electron-ion energy | -7.0454730400 | -7.0459157000 | -4.4266e-04 | -7.0458615000 | -3.8846e-04 |
+| Total energy | -2.2931972800 | -2.2930261900 | +1.7109e-04 | -2.2931972800 | +0.0000e+00 |
+| Eigenvalue energy | -1.5116605700 | -1.5117192500 | -5.8680e-05 | -1.5118798700 | -2.1930e-04 |
+| Hartree energy | 2.5892819900 | 2.5894749100 | +1.9292e-04 | 2.5894847500 | +2.0276e-04 |
+| Integral Vxc*rho | -1.6953933500 | -1.6955271300 | -1.3378e-04 | -1.6955153800 | -1.2203e-04 |
+| Exchange-correlation energy | -1.2986859700 | -1.2987903700 | -1.0440e-04 | -1.2987789100 | -9.2940e-05 |
+| Electron-ion energy | -7.0454730400 | -7.0457541900 | -2.8115e-04 | -7.0458615000 | -3.8846e-04 |
 | Ion-ion energy | 1.4111386700 | 1.4111386700 | +0.0000e+00 | 1.4111386700 | +0.0000e+00 |
-| Occupied eigenvalue | -0.7558302836 | -0.7559442216 | -1.1394e-04 | -0.7559399368 | -1.0965e-04 |
+| Occupied eigenvalue | -0.7558302836 | -0.7558596245 | -2.9341e-05 | -0.7559399368 | -1.0965e-04 |
 
 Convergence and runtime:
 
 | Quantity | PARSEC | Python |
 |---|---:|---:|
 | Converged SCF iteration | 19 | 17 |
-| Final weighted SRE [Ry] | 6.58059e-05 | 1.54368e-04 |
+| Final weighted SRE [Ry] | 6.58059e-05 | 1.54542e-04 |
 | Full active grid points | 179,944 | 179,944 |
 | Grid points diagonalized directly | eight symmetry sectors of 22,493 | six weighted sectors of a subgroup of order 8 of D_4h |
 | Nonlocal projector columns | 6 | 6 |
-| Wall time [s] | 19.30 (CPU) | 2.24 (A100 GPU) |
+| Wall time [s] | 19.30 (CPU) | 2.73 (A100 GPU) |
 
 ## Interpretation
 
 With PARSEC 1.5's numerics the total energy is reproduced to the
 eight printed decimal places in Rydberg for this matched physical case. The
-defaults lower it by `2.2e-5 Ry`: `1.5e-5 Ry` from the cubic splines of
-this table and `7.1e-6 Ry` from the quadrature of the projector norms and
-the continuous CA correlation; both converge in 17 iterations. The
+defaults raise it by `1.7e-4 Ry`: `+1.93e-4 Ry` from the Fourier filter of
+the table to the grid, `-1.5e-5 Ry` from the cubic splines of this table and
+`-7.1e-6 Ry` from the quadrature of the projector norms and the continuous
+CA correlation; both converge in 17 iterations. The
 separate energy terms agree at the `1e-4 Ry` scale; their leading
 differences cancel in the stationary total energy, and each code stops on
 its potential-residual criterion (`2e-4 Ry`) at a different point of its
 mixing trajectory. The occupied eigenvalue follows the potential at that
-point: it differs by `1.1e-4 Ry` with either numerics, the size of
-its own change between the last two Python iterations (`1.0e-4 Ry`); the run
-of 2026-11-05 (D_2h sectors) stopped at another point and gave `1.5e-6 Ry`.
+point: it differs by `1.1e-4 Ry` with PARSEC 1.5's numerics, the size of
+its own change between the last two Python iterations (`1.0e-4 Ry`), and by
+`2.9e-5 Ry` with the defaults; the run of 2026-11-05 (D_2h sectors) stopped
+at another point and gave `1.5e-6 Ry`.
 
 PARSEC diagonalizes the eight representations of its abelian subgroup `D_2h`
 separately. H2 on the z axis has the point group `D_4h` on the grid, and the

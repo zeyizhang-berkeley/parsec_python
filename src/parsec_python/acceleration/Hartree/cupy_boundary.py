@@ -25,6 +25,7 @@ import numpy as np
 
 from ..backends.cupy import require_cupy
 from ..backends.cupy_compile import compile_cupy_raw
+from ..backends.device_checks import all_finite
 from ..SCF.symmetry_fields import SymmetryScalarField
 from ..Symmetry import AxisReflectionReduction, SignedPermutationReduction
 from .fast_multipole import FastMultipoleExpansion
@@ -357,7 +358,7 @@ class CuPyMultipoleBoundaryBuilder:
         # too: the caller's current one may be another.
         with cp.cuda.Device(self.device_id):
             density = cp.asarray(density,dtype=cp.float64) if on_device else np.ascontiguousarray(density, dtype=np.float64)
-            finite = bool(cp.isfinite(density).all().get()) if on_device else np.isfinite(density).all()
+            finite = all_finite(density)
             if density.shape != (self.grid.size,) or not finite:
                 raise ValueError("density must be finite and match the active grid")
             g = self.geometry
@@ -506,6 +507,20 @@ extern "C" __global__ void assemble_rhs_sym(
     rhs[row]=v*root[row];
 }
 '''
+
+
+def symmetry_kernels(cp):
+    """The three kernels of the symmetric builder (moments, exterior values, assembly), compiled for the current
+    device (also ahead of a run: backends/compile_ahead.py)."""
+
+    kernels = tuple(
+        cp.RawKernel(_SYMMETRY_SOURCE, name, options=("--std=c++11",))
+        for name in ("moments_sym", "exterior_values_sym", "assemble_rhs_sym"))
+    for kernel in kernels:
+        compile_cupy_raw(kernel)
+    return kernels
+
+
 _MOMENT_SPAN = 16
 
 
@@ -611,11 +626,7 @@ class CuPySymmetryMultipoleBoundaryBuilder:
             self.rhs = cp.empty(self.assembly_size, dtype=cp.float64)
             self.value = cp.empty(self.exterior_point_count, dtype=cp.float64)
             self.tail = None
-            self.kernels = tuple(
-                cp.RawKernel(_SYMMETRY_SOURCE, name, options=("--std=c++11",))
-                for name in ("moments_sym", "exterior_values_sym", "assemble_rhs_sym"))
-            for kernel in self.kernels:
-                compile_cupy_raw(kernel)
+            self.kernels = symmetry_kernels(cp)
             cp.cuda.get_current_stream().synchronize()
         self.atomic_tail_maximum = None
         self.atomic_tail_seconds = 0.0
@@ -735,7 +746,7 @@ class CuPySymmetryMultipoleBoundaryBuilder:
         with cp.cuda.Device(self.device_id):
             density = (cp.asarray(wedge_density, dtype=cp.float64) if on_device
                        else np.ascontiguousarray(wedge_density, dtype=np.float64))
-            finite = bool(cp.isfinite(density).all().get()) if on_device else np.isfinite(density).all()
+            finite = all_finite(density)
             if density.shape != (wedge,) or not finite:
                 raise ValueError("density must be finite and match the symmetry wedge")
             if on_device:
@@ -942,8 +953,7 @@ class CuPySubgroupMultipoleBoundaryBuilder:
         """Borrowed device RHS of the wedge of the group, valid until the next build."""
         cp, _ = require_cupy()
         with cp.cuda.Device(self.device_id):
-            finite = (bool(cp.isfinite(wedge_density).all().get()) if isinstance(wedge_density, cp.ndarray)
-                      else bool(np.isfinite(wedge_density).all()))
+            finite = all_finite(wedge_density)
             if not finite:
                 raise ValueError("density must be finite and match the symmetry wedge")
             diagonal = self._diagonal_density(wedge_density)

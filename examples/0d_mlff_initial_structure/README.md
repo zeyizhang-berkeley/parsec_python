@@ -51,22 +51,35 @@ of the same input takes `mlff_structure.xyz` instead of relaxing again.
 
 | System | Machine | DFT structures: crude / after `uma-s-1p2` | Time (program time of `parsec.out`): crude / force field + DFT |
 |---|---|---:|---:|
-| C6H6 | one node, 4 A100 | 13 / 10 | 16 s / 35 + 13 s |
+| C6H6 | one node, 4 A100 | 10 / 5 | 14 s / 37 + 8 s |
 | C35H36 | Windows laptop, RTX 5070 | 29 / 13 | 658 s / 133 + 302 s |
-| C35H36 | one node, 4 A100 | 29 / 13 | 33 s / 30 + 22 s |
-| C185H124 | one node, 4 A100 | 38 / 18 | 122 s / 19 + 57 s |
+| C35H36 | one node, 4 A100 | 14 / 10 | 20 s / 20 + 15 s |
+| C185H124 | one node, 4 A100 | 16 / 12 | 27 s / 34 + 19 s |
 
-The C6H6 row was run with the code of 22 November 2026, where species
-without a `Cubic_Spline` line, as in the benzene inputs, take cubic splines
-by default; the nanodiamond inputs give the line. Every pair ends at the
-same structure and energy. From the GFN2-xTB
-structures themselves the DFT runs took 13 (C35H36) and 21 (C185H124)
-structures: the force field brings a crude structure back to that quality.
-The force field costs a fixed half minute to two minutes, mostly loading the
-model (about two minutes on the Windows laptop, where the files are scanned
-on first use), and it pays off once the DFT run is expensive: on four A100
-from a few hundred atoms on, on the laptop GPU, whose double precision is
-slow, already for C35H36 (a third less time). The larger clusters of
+The A100 rows were run with the code of 24 November 2026, benzene by
+`main.py`, the nanodiamonds by `scripts/run_multi_gpu_scf.sh`, after one
+throwaway relaxation of a single step on each route; the benzene inputs give
+no `Cubic_Spline` line and take cubic splines by default, the nanodiamond
+inputs give the line. Since 24 November 2026 the local potentials and the
+projectors are Fourier-filtered to the grid before they are sampled
+(`PARSEC_LOCAL_FILTER`), which removes most of the egg-box noise of the
+forces at these spacings, so BFGS reaches `Force_Min` in fewer structures:
+with `PARSEC_LOCAL_FILTER=off` the same code takes 13 / 10 (C6H6), 30 / 13
+(C35H36) and 41 / 18 (C185H124) structures, as the tables of the files did
+before. The laptop row is from the code of 19 October 2026 (the files'
+tables) and was not run again. Every pair ends at the same structure
+(within 0.008 bohr) and energy (within 3e-5 eV per atom). From the
+GFN2-xTB structures themselves the DFT runs take 8 (C35H36) and 9
+(C185H124) structures (13 and 19 with `PARSEC_LOCAL_FILTER=off`): the force
+field brings a crude structure back close to that quality. The force field
+costs a fixed 20 s to two minutes, mostly loading the model (about two
+minutes on the Windows laptop, where the files are scanned on first use),
+and it pays off only once the DFT run is expensive: on four A100 the
+filtered relaxations of these three from their crude structures take 14 to
+27 s, less than the force field and its DFT relaxation together; on the
+laptop GPU, whose double precision is slow, it saved a third of the time
+already for C35H36. The larger clusters of
 [the MLFF guide](../../src/parsec_python/MLFF/README.md#what-it-gains-and-which-model)
-saved 37 to 49 %. The program time at the end of `parsec.out` leaves the
-force field out; its time is in the lines that report it.
+saved 37 to 49 % (measured with the files' tables). The program time at the
+end of `parsec.out` leaves the force field out; its time is in the lines
+that report it.

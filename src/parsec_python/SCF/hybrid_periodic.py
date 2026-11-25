@@ -421,6 +421,21 @@ def hybrid_wedge_plan(system, deferred, pair_points, reciprocal, *, complete: bo
     return WedgePlan(indices, k_points, k_weights, int(deferred.group.order), wedge_system, found)
 
 
+def _wedge_order(system, stars) -> int:
+    """The order of the group of the wedge a run took from its start (:func:`parsec_python.Grid.kpoints.
+    hybrid_wedge_group` of its input), else the operations its images take."""
+
+    try:
+        from ..Grid.kpoints import hybrid_wedge_group
+
+        group = hybrid_wedge_group(system.input)
+        if group is not None:
+            return int(group.order)
+    except Exception:  # noqa: BLE001  (a NOTE only: never stop the run for it)
+        pass
+    return len(getattr(stars, "gathers", ()) or ())
+
+
 def _start_occupations(start) -> list:
     """The occupations of a k-point loop's result, per spin channel (0 to 1 per spin orbital)."""
 
@@ -594,6 +609,9 @@ class BlochExchange:
     #: ``(how, pairs, mesh points, operations)`` once ``PARSEC_HYBRID_KPOINT_WEDGE=auto`` moved this Fock loop to the
     #: wedge (``how``: ``start``, :meth:`after_start`; ``carried``, :meth:`adopt_carried`), for :meth:`after_loop`.
     _wedge_taken: tuple | None = None
+    #: The partly filled states of the semilocal start (:meth:`after_start`), for :meth:`after_loop`: a metal's Fock
+    #: loop may end with every state 0 or 1 (the broken state of the pairs).
+    _start_partly_filled: int = 0
 
     def __init__(self, system, definition, k_points, k_weights, potentials: PeriodicPairPotentials | None = None) -> None:
         self.k_points = np.atleast_2d(np.asarray(k_points, dtype=np.float64))
@@ -679,9 +697,13 @@ class BlochExchange:
         from ..models import HybridMeshRouteRecord
 
         deferred = getattr(system.input, "hybrid_kpoint_wedge_deferred", None)
-        if deferred is None or self.stars is not None or getattr(start, "k_wavefunctions", None) is None:
+        if getattr(start, "k_wavefunctions", None) is None:
             return system, start
         count, largest = partly_filled_states(_start_occupations(start))
+        # (for the NOTE at the end of the loop, after_loop: a metal's Fock loop may end with every state 0 or 1)
+        self._start_partly_filled = int(count)
+        if deferred is None or self.stars is not None:
+            return system, start
         pairs = int(self.k_points.shape[0])
         mesh_points = int(np.prod([int(value) for value in deferred.dimensions]))
 
@@ -755,31 +777,60 @@ class BlochExchange:
         )
         return plan.system
 
-    def after_loop(self, system, result, *, callback: Callable | None = None) -> None:
-        """The NOTE of a Fock loop that ``PARSEC_HYBRID_KPOINT_WEDGE=auto`` moved to the wedge (after an insulating
-        semilocal start, :meth:`after_start`, or with the wedge's orbitals of the structure before a move,
-        :meth:`adopt_carried`) and whose last inner loop ``result`` has a partly filled state
-        (:func:`parsec_python.Grid.kpoints.partly_filled_states`): such a structure is a metal held in the symmetric
-        state of the wedge, which ``PARSEC_HYBRID_KPOINT_WEDGE=auto`` keeps on the time-reversal pairs where the
-        semilocal start shows it (a later structure of a relaxation, or a Fock loop that closes the start's gap).
-        ``callback`` receives a
-        :class:`parsec_python.models.HybridMeshRouteRecord` of route ``wedge_partly_filled`` (``reason``: ``start``
-        or ``carried``); the run and its result are not changed.  Nothing for the pairs, ``on`` or an insulator."""
+    def after_loop(self, system, result, *, callback: Callable | None = None, records=()) -> None:
+        """The NOTE of a Fock loop whose last inner loop ``result`` or semilocal start (:meth:`after_start`) has a
+        partly filled state (:func:`parsec_python.Grid.kpoints.partly_filled_states`: a metal; the broken state of the
+        pairs may end with every state 0 or 1), which says which state it holds; the run and its result are not
+        changed.  ``callback`` receives a :class:`parsec_python.models.HybridMeshRouteRecord`:
 
-        taken = getattr(self, "_wedge_taken", None)
-        if taken is None or callback is None or result is None:
+        * on the irreducible wedge, route ``wedge_partly_filled``: the state in which the members of every star of the
+          mesh are filled alike (``reason`` ``wedge`` for a run on the wedge from its start,
+          ``PARSEC_HYBRID_KPOINT_WEDGE=on``; ``start`` / ``carried`` for a Fock loop that ``auto`` moved to the wedge
+          after an insulating start, :meth:`after_start`, or with the wedge's orbitals of the structure before a move,
+          :meth:`adopt_carried`);
+        * on the time-reversal pairs of a mesh of more than one point, route ``pairs_partly_filled``: such a Fock loop
+          can fill equivalent k-points unequally and end below the symmetric state (an artefact of the finite mesh),
+          so its energy is not comparable with that of a structure run on the wedge.
+
+        ``records`` (the :class:`parsec_python.models.ExchangeLoopIteration` of the loop) give the record its
+        ``instability``: the outer iteration at which dexx rose tenfold above its smallest earlier value
+        (:func:`parsec_python.SCF.hybrid.fock_loop_diagnostics`).  Nothing for an insulator."""
+
+        if callback is None or result is None:
             return
         from ..Grid.kpoints import HYBRID_WEDGE_FRACTIONAL_TOLERANCE, partly_filled_states
         from ..models import HybridMeshRouteRecord
 
         count, largest = partly_filled_states(_start_occupations(result))
-        if not count:
+        # a metal: a partly filled state at the end, or in the semilocal start (the broken state of the pairs may end
+        # with every state 0 or 1)
+        started = int(getattr(self, "_start_partly_filled", 0) or 0)
+        if not count and not started:
             return
-        how, pairs, mesh_points, operations = taken
+        instability = None
+        if records:
+            from .hybrid import fock_loop_diagnostics
+
+            instability = fock_loop_diagnostics(tuple(records), [])["instability"]
+        taken = getattr(self, "_wedge_taken", None)
+        stars = getattr(self, "stars", None)
+        mesh = tuple(int(value) for value in (getattr(self, "mesh", None) or ()))
+        mesh_points = int(np.prod(mesh)) if mesh else 0
+        points = int(self.k_points.shape[0])
+        if taken is not None:
+            how, pairs, mesh_points, operations = taken
+            route = "wedge_partly_filled"
+        elif stars is not None:
+            route, how, pairs, operations = "wedge_partly_filled", "wedge", 0, _wedge_order(system, stars)
+        elif mesh_points == 1:
+            # one point: no equivalent k-points to fill unequally
+            return
+        else:
+            route, how, pairs, operations = "pairs_partly_filled", "", points, 0
         callback(
             HybridMeshRouteRecord(
-                route="wedge_partly_filled",
-                points=int(self.k_points.shape[0]),
+                route=route,
+                points=points,
                 mesh_points=int(mesh_points),
                 pairs_points=int(pairs),
                 operations=int(operations),
@@ -787,6 +838,8 @@ class BlochExchange:
                 largest_fractional_occupation=float(largest),
                 tolerance=float(HYBRID_WEDGE_FRACTIONAL_TOLERANCE),
                 reason=how,
+                instability=instability,
+                start_partly_filled=started,
             )
         )
 

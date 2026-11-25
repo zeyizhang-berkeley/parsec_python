@@ -140,9 +140,11 @@ class PartnerRowSCFTests(unittest.TestCase):
                 self.assertTrue(any("LDA+U keeps the units" in note for note in notes), notes)
                 self.assertNotIn("on the orbits of larger subgroups", units[3]["symmetry_detection"])
                 # the total energy within 1e-7 Ry at the criterion of 1e-8 Ry; its Hartree and exchange-correlation
-                # terms, which the criterion leaves free to first order, within 5e-7 Ry (1.05e-7 apart on A100)
+                # terms, which the criterion leaves free to first order, within 1e-6 Ry (1.05e-7 apart on A100 with
+                # the tables of the files and the LDA+U projectors of upot.F90, 6.9e-7 with the filtered tables and
+                # the smooth projectors of the defaults)
                 self.assertAlmostEqual(units[0].energies.total, before[0].energies.total, delta=1.0e-7)
-                self.assert_same(units, before, f"Ag4+U {method} once against off", energy=5.0e-7, level=1.0e-6,
+                self.assert_same(units, before, f"Ag4+U {method} once against off", energy=1.0e-6, level=1.0e-6,
                                  force=1.0e-5)
 
     def test_the_exported_orbitals(self) -> None:

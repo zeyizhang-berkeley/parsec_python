@@ -432,7 +432,11 @@ def _resource_report(resources: Resources, system) -> list[str]:
 def _accelerated_self_consistent_soc_eligible(translation) -> bool:
     """Whether this input matches the one self-consistent-SOC shape the
     accelerated path implements: Gamma-point only, not combined with
-    collinear spin polarization, and without forces, relaxation or molecular dynamics.
+    collinear spin polarization, and (on the default routines) with forces, relaxation or molecular dynamics only
+    under ``PARSEC_SOC_DEVICE_FORCES=auto`` (the default: the device forces of
+    :mod:`parsec_python.acceleration.Forces.spinor_device`; ``off`` hands them to the reference solver, as before;
+    the Fortran-derived routines are eligible either way and :func:`_reference_only_features` names their moving
+    atoms under ``off``).
 
     See :mod:`parsec_python.acceleration.SCF.self_consistent_soc`'s module
     docstring.  Combined with spin polarization or a periodic
@@ -449,14 +453,151 @@ def _accelerated_self_consistent_soc_eligible(translation) -> bool:
         and not problem.scf.spin_polarized
         and not problem.scf.noncollinear
         and problem.periodic_cell is None
-        and (fortran or not _asks_for_ionic_motion(translation))
+        and (fortran or not _asks_for_ionic_motion(translation) or _soc_device_forces(translation))
     )
+
+
+def _run_soc_ionic(
+    arguments,
+    translation,
+    system,
+    *,
+    reporter,
+    files,
+    log,
+    soc_symmetry: bool,
+    force_symmetry: bool,
+    relax_restart,
+    dynamics_restart,
+    input_directory,
+    archive_path,
+    log_path,
+    started: float,
+    scf_started: float,
+) -> int:
+    """The forces, relaxation or molecular dynamics of a self-consistent spin-orbit cluster on the device
+    (``PARSEC_SOC_DEVICE_FORCES=auto``): the ionic loops of the reference solver's spinor path
+    (``Relaxation.spinor_backend``) with the device spinor loop and forces of
+    :func:`.SCF.self_consistent_soc.soc_ionic_backend`, each SCF iteration and structure reported with the
+    spin-orbit tables, the archive of a spin-orbit run with its forces and structures; returns the exit status."""
+
+    from parsec_python.cli import _SpinorReporter
+
+    from .SCF.self_consistent_soc import soc_ionic_backend
+
+    # the Fortran-derived routines: the forces of Forces.spin_orbit_fortran, their ionic loop and their archive
+    fortran = bool(getattr(getattr(translation, "routines", None), "fortran", False))
+    # the spin-orbit tables of the reference reporter, and the files of every iteration and structure
+    soc_reporter = _SpinorReporter(ReporterWithFiles(reporter.reference, files))
+
+    def backend_of(extrapolation: str = "none"):
+        return soc_ionic_backend(
+            # --symmetry off, and Ignore_Symmetry without a mode on the command line, keep the whole grid
+            symmetry=soc_symmetry,
+            # --symmetry on: PARSEC_SOC_SECTORS=auto takes the sector at every size
+            forced=arguments.symmetry == "on",
+            note=log.write,
+            # (the ionic loop of the Fortran-derived routines takes no extrapolation, Relaxation.fortran_spinor_backend)
+            potential_extrapolation="none" if fortran else extrapolation,
+            fortran=fortran,
+        )
+
+    outcome = None
+    dynamics = None
+    if translation.relaxation is not None:
+        outcome = run_recorded_relaxation(
+            translation,
+            system,
+            backend_of(translation.potential_extrapolation),
+            soc_reporter,
+            log.write,
+            directory=input_directory,
+            restart=relax_restart,
+            symmetrize=force_symmetry,
+        )
+        result = outcome.result
+        forces = outcome.records[-1].forces
+    elif translation.molecular_dynamics is not None:
+        dynamics = run_recorded_molecular_dynamics(
+            translation,
+            system,
+            backend_of(translation.potential_extrapolation),
+            soc_reporter,
+            log.write,
+            directory=input_directory,
+            restart=dynamics_restart,
+        )
+        result, forces = dynamics.result, dynamics.forces
+    else:
+        result, forces = run_single_point_with_forces(
+            system, backend_of(), soc_reporter, symmetrize=force_symmetry
+        )
+    from .Forces.spinor_device import release_device_spinors
+
+    # (the last structure's device spinors and subspace are not needed again)
+    release_device_spinors(result)
+    result.eigensolver_state = None
+    log.write(f" Pre-SCF setup/reporting wall time [sec] : {scf_started - started:11.6f}")
+    log.write(f" Total accelerated Python wall time [sec] : {time.perf_counter() - started:11.2f}")
+    if not arguments.no_archive:
+        # the archive of the reference solver's spinor loops: that of a spin-orbit run on the default routines, the
+        # general one on the Fortran-derived routines
+        save = save_result_archive if fortran else save_self_consistent_soc_result_archive
+        saved = save(
+            archive_path,
+            result,
+            include_wavefunctions=(arguments.save_wavefunctions or translation.output_all_states),
+            **{
+                name: value
+                for name, value in (("forces", forces), ("relaxation", outcome), ("dynamics", dynamics))
+                if value is not None
+            },
+        )
+        log.write(f"Result archive: {saved}")
+    # (the moved structures keep the grid)
+    files.finish(result, system.grid, translation.problem)
+    log.write(f"Text log: {log_path}")
+    if dynamics is not None:
+        return 3 if dynamics.scf_failed else 0
+    return relaxation_exit_code(
+        result,
+        outcome,
+        manual=(translation.relaxation is not None and translation.relaxation.method == "manual"),
+    )
+
+
+def _soc_device_forces(translation) -> bool:
+    """Whether the forces, relaxation or molecular dynamics of a self-consistent spin-orbit cluster (neither
+    spin-polarized nor non-collinear) run on the accelerated path (``PARSEC_SOC_DEVICE_FORCES=auto``, either routine
+    set, one process, without ``Create_DOS``; an unknown value of the switch is refused before the SCF by
+    :func:`main`)."""
+
+    from .Forces.spinor_device import soc_device_forces_setting
+    from .Parallel import mpi
+
+    problem = translation.problem
+    if not (
+        problem.scf.self_consistent_spin_orbit
+        and not problem.scf.spin_polarized
+        and not problem.scf.noncollinear
+        and problem.periodic_cell is None
+    ):
+        return False
+    if getattr(translation, "dos", None) is not None or mpi.requested():
+        # Create_DOS of the last structure, and --mpi: the reference solver's spinor loops (the input reader refuses
+        # Write_Potential_Field with spin-orbit coupling)
+        return False
+    try:
+        return soc_device_forces_setting() == "auto"
+    except ValueError:
+        return False
 
 
 def _asks_for_ionic_motion(translation) -> bool:
     """Whether the input asks for forces, a relaxation or molecular dynamics.
 
-    The CuPy spinor driver has no forces; the reference solver has them for every spin-orbit and non-collinear input.
+    The CuPy spinor driver has them for an unpolarized cluster under ``PARSEC_SOC_DEVICE_FORCES=auto``
+    (:func:`_soc_device_forces`); the reference solver has them for every spin-orbit and non-collinear input.
     """
 
     return bool(
@@ -720,9 +861,11 @@ def _reference_only_features(
         getattr(translation, "compute_forces", False)
         or getattr(translation, "relaxation", None) is not None
         or getattr(translation, "molecular_dynamics", None) is not None
-    ):
+    ) and not (accelerated_backend_selected and _soc_device_forces(translation)):
         # The spin-orbit forces (Forces.spin_orbit_fortran) and the spinor ionic
-        # loop exist on the reference path only.  (Andrew Grieder's routines name
+        # loop exist on the reference path only, but for an unpolarized cluster on
+        # CuPy under PARSEC_SOC_DEVICE_FORCES=auto (their device form,
+        # Forces/spinor_device.py).  (Andrew Grieder's routines name
         # them above and route them with _accelerated_self_consistent_soc_eligible.)
         features.append(
             "forces, relaxation or molecular dynamics with spin-orbit coupling "
@@ -1209,6 +1352,25 @@ def _cupy_backend_selected(arguments: argparse.Namespace, translation) -> bool:
     except (BackendUnavailableError, NotImplementedError, ValueError):
         return False
     return selection.selected == "cupy"
+
+
+def _start_compile_ahead(arguments: argparse.Namespace, resources: Resources, translation) -> bool:
+    """Start the compilations ahead of a GPU run (``PARSEC_CUPY_COMPILE_AHEAD``); ``True`` where threads started.
+
+    The setting is read in every run (``ValueError`` for a value it does not know).  Nothing starts in a dry run,
+    on the CPU, for a host backend or where CuPy is not installed; the threads themselves leave a process without a
+    usable device alone (:func:`.backends.compile_ahead.start`).
+    """
+
+    from .backends.compile_ahead import compile_ahead_setting, start
+
+    if compile_ahead_setting() == "off":
+        return False
+    if arguments.dry_run or resources.device == "cpu" or arguments.backend not in ("auto", "cupy"):
+        return False
+    if not _cupy_installed():
+        return False
+    return start(translation.problem)
 
 
 def _gamma_point_only(problem: SinglePointInput) -> bool:
@@ -1741,6 +1903,9 @@ def _run(
         from parsec_python.SCF.supercell_mesh import validate_settings as _validate_supercell_mesh
 
         _validate_supercell_mesh()
+        # PARSEC_CUPY_COMPILE_AHEAD (backends/compile_ahead.py), read in every run so that a value it does not know
+        # is refused; a GPU run starts compiling the kernels its input will need, beside everything below
+        _start_compile_ahead(arguments, resources, translation)
     except ValueError as error:
         print(f"Input error: {error}", file=sys.stderr)
         return 2
@@ -1863,13 +2028,16 @@ def _run(
         from .Symmetry.axis_reflection import slab_wire_sectors_setting
         from .Symmetry.oblique_frame import oblique_sectors_setting
 
-        # PARSEC_SLAB_WIRE_SECTORS, PARSEC_OBLIQUE_SECTORS and PARSEC_GENERAL_GRID_ACCELERATED: refused here too,
-        # before an input the reference solver runs (a cell on the general grid of the Fortran-derived routines under
-        # PARSEC_GENERAL_GRID_ACCELERATED=off) is handed over without reading them
+        # PARSEC_SLAB_WIRE_SECTORS, PARSEC_OBLIQUE_SECTORS, PARSEC_OBLIQUE_FULL_GROUP and
+        # PARSEC_GENERAL_GRID_ACCELERATED: refused here too, before an input the reference solver runs (a cell on the
+        # general grid of the Fortran-derived routines under PARSEC_GENERAL_GRID_ACCELERATED=off) is handed over without
+        # reading them
         from .SCF.periodic_routes import general_grid_accelerated_setting
+        from .Symmetry.oblique_frame import oblique_full_group_setting
 
         slab_wire_sectors_setting()
         oblique_sectors_setting()
+        oblique_full_group_setting()
         general_grid_accelerated_setting()
         if _found_supercell is not None:
             # the mesh solved as its supercell: said in parsec.out too
@@ -1945,13 +2113,22 @@ def _run(
 
             soc_sectors = soc_sectors_setting()
             soc_auto_fourfold_setting()
-        # PARSEC_ORDERED_SUMS (the device products of the k-point, band and spin-orbit operators) and
+        # PARSEC_ORDERED_SUMS and PARSEC_LONG_ROW_SPLIT (the device products of the k-point, band and spin-orbit
+        # operators) and
         # PARSEC_MPI_ACCELERATED_BANDS (bandstruc under --mpi), on every route
-        from .Hamiltonian.complex_csr_device import ordered_sums_setting
+        from .Hamiltonian.complex_csr_device import long_row_split_setting, ordered_sums_setting
         from .Output.post_scf import mpi_accelerated_bands_setting
 
         ordered_sums_setting()
+        long_row_split_setting()
         mpi_accelerated_bands_setting()
+        # PARSEC_SOC_DEVICE_FORCES and PARSEC_SPHERE_TIES, read in every run so that a value they do not know is refused
+        from parsec_python.Grid.cluster import sphere_ties_setting
+
+        from .Forces.spinor_device import soc_device_forces_setting
+
+        soc_device_forces_setting()
+        sphere_ties_setting()
     except ValueError as error:
         print(f"Input error: {error}", file=sys.stderr)
         return 2
@@ -2054,6 +2231,10 @@ def _run(
     report_symmetry_mode = symmetry_mode
     # Whether the spinor loop may use the double-group sectors of PARSEC_SOC_SECTORS.
     soc_symmetry = False
+    # The forces of a spinor loop on the device (PARSEC_SOC_DEVICE_FORCES) are averaged over the point group of the
+    # atoms as those of the reference solver are (its use_symmetry), unless --symmetry off: the choice before the
+    # spinor loop prepares the solver without symmetry.
+    soc_force_symmetry = symmetrize_forces
     if accelerated_self_consistent_soc:
         try:
             symmetry_mode, soc_symmetry, report_symmetry_mode = _soc_symmetry_choice(
@@ -2820,6 +3001,27 @@ def _run(
                 log.write()
 
             scf_started = time.perf_counter()
+            if accelerated_self_consistent_soc and _asks_for_ionic_motion(translation):
+                # PARSEC_SOC_DEVICE_FORCES=auto: the forces, relaxation or molecular dynamics of the spinor loop on the
+                # device (its double-group sectors where the run allows symmetry, the forces where its spinors are),
+                # reported and archived as the reference solver's spinor loops are.
+                return _run_soc_ionic(
+                    arguments,
+                    translation,
+                    system,
+                    reporter=reporter,
+                    files=files,
+                    log=log,
+                    soc_symmetry=soc_symmetry,
+                    force_symmetry=soc_force_symmetry,
+                    relax_restart=relax_restart,
+                    dynamics_restart=dynamics_restart,
+                    input_directory=input_directory,
+                    archive_path=archive_path,
+                    log_path=log_path,
+                    started=started,
+                    scf_started=scf_started,
+                )
             if accelerated_self_consistent_soc:
                 soc_projectors = tuple(
                     build_spin_orbit_projectors(

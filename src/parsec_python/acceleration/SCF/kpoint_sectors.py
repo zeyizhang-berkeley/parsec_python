@@ -86,7 +86,7 @@ the points of a fourfold axis (the 2 x 2 x 2 silicon cube at ``(0, 0, 1/3)``, ``
 3 x 3 x 3 diamond cube at ``(0, 0, 1/3)``).  ``real`` keeps the involutions alone.
 
 The k-point SCF of a bulk orthorhombic cell takes it, scalar or spin-polarized, with the exchange of a hybrid, forces
-and kept orbitals, LDA+U of unpolarized orbitals under ``PARSEC_KPOINT_SECTOR_LDAU=on`` (opt-in) and a meta-GGA under
+and kept orbitals, LDA+U of unpolarized orbitals under ``PARSEC_KPOINT_SECTOR_LDAU=on`` (the default) and a meta-GGA under
 ``PARSEC_KPOINT_SECTOR_META_GGA=auto`` (the default since 2026-11-23: the orbital term and ``tau`` reduced to the
 sectors, :mod:`..Hamiltonian.sector_bloch_meta_gga`, :class:`SectorMetaBlochHamiltonian`; no conjugate pairs, real
 forms or complex characters in such a loop), without the fixed occupations of ``occup.in`` (the driver then gives the
@@ -314,25 +314,25 @@ _LDAU_SWITCH = "PARSEC_KPOINT_SECTOR_LDAU"
 def kpoint_sector_ldau_setting() -> str:
     """``PARSEC_KPOINT_SECTOR_LDAU``: the k-point loops with LDA+U in the sectors of their little groups.
 
-    * ``off`` (default): one task per k-point, as before.
-    * ``on`` (opt-in): the loops of unpolarized orbitals take the sectors.  The term ``P_k D P_k^H`` of a k-point
-      reduces to a sector as ``(U^H P_k) D (U^H P_k)^H`` (:meth:`KPointSectors.hamiltonian`; the blocks between two
-      sectors are dropped, the average of the term over the operations of the sectors, as the local potential takes
-      its orbit means), and the occupation matrices of a sector are formed from its states with the same reduced
-      projectors, ``<phi|U v> = (U^H phi)^H v`` (:meth:`SectorKPointSolver._accumulate`).
+    * ``on`` (default since 2026-11-23; opt-in from 2026-11-22): the loops of unpolarized orbitals take the sectors.
+      The term ``P_k D P_k^H`` of a k-point reduces to a sector as ``(U^H P_k) D (U^H P_k)^H``
+      (:meth:`KPointSectors.hamiltonian`; the blocks between two sectors are dropped, the average of the term over the
+      operations of the sectors, as the local potential takes its orbit means), and the occupation matrices of a
+      sector are formed from its states with the same reduced projectors, ``<phi|U v> = (U^H phi)^H v``
+      (:meth:`SectorKPointSolver._accumulate`).
+    * ``off``: one task per k-point, as before.
     * ``spin`` (opt-in): the loops of collinear spin as well, with the symmetry guard of the spin loops
       (``PARSEC_KPOINT_SECTOR_GUARD``); a magnetic order that the term holds on some atoms only is averaged over the
       sectors' operations (the Gamma route's ``PARSEC_LDAU_SPIN_SECTORS`` stays off for that reason).
 
     ``on`` gives the energies and occupation matrices of one task per k-point (A100: Ag 32, 108, Cu 32 and SrTiO3 40
-    atoms, 2 x 2 x 2 meshes, within the SCF criterion) in fewer steps and on one GPU in about half the time, but not
-    by default: on four GPUs of one process the 32- and 40-atom cells took 1.3-1.4 times as long as one task per
-    k-point.  The sector loop of such cells does not scale with the GPUs of a process (SrTiO3 40 in sectors without
-    U 43.2 s on one GPU and 43.7 s on four, with U 105.9 and 115.0 s; the summed solve time of the workers grows about
-    four times), while one task per k-point divides its four k-points over them; the complex arithmetic that the term
-    asks of the real sectors costs about 8 %.  Any other value is refused before the first solve."""
+    atoms, 2 x 2 x 2 meshes, within the SCF criterion) in fewer steps, on one GPU in about half the time.  It was
+    opt-in while the sector loop did not scale with the GPUs of a process (the 32- and 40-atom cells took 1.3-1.4 times
+    as long as one task per k-point on four GPUs, whose threads took turns at the interpreter lock); the worker
+    processes of ``PARSEC_KPOINT_SECTOR_PROCESSES`` (:mod:`.kpoint_processes`) solve them side by side.  Any other
+    value is refused before the first solve."""
 
-    value = os.environ.get(_LDAU_SWITCH, "off").strip().lower() or "off"
+    value = os.environ.get(_LDAU_SWITCH, "on").strip().lower() or "on"
     if value not in {"off", "on", "spin"}:
         raise ValueError(f"{_LDAU_SWITCH} must be off, on or spin, not {value!r}")
     return value
@@ -745,6 +745,51 @@ class ClassMember:
     antiunitary: bool
     rows: np.ndarray
     signs: np.ndarray
+
+
+def class_member_block(member: ClassMember, block, xp=np, maps: dict | None = None, key=None):
+    """The coefficients in the sector of ``member`` of the images ``P_g u`` (``P_g conj(u)``) of the orbitals whose
+    coefficients in its source are the columns of ``block`` (host or device); ``maps`` keeps the device copies of its
+    rows and signs by ``(key, device)``."""
+
+    values = member.signs if np.iscomplexobj(member.signs) else member.signs.astype(np.float64)
+    if xp is np or isinstance(block, np.ndarray):
+        rows, signs = member.rows, values
+    else:
+        device = int(block.device.id)
+        found = None if maps is None else maps.get((key, device))
+        if found is None:
+            with xp.cuda.Device(device):
+                found = (xp.asarray(member.rows), xp.asarray(values))
+            if maps is not None:
+                maps[(key, device)] = found
+        rows, signs = found
+    source = xp.conj(block) if member.antiunitary else block
+    out = xp.empty_like(source)
+    out[rows] = signs[:, None] * source
+    return out
+
+
+def sector_extras(recipe: dict, vectors, xp, force, coefficients=None, maps: dict | None = None):
+    """The sum of the extras of the groups of ``recipe`` (``SectorKPointSolver.extras_recipe``) for the orbitals
+    ``vectors`` of their sector (host or device): for every group and block of at most :data:`_FORCE_COLUMNS` columns
+    ``force(U b, places)`` of the expanded block ``b`` (the images of the group's class member where it has one),
+    added in that order; ``None`` where no column is taken.  ``coefficients`` maps a block of the solve to the
+    coefficients of the sector (the real forms; the identity where ``None``); ``maps`` keeps the device rows and signs
+    of the class members."""
+
+    total = None
+    for member, expansion, keep, places in recipe["groups"]:
+        for c0 in range(0, int(keep.size), _FORCE_COLUMNS):
+            chosen = keep[c0 : c0 + _FORCE_COLUMNS]
+            block = vectors[:, chosen if xp is np else xp.asarray(chosen)]
+            if coefficients is not None:
+                block = coefficients(block)
+            if member is not None:
+                block = class_member_block(member, block, xp, maps, id(member))
+            piece = np.asarray(_host(force(expansion.expand(block, xp), places[c0 : c0 + _FORCE_COLUMNS])), dtype=np.float64)
+            total = piece if total is None else total + piece
+    return total
 
 
 def _inverse_elements(table: np.ndarray) -> np.ndarray:
@@ -1310,7 +1355,7 @@ class KPointSectors:
         # by sector: (LDA+U projectors of the whole grid, U^H P), shared by the channels of the k-point (twin)
         self._hubbard: dict[int, tuple] = {}
         self._gathers: dict[int, sp.csr_matrix] = {}  # by sector: U^H (shared by the tasks of the k-point)
-        self._expanders: dict[tuple, tuple] = {}  # by (sector, device): the rows and factors of U on a device
+        self._expansions: dict[int, SectorExpansion] = {}  # by sector: U on the whole grid (expansion)
         # whether the sectors assume an invariance the density is not symmetrized over, and the operations of the
         # symmetry guard (set by plan_sectors)
         self.assumed = False
@@ -1386,22 +1431,7 @@ class KPointSectors:
         """The coefficients in ``sector`` (a :class:`ClassMember`) of the images ``P_g u`` (``P_g conj(u)``) of the
         orbitals whose coefficients in its source are the columns of ``block`` (host or device)."""
 
-        member = self.classes[sector]
-        values = member.signs if np.iscomplexobj(member.signs) else member.signs.astype(np.float64)
-        if xp is np or isinstance(block, np.ndarray):
-            rows, signs = member.rows, values
-        else:
-            device = int(block.device.id)
-            found = self._member_maps.get((sector, device))
-            if found is None:
-                with xp.cuda.Device(device):
-                    found = (xp.asarray(member.rows), xp.asarray(values))
-                self._member_maps[(sector, device)] = found
-            rows, signs = found
-        source = xp.conj(block) if member.antiunitary else block
-        out = xp.empty_like(source)
-        out[rows] = signs[:, None] * source
-        return out
+        return class_member_block(self.classes[sector], block, xp, self._member_maps, sector)
 
     def class_density(self, source: int, members, sums: np.ndarray) -> np.ndarray:
         """The density of the class of ``source`` from ``q = sum_n f_n |v_n|^2`` on its rows, ``f`` the occupations
@@ -1719,15 +1749,36 @@ class KPointSectors:
 
         from ..Hamiltonian.sector_bloch_meta_gga import sector_orbital_sums
 
-        decomposition = self.decomposition
-        wedge = np.zeros(decomposition.wedge_size, dtype=np.float64)
-        along = np.zeros((3, decomposition.wedge_size), dtype=np.float64) if gradient else None
+        parts = []
         for current in [int(sector)] + [int(member) for member in members]:
             block = vectors if current == int(sector) else self.member_block(current, vectors, xp)
             geometry = self.meta_geometry(current, derivatives)
-            squares, products = sector_orbital_sums(
-                geometry, geometry.k_shifts(self.k_point), block, occupations, xp, gradient=gradient
+            parts.append(
+                sector_orbital_sums(geometry, geometry.k_shifts(self.k_point), block, occupations, xp, gradient=gradient)
             )
+        return self.orbit_sums(sector, parts, scale, derivatives, members=members, gradient=gradient)
+
+    def orbital_recipe(self, sector: int, derivatives, members=()) -> list[tuple]:
+        """``(geometry, shifts, member)`` of ``sector`` and of the sectors ``members`` of its class (``member`` its
+        :class:`ClassMember`, ``None`` for ``sector``): what :meth:`kinetic_orbit_sums` takes from the plan, for a worker
+        process of the sectors (``.kpoint_processes``)."""
+
+        found = []
+        for current in [int(sector)] + [int(member) for member in members]:
+            geometry = self.meta_geometry(current, derivatives)
+            member = None if current == int(sector) else self.classes[current]
+            found.append((geometry, geometry.k_shifts(self.k_point), member))
+        return found
+
+    def orbit_sums(self, sector: int, parts, scale: float, derivatives, *, members=(), gradient=False):
+        """:meth:`kinetic_orbit_sums` from the sums ``parts`` of :func:`..Hamiltonian.sector_bloch_meta_gga
+        .sector_orbital_sums`, one ``(squares, products)`` per sector of ``[sector] + members``."""
+
+        decomposition = self.decomposition
+        wedge = np.zeros(decomposition.wedge_size, dtype=np.float64)
+        along = np.zeros((3, decomposition.wedge_size), dtype=np.float64) if gradient else None
+        for current, (squares, products) in zip([int(sector)] + [int(member) for member in members], parts):
+            geometry = self.meta_geometry(current, derivatives)
             for axis in range(3):
                 orbits = geometry.target_orbits[axis]
                 wedge[orbits] += squares[axis] / self._multiplicities[orbits]
@@ -1845,29 +1896,22 @@ class KPointSectors:
         wedge[orbits] = np.asarray(sums, dtype=np.float64) / self._multiplicities[orbits]
         return wedge[decomposition.reduction.full_to_wedge]
 
+    def expansion(self, sector: int) -> "SectorExpansion":
+        """``U`` of ``sector`` on the whole grid (:class:`SectorExpansion`), made once per sector."""
+
+        found = self._expansions.get(int(sector))
+        if found is None:
+            found = self._expansions.setdefault(
+                int(sector),
+                SectorExpansion(self.decomposition, self._multiplicities, int(sector), self._phase_row(sector)),
+            )
+        return found
+
     def expand(self, sector: int, block, xp=np):
         """:meth:`orbitals` where ``block`` is: a device block becomes ``U v`` on its device (one gather with the
         phase and orbit factor of every row, made once per sector and device)."""
 
-        if xp is np or isinstance(block, np.ndarray):
-            return self.orbitals(sector, np.asarray(block))
-        device = int(block.device.id)
-        found = self._expanders.get((sector, device))
-        if found is None:
-            decomposition = self.decomposition
-            orbits = decomposition.sector_orbit_indices(sector)
-            place = np.full(decomposition.wedge_size, -1, dtype=np.int64)
-            place[orbits] = np.arange(orbits.size, dtype=np.int64)
-            to_wedge = np.asarray(decomposition.reduction.full_to_wedge, dtype=np.int64)
-            rows = place[to_wedge]
-            factor = self._phase_row(sector) / np.sqrt(self._multiplicities[to_wedge])
-            factor[rows < 0] = 0.0
-            rows[rows < 0] = 0
-            with xp.cuda.Device(device):
-                found = (xp.asarray(rows), xp.asarray(factor))
-            self._expanders[(sector, device)] = found
-        rows, factor = found
-        return xp.take(block, rows, axis=0) * factor[:, None]
+        return self.expansion(sector).expand(block, xp)
 
     def partner_orbitals(self, grid, whole: np.ndarray) -> np.ndarray:
         """The orbitals of the partner sector from those of the sector solved (whole grid, :attr:`partners`):
@@ -1879,13 +1923,54 @@ class KPointSectors:
     def orbitals(self, sector: int, block: np.ndarray) -> np.ndarray:
         """``U v`` on the whole grid for the columns of ``block`` (rows of ``sector``)."""
 
-        decomposition = self.decomposition
+        return self.expansion(sector).orbitals(block)
+
+
+class SectorExpansion:
+    """``U`` of one sector on the whole grid: ``(U v)(r) = phase(r) v_{j(r)} / sqrt(|O_{j(r)}|)`` for the row ``j(r)``
+    of the orbit of point ``r`` (zero where the sector holds no state on it).  :meth:`orbitals` forms it on the host,
+    :meth:`expand` where the block is (on a device one gather with the rows and factors of the device, made once).  A
+    worker process of the sectors (``.kpoint_processes``) receives it once for the forces of its orbitals; its device
+    copies stay where they were made."""
+
+    def __init__(self, decomposition, multiplicities: np.ndarray, sector: int, phases: np.ndarray) -> None:
+        self.orbits = decomposition.sector_orbit_indices(sector)
+        self.multiplicities = multiplicities
+        self.full_to_wedge = decomposition.reduction.full_to_wedge
+        self.wedge_size = int(decomposition.wedge_size)
+        self.phases = phases
+        self._devices: dict[int, tuple] = {}
+
+    def __getstate__(self) -> dict:
+        state = dict(self.__dict__)
+        state["_devices"] = {}
+        return state
+
+    def orbitals(self, block: np.ndarray) -> np.ndarray:
         block = np.asarray(block, dtype=np.complex128).reshape(-1, np.shape(block)[-1] if np.ndim(block) > 1 else 1)
-        orbits = decomposition.sector_orbit_indices(sector)
-        wedge = np.zeros((decomposition.wedge_size, block.shape[1]), dtype=np.complex128)
-        wedge[orbits] = block / np.sqrt(self._multiplicities[orbits])[:, None]
-        phases = self._phase_row(sector)
-        return phases[:, None] * wedge[decomposition.reduction.full_to_wedge]
+        orbits = self.orbits
+        wedge = np.zeros((self.wedge_size, block.shape[1]), dtype=np.complex128)
+        wedge[orbits] = block / np.sqrt(self.multiplicities[orbits])[:, None]
+        return self.phases[:, None] * wedge[self.full_to_wedge]
+
+    def expand(self, block, xp=np):
+        if xp is np or isinstance(block, np.ndarray):
+            return self.orbitals(np.asarray(block))
+        device = int(block.device.id)
+        found = self._devices.get(device)
+        if found is None:
+            place = np.full(self.wedge_size, -1, dtype=np.int64)
+            place[self.orbits] = np.arange(self.orbits.size, dtype=np.int64)
+            to_wedge = np.asarray(self.full_to_wedge, dtype=np.int64)
+            rows = place[to_wedge]
+            factor = self.phases / np.sqrt(self.multiplicities[to_wedge])
+            factor[rows < 0] = 0.0
+            rows[rows < 0] = 0
+            with xp.cuda.Device(device):
+                found = (xp.asarray(rows), xp.asarray(factor))
+            self._devices[device] = found
+        rows, factor = found
+        return xp.take(block, rows, axis=0) * factor[:, None]
 
 
 _TOLERANCE_SWITCH = "PARSEC_KPOINT_SECTOR_TOLERANCE"
@@ -1929,9 +2014,10 @@ def check_kpoint_sector_switches(problem=None) -> None:
     ``PARSEC_PERIODIC_DEFECT_CENTRE``, ``PARSEC_HYBRID_KPOINT_SECTORS``, ``PARSEC_PERIODIC_IMAGE_ROWS`` (the
     density group of the k-point wedge), ``PARSEC_KPOINT_SECTOR_CLASSES``, ``PARSEC_KPOINT_SECTOR_REAL``, the real
     arithmetic of the Gamma point (``PARSEC_KPOINT_REAL_GAMMA``, :mod:`.kpoint_real`),
-    ``PARSEC_KPOINT_SECTOR_WARM_GROWTH``, ``PARSEC_KPOINT_SECTOR_LDAU`` and ``PARSEC_KPOINT_SECTOR_META_GGA``.  Reading
-    them changes nothing else.  With ``problem`` (the input of the run) a meta-GGA under ``PARSEC_KPOINT_KINETIC=bloch``
-    is refused as well: the orbital term keeps the gradient form of the kinetic term of a k-point
+    ``PARSEC_KPOINT_SECTOR_WARM_GROWTH``, ``PARSEC_KPOINT_SECTOR_LDAU``, ``PARSEC_KPOINT_SECTOR_META_GGA``,
+    ``PARSEC_KPOINT_SECTOR_PROCESSES``, ``PARSEC_SOC_KPOINT_SECTORS`` and ``PARSEC_SOC_SPIN_KPOINT_SECTORS``
+    (:mod:`.kpoint_spinor_sectors`).  Reading them changes nothing else.  With ``problem`` (the input of the run) a
+    meta-GGA under ``PARSEC_KPOINT_KINETIC=bloch`` is refused as well: the orbital term keeps the gradient form of the kinetic term of a k-point
     (:func:`parsec_python.Laplacian.finite_difference.bloch_laplacian_or_none`, which would stop its k-point loop after
     the first iteration, the first with the term)."""
 
@@ -1967,6 +2053,14 @@ def check_kpoint_sector_switches(problem=None) -> None:
     from ..Hamiltonian.sector_bloch_meta_gga import kpoint_sector_meta_gga_setting
 
     kpoint_sector_meta_gga_setting()
+    from .kpoint_processes import sector_processes_setting
+
+    sector_processes_setting()
+    # the double-group sectors of the k-points of a spin-orbit loop (PARSEC_SOC_KPOINT_SECTORS)
+    from .kpoint_spinor_sectors import soc_kpoint_sectors_setting, soc_spin_kpoint_sectors_setting
+
+    soc_kpoint_sectors_setting()
+    soc_spin_kpoint_sectors_setting()
     scf = getattr(problem, "scf", None)
     if getattr(scf, "is_meta_gga", False) and getattr(problem, "periodic_cell", None) is not None:
         from parsec_python.Laplacian.finite_difference import kpoint_kinetic_setting
@@ -2318,6 +2412,10 @@ class SectorKPointSolver:
         self._force_orbits = kpoint_force_orbits_setting() == "auto"
         # PARSEC_KPOINT_SECTOR_WARM_GROWTH (read here for the same reason; the inner solvers apply it in resize_tasks)
         kpoint_sector_warm_growth_setting()
+        # the Hamiltonians of the whole grid of the k-points for the potentials of the current solve, shared by their
+        # sectors (_full_hamiltonian)
+        self._full_lock = threading.Lock()
+        self._fulls: tuple = (None, {})
         self._inner = None
         self._inner = self._new_inner()
 
@@ -2347,7 +2445,11 @@ class SectorKPointSolver:
         )
         options = dict(self._options)
         options["problem_size"] = max(self._rows(item) for item in solved)
-        return self._make_solver(inner_job, **options)
+        # a worker process per device where one process holds several (PARSEC_KPOINT_SECTOR_PROCESSES, .kpoint_processes)
+        from .kpoint_processes import make_process_solver
+
+        found = make_process_solver(self, inner_job, options)
+        return found if found is not None else self._make_solver(inner_job, **options)
 
     def _inner_task(self, position: int) -> int:
         """The task of the inner solver that solves the item at ``position`` (that of its partner for an item of a
@@ -2365,10 +2467,27 @@ class SectorKPointSolver:
 
     def _make_hamiltonian(self, task: int, potentials: dict):
         k_index, sector = self._items[self._solved[task]]
-        full = self.job.make_hamiltonian(k_index, potentials)
+        full = self._full_hamiltonian(k_index, potentials)
         if sector is None:
             return full
         return self._plans[k_index].hamiltonian(sector, full, self._owned_sectors(k_index))
+
+    def _full_hamiltonian(self, k_index: int, potentials: dict):
+        """The Bloch Hamiltonian of the whole grid of ``k_index`` for ``potentials``, made once per k-point in a call of
+        :meth:`solve` (its sectors read it, none changes it; ``potentials`` of another call make it again)."""
+
+        with self._full_lock:
+            held, fulls = self._fulls
+            if held is not potentials:
+                held, fulls = potentials, {}
+                self._fulls = (held, fulls)
+            found = fulls.get(k_index)
+        if found is None:
+            found = self.job.make_hamiltonian(k_index, potentials)
+            with self._full_lock:
+                if self._fulls[0] is potentials:
+                    found = self._fulls[1].setdefault(k_index, found)
+        return found
 
     def _owned_sectors(self, k_index: int):
         """The sectors of ``k_index`` that this process solves: those of the tasks of its pool (MPI pools), all
@@ -2389,6 +2508,40 @@ class SectorKPointSolver:
         # (the coefficients of a sector in its real form, PARSEC_KPOINT_SECTOR_REAL: T x of its real coordinates)
         vectors = self._plans[k_index].coefficients(sector, vectors, xp)
         sums = _host(weighted_square_sum(vectors, occupations, xp))
+        return self.sector_parts(task, sums, vectors, occupations, xp)
+
+    def device_recipe(self, task: int):
+        """What a worker process of the sectors (:mod:`.kpoint_processes`) needs besides the orbitals of inner task
+        ``task`` (a sector) to form the parts of its density that need them: ``None``, or a dict with ``"hubbard"``, the
+        LDA+U projectors reduced to the sector's rows and the ``(name, weight)`` of
+        :meth:`..SCF.kpoint_hubbard.SectorHubbardPart.recipe`, and ``"meta"``, whether the orbital density gradient is
+        summed and the :meth:`KPointSectors.orbital_recipe` of the sector and its class (a meta-GGA)."""
+
+        k_index, sector = self._items[self._solved[task]]
+        geometry = self.job.geometry
+        recipe = {}
+        meta = geometry.get("meta_fields")
+        if meta is not None:
+            _, _, gradient_key = meta(k_index)
+            members = self._class_members.get(self._solved[task]) or ()
+            recipe["meta"] = (
+                gradient_key is not None,
+                self._plans[k_index].orbital_recipe(sector, geometry["meta_derivatives"], members),
+            )
+        hubbard_part = geometry.get("hubbard_part")
+        if hubbard_part is not None:
+            reduced = self._plans[k_index].reduced_hubbard(sector, geometry["hubbard_projectors"](k_index))
+            recipe["hubbard"] = (reduced,) + tuple(hubbard_part.recipe(k_index))
+        return recipe or None
+
+    def sector_parts(self, task: int, sums: np.ndarray, vectors=None, occupations=None, xp=np, made=None) -> dict:
+        """The parts of the density of inner task ``task`` (a sector) from ``sums``, ``sum_n f_n |v_n|^2`` on its rows
+        (host), and its orbitals ``vectors`` where the parts need them; ``made``: the parts a worker process formed from
+        the orbitals (:meth:`device_recipe`: ``"hubbard"`` the LDA+U part, ``"meta"`` the sums of
+        :func:`..Hamiltonian.sector_bloch_meta_gga.sector_orbital_sums`), in place of those from ``vectors``."""
+
+        made = {} if made is None else made
+        k_index, sector = self._items[self._solved[task]]
         members = self._class_members.get(self._solved[task])
         if members:
             # the occupations of the class are summed onto this sector (accumulate): the density of the class
@@ -2405,16 +2558,26 @@ class SectorKPointSolver:
             # states from the derivatives between the sectors, with the images of its class, on the orbits of the
             # k-point: the sectors of a k-point add there and accumulate() expands the sum once
             scale, _, gradient_key = meta(k_index)
-            wedge, along = self._plans[k_index].kinetic_orbit_sums(
-                sector, vectors, occupations, scale, geometry["meta_derivatives"], members=members or (),
-                gradient=gradient_key is not None, xp=xp,
-            )
+            if "meta" in made:
+                wedge, along = self._plans[k_index].orbit_sums(
+                    sector, made["meta"], scale, geometry["meta_derivatives"], members=members or (),
+                    gradient=gradient_key is not None,
+                )
+            else:
+                wedge, along = self._plans[k_index].kinetic_orbit_sums(
+                    sector, vectors, occupations, scale, geometry["meta_derivatives"], members=members or (),
+                    gradient=gradient_key is not None, xp=xp,
+                )
             parts = dict(parts)
             parts[f"{_META_KEY}:{k_index}:tau"] = wedge
             if along is not None:
                 parts[f"{_META_KEY}:{k_index}:gradient"] = along
+        hubbard = made.get("hubbard")
         hubbard_part = geometry.get("hubbard_part")
-        if hubbard_part is not None:
+        if hubbard is not None:
+            parts = dict(parts)
+            parts.update(hubbard)
+        elif hubbard_part is not None:
             # LDA+U (PARSEC_KPOINT_SECTOR_LDAU): the occupation matrices of the sector's states, <phi|U v> with the
             # projectors of the k-point reduced to its rows (those its Hamiltonians take)
             reduced = self._plans[k_index].reduced_hubbard(sector, geometry["hubbard_projectors"](k_index))
@@ -2589,6 +2752,7 @@ class SectorKPointSolver:
     def solve(self, potentials: dict, filter_degree: int, tolerance: float | None = None) -> list[np.ndarray]:
         """The lowest ``number_of_states`` levels of every k-point (task order)."""
 
+        self._fulls = (None, {})  # the Hamiltonians of the whole grid of this call (_full_hamiltonian)
         values = self._expanded(self._inner.solve(potentials, filter_degree, tolerance))
         for _ in range(_ATTEMPTS):
             short = self._short_sectors(values)
@@ -2649,6 +2813,7 @@ class SectorKPointSolver:
 
         from parsec_python.Eigensolvers.eigval import first_solve_extra_cycles
 
+        self._fulls = (None, {})  # the Hamiltonians of the whole grid of this call (_full_hamiltonian)
         settings = job_eigval_settings(self.job, filter_degree)
         relative = reported_level_tolerance(settings.chebdav.convergence_tolerance)
         cap = int(settings.chebff.filter_cycles) + first_solve_extra_cycles()
@@ -2854,93 +3019,86 @@ class SectorKPointSolver:
         whole grid a block of :data:`_FORCE_COLUMNS` at a time, with their places among the levels of the k-point
         (the occupations the job holds).  The sector solved for a conjugate pair (``PARSEC_KPOINT_TRIM_REAL``) stands
         for its partner as well: the partner's orbitals ``A u`` give the forces of ``u``, so its columns are taken
-        once more at the partner's places."""
+        once more at the partner's places; a sector solved for a class (``PARSEC_KPOINT_SECTOR_CLASSES``) for the
+        sectors of its class, their states the images of its own (:meth:`extras_recipe`, :func:`sector_extras`)."""
 
-        position = self._solved[position]  # the inner task -> its item
+        task = position
+        position = self._solved[task]  # the inner task -> its item
         k_index, sector = self._items[position]
         count = int(vectors.shape[1])
         columns = np.arange(count, dtype=np.int64) if columns is None else np.asarray(columns, dtype=np.int64)
         if sector is None:
             return self.job.extras(k_index, vectors, xp=xp, columns=columns)
-        if position in self._class_members:
-            return self._class_extras(position, vectors, xp, columns)
-        owners, indices = self._kept[k_index]
-        keep_parts, place_parts = [], []
-        held = [sector] + [self._items[other][1] for other, source in self._source.items() if source == position]
-        for member in held:
-            mine = np.flatnonzero(owners == member)
-            size = int(max(int(indices[mine].max()) + 1 if mine.size else 0, int(columns.max()) + 1 if columns.size else 0))
-            place = np.full(max(size, 1), -1, dtype=np.int64)
-            place[indices[mine]] = mine
-            wanted = place[columns] if columns.size else np.zeros(0, dtype=np.int64)
-            keep = np.flatnonzero(wanted >= 0)
-            keep_parts.append(keep)
-            place_parts.append(wanted[keep])
-        keep = np.concatenate(keep_parts) if len(keep_parts) > 1 else keep_parts[0]
-        places = np.concatenate(place_parts) if len(place_parts) > 1 else place_parts[0]
+        recipe = self.extras_recipe(task, columns)
+        options = {} if recipe["atoms"] is None else {"atoms": recipe["atoms"]}
         plan = self._plans[k_index]
-        # PARSEC_KPOINT_FORCE_ORBITS: the forces of one atom per orbit of the little group, turned onto the others
-        orbits = plan.force_orbits(self.job.geometry) if self._force_orbits else None
-        options = {} if orbits is None else {"atoms": orbits[0]}
-        total = None
-        for c0 in range(0, int(keep.size), _FORCE_COLUMNS):
-            chosen = keep[c0 : c0 + _FORCE_COLUMNS]
-            block = plan.coefficients(sector, vectors[:, chosen if xp is np else xp.asarray(chosen)], xp)
-            piece = np.asarray(
-                _host(
-                    self.job.extras(
-                        k_index, plan.expand(sector, block, xp), xp=xp, columns=places[c0 : c0 + _FORCE_COLUMNS],
-                        **options,
-                    )
-                ),
-                dtype=np.float64,
-            )
-            total = piece if total is None else total + piece
-        if total is None:
-            total = np.zeros((len(self.job.geometry["atoms"]), 3), dtype=np.float64)
-        elif orbits is not None:
-            total = plan.complete_orbit_forces(total, orbits)
-        return total
 
-    def _class_extras(self, position: int, vectors, xp, columns):
-        """:meth:`_inner_extras` of a sector solved for the sectors of its class (``PARSEC_KPOINT_SECTOR_CLASSES``):
-        the states of each sector of the class at their places among the levels of the k-point, those of a sector not
-        solved as the images of the states solved (:meth:`KPointSectors.member_block`), expanded in that sector."""
+        def force(expanded, places):
+            return self.job.extras(k_index, expanded, xp=xp, columns=places, **options)
 
+        total = sector_extras(
+            recipe, vectors, xp, force, lambda block: plan.coefficients(sector, block, xp), plan._member_maps
+        )
+        return self.complete_extras(task, total)
+
+    def extras_recipe(self, task: int, columns=None) -> dict:
+        """What the extras of inner task ``task`` (a sector) take besides its orbitals (:func:`sector_extras`): its
+        groups ``(member, expansion, keep, places)``, the columns ``keep`` of its states taken (at most
+        :data:`_FORCE_COLUMNS` at a time) at their places among the levels of the k-point, expanded by ``expansion``
+        after the images of ``member`` (a :class:`ClassMember`, ``None`` for the sector itself); the atoms of the
+        orbits of the forces (``None``: every atom); and, where the job gives them (``force_parts`` of the geometry),
+        the parts of its nonlocal force of the k-point, for a worker process (``.kpoint_processes``).  ``columns``:
+        the states of the task (all where ``None``)."""
+
+        position = self._solved[task]
         k_index, sector = self._items[position]
-        owners, indices = self._kept[k_index]
+        if columns is None:
+            columns = np.arange(self._states(self._items[position]), dtype=np.int64)
+        columns = np.asarray(columns, dtype=np.int64)
         plan = self._plans[k_index]
+        owners, indices = self._kept[k_index]
         orbits = plan.force_orbits(self.job.geometry) if self._force_orbits else None
-        options = {} if orbits is None else {"atoms": orbits[0]}
-        total = None
-        for member in [sector] + self._class_members[position]:
+        atoms = None if orbits is None else orbits[0]
+
+        def places_of(member):
             mine = np.flatnonzero(owners == member)
             size = int(max(int(indices[mine].max()) + 1 if mine.size else 0, int(columns.max()) + 1 if columns.size else 0))
             place = np.full(max(size, 1), -1, dtype=np.int64)
             place[indices[mine]] = mine
             wanted = place[columns] if columns.size else np.zeros(0, dtype=np.int64)
             keep = np.flatnonzero(wanted >= 0)
-            places = wanted[keep]
-            for c0 in range(0, int(keep.size), _FORCE_COLUMNS):
-                chosen = keep[c0 : c0 + _FORCE_COLUMNS]
-                block = plan.coefficients(sector, vectors[:, chosen if xp is np else xp.asarray(chosen)], xp)
-                if member != sector:
-                    block = plan.member_block(member, block, xp)
-                piece = np.asarray(
-                    _host(
-                        self.job.extras(
-                            k_index, plan.expand(member, block, xp), xp=xp, columns=places[c0 : c0 + _FORCE_COLUMNS],
-                            **options,
-                        )
-                    ),
-                    dtype=np.float64,
-                )
-                total = piece if total is None else total + piece
+            return keep, wanted[keep]
+
+        groups = []
+        if position in self._class_members:
+            # the sectors of its class: the images of its states, expanded in each member
+            for member in [sector] + self._class_members[position]:
+                keep, places = places_of(member)
+                groups.append((None if member == sector else plan.classes[member], plan.expansion(member), keep, places))
+        else:
+            # the sector and the partners of its conjugate pairs: its own expansion at the places of each
+            held = [sector] + [self._items[other][1] for other, source in self._source.items() if source == position]
+            parts = [places_of(member) for member in held]
+            keep = np.concatenate([part[0] for part in parts]) if len(parts) > 1 else parts[0][0]
+            places = np.concatenate([part[1] for part in parts]) if len(parts) > 1 else parts[0][1]
+            groups.append((None, plan.expansion(sector), keep, places))
+        parts_of = self.job.geometry.get("force_parts")
+        return {
+            "groups": groups,
+            "atoms": atoms,
+            "count": int(columns.size) if columns.size else 0,
+            "force": None if parts_of is None else parts_of(k_index, atoms),
+        }
+
+    def complete_extras(self, task: int, total):
+        """The extras of inner task ``task`` from the sum :func:`sector_extras` gave: zero where it took no state, the
+        forces of every atom from those of the representatives of their orbits."""
+
+        k_index, _ = self._items[self._solved[task]]
         if total is None:
-            total = np.zeros((len(self.job.geometry["atoms"]), 3), dtype=np.float64)
-        elif orbits is not None:
-            total = plan.complete_orbit_forces(total, orbits)
-        return total
+            return np.zeros((len(self.job.geometry["atoms"]), 3), dtype=np.float64)
+        orbits = self._plans[k_index].force_orbits(self.job.geometry) if self._force_orbits else None
+        return total if orbits is None else self._plans[k_index].complete_orbit_forces(total, orbits)
 
     # ----------------------------------------------------------- the symmetry guard
     def guarded_tasks(self) -> list[int]:
@@ -3217,6 +3375,8 @@ class SectorKPointSolver:
         return self.vectors(task)
 
     def stats(self) -> dict[str, float]:
+        from .kpoint_processes import task_entries
+
         inner = getattr(self._inner, "stats", None)
         stats = dict(inner()) if inner is not None else {}
         rows, states = self._grid_size, int(self.job.number_of_states)
@@ -3234,6 +3394,13 @@ class SectorKPointSolver:
                 "kpoint_sector_rebuilds": float(self._rebuilds),
                 "kpoint_sector_refit_states": float(self._refit_states),
                 "kpoint_sector_refit_sectors": float(len(self._trimmed)),
+                # the median rows x states of the tasks solved (the size rule of PARSEC_KPOINT_SECTOR_PROCESSES)
+                "kpoint_sector_task_entries": float(
+                    task_entries(
+                        [self._rows(self._items[position]) for position in self._solved],
+                        [self._states(self._items[position]) for position in self._solved],
+                    )
+                ),
             }
         )
         pairs = len(self._source) - len(self._images)
@@ -3291,7 +3458,8 @@ def sector_solver(job: KPointJob, make_solver: Callable[..., Any], *, notes: lis
     if getattr(job, "geometry", None) is None:
         refusal = (
             "skipped: this k-point loop takes no sectors (the spinors of a spin-orbit or non-collinear run, LDA+U "
-            "without PARSEC_KPOINT_SECTOR_LDAU=on or spin, a meta-GGA under PARSEC_KPOINT_SECTOR_META_GGA=off, fixed "
+            "under PARSEC_KPOINT_SECTOR_LDAU=off or with spin without its value spin, a meta-GGA under "
+            "PARSEC_KPOINT_SECTOR_META_GGA=off, fixed "
             "occupations, refined levels under PARSEC_KPOINT_SECTOR_LEVELS=off, or the loop after the symmetry guard "
             "left the sectors)"
         )
@@ -3307,9 +3475,25 @@ def sector_solver(job: KPointJob, make_solver: Callable[..., Any], *, notes: lis
         if notes is not None:
             notes.append(refusal)
         return None
-    # the devices the solver of one task per k-point would deal the tasks over (the floor of a meta-GGA, plan_sectors)
+    # the devices the solver of one task per k-point would deal the tasks over (the floor of a meta-GGA, plan_sectors);
+    # one where worker processes solve the sectors on the devices (PARSEC_KPOINT_SECTOR_PROCESSES): the sectors scale
+    # over them as that solver's k-points do
     meta = job.geometry.get("meta_fields") is not None
-    plans = plan_sectors(job, notes, devices=_solver_devices(options.get("backend")) if meta else 1)
+    devices = 1
+    lowered = False
+    if meta:
+        from .kpoint_processes import processes_expected
+
+        devices = _solver_devices(options.get("backend"))
+        lowered = devices > 1 and processes_expected(options.get("backend"))
+    plans = plan_sectors(job, notes, devices=1 if lowered else devices)
+    if lowered and plans is not None:
+        from .kpoint_processes import plans_take_processes
+
+        if not plans_take_processes(job, plans):
+            # sectors the threads would solve (a k-point that stays whole, large sectors: .kpoint_processes
+            # .process_route): the floor of several devices
+            plans = plan_sectors(job, notes, devices=devices)
     if plans is None:
         return None
     # the gathered stencils of the kinetic terms only where the operators go to the device code

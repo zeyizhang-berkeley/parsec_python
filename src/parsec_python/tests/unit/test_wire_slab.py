@@ -741,13 +741,13 @@ def hydrogen_problem(
 class SCFTests(unittest.TestCase):
     def test_wire_local_potential_is_the_image_sum(self) -> None:
         from parsec_python.SCF.wire_slab import prepare_wire_slab_single_point
-        from parsec_python.V_ion import load_pseudopotentials
 
         atoms = [Atom("H", (0.2, 0.3, 0.7)), Atom("H", (-0.4, 0.0, -0.6))]
         system = prepare_wire_slab_single_point(
             hydrogen_problem(1, atoms=atoms, spacing=0.25, order=12, radius=4.0)
         )
-        potentials = load_pseudopotentials(system.input.pseudopotentials)
+        # the tables of the run (filtered to the grid by default, PARSEC_LOCAL_FILTER)
+        potentials = system.pseudopotentials
         grid = system.grid
         # Differences between two points converge in a direct image sum.
         first = int(np.argmin(np.linalg.norm(grid.coordinates - [0.0, 1.5, 0.0], axis=1)))

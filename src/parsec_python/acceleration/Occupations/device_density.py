@@ -40,6 +40,14 @@ void orbital_density(
 """
 
 
+def density_kernel(cp: Any) -> Any:
+    """The ``orbital_density`` kernel, compiled for the current device (also ahead of a run: backends/compile_ahead.py)."""
+
+    kernel = cp.RawKernel(_DENSITY_KERNEL, "orbital_density", options=("--std=c++11",))
+    kernel.compile()
+    return kernel
+
+
 class CuPyDeviceDensityBuilder:
     """Build host density while retaining all orbital columns on the GPU.
 
@@ -67,12 +75,7 @@ class CuPyDeviceDensityBuilder:
         )
         self.kernel = None
         if hasattr(cp, "RawKernel"):
-            self.kernel = cp.RawKernel(
-                _DENSITY_KERNEL,
-                "orbital_density",
-                options=("--std=c++11",),
-            )
-            self.kernel.compile()
+            self.kernel = density_kernel(cp)
 
     def __call__(
         self,

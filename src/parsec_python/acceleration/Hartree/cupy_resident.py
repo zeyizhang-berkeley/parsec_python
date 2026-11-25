@@ -47,6 +47,7 @@ from time import perf_counter
 import numpy as np
 
 from ..backends.cupy import require_cupy
+from ..backends.device_checks import all_finite
 from ..SCF.symmetry_fields import SymmetryScalarField
 from .native_poisson import NativePoissonResult
 
@@ -263,7 +264,7 @@ class CuPyResidentHartree:
         alpha = xp.clip(xp.dot(direction, new_rhs - prev_rhs) / denominator, -0.5, 1.5)
         predicted = prev_x + alpha * (prev_x - old_x)
         # The guard of NativePoissonSolver: no prediction that is not finite.
-        return predicted if bool(xp.all(xp.isfinite(predicted))) else None
+        return predicted if all_finite(predicted) else None
 
     def solve(self, density, initial_potential=None, **controls):
         """Solve for the Hartree potential of ``density`` (see the class)."""

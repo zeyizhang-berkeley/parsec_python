@@ -168,6 +168,47 @@ class DeviceHybridSemilocalTests(unittest.TestCase):
                 value.total_energy, reference.total_energy, delta=1e-13 * abs(reference.total_energy), msg=label
             )
 
+    def test_modules_of_the_weighted_components_give_the_same_bits(self) -> None:
+        # A module compiled with the components a functional weights (and the kernels an evaluator launches) gives
+        # the bits of the module of every component: a weight of zero skips a component, so nothing else changes.
+        import cupy as cp
+
+        from parsec_python.acceleration.V_xc import device_hybrid_xc as module
+
+        unpolarized, polarized = _points()
+        device = int(cp.cuda.Device().id)
+        for label, functional in HYBRID_FUNCTIONALS.items():
+            weights, omegas = module.component_parameters(functional.semilocal)
+            mask = module.component_mask(weights)
+            self.assertEqual(mask, sum(1 << c for c in range(len(weights)) if weights[c] != 0.0), label)
+            for arrays in (unpolarized, polarized):
+                inputs = cp.asarray(np.ascontiguousarray(np.vstack(arrays)))
+                count = int(inputs.shape[1])
+                results = []
+                for components in (module.ALL_COMPONENTS, mask):
+                    kernel = module._hybrid_kernels(cp, device, ("hybrid_points",), components)["hybrid_points"]
+                    outputs = cp.empty((6 if len(arrays) == 5 else 3, count), dtype=np.float64)
+                    module._launch(kernel, count, np.int32(len(arrays) == 5), inputs, cp.asarray(weights),
+                                   cp.asarray(omegas), outputs)
+                    results.append(cp.asnumpy(outputs))
+                np.testing.assert_array_equal(results[0], results[1], err_msg=f"{label} points {len(arrays)}")
+            for evaluator_class, args in (
+                (module.DeviceHybridXCEvaluator, (self.density,)),
+                (module.DeviceSpinHybridXCEvaluator, (self.up, self.down)),
+            ):
+                evaluator = evaluator_class(functional, self.grid, core_density=self.core)
+                names = module.evaluator_kernel_names(spin_polarized=evaluator.spin_polarized)
+                self.assertEqual(set(evaluator._kernels), set(names))
+                weighted = evaluator(*args)
+                evaluator._kernels = module._hybrid_kernels(cp, device, names, module.ALL_COMPONENTS)
+                every = evaluator(*args)
+                for name in ("potential", "potential_up", "potential_down", "energy_density"):
+                    if hasattr(weighted, name):
+                        np.testing.assert_array_equal(
+                            np.asarray(getattr(weighted, name)), np.asarray(getattr(every, name)), err_msg=label
+                        )
+                self.assertEqual(weighted.total_energy, every.total_energy, label)
+
     def test_refusals(self) -> None:
         from parsec_python.acceleration.V_xc.device_hybrid_xc import (
             component_parameters,

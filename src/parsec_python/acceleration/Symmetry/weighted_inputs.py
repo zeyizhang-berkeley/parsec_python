@@ -3,8 +3,9 @@
 The one-dimensional sectors of a subgroup ``H`` of the point group ``G`` with weights (:class:`.PointGroupReduction`,
 "Weighted sectors of a larger subgroup" in ``acceleration/README.md``) solve one partner of some degenerate levels
 and count it ``w`` times.  Four kinds of input kept the abelian group of the orbitals until 2026-11-19, the
-meta-GGA of a cluster until 2026-11-23 (``driver._orbital_group_refusal``); each now takes the weighted sectors where
-its switch is ``auto`` (the default) and the plan of the group does (``PARSEC_ORBITAL_GROUP``,
+meta-GGA of a cluster and of a bulk cell and the hybrid of a cluster until 2026-11-23
+(``driver._orbital_group_refusal``); each now takes the weighted sectors where its switch is ``auto`` (the default)
+and the plan of the group does (``PARSEC_ORBITAL_GROUP``,
 ``PARSEC_ORBITAL_GROUP_MAX_COST``):
 
 * ``PARSEC_ORBITAL_GROUP_FIXED_COUNT`` -- ``Fix_Number_Eigenvalues``: the first solve of the run brackets the lowest
@@ -32,11 +33,24 @@ its switch is ``auto`` (the default) and the plan of the group does (``PARSEC_OR
   sectors (whose own guard may still send it to the full grid), or goes straight to the full grid where those
   sectors would stop the same levels (``PARSEC_WEIGHTED_GUARD_SHORTCUT`` below).
 * ``PARSEC_ORBITAL_GROUP_META_GGA`` (since 2026-11-23) -- the meta-GGA of a cluster (not a meta-GGA hybrid, which
-  keeps the refusal of a hybrid, nor a periodic cell): ``tau`` and the orbital density gradient ``g`` of the solved
-  states, whose occupations carry the weights, are averaged over ``G`` as the density is, and the orbital term of
-  every sector reads the Cartesian derivatives at the representatives of every orbit of ``H``
+  keeps the refusal of a hybrid; a cell needs the switch below as well): ``tau`` and the orbital density gradient
+  ``g`` of the solved states, whose occupations carry the weights, are averaged over ``G`` as the density is, and the
+  orbital term of every sector reads the Cartesian derivatives at the representatives of every orbit of ``H``
   (``Hamiltonian/meta_gga_device.py``, :class:`WeightedOrbitMaps`); the device functional takes the operation table of
   ``G`` (``V_xc/meta_gga_xc.py``, ``permutations``).
+* ``PARSEC_ORBITAL_GROUP_META_GGA_CELL`` (since 2026-11-23) -- the meta-GGA of a bulk cell at the Gamma point that
+  the sectors take (``PARSEC_GAMMA_META_GGA_SECTORS``, ``SCF/gamma_features.py``), where
+  ``PARSEC_ORBITAL_GROUP_META_GGA`` is ``auto`` too: the same terms as a cluster's, the operations ``r -> R r + t``
+  of the cell with their translations (the coset representatives move the rows with ``t`` and turn the vector fields
+  with ``R`` alone), the forces and the moves of a relaxation averaged over ``G`` as for the other weighted sectors of
+  a cell (``Forces/sector_symmetry.py``).  ``off`` keeps the abelian sectors of the cell, as before.
+* ``PARSEC_ORBITAL_GROUP_HYBRID`` -- the self-consistent hybrid of a cluster in one process (not on several MPI
+  ranks, not a meta-GGA hybrid nor with ``PARSEC_ORBITAL_IRREPS``, which keep the abelian group): the exchange
+  operator takes the density matrix of the weighted, ``G``-averaged density, the coset images of the states of the
+  sectors that hold one partner of a level and the solved states of the others
+  (``Hamiltonian/exchange_device.py``, :class:`WeightedExchange`; ``Symmetry/exchange_partners.py``).  An unpolarized
+  run whose start or an inner loop ends with a partly filled degenerate level starts again in the abelian sectors,
+  where the exact exchange can split it (``SCF/hybrid.py``, ``WeightedHybridAbandoned``).
 
 ``off`` keeps the abelian group of before for that input, bit for bit.  Every value is read and checked in every
 preparation (:func:`weighted_input_settings`), so that a value the code does not know stops the run before the
@@ -89,7 +103,11 @@ WEIGHTED_INPUT_SWITCHES = {
     "occupations": "PARSEC_ORBITAL_GROUP_OCCUPATIONS",
     "spin": "PARSEC_ORBITAL_GROUP_SPIN",
     "meta_gga": "PARSEC_ORBITAL_GROUP_META_GGA",
+    "meta_gga_cell": "PARSEC_ORBITAL_GROUP_META_GGA_CELL",
+    "hybrid": "PARSEC_ORBITAL_GROUP_HYBRID",
 }
+#: The default of each switch (``auto`` unless named here: every one since 2026-11-23).
+WEIGHTED_INPUT_DEFAULTS: dict[str, str] = {}
 _VALUES = ("auto", "off")
 
 # The reason a preparation keeps the abelian group whatever the input (a calculation that left the weighted sectors).
@@ -100,7 +118,8 @@ def weighted_input_setting(kind: str) -> str:
     """The value of the switch of ``kind`` (a key of :data:`WEIGHTED_INPUT_SWITCHES`): ``auto`` or ``off``."""
 
     name = WEIGHTED_INPUT_SWITCHES[kind]
-    value = os.environ.get(name, "auto").strip().lower() or "auto"
+    default = WEIGHTED_INPUT_DEFAULTS.get(kind, "auto")
+    value = os.environ.get(name, default).strip().lower() or default
     if value not in _VALUES:
         raise ValueError(f"{name} must be auto or off, not {value!r}")
     return value

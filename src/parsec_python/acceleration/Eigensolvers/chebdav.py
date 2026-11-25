@@ -28,6 +28,7 @@ from parsec_python.Eigensolvers.chebdav import (
 )
 
 from ..backends.cupy import device_stage, require_cupy
+from ..backends.device_checks import all_finite
 from .small_dense import symmetric_eigh
 from .chebyshev import chebff_filter, chebyshev_filter
 from .lapack_random import LapackRandom
@@ -890,14 +891,9 @@ def run_chebdav(
 
     # One coarse validation preserves an actionable nonfinite-result error
     # without synchronizing every Hamiltonian application in the Davidson
-    # loop.  The reductions are queued together and only the final scalar is
-    # transferred to the host.
-    all_finite = (
-        cp.all(cp.isfinite(eigenvalues))
-        & cp.all(cp.isfinite(vectors))
-        & cp.all(cp.isfinite(residual_norms))
-    )
-    if not bool(all_finite.item()):
+    # loop.  The tests are queued together and only one flag is transferred
+    # to the host (backends/device_checks.py: no CUB reduction to compile).
+    if not all_finite(eigenvalues, vectors, residual_norms):
         raise FloatingPointError("CHEBDAV produced a nonfinite eigensystem")
 
     state = DeviceChebDavState(

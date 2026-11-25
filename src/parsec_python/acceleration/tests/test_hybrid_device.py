@@ -86,11 +86,19 @@ class _Inputs:
         return reference, system, accelerated, records
 
 
-def _levels(result):
+def _levels(result, like=None):
+    """The levels of ``result``; with ``like`` (another result) each channel's first as many as that one lists (the
+    weighted sectors of a spin channel list every partner of their last multiplet, beyond ``States_Num``)."""
+
     channels = getattr(result, "spin", None)
     if channels is None:
-        return np.asarray(result.eigenvalues)
-    return np.concatenate([np.asarray(channel.eigenvalues) for channel in channels])
+        values = np.asarray(result.eigenvalues)
+        return values if like is None else values[: np.asarray(like.eigenvalues).size]
+    others = [None] * len(channels) if like is None else list(like.spin)
+    return np.concatenate([
+        np.asarray(channel.eigenvalues)[: None if other is None else np.asarray(other.eigenvalues).size]
+        for channel, other in zip(channels, others)
+    ])
 
 
 @unittest.skipUnless(cupy_available(), "CuPy with a usable CUDA device is required")
@@ -204,16 +212,50 @@ class DeviceExchangeTests(_Inputs, unittest.TestCase):
         from parsec_python.acceleration.Symmetry import PointGroupReduction
 
         # H2 has the weighted sectors of D4h in a PBE run (PARSEC_ORBITAL_GROUP_MAX_COST, 0.75 since 2026-11-18);
-        # they hold one partner of the pi levels, and a hybrid run keeps the abelian D2h of the structure
-        # (driver._orbital_group_refusal): the exchange of those weighted orbitals is refused, and that of the
-        # sectors a hybrid run takes is compared with the host.
+        # they hold one partner of the pi levels.  Their exchange (PARSEC_ORBITAL_GROUP_HYBRID=auto) takes the
+        # occupations of the solved states times their weights and the coset images of the weighted ones: E_x is that
+        # of the host operator of every partner (the full-grid orbitals of the result); under off it is refused, and
+        # a hybrid run keeps the abelian D2h of the structure (driver._orbital_group_refusal), whose sectors are
+        # compared with the host below.
         system = prepare_single_point(self.problem("pbe", states=6, extra=""), backend="cupy", symmetry="auto")
         system.materialize_final_wavefunctions = False
-        weighted = run_scf(system).result.wavefunctions
+        result = run_scf(system).result
+        weighted = result.wavefunctions
         self.assertIsInstance(weighted.point_group, PointGroupReduction)
-        with self.assertRaisesRegex(NotImplementedError, "every partner"):
-            channel_orbitals(weighted, np.ones(6), 2.0, system.grid.volume_element)
-        del system, weighted
+        with mock.patch.dict(os.environ, {"PARSEC_ORBITAL_GROUP_HYBRID": "off"}):
+            with self.assertRaisesRegex(NotImplementedError, "every partner"):
+                channel_orbitals(weighted, np.ones(6), 2.0, system.grid.volume_element)
+        with self.assertRaisesRegex(ValueError, "one occupation per solved state"):
+            channel_orbitals(weighted, np.ones(int(np.asarray(result.occupations).size) + 1), 2.0,
+                             system.grid.volume_element)
+        host_solver = KroneckerPoisson(system.grid, multipole_order=system.input.hartree.multipole_order)
+        solvers = DevicePairSolvers(system.grid, (("coulomb", 1.0, None),), system.input.hartree.multipole_order, 2)
+        full = weighted.to_full_host()
+        repeats = np.asarray(result.sector_states[2], dtype=np.int64)
+        # the occupations of the SCF (the sigma_g level alone), and fractional ones that also fill the lowest solved state
+        # of weight 2, a pi level (whose coset images then enter the exchange)
+        self.assertTrue(np.any(repeats > 1))
+        fractional = np.zeros(repeats.size)
+        fractional[0] = 1.0
+        fractional[int(np.flatnonzero(repeats > 1)[0])] = 0.4
+        for partner in (None, fractional):
+            if partner is None:
+                solved = np.asarray(result.sector_states[1], dtype=np.float64)
+                listed = np.asarray(result.occupations, dtype=np.float64)
+            else:
+                solved = partner * repeats
+                listed = np.repeat(partner, repeats)
+            orbitals = channel_orbitals(weighted, solved, 2.0, system.grid.volume_element)
+            self.assertIsNotNone(orbitals.weighting)
+            if partner is not None:
+                self.assertTrue(orbitals.images)
+            host = apply_exchange_to_orbitals(
+                full, listed, system.grid.volume_element, host_solver, batch_size=4,
+                columns=[int(i) for i in np.flatnonzero(listed > 1.0e-10)],
+            )
+            application = apply_device_exchange(orbitals, solvers, (0,), columns="occupied")
+            self.assertAlmostEqual(application.energy, host.energy, delta=1e-11 * abs(host.energy))
+        del system, weighted, result, orbitals, application, full
         for symmetry in ("off", "auto"):
             with mock.patch.dict(os.environ, {"PARSEC_ORBITAL_GROUP": "abelian"}):
                 system = prepare_single_point(
@@ -331,7 +373,7 @@ class MultiDeviceExchangeTests(unittest.TestCase):
 class DeviceFockLoopTests(_Inputs, unittest.TestCase):
     """The accelerated Fock loop against the reference loop on the same input."""
 
-    def check(self, reference, accelerated, *, energy=1e-9, levels=1e-6):
+    def check(self, reference, accelerated, *, energy=1e-9, levels=1e-6, partners=False):
         self.assertTrue(reference.converged and accelerated.converged)
         self.assertAlmostEqual(accelerated.energies.total, reference.energies.total, delta=energy)
         self.assertAlmostEqual(
@@ -339,7 +381,9 @@ class DeviceFockLoopTests(_Inputs, unittest.TestCase):
             reference.exact_exchange.exchange_energy,
             delta=levels,
         )
-        np.testing.assert_allclose(_levels(accelerated), _levels(reference), atol=levels)
+        np.testing.assert_allclose(
+            _levels(accelerated, reference if partners else None), _levels(reference), atol=levels
+        )
         self.assertEqual(
             len(accelerated.exact_exchange.iterations), len(reference.exact_exchange.iterations)
         )
@@ -382,8 +426,15 @@ class DeviceFockLoopTests(_Inputs, unittest.TestCase):
         # Both channels on the full grid take the reference path's arithmetic
         # to round-off; in the symmetry sectors (the default of a hybrid,
         # Spin_Symmetry_Sectors: auto) the loop takes another SCF path, and
-        # E_x and the levels agree to first order in the SCF residual.
-        for sectors, tolerances in (("off", dict(energy=1e-12, levels=1e-12)), ("auto", {})):
+        # E_x and the levels agree to first order in the SCF residual: the
+        # abelian sectors (PARSEC_ORBITAL_GROUP_HYBRID=off) and the weighted
+        # ones of the atom's Oh (the default), whose spin channels list every
+        # partner of their last multiplet beyond States_Num.
+        for sectors, hybrid, tolerances in (
+            ("off", "auto", dict(energy=1e-12, levels=1e-12)),
+            ("auto", "off", {}),
+            ("auto", "auto", dict(partners=True)),
+        ):
             problem = self.problem(
                 "pbe0",
                 states=2,
@@ -391,7 +442,8 @@ class DeviceFockLoopTests(_Inputs, unittest.TestCase):
                 species="Initial_Spin_Polarization: 1.0\n",
                 extra="Spin_Polarization: .true.\n" + TIGHT + f"Spin_Symmetry_Sectors: {sectors}\n",
             )
-            reference, system, accelerated, _ = self.both(problem)
+            with mock.patch.dict(os.environ, {"PARSEC_ORBITAL_GROUP_HYBRID": hybrid}):
+                reference, system, accelerated, _ = self.both(problem)
             self.assertEqual(getattr(system.backend, "symmetry_eigensolver", None) is not None, sectors == "auto")
             self.check(reference, accelerated, **tolerances)
             up, down = accelerated.spin

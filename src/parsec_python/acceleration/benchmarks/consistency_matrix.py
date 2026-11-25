@@ -13,7 +13,11 @@ repository, so that the matrix can be run unchanged on any later tree.  Groups:
     and 2e-3 bohr, SCF to 1e-10 Ry; the Richardson value of the two is printed too).  Tolerance 1e-5 Ry/bohr at both
     steps.  Atoms on a grid point, 5e-4 bohr from one and 0.05 bohr off a site; C (POTRE and FHI), Si, Ge (core
     correction), Ag (d channel), Mg (core correction), O, H, B, N; both routine sets; clusters, Gamma cells, a 2x2x2
-    mesh, two slabs (one under PARSEC_HARTREE_VARIATIONAL=off) and a wire; spin, spin-orbit and LDA+U.  The force
+    mesh, two slabs (one under PARSEC_HARTREE_VARIATIONAL=off) and a wire; spin, spin-orbit (a Gamma cell, and since
+    308edad4e AuH and Au2 clusters on the device, on the whole grid and in their double-group sectors) and LDA+U;
+    SCAN in the weighted sectors of a Gamma-point cell (added after 308edad4e); Au with PBE on a grid point at steps
+    of 2e-5 and 4e-5 bohr (``FINE_STEPS``: the GGA energy varies on a scale of 1e-3 bohr there, see ``au2_gga``).
+    The force
     compared is the total before its net part was removed (``forces_total + forces_net / N``), the derivative of the
     energy.  ``dgrid`` is the distance of the atom from the nearest grid point where the archive holds the grid.
 ``mpi``
@@ -50,7 +54,10 @@ repository, so that the matrix can be run unchanged on any later tree.  Groups:
     PARSEC_KPOINT_KINETIC=trim) and the k-point sectors against their off values, on a basis above their floors.
 ``soc``
     Self-consistent spin-orbit clusters in the sectors that PARSEC_SOC_SECTORS forces at any size (``kramers``,
-    ``on``) against the whole grid (``off``).
+    ``on``) against the whole grid (``off``); a spin-orbit cell with a 2 x 2 x 2 mesh and forces in the double-group
+    sectors of its k-points that ``PARSEC_SOC_KPOINT_SECTORS=on`` forces at any size, against ``off``; and (added
+    after 308edad4e) the energy and forces of AuH in the Kramers sector on the device against those of the
+    reference solver (``PARSEC_SOC_DEVICE_FORCES=off``) on both routine sets, forces within 1e-7 Ry/bohr.
 The groups ``traj``, ``band``, ``kpoint`` and ``soc`` and the MPI band case were added after the first run of the
 matrix (on ed4144f13); ``--group all`` takes them.  The MPI cases also run on several nodes (the line names them).
 
@@ -102,6 +109,9 @@ MPI_VARIABLES = (
 # Tolerances
 FORCE_TOLERANCE = 1.0e-5
 FORCE_STEPS = (1.0e-3, 2.0e-3)
+#: The steps of the force cases whose energy varies on a scale below FORCE_STEPS (a GGA at a grid point on a nucleus
+#: of low pseudo-valence density: au2_gga)
+FINE_STEPS = (2.0e-5, 4.0e-5)
 MPI_ENERGY_TOLERANCE = 1.0e-8
 MPI_FORCE_TOLERANCE = 1.0e-7
 SYMMETRY_ENERGY_TOLERANCE = 1.0e-7
@@ -181,6 +191,7 @@ ALL_OFF = {
     "PARSEC_GAMMA_PARSEC_DAT": "off",
     "PARSEC_KPOINT_SECTOR_CLASSES": "off",
     "PARSEC_ORDERED_SUMS": "off",  # its own sums are not bit-repeatable (cuSPARSE): GPU noise, not bits
+    "PARSEC_LONG_ROW_SPLIT": "off",
     "PARSEC_MPI_ACCELERATED_BANDS": "off",
     "PARSEC_CONFINED_SETUP": "readable",
     "PARSEC_PERIODIC_OBLIQUE_SPLIT": "auto",
@@ -226,8 +237,33 @@ ALL_OFF = {
     "PARSEC_LOCAL_FILTER": "off",
     # after a6401263f: the k-point sectors of meta-GGA loops (off: one task per k-point)
     "PARSEC_KPOINT_SECTOR_META_GGA": "off",
+    # defaults changed after 308edad4e: the wedge of a hybrid's Monkhorst-Pack mesh from the semilocal start, metals
+    # too (auto: the start on the time-reversal pairs, the wedge after it only where no state is partly filled)
+    "PARSEC_HYBRID_KPOINT_WEDGE": "auto",
     # after a6401263f: the Coulomb tail of a splined local potential beyond its Coulomb onset
     "PARSEC_SPLINE_COULOMB_TAIL": "off",
+    # after 308edad4e: the full hexagonal and cubic groups of oblique cells without a density gradient
+    "PARSEC_OBLIQUE_FULL_GROUP": "off",
+    # after 308edad4e: the weighted sectors of the meta-GGA of a Gamma-point cell, and its floor of 2^24 entries
+    "PARSEC_ORBITAL_GROUP_META_GGA_CELL": "off",
+    "PARSEC_GAMMA_META_GGA_FLOOR": "former",
+    # after 308edad4e: the forces, relaxations and dynamics of self-consistent spin-orbit clusters on the device
+    # (off: the reference solver)
+    "PARSEC_SOC_DEVICE_FORCES": "off",
+    # after 308edad4e: the order of the squares in the sphere test of a cluster grid (dot, the default, as before)
+    "PARSEC_SPHERE_TIES": "dot",
+    # after 308edad4e: the double-group sectors of the k-points of a spin-orbit loop
+    "PARSEC_SOC_KPOINT_SECTORS": "off",
+    # after 308edad4e: the double-group sectors of the k-points of a spin-polarized spin-orbit loop (opt-in on)
+    "PARSEC_SOC_SPIN_KPOINT_SECTORS": "off",
+    # after 308edad4e: the weighted sectors of a cluster's hybrid (off: the abelian group)
+    "PARSEC_ORBITAL_GROUP_HYBRID": "off",
+    # after 308edad4e: the k-point sectors of one process with several GPUs in worker processes (off: the threads, the
+    # floor of a meta-GGA on several GPUs), and the k-point loops of LDA+U in the sectors (off: one task per k-point)
+    "PARSEC_KPOINT_SECTOR_PROCESSES": "off",
+    "PARSEC_KPOINT_SECTOR_LDAU": "off",
+    # after 308edad4e: the kernels of a run compiled ahead on background threads (the same binaries)
+    "PARSEC_CUPY_COMPILE_AHEAD": "off",
 }
 NO_SYMMETRY_ENV = {"PARSEC_PERIODIC_SYMMETRY": "off", "PARSEC_KPOINT_SECTORS": "off"}
 NO_SYMMETRY_ARGS = ("--symmetry", "off")
@@ -243,6 +279,7 @@ PP_FILES = {
     "Ge_POTRE": "src/parsec_python/tests/data/Ge_POTRE.DAT",
     "Gep_POTRE": "src/parsec_python/tests/data/Ge_POTRE.DAT",
     "Ag_POTRE": "src/parsec_python/tests/data/Ag_POTRE.DAT",
+    "Agn_POTRE": "src/parsec_python/tests/data/Ag_POTRE.DAT",
     "H_POTRE": "examples/0d_benzene/H_POTRE.DAT",
     "Hw_POTRE": "examples/0d_water_geoopt/H_POTRE.DAT",
     "Ow_POTRE": "examples/0d_water_geoopt/O_POTRE.DAT",
@@ -287,6 +324,8 @@ SPECIES = {
     "Ge_POTRE": ("Ge_POTRE.DAT", _potre("Ge", "d")),
     "Gep_POTRE": ("Ge_POTRE.DAT", _potre("Ge", "p")),
     "Ag_POTRE": ("Ag_POTRE.DAT", _potre("Ag", "s", element=True)),
+    # (without Element_Symbol, which the reader takes for every species: beside Au)
+    "Agn_POTRE": ("Ag_POTRE.DAT", _potre("Ag", "s")),
     "H_POTRE": ("H_POTRE.DAT", _potre("H", "s")),
     "Hw_POTRE": ("H_POTRE.DAT", _potre("H", "s")),
     "Ow_POTRE": ("O_POTRE.DAT", _potre("O", "p")),
@@ -479,6 +518,30 @@ def diamond(name, key, a, xc, states, *, fortran=False, move=(0.05, 0.05, 0.05),
     return Structure(name, text, positions, (key,), vectors, 3)
 
 
+#: The four bonds of the diamond cube's atom at the origin to atoms 4-7 (unit vectors, the order of ``diamond_cube``).
+TETRAHEDRON = np.array([(1.0, 1.0, 1.0), (1.0, -1.0, -1.0), (-1.0, 1.0, -1.0), (-1.0, -1.0, 1.0)]) / np.sqrt(3.0)
+
+
+def si8_td_meta(name, *, xc="scan", fortran=False, steps=1.0, criterion=1.0e-10, forces=True):
+    """Si8 with atoms 4-7 moved out along their bonds to atom 0 by ``steps`` grid steps along each axis (Td about the
+    origin, no face-centring translation; on the half-shifted grid of h = a/18 they stay on grid points for whole
+    steps), a meta-GGA in the Gamma sectors at any size (``PARSEC_GAMMA_META_GGA_SECTORS=on``): the weighted sectors of
+    ``PARSEC_ORBITAL_GROUP_META_GGA_CELL`` (added after 308edad4e)."""
+
+    positions = diamond_cube(A_SI)
+    positions[4:] = np.mod((0.25 * A_SI * np.sqrt(3.0) + steps * np.sqrt(3.0) * A_SI / 18) * TETRAHEDRON, A_SI)
+    vectors = np.diag([A_SI] * 3)
+
+    def text(p):
+        return (
+            cell_head(vectors, A_SI / 18, fortran=fortran)
+            + scf_block(xc, 24, temperature=100.0, criterion=criterion, diag=criterion / 10, forces=forces)
+            + atom_blocks([("Si_POTRE", p, "")])
+        )
+
+    return Structure(name, text, positions, ("Si_POTRE",), vectors, 3, env={"PARSEC_GAMMA_META_GGA_SECTORS": "on"})
+
+
 def c7n(name, *, fortran=False, mesh=None, criterion=1.0e-10, forces=True, move=0.03):
     """C7N in the diamond cube (spin doublet, CA), N at the origin moved by ``move`` along [111] (C3v)."""
 
@@ -575,9 +638,10 @@ def hcp_mg2(name, mesh, *, move=0.05, criterion=1.0e-9):
     return Structure(name, text, positions, (key,), vectors, 3)
 
 
-def hcp_na2(name, mesh, *, move=0.05, criterion=1.0e-9, forces=True):
+def hcp_na2(name, mesh, *, move=0.05, criterion=1.0e-9, forces=True, xc="ca", extra=""):
     """hcp Na (two atoms, TM Na without a core correction, CA: the default routines of an oblique cell), atom 0 moved
-    along c (C3v), h about 0.50."""
+    along c (C3v), h about 0.50; ``xc`` another functional (``pbe0``: a metal's hybrid on the wedge of its mesh),
+    ``extra`` lines of the SCF block."""
 
     a, c = 3.767 * BOHR_PER_ANGSTROM, 6.154 * BOHR_PER_ANGSTROM
     vectors = np.array([[a, 0.0, 0.0], [-0.5 * a, 0.5 * np.sqrt(3.0) * a, 0.0], [0.0, 0.0, c]])
@@ -588,11 +652,44 @@ def hcp_na2(name, mesh, *, move=0.05, criterion=1.0e-9, forces=True):
     def text(p):
         return (
             cell_head(vectors, 0.50, fortran=False)
-            + scf_block("ca", 8, criterion=criterion, diag=criterion / 10, forces=forces)
+            + scf_block(xc, 8, criterion=criterion, diag=criterion / 10, forces=forces, extra=extra)
             + kpoints + atom_blocks([("Na_POTRE", p, "")])
         )
 
     return Structure(name, text, positions, ("Na_POTRE",), vectors, 3)
+
+
+def primitive_cubic(name, kind, *, move=0.03, criterion=1.0e-9, forces=True, fortran=False, extra=""):
+    """A 2 x 2 x 2 supercell of a primitive cubic cell under ``PARSEC_OBLIQUE_FULL_GROUP=auto`` (CA; the floor of the
+    sectors and their fixed cost off): ``fcc`` diamond Si (POTRE, 16 atoms, h about 0.6), atom 1 moved along z (C2v about z, whose two-fold
+    axis is no signed permutation of the grid axes); ``bcc`` Na (POTRE, 8 atoms, h about 0.6), atom 1 moved along z
+    (C4v).  Both keep an operation of the full cubic group that the signed permutations of the grid axes do not hold."""
+
+    if kind == "fcc":
+        key, a, basis, states = "Si_POTRE", A_SI, [np.zeros(3), np.full(3, 0.25 * A_SI)], 40
+        vectors = np.array([[0.0, 0.5 * a, 0.5 * a], [0.5 * a, 0.0, 0.5 * a], [0.5 * a, 0.5 * a, 0.0]])
+    else:
+        key, a, basis, states = "Na_POTRE", 7.98, [np.zeros(3)], 12
+        vectors = np.array([[-0.5 * a, 0.5 * a, 0.5 * a], [0.5 * a, -0.5 * a, 0.5 * a], [0.5 * a, 0.5 * a, -0.5 * a]])
+    positions = np.array([
+        position + i * vectors[0] + j * vectors[1] + k * vectors[2]
+        for i in range(2) for j in range(2) for k in range(2) for position in basis
+    ])
+    positions[1, 2] += move
+    supercell = 2.0 * vectors
+
+    def text(p):
+        return (
+            cell_head(supercell, 0.60, fortran=fortran)
+            + scf_block("ca", states, criterion=criterion, diag=criterion / 10, forces=forces, extra=extra)
+            + atom_blocks([(key, p, "")])
+        )
+
+    # (the fixed cost of a sector off: these small cells take the plan of the least rows x states, the full cubic
+    # group, which the default cost of a sector gives larger cells)
+    return Structure(name, text, positions, (key,), supercell, 3,
+                     env={"PARSEC_OBLIQUE_FULL_GROUP": "auto", "PARSEC_PERIODIC_SECTOR_FLOOR": "off",
+                          "PARSEC_SECTOR_OVERHEAD": "off"})
 
 
 MD_RESTART_LINES = (
@@ -706,35 +803,90 @@ def bcc_guarded(name, metal, kpoints, *, criterion=1.0e-9):
     return Structure(name, text, positions, (key,), vectors, 3)
 
 
-def au2_soc(name, *, hydride=False, criterion=1.0e-9):
-    """Au2 (or AuH) with self-consistent spin-orbit coupling (TM Au with its spin-orbit channels, CA), along z.  No
-    forces: forces with spin-orbit coupling take the reference solver, which has no spin-orbit sectors."""
+def au2_soc(name, *, hydride=False, criterion=1.0e-9, forces=False, positions=None, env=None, fortran=False):
+    """Au2 (or AuH) with self-consistent spin-orbit coupling (TM Au with its spin-orbit channels, CA), along z.  The
+    symmetry checks have no forces (``forces``: their forces, which ran on the reference solver without spin-orbit
+    sectors before PARSEC_SOC_DEVICE_FORCES; the force cases added after 308edad4e take them on the device, in the
+    sectors that ``env`` asks for).  ``positions`` replaces the atoms along z of the default; ``fortran`` adds
+    ``Use_Fortran_Routines``."""
 
     if hydride:
-        positions = np.array([[0.0, 0.0, -1.445], [0.0, 0.0, 1.445]])
+        default = np.array([[0.0, 0.0, -1.445], [0.0, 0.0, 1.445]])
         groups = lambda p: [("Auso_POTRE", p[:1], ""), ("Hso_POTRE", p[1:], "")]
         species, states = ("Auso_POTRE", "Hso_POTRE"), 20
     else:
-        positions = np.array([[0.0, 0.0, -2.36], [0.0, 0.0, 2.36]])
+        default = np.array([[0.0, 0.0, -2.36], [0.0, 0.0, 2.36]])
         groups = lambda p: [("Auso_POTRE", p, "")]
         species, states = ("Auso_POTRE",), 30
+    positions = default if positions is None else np.asarray(positions, dtype=float)
 
     def text(p):
         return (
             cluster_head(9.0, 0.35)
             + scf_block("ca", states, temperature=300.0, criterion=criterion, diag=criterion / 10, mixing=0.25,
-                        forces=False, extra="SO_from_scratch: .true.\n")
+                        forces=forces,
+                        extra="SO_from_scratch: .true.\n" + ("Use_Fortran_Routines: .true.\n" if fortran else ""))
             + atom_blocks(groups(p))
         )
 
-    return Structure(name, text, positions, species, None, 0)
+    return Structure(name, text, positions, species, None, 0, env=dict(env or {}))
 
 
-def ch4(name, *, perturb=True, offset_h=None, criterion=1.0e-10):
+def ge5_soc(name, *, criterion=1.0e-10, env=None):
+    """A Ge5 square pyramid (C4v about z) with self-consistent spin-orbit coupling (Ge with its spin-orbit channels and
+    core correction, CA), forces; the apex on a grid point (z = 3h), the base atoms off the grid.  Added after
+    308edad4e for the device forces (PARSEC_SOC_DEVICE_FORCES)."""
+
+    positions = np.array([[0.0, 0.0, 1.2], [2.3, 2.3, -1.2], [-2.3, 2.3, -1.2], [2.3, -2.3, -1.2], [-2.3, -2.3, -1.2]])
+
+    def text(p):
+        return (
+            cluster_head(10.5, 0.4)
+            + scf_block("ca", 32, temperature=300.0, criterion=criterion, diag=criterion / 10, mixing=0.25,
+                        extra="SO_from_scratch: .true.\n")
+            + atom_blocks([("Ge_POTRE", p, "SO_PSP: .true.\n")])
+        )
+
+    return Structure(name, text, positions, ("Ge_POTRE",), None, 0, env=dict(env or {}))
+
+
+def au20_soc(name, *, criterion=1.0e-9):
+    """The Au20 tetrahedron (Td, the group D2 of its axes on the grid) with self-consistent spin-orbit coupling, forces
+    (h = 0.4 bohr, 16 bohr sphere, 236 states).  Added after 308edad4e: the base structure in the Kramers sector of
+    PARSEC_SOC_SECTORS=auto, the moved atom leaves no two-fold operation (the whole grid)."""
+
+    unit = 2.88 / 2 ** 0.5 / 0.529177 * 0.98
+    found = []
+    for x, y, z in itertools.product((-1.5, -0.5, 0.5, 1.5), repeat=3):
+        if int(round(x + y + z + 4.5)) % 2:
+            continue
+        if max(x + y + z, x - y - z, -x + y - z, -x - y + z) <= 1.5 + 1e-9:
+            found.append((x * unit, y * unit, z * unit))
+    positions = np.array(found)
+
+    def text(p):
+        return (
+            cluster_head(16.0, 0.4)
+            + scf_block("ca", 236, temperature=300.0, criterion=criterion, diag=criterion / 10, mixing=0.25,
+                        extra="SO_from_scratch: .true.\n")
+            + atom_blocks([("Auso_POTRE", p, "")])
+        )
+
+    return Structure(name, text, positions, ("Auso_POTRE",), None, 0)
+
+
+def _hybrid_tolerance(xc) -> str:
+    """The Fock-loop stop of a hybrid ``xc`` in a case (1e-10 Ry: totals to about 1e-10 Ry), none for another."""
+
+    return "Exx_Tolerance: 1e-10 Ry\n" if xc in ("pbe0", "hse06", "b3lyp", "hf") else ""
+
+
+def ch4(name, *, perturb=True, offset_h=None, criterion=1.0e-10, xc="pbe", scale=1.0, extra=""):
     """CH4 (C FHI at the origin, a grid point; H POTRE), the H atoms moved off the Td sites unless ``perturb`` is
-    false; ``offset_h`` moves the first H by that many bohr along x."""
+    false; ``offset_h`` moves the first H by that many bohr along x; ``xc`` a functional (a hybrid with its Fock loop
+    to 1e-10 Ry); ``scale`` the C-H bonds (Td kept); ``extra`` lines of the SCF block (a relaxation)."""
 
-    d = 1.1859538349
+    d = 1.1859538349 * scale
     hydrogens = np.array([[d, d, d], [-d, -d, d], [-d, d, -d], [d, -d, -d]])
     if perturb:
         hydrogens = hydrogens + np.array(
@@ -745,9 +897,9 @@ def ch4(name, *, perturb=True, offset_h=None, criterion=1.0e-10):
     positions = np.vstack([[[0.0, 0.0, 0.0]], hydrogens])
 
     def text(p):
-        return cluster_head(9.0, 0.25) + scf_block("pbe", 8, criterion=criterion, diag=criterion / 10) + atom_blocks(
-            [("C_FHI", p[:1], ""), ("H_POTRE", p[1:], "")]
-        )
+        return cluster_head(9.0, 0.25) + scf_block(
+            xc, 8, criterion=criterion, diag=criterion / 10, extra=_hybrid_tolerance(xc) + extra
+        ) + atom_blocks([("C_FHI", p[:1], ""), ("H_POTRE", p[1:], "")])
 
     return Structure(name, text, positions, ("C_FHI", "H_POTRE"), None, 0)
 
@@ -779,6 +931,41 @@ def ag3(name):
     return Structure(name, text, positions, ("Ag_POTRE",), None, 0)
 
 
+def au2_gga(name, *, xc="pbe", cluster=False):
+    """Au2 (TM Au without a core correction, local s) with a GGA, atom 0 on a grid point (h = 0.31), atom 1 off the
+    grid points.  The cell: a 6.2 bohr cube with both atoms on its (1, 1, 1) line (atom 0 at 1.5 h on every axis,
+    the points of the default routines lie at (i + 1/2) h), a 4x4x4 mesh, 1000 K.  The cluster: atom 0 at
+    (5h, 5h, 5h), the box of the atoms centred within 0.1 bohr of the origin (no re-centring at any step).
+
+    The pseudo-valence density of Au is low at the nucleus (9.6e-4 e/bohr^3, 3.5e-2 one step away: the 5d shell);
+    at a grid point on the nucleus the finite-difference gradient of the density grows with the offset of the atom,
+    and the reduced gradient there reaches the scale of the PBE enhancement (s = 1) within about 1e-3 bohr, so that
+    the discrete GGA energy varies on that scale.  The force is its derivative: the cases with these structures take
+    steps of 2e-5 and 4e-5 bohr, which resolve that scale."""
+
+    if cluster:
+        a = 5 * 0.31
+        positions = np.array([[a, a, a], [-a + 0.05, -a + 0.1, -a - 0.05]])
+
+        def text(p):
+            return (cluster_head(10.0, 0.31) + scf_block(xc, 16, criterion=1.0e-10, diag=1.0e-11)
+                    + atom_blocks([("Au_POTRE", p, "")]))
+
+        return Structure(name, text, positions, ("Au_POTRE",), None, 0)
+
+    vectors = np.diag([6.2, 6.2, 6.2])
+    positions = np.array([[0.0, 0.0, 0.0], [3.35, 3.35, 3.35]]) + 1.5 * 0.31
+
+    def text(p):
+        return (
+            cell_head(vectors, 0.31, fortran=False, sad=False)
+            + scf_block(xc, 30, temperature=1000.0, criterion=1.0e-10, diag=1.0e-11, order=6)
+            + mesh_text((4, 4, 4)) + atom_blocks([("Au_POTRE", p, "")])
+        )
+
+    return Structure(name, text, positions, ("Au_POTRE",), vectors, 3)
+
+
 def o2_broken(name, *, criterion=1.0e-10):
     """O2 (O FHI, PBE, spin) from opposite starting polarizations of its two atoms (labels O_a and O_b)."""
 
@@ -795,9 +982,10 @@ def o2_broken(name, *, criterion=1.0e-10):
     return Structure(name, text, positions, ("Oa_FHI", "Ob_FHI"), None, 0)
 
 
-def o2(name, *, symmetric=False, criterion=1.0e-10):
-    """O2 triplet (O FHI, PBE, spin), O 0 on a grid point (0, 0, -1.15) of h = 0.23; D-infinity-h if ``symmetric``.
-    The box of the atoms is centred on the origin within 0.1 bohr: PARSEC does not re-centre the cluster."""
+def o2(name, *, symmetric=False, criterion=1.0e-10, xc="pbe"):
+    """O2 triplet (O FHI, PBE or ``xc``, spin), O 0 on a grid point (0, 0, -1.15) of h = 0.23; D-infinity-h if
+    ``symmetric``.  The box of the atoms is centred on the origin within 0.1 bohr: PARSEC does not re-centre the
+    cluster."""
 
     positions = np.array([[0.0, 0.0, -1.15], [0.0, 0.0, 1.15]]) if symmetric else np.array(
         [[0.0, 0.0, -1.15], [0.02, -0.01, 1.17]]
@@ -806,7 +994,8 @@ def o2(name, *, symmetric=False, criterion=1.0e-10):
     def text(p):
         return (
             cluster_head(9.0, 0.23)
-            + scf_block("pbe", 10, criterion=criterion, diag=criterion / 10, extra="Spin_Polarization: .true.\n")
+            + scf_block(xc, 10, criterion=criterion, diag=criterion / 10,
+                        extra="Spin_Polarization: .true.\n" + _hybrid_tolerance(xc))
             + atom_blocks([("O_FHI", p, "Initial_Spin_Polarization: 0.3\n")])
         )
 
@@ -963,6 +1152,69 @@ def si_pbe0(name, *, mesh=True):
     return Structure(name, text, positions, ("Si_FHI",), vectors, 3)
 
 
+#: The Fock-loop stop of the metal hybrids of the force group (the slope needs the free energy to 1e-10 Ry)
+#: Why the atom on a grid point of the Au cases is exempt (force_checks)
+_GGA_ON_GRID = (
+    "Au on a grid point with a GGA: the energy varies on a scale of 1e-3 bohr there (the finite-difference density "
+    "gradient at a grid point on a nucleus of low pseudo-valence density); the force is its derivative (steps of "
+    "2e-5 and 4e-5 bohr: f_au2_pbe_fine, f_au2c_pbe_fine)"
+)
+#: Why a displacement that removes the group of a metal hybrid is exempt (force_checks)
+_METAL_PAIRS = (
+    "the displaced structures keep no group and run on the time-reversal pairs, whose Fock loop may fill equivalent "
+    "k-points unequally (a lower, broken state, an artefact of the finite mesh): their slope is that of the broken "
+    "branch, not of the wedge state at the base"
+)
+METAL_HYBRID_EXX = "Exx_Tolerance: 1e-10 Ry\nExx_Max_Iter: 200\n"
+
+
+def au2_pbe0(name, *, fortran=False, mesh=(4, 4, 4), second="Au_POTRE"):
+    """bcc Au2 in its cube (a = 6.2 bohr, TM Au, PBE0, 1000 K), the second atom moved from the body centre along
+    (1, 1, 1) (C3v): a metal whose levels at the Fermi level are partly filled, on the irreducible wedge of its mesh
+    (PARSEC_HYBRID_KPOINT_WEDGE=on, the default since 2026-11-23).  Both atoms moved by 0.465 bohr along (1, 1, 1),
+    inside the cell at either step (an atom at a corner leaves the cell at one sign and takes the input to the
+    Fortran-derived routines) and the first on a point of the default routines' grid (points at (i + 1/2) h).
+    ``second="Agn_POTRE"``: AuAg, whose group has no fractional translation (that of Au2, which swaps the atoms,
+    keeps no grid of the Fortran-derived routines near the spacing, so they would run the time-reversal pairs)."""
+
+    vectors = np.diag([6.2, 6.2, 6.2])
+    positions = np.array([[0.0, 0.0, 0.0], [3.35, 3.35, 3.35]]) + 0.465
+    if second == "Au_POTRE":
+        groups, species = (lambda p: [("Au_POTRE", p, "")]), ("Au_POTRE",)
+    else:
+        groups, species = (lambda p: [("Au_POTRE", p[:1], ""), (second, p[1:], "")]), ("Au_POTRE", second)
+
+    def text(p):
+        return (
+            cell_head(vectors, 0.31, fortran=fortran, sad=False)
+            + scf_block("pbe0", 30, temperature=1000.0, criterion=1.0e-10, diag=1.0e-11, order=6,
+                        extra=METAL_HYBRID_EXX)
+            + mesh_text(mesh) + atom_blocks(groups(p))
+        )
+
+    return Structure(name, text, positions, species, vectors, 3)
+
+
+def au2b_pbe0(name):
+    """bcc Au2 in its cube as :func:`au2_pbe0`, the second atom moved from the body centre by (0.25, 0.25, 0) bohr and
+    both by 0.40 bohr along (1, 1, 1): the group {E, x <-> y}, neither atom near a grid point.  A displacement along z
+    keeps the group (the wedge of its mesh at every step); one along x or y removes it, so the displaced structures
+    run on the time-reversal pairs."""
+
+    vectors = np.diag([6.2, 6.2, 6.2])
+    positions = np.array([[0.0, 0.0, 0.0], [3.35 + 0.25, 3.35 + 0.25, 3.35]]) + 0.40
+
+    def text(p):
+        return (
+            cell_head(vectors, 0.31, fortran=False, sad=False)
+            + scf_block("pbe0", 30, temperature=1000.0, criterion=1.0e-10, diag=1.0e-11, order=6,
+                        extra=METAL_HYBRID_EXX)
+            + mesh_text((4, 4, 4)) + atom_blocks([("Au_POTRE", p, "")])
+        )
+
+    return Structure(name, text, positions, ("Au_POTRE",), vectors, 3)
+
+
 def c8_pbe0(name, *, forces=True):
     """C8 (C POTRE) at the Gamma point with PBE0, atom 0 moved along [111]."""
 
@@ -1069,8 +1321,11 @@ class ForceCheck(Check):
     targets: tuple = ()
     offset: tuple | None = None  # (atom, bohr): the atom moved that far along OFFSET_DIRECTION first
     tolerance: float = FORCE_TOLERANCE
-    #: documented exceptions: atom -> (steps whose slope is not judged, the reason printed)
+    #: documented exceptions: atom -> (steps whose slope is not judged, the reason printed[, the largest difference of
+    #: force and slope that is exempt, Ry/bohr: beyond it the step fails])
     exempt: dict = field(default_factory=dict)
+    #: the two steps of the central differences (bohr), the second twice the first for the Richardson value
+    steps: tuple = FORCE_STEPS
 
     def structures(self):
         return [self.structure]
@@ -1085,7 +1340,7 @@ class ForceCheck(Check):
     def jobs(self):
         start = self.start()
         jobs = {"base": Job(f"{self.name}/base", self.structure, start, keep_output=True)}
-        for (atom, axis), step, sign in itertools.product(self.targets, FORCE_STEPS, (1.0, -1.0)):
+        for (atom, axis), step, sign in itertools.product(self.targets, self.steps, (1.0, -1.0)):
             moved = start.copy()
             moved[atom, axis] += sign * step
             jobs[(atom, axis, step, sign)] = Job(
@@ -1101,7 +1356,7 @@ class ForceCheck(Check):
         for atom, axis in self.targets:
             force = float(base.forces[atom, axis])
             slopes, diffs, missing = [], [], []
-            for step in FORCE_STEPS:
+            for step in self.steps:
                 plus, minus = results[(atom, axis, step, 1.0)], results[(atom, axis, step, -1.0)]
                 if not (plus.ok and minus.ok):
                     missing.append(f"step {step:g}: {(plus if not plus.ok else minus).why()}")
@@ -1118,7 +1373,7 @@ class ForceCheck(Check):
             text = (
                 f"atom {atom} axis {axis} F {force:+.9e} "
                 + " ".join(
-                    f"slope({step:g}) {_fmt(s)} diff {_fmt(d, '.2e')}" for step, s, d in zip(FORCE_STEPS, slopes, diffs)
+                    f"slope({step:g}) {_fmt(s)} diff {_fmt(d, '.2e')}" for step, s, d in zip(self.steps, slopes, diffs)
                 )
                 + f" rich {_fmt(richardson)} diff {_fmt(None if richardson is None else abs(force - richardson), '.2e')}"
                 + f" dgrid {_fmt(dgrid, '.2e')} tol {self.tolerance:.0e} E {base.free:.10f}"
@@ -1135,15 +1390,22 @@ class ForceCheck(Check):
                 # (no exemption: a NaN or infinite force or slope is never a step that may miss)
                 lines.append(("FAIL", text + " | non-finite force or slope"))
                 continue
-            failing = [step for step, d in zip(FORCE_STEPS, diffs) if not _within(d, self.tolerance)]
-            exempt_steps, reason = self.exempt.get(atom, ((), ""))
+            failing = [step for step, d in zip(self.steps, diffs) if not _within(d, self.tolerance)]
+            exemption = self.exempt.get(atom, ((), ""))
+            exempt_steps, reason = exemption[0], exemption[1]
+            bound = exemption[2] if len(exemption) > 2 else None
             first, second = (s - force for s in slopes)
             if not failing:
                 lines.append(("PASS", text))
-            elif all(step in exempt_steps for step in failing):
-                lines.append(("EXEMPT", text + f" | exempt step(s) {','.join(f'{s:g}' for s in failing)}: {reason}"))
+            elif all(step in exempt_steps for step in failing) and (
+                bound is None or all(_within(d, bound) for step, d in zip(self.steps, diffs) if step in failing)
+            ):
+                within = "" if bound is None else f" (exempt up to {bound:.0e})"
+                lines.append(
+                    ("EXEMPT", text + f" | exempt step(s) {','.join(f'{s:g}' for s in failing)}{within}: {reason}")
+                )
             elif (
-                failing == [FORCE_STEPS[1]]
+                failing == [self.steps[1]]
                 and _within(abs(force - richardson), self.tolerance)
                 and first * second > 0.0
                 and abs(second) >= 2.0 * abs(first)
@@ -1151,7 +1413,7 @@ class ForceCheck(Check):
                 # the larger step alone misses, by the h^2 term of the central difference: the two slopes approach
                 # the force from one side, about four times as far at twice the step, and their Richardson value
                 # meets the tolerance (a large force with a large third derivative of the energy)
-                lines.append(("EXEMPT", text + f" | step {FORCE_STEPS[1]:g}: h^2 truncation of the central "
+                lines.append(("EXEMPT", text + f" | step {self.steps[1]:g}: h^2 truncation of the central "
                               "difference (one-sided, Richardson within the tolerance)"))
             elif (
                 _within(abs(force - richardson), self.tolerance)
@@ -1674,12 +1936,57 @@ def force_checks():
         # step, which takes the input to the Fortran-derived routines and their grid
         ("f_mg2g_f", hcp_mg2("mg2g_f", "", criterion=1.0e-10), ((0, 2), (1, 2)), on),
         ("f_c2g_d", primitive_c2("c2g_d", "", criterion=1.0e-10), ((1, 0), (1, 2)), on),
+        # primitive cubic supercells in the sectors of their full cubic group (PARSEC_OBLIQUE_FULL_GROUP=auto, added
+        # after 308edad4e): the moved atom along z and an atom on its site
+        ("f_si16_fcc_fg", primitive_cubic("si16_fcc_fg", "fcc", criterion=1.0e-10), ((1, 2), (2, 0)), on),
+        ("f_na8_bcc_fg", primitive_cubic("na8_bcc_fg", "bcc", criterion=1.0e-10), ((1, 2), (2, 0)), on),
+        # Au on a grid point with PBE (added after 308edad4e), at the steps of FINE_STEPS: the energy varies on a scale
+        # of 1e-3 bohr there (au2_gga), so that the slopes over 1e-3 and 2e-3 bohr miss the force (cell 1.1e-4 and
+        # 2.5e-5, cluster 1.7e-4 and 3.2e-4 Ry/bohr) while those over 2e-5 and 4e-5 bohr approach it as the square of
+        # the step (cell 4.9e-7 and 1.3e-6, cluster 8.1e-8 and 4.4e-7 Ry/bohr on A100)
+        ("f_au2_pbe_fine", au2_gga("au2_pbe_fine"), ((0, 0),), on),
+        ("f_au2c_pbe_fine", au2_gga("au2c_pbe_fine", cluster=True), ((0, 0),), on),
         # no Cubic_Spline in the input (added after the first run, when such an input took PARSEC 1.5's linear tables
         # and these cases were exempt; after 30edaacf1 the default of PARSEC_CUBIC_SPLINE_DEFAULT is the cubic spline)
         ("f_si8k_lin_d", linear(diamond("si8k_lin_d", "Si_POTRE", A_SI, "ca", 24, mesh=(2, 2, 2))),
          ((6, 0), (0, 0)), on),
         ("f_ch4_lin", linear(ch4("ch4_lin")), ((0, 0), (1, 0)), on),
         ("f_h2o_lin", linear(h2o("h2o_lin")), ((0, 1), (1, 0)), on),
+        # a meta-GGA of a Gamma-point cell in the weighted sectors of Td (added after 308edad4e): SCAN with atoms
+        # 4-7 on grid points (default routines) and off them (Fortran-derived routines)
+        ("f_si8td_scan_d_grid", si8_td_meta("si8td_scan_d"), ((4, 0), (5, 1)), on),
+        ("f_si8td_scan_f_off", si8_td_meta("si8td_scan_f", fortran=True, steps=0.37), ((4, 0), (5, 1)), on),
+        # self-consistent spin-orbit clusters on the device (added after 308edad4e, PARSEC_SOC_DEVICE_FORCES=auto;
+        # the reference solver took them before): AuH with Au on a grid point on the whole grid (below the floor of
+        # the sectors), AuH with Au 5e-4 bohr from one in the Kramers sector, Au2 off the grid in its parity sectors
+        ("f_auh_soc_grid", au2_soc("auh_soc_grid", hydride=True, criterion=1.0e-10, forces=True,
+                                   positions=[[0.0, 0.0, -1.4], [0.0, 0.0, 1.3]]), ((0, 2), (1, 2)), on),
+        ("f_auh_soc_kramers", au2_soc("auh_soc_kramers", hydride=True, criterion=1.0e-10, forces=True,
+                                      positions=[[0.0, 0.0, -1.3995], [0.0, 0.0, 1.35]],
+                                      env={"PARSEC_SOC_SECTORS": "kramers"}), ((0, 2), (1, 2)), on),
+        ("f_au2_soc_on", au2_soc("au2_soc_on", criterion=1.0e-10, forces=True,
+                                 positions=[[0.0, 0.0, -2.31], [0.0, 0.0, 2.31]],
+                                 env={"PARSEC_SOC_SECTORS": "on"}), ((0, 2),), on),
+        # the same AuH on the Fortran-derived routines (their spin-orbit gradients), in the Kramers sector
+        ("f_auh_soc_f", au2_soc("auh_soc_f", hydride=True, criterion=1.0e-10, forces=True, fortran=True,
+                                positions=[[0.0, 0.0, -1.3995], [0.0, 0.0, 1.35]],
+                                env={"PARSEC_SOC_SECTORS": "kramers"}), ((0, 2), (1, 2)), on),
+        # germanium (its spin-orbit channels and core correction): the apex of a Ge5 pyramid on a grid point, a base
+        # atom off the grid, in the Kramers sector; and the Au20 tetrahedron (its sector, the moved atom on the grid)
+        ("f_ge5_soc_kramers", ge5_soc("ge5_soc_kramers", env={"PARSEC_SOC_SECTORS": "kramers"}), ((0, 2), (1, 0)),
+         on),
+        ("f_au20_soc", au20_soc("au20_soc"), ((0, 0),), on),
+        # metals with a hybrid on the wedge of their mesh (added after 308edad4e, PARSEC_HYBRID_KPOINT_WEDGE=on by
+        # default): bcc Au2 and AuAg on the default routines, AuAg on the Fortran-derived ones (Au2's group keeps no
+        # grid of theirs), hcp Na2 on the oblique grid of the default routines
+        ("f_au2_pbe0_d", au2_pbe0("au2_pbe0_d"), ((1, 0), (1, 2), (0, 0)), on),
+        ("f_auag_pbe0_f", au2_pbe0("auag_pbe0_f", fortran=True, second="Agn_POTRE"), ((1, 0), (0, 0)), on),
+        ("f_auag_pbe0_d", au2_pbe0("auag_pbe0_d", second="Agn_POTRE"), ((1, 0), (0, 0)), on),
+        ("f_na2_pbe0_k333", hcp_na2("na2_pbe0", (3, 3, 3), criterion=1.0e-10, xc="pbe0", extra=METAL_HYBRID_EXX),
+         ((0, 2), (1, 2)), on),
+        # bcc Au2 of the group {E, x <-> y}: atom 1 along z keeps it (the wedge at every step), atom 1 along y and atom 0
+        # along x remove it (the displaced structures on the time-reversal pairs)
+        ("f_au2b_pbe0_d", au2b_pbe0("au2b_pbe0_d"), ((1, 2), (1, 1), (0, 0)), on),
     ]
     notes = {
         "f_ag4u_d_grid": "atom 0: LDA+U energy kink reported before",
@@ -1697,11 +2004,27 @@ def force_checks():
         # 30edaacf1); f_ge2slab_var takes the derivative (the default PARSEC_HARTREE_VARIATIONAL=slab)
         "f_ge2slab": {0: (FORCE_STEPS, "slab Hartree operator not symmetric where the density reaches the edge of the "
                           "slab under PARSEC_HARTREE_VARIATIONAL=off (the default slab: f_ge2slab_var)")},
+        # an Au atom on a grid point with a GGA: the finite-difference gradient of the density at a grid point on a
+        # nucleus of low pseudo-valence density (the 5d shell) makes the GGA energy vary on a scale of 1e-3 bohr there,
+        # so the slopes over steps of 1e-3 and 2e-3 bohr miss the force by 1.1e-4 (PBE) to 2.2e-4 Ry/bohr (PBE0), on
+        # the time-reversal pairs of PBE0 as on its wedge, while the force is the derivative of that energy (steps of
+        # 2e-5 and 4e-5 bohr; the CA functional agrees within 2e-8 at the default steps).  Bounded at 5e-4 Ry/bohr.
+        "f_au2_pbe0_d": {0: (FORCE_STEPS, _GGA_ON_GRID, 5.0e-4)},
+        "f_auag_pbe0_d": {0: (FORCE_STEPS, _GGA_ON_GRID, 5.0e-4)},
+        "f_auag_pbe0_f": {0: (FORCE_STEPS, _GGA_ON_GRID, 5.0e-4)},
+        # a displacement that removes the group of a metal hybrid: the displaced structures run on the time-reversal
+        # pairs (no wedge group left), whose Fock loop may break into a lower state (bcc Au2 at 1000 K: 1.3e-5 Ry below
+        # the wedge state of the base), so their slope misses the force of the wedge by about 1e-5 Ry/bohr; a
+        # displacement that keeps a subgroup of the wedge passes (atom 1 along z).  Bounded at 5e-5 Ry/bohr.
+        "f_au2b_pbe0_d": {0: (FORCE_STEPS, _METAL_PAIRS, 5.0e-5), 1: (FORCE_STEPS, _METAL_PAIRS, 5.0e-5)},
     }
     # The linear radial tables of PARSEC 1.5 (PARSEC_CUBIC_SPLINE_DEFAULT=off for an input without Cubic_Spline) have
     # a kink at every radial sample a grid point crosses, so the slope of the energy over a step is not the force at
     # the point; with the default cubic spline the three cases above are ordinary checks.
-    return [ForceCheck("force", name, notes.get(name, ""), structure, targets, offset, exempt=exempt.get(name, {}))
+    # Cases whose energy varies on a scale below the steps of FORCE_STEPS: steps that resolve it
+    fine = {"f_au2_pbe_fine": FINE_STEPS, "f_au2c_pbe_fine": FINE_STEPS}
+    return [ForceCheck("force", name, notes.get(name, ""), structure, targets, offset, exempt=exempt.get(name, {}),
+                       steps=fine.get(name, FORCE_STEPS))
             for name, structure, targets, offset in table]
 
 
@@ -1740,9 +2063,19 @@ def symmetry_checks():
                                       env={"PARSEC_PERIODIC_SECTOR_FLOOR": "off"}), None),
         ("s_c2_fcc_gamma", replace(primitive_c2("c2g_sym", "", criterion=1.0e-9),
                                    env={"PARSEC_PERIODIC_SECTOR_FLOOR": "off"}), None),
+        # primitive cubic supercells in the sectors of their full cubic group (PARSEC_OBLIQUE_FULL_GROUP=auto, added
+        # after 308edad4e), both routine sets for Si
+        ("s_si16_fcc_fg", primitive_cubic("si16_fcc_fg_sym", "fcc"), None),
+        ("s_si16_fcc_fg_f", primitive_cubic("si16_fcc_fg_sym_f", "fcc", fortran=True), None),
+        ("s_si16_fcc_fg_perfect", primitive_cubic("si16_fcc_fg_perfect", "fcc", move=0.0, forces=False), None),
+        ("s_na8_bcc_fg", primitive_cubic("na8_bcc_fg_sym", "bcc"), None),
         ("s_h2o_c2v", h2o("h2o_c2v", criterion=1.0e-9), None),
         ("s_ch4_td", ch4("ch4_td", perturb=False, criterion=1.0e-9), None),
         ("s_o2_spin", o2("o2_sym", symmetric=True, criterion=1.0e-9), None),
+        # hybrids of clusters (added after 308edad4e): the weighted sectors of Td and D4h (PARSEC_ORBITAL_GROUP_HYBRID)
+        # against the full grid, unpolarized and spin
+        ("s_ch4_td_pbe0", ch4("ch4_td_pbe0", perturb=False, criterion=1.0e-9, xc="pbe0"), None),
+        ("s_o2_spin_pbe0", o2("o2_sym_pbe0", symmetric=True, criterion=1.0e-9, xc="pbe0"), None),
         ("s_c7n_spin_gamma", c7n("c7n", criterion=1.0e-9), None),
         ("s_c7n_spin_k333_list", c7n("c7n_k333", mesh=(3, 3, 3), criterion=1.0e-9),
          c7n("c7n_k333_list", mesh=full_mesh_list(np.diag([A_C] * 3), (3, 3, 3)), criterion=1.0e-9)),
@@ -1759,6 +2092,8 @@ def symmetry_checks():
         # against the full grid
         ("s_bnslab_rect_gamma", bn_rect_slab("bn_rect"), None),
         ("s_ribbon_wire_gamma", ribbon_wire("ribbon"), None),
+        # the weighted sectors of a meta-GGA of a Gamma-point cell (added after 308edad4e)
+        ("s_si8td_scan_gamma", si8_td_meta("si8td_sym", steps=0.37, criterion=1.0e-9), None),
     ]
     out = []
     for name, structure, reference in checks:
@@ -1864,6 +2199,26 @@ def trajectory_checks():
     mg2 = mg2.with_text("t_mg2_bfgs", lambda text: text + RELAX_LINES)
     checks.append(SymmetryCheck("traj", "t_mg2_bfgs_sym", "", mg2, mg2, reference_env={"PARSEC_OBLIQUE_SECTORS": "off"},
                                 reference_args=()))
+    # a primitive cubic supercell in the sectors of its full cubic group (PARSEC_OBLIQUE_FULL_GROUP=auto, added after
+    # 308edad4e): its BFGS steps against the full grid
+    si16 = primitive_cubic("t_si16_bfgs_fg", "fcc", extra=RELAX_LINES)
+    checks.append(SymmetryCheck("traj", "t_si16_bfgs_fg", "", si16, si16,
+                                reference_env={"PARSEC_OBLIQUE_SECTORS": "off", "PARSEC_OBLIQUE_FULL_GROUP": "off"},
+                                reference_args=()))
+    # and its dynamics from a start that keeps C2v about z (the moved atom's previous position along z), in the
+    # sectors of PARSEC_MOVING_SECTORS=on against the full grid
+    si16_md = primitive_cubic("t_si16_md_fg", "fcc", extra=MD_RESTART_LINES)
+    si16_md.extra_files = md_restart(["Si"] * 16, 1, (0.0, 0.0, 1.0))
+    si16_md.env = dict(si16_md.env, PARSEC_MOVING_SECTORS="on")
+    checks.append(SymmetryCheck("traj", "t_si16_md_fg", "", si16_md, si16_md,
+                                reference_env={"PARSEC_OBLIQUE_SECTORS": "off", "PARSEC_OBLIQUE_FULL_GROUP": "off",
+                                               "PARSEC_MOVING_SECTORS": "off"},
+                                reference_args=()))
+    # a hybrid of Td (added after 308edad4e): the BFGS steps of CH4 with its bonds 3 % long, PBE0 in the weighted sectors
+    # of D2d (PARSEC_ORBITAL_GROUP_HYBRID), the orbitals of a structure building the first operator of the next,
+    # against the full grid
+    ch4h = ch4("t_ch4_pbe0_bfgs", perturb=False, criterion=1.0e-9, xc="pbe0", scale=1.03, extra=RELAX_LINES)
+    checks.append(SymmetryCheck("traj", "t_ch4_pbe0_bfgs_sym", "", ch4h, ch4h))
     return checks
 
 
@@ -1907,6 +2262,28 @@ def soc_checks():
         structure = make(name)
         structure.env = {"PARSEC_SOC_SECTORS": value}
         checks.append(SymmetryCheck("soc", name, "", structure, make(name + "_off"), {"PARSEC_SOC_SECTORS": "off"}, ()))
+    # (added after 308edad4e) the forces of the device route in the Kramers sector against those of the reference
+    # solver (PARSEC_SOC_DEVICE_FORCES=off: its CPU spinor loop on the whole grid and the readable forces)
+    positions = [[0.0, 0.0, -1.3995], [0.0, 0.0, 1.35]]
+    device = au2_soc("o_auh_forces", hydride=True, criterion=1.0e-10, forces=True, positions=positions,
+                     env={"PARSEC_SOC_SECTORS": "kramers"})
+    reference = au2_soc("o_auh_forces_reference", hydride=True, criterion=1.0e-10, forces=True, positions=positions)
+    checks.append(SymmetryCheck("soc", "o_auh_forces_reference", "", device, reference,
+                                {"PARSEC_SOC_DEVICE_FORCES": "off"}, (), force_tolerance=1.0e-7))
+    device = au2_soc("o_auh_forces_f", hydride=True, criterion=1.0e-10, forces=True, positions=positions,
+                     env={"PARSEC_SOC_SECTORS": "kramers"}, fortran=True)
+    reference = au2_soc("o_auh_forces_reference_f", hydride=True, criterion=1.0e-10, forces=True, positions=positions,
+                        fortran=True)
+    checks.append(SymmetryCheck("soc", "o_auh_forces_reference_f", "", device, reference,
+                                {"PARSEC_SOC_DEVICE_FORCES": "off"}, (), force_tolerance=1.0e-7))
+    # the double-group sectors of the k-points (PARSEC_SOC_KPOINT_SECTORS): Ge8 with atom 0 moved along z (C2z and the
+    # mirrors about z kept), 2 x 2 x 2, forces
+    make = lambda n: diamond(n, "Ge_POTRE", A_GE, "ca", 24, soc=True, mesh=(2, 2, 2), move=(0.0, 0.0, 0.05),
+                             criterion=1.0e-10)
+    structure = make("o_ge8k_soc_sectors")
+    structure.env = {"PARSEC_SOC_KPOINT_SECTORS": "on"}
+    checks.append(SymmetryCheck("soc", "o_ge8k_soc_sectors", "", structure, make("o_ge8k_soc_sectors_off"),
+                                {"PARSEC_SOC_KPOINT_SECTORS": "off"}, ()))
     return checks
 
 

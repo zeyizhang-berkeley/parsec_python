@@ -255,6 +255,9 @@ class SpinorSectorPlan:
     split_name: str = ""
     # the folded parts of the blocks the splits combine, kept for the sectors of one set of operators
     _fold_cache: dict = dataclasses.field(default_factory=dict, repr=False, compare=False)
+    # the parts of the blocks that do not depend on the atoms (the kinetic term of one Laplacian, the orbit averages,
+    # the unfold), kept for the structures of an ionic loop that reuse the plan (:func:`detect_sector_plan`'s cache)
+    _static_cache: dict = dataclasses.field(default_factory=dict, repr=False, compare=False)
 
     @property
     def sector_count(self) -> int:
@@ -423,20 +426,47 @@ def soc_orbital_symmetry(grid, atoms, setting: str, *, atom_tolerance: float | N
 
 
 def detect_sector_plan(
-    grid, atoms, *, parity: bool = True, atom_tolerance: float | None = None, fourfold: bool = False
+    grid,
+    atoms,
+    *,
+    parity: bool = True,
+    atom_tolerance: float | None = None,
+    fourfold: bool = False,
+    cache: dict | None = None,
 ) -> tuple[SpinorSectorPlan | None, str]:
     """The reduced bases of a cluster (split by inversion parity with ``parity`` where the cluster has a centre of
     inversion; with ``fourfold`` instead by the eigenvalues of a four-fold operation about z where the sector is a
-    real one of C2z, :func:`_four_fold_splits`), or ``None`` with the reason the whole grid stays."""
+    real one of C2z, :func:`_four_fold_splits`), or ``None`` with the reason the whole grid stays.
 
-    from ..Symmetry.axis_reflection import _grid_row_mapping, _orbit_labels
+    ``cache`` (a dict the caller keeps, the structures of an ionic loop): the bases depend on the grid and the
+    operations alone, so a structure whose atoms keep the operations of a plan made before on the same grid takes that
+    plan (the same bases, and the parts of its folds that do not depend on the atoms)."""
 
     chosen = _sector_generators(
         grid, atoms, parity=parity, atom_tolerance=atom_tolerance, fourfold=fourfold
     )
-    group = chosen.group
     if chosen.first is None:
         return None, chosen.reason
+    key = (
+        id(grid), chosen.group, chosen.first, chosen.second, chosen.inversion,
+        None if chosen.four_fold is None else chosen.four_fold[1], bool(parity), bool(fourfold),
+    )
+    if cache is not None:
+        kept = cache.get(key)
+        if kept is not None and kept[0] is grid:
+            return kept[1], ""
+    plan, reason = _built_sector_plan(grid, atoms, chosen, atom_tolerance)
+    if cache is not None and plan is not None:
+        cache[key] = (grid, plan)
+    return plan, reason
+
+
+def _built_sector_plan(grid, atoms, chosen, atom_tolerance) -> tuple[SpinorSectorPlan | None, str]:
+    """The plan of :func:`detect_sector_plan` for the operations ``chosen`` (:func:`_sector_generators`)."""
+
+    from ..Symmetry.axis_reflection import _grid_row_mapping, _orbit_labels
+
+    group = chosen.group
     first, second, inversion = chosen.first, chosen.second, chosen.inversion
     first_axis = _spin_axis(first)
     generators = [first] + ([second] if second is not None else []) + ([_INVERSION] if inversion else [])
@@ -716,12 +746,54 @@ def _split_parts(base: FoldedParts, split: sp.csr_matrix) -> FoldedParts:
     )
 
 
+def _static_parts(plan: SpinorSectorPlan, blocks, laplacian):
+    """``(transposed bases, kinetic, averages, unfold)`` of ``blocks``: the parts that do not depend on the atoms,
+    made once per plan, blocks and Laplacian (``plan._static_cache``) and the same as made again."""
+
+    key = tuple(id(block) for block in blocks)
+    kept = plan._static_cache.get(key)
+    if kept is not None and kept[0] is laplacian:
+        return kept[1:]
+    size = plan.grid_size
+    matrix = sp.csr_matrix(laplacian, dtype=np.float64)
+    transposes, kinetic_blocks, average_blocks = [], [], []
+    for block in blocks:
+        basis = block.basis
+        transposed = basis.T.tocsr()
+        transposes.append(transposed)
+        kinetic_blocks.append((transposed @ (matrix @ basis)).tocsr())
+        average_blocks.append(transposed.multiply(transposed).tocsr())
+    kinetic = sp.block_diag(kinetic_blocks, format="csr")
+    kinetic.sort_indices()
+    averages = sp.vstack(average_blocks, format="csr")
+    unfold_rows = []
+    for spin in (0, 1):
+        pieces = []
+        for block in blocks:
+            amplitude = block.spinor[spin] * block.phase
+            if amplitude != 0:
+                pieces.append(block.basis * amplitude)
+            else:
+                pieces.append(sp.csr_matrix((size, block.size), dtype=np.complex128))
+        unfold_rows.append(sp.hstack(pieces, format="csr").astype(np.complex128))
+    if plan.real:
+        unfold = sp.vstack([part for matrix in unfold_rows for part in (matrix.real, matrix.imag)], format="csr")
+        unfold = unfold.astype(np.float64)
+    else:
+        unfold = sp.vstack(unfold_rows, format="csr")
+        if not np.any(unfold.data.imag):
+            unfold = unfold.real.tocsr()
+    unfold.eliminate_zeros()
+    parts = (transposes, kinetic, averages, unfold)
+    plan._static_cache[key] = (laplacian, *parts)
+    return parts
+
+
 def _fold_blocks(plan: SpinorSectorPlan, blocks, laplacian, nonlocal_operator, soc_projectors) -> FoldedParts:
     """The parts of the columns of ``blocks`` (:func:`fold_operator`)."""
 
     size = plan.grid_size
-    laplacian = sp.csr_matrix(laplacian, dtype=np.float64)
-    kinetic_blocks, average_blocks, projector_blocks = [], [], []
+    transposes, kinetic, averages, unfold = _static_parts(plan, blocks, laplacian)
     projectors = None
     if nonlocal_operator is not None and nonlocal_operator.projectors.shape[1]:
         projectors = nonlocal_operator.projectors
@@ -730,20 +802,12 @@ def _fold_blocks(plan: SpinorSectorPlan, blocks, laplacian, nonlocal_operator, s
         projectors = sp.csr_matrix(
             projectors.real if np.iscomplexobj(projectors.data) else projectors, dtype=np.float64
         )
-    for block in blocks:
-        basis = block.basis
-        transposed = basis.T.tocsr()
-        kinetic_blocks.append((transposed @ (laplacian @ basis)).tocsr())
-        average_blocks.append(transposed.multiply(transposed).tocsr())
-        if projectors is not None:
-            projector_blocks.append((transposed @ projectors).tocsr())
-    kinetic = sp.block_diag(kinetic_blocks, format="csr")
-    kinetic.sort_indices()
-    averages = sp.vstack(average_blocks, format="csr")
     folded_projectors = None
     projector_signs = None
     if projectors is not None:
-        folded_projectors = sp.block_diag(projector_blocks, format="csr")
+        folded_projectors = sp.block_diag(
+            [(transposed @ projectors).tocsr() for transposed in transposes], format="csr"
+        )
         projector_signs = np.tile(np.asarray(nonlocal_operator.signs, dtype=np.float64), len(blocks))
     soc = None
     soc_signs = None
@@ -770,24 +834,6 @@ def _fold_blocks(plan: SpinorSectorPlan, blocks, laplacian, nonlocal_operator, s
                 soc = soc.real.tocsr()
         soc.eliminate_zeros()
         soc_signs = _soc_signs(soc_projectors)
-    unfold_rows = []
-    for spin in (0, 1):
-        pieces = []
-        for block in blocks:
-            amplitude = block.spinor[spin] * block.phase
-            if amplitude != 0:
-                pieces.append(block.basis * amplitude)
-            else:
-                pieces.append(sp.csr_matrix((size, block.size), dtype=np.complex128))
-        unfold_rows.append(sp.hstack(pieces, format="csr").astype(np.complex128))
-    if plan.real:
-        unfold = sp.vstack([part for matrix in unfold_rows for part in (matrix.real, matrix.imag)], format="csr")
-        unfold = unfold.astype(np.float64)
-    else:
-        unfold = sp.vstack(unfold_rows, format="csr")
-        if not np.any(unfold.data.imag):
-            unfold = unfold.real.tocsr()
-    unfold.eliminate_zeros()
     return FoldedParts(
         kinetic=kinetic,
         averages=averages,
@@ -1076,6 +1122,13 @@ class _SectorStates:
     counts: list[int]
     states: list[Any]
 
+    def for_new_scf_loop(self) -> "_SectorStates":
+        """The states marked for the first SUBSPACE call of the loop of a moved structure
+        (:func:`parsec_python.SCF.single_point.state_for_new_potential`, ``solver%firstfilt``)."""
+        from parsec_python.SCF.single_point import state_for_new_potential
+
+        return _SectorStates(list(self.counts), [state_for_new_potential(state) for state in self.states])
+
 
 def _add_stats(total: dict, stats: dict) -> None:
     for key, value in stats.items():
@@ -1119,6 +1172,29 @@ class SectorRoute:
         parts = self._device_parts(laplacian, nonlocal_operator)
         operators = [SectorSpinorOperator(part, part.potential(potential)) for part in parts]
         return operators[0] if len(operators) == 1 else SectorOperators(operators)
+
+    def accepts(self, operator, state) -> bool:
+        """Whether the eigensolver state ``state`` of a loop before (the structure before an ionic step) belongs to
+        the sectors of ``operator``: the same number of sectors with the same dimensions, so that its vectors are
+        columns of the same reduced bases (which depend on the grid and the group, not on the atoms)."""
+        from ..Eigensolvers.chebff_spinor import SpinorEigvalState
+
+        def fits(sub, sector) -> bool:
+            if not isinstance(sub, SpinorEigvalState) or int(sub.operator_dimension) != int(sector.shape[0]):
+                return False
+            vectors = sub.vectors
+            # a real sector keeps real vectors, a complex one complex vectors
+            return vectors is None or bool(getattr(sector, "real_arithmetic", False)) == (
+                not np.issubdtype(vectors.dtype, np.complexfloating)
+            )
+
+        if isinstance(operator, SectorOperators):
+            return (
+                isinstance(state, _SectorStates)
+                and len(state.states) == len(operator.sectors)
+                and all(sub is None or fits(sub, sector) for sub, sector in zip(state.states, operator.sectors))
+            )
+        return fits(state, operator)
 
     def _first_counts(self, pairs: int) -> list[int]:
         """Pairs per sector of a first solve: its share of the rows and two more."""

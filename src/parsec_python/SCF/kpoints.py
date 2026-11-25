@@ -69,7 +69,7 @@ from ..SCF.spin_polarized import (
 )
 from ..Forces.nonlocal_force import bloch_projector_gradients, build_periodic_projector_gradients, nonlocal_forces
 from ..V_ion import build_nonlocal_projectors
-from .kpoint_hubbard import KPointHubbard, kpoint_backend
+from .kpoint_hubbard import KPointHubbard, SectorHubbardPart, kpoint_backend
 from .single_point import (
     LEVEL_PASSES,
     IterationChannelFields,
@@ -123,7 +123,7 @@ def _sectors_take_levels(warm_start) -> bool:
 
 def _sectors_take_hubbard(hubbard, *, spin: bool) -> bool:
     """Whether a loop with LDA+U (``hubbard`` not ``None``) may take the sectors of its k-points
-    (``PARSEC_KPOINT_SECTOR_LDAU``, opt-in: ``on`` unpolarized loops, ``spin`` collinear-spin loops too); a loop without
+    (``PARSEC_KPOINT_SECTOR_LDAU``: ``on``, the default, unpolarized loops, ``spin`` collinear-spin loops too); a loop without
     LDA+U may (the switch is read only for a loop with it)."""
 
     if hubbard is None:
@@ -483,7 +483,13 @@ def run_scf_kpoints(
     # sectors of the k-point).  Cleared after the pass.
     force_cache: dict = {}
 
-    def kpoint_nonlocal_force(task, vectors, xp=np, columns=None, atoms=None):
+    def nonlocal_force_parts(task, atoms=None):
+        """``(operator, gradients, weight, occupations, atom count)`` of the nonlocal force of task ``task``: the
+        projectors and their gradients of the atoms ``atoms`` (every atom where None), the weight of its k-point and the
+        occupations of its states (those of the last SCF step).  The worker processes of the k-point sectors
+        (acceleration/SCF/kpoint_processes.py) form the forces of their orbitals from them, as
+        :func:`kpoint_nonlocal_force` does."""
+
         # ``atoms``: the forces of these atoms only (the others zero), from their projectors and gradients alone: the
         # representative atoms of the orbits of the little group of a k-point in sectors (kpoint_sectors.py, which
         # turns them onto the other atoms of their orbits); None: every atom
@@ -528,8 +534,13 @@ def run_scf_kpoints(
                     signs=np.asarray(operator.signs)[kept],
                 )
             operator = found
+        return operator, gradients, weighting.of_k(task), final_occupations[task], len(cell_atoms)
+
+    def kpoint_nonlocal_force(task, vectors, xp=np, columns=None, atoms=None):
+        operator, gradients, weight, occupations, atom_count = nonlocal_force_parts(task, atoms)
+        chosen = None if atoms is None else tuple(int(atom) for atom in atoms)
         # ``columns``: the states of the task these columns are (all of them, in order, where None)
-        occupations = final_occupations[task] if columns is None else final_occupations[task][np.asarray(columns)]
+        occupations = occupations if columns is None else occupations[np.asarray(columns)]
         if xp is not np and not isinstance(vectors, np.ndarray):
             # the orbitals of a device stay there: the overlaps are formed on it (the acceleration package, which
             # supplied the device array, supplies the contraction)
@@ -544,21 +555,21 @@ def run_scf_kpoints(
                 operator,
                 gradients,
                 vectors,
-                weighting.of_k(task) * occupations,
-                len(cell_atoms),
+                weight * occupations,
+                atom_count,
                 prepared=prepared,
             )
         return nonlocal_forces(
             operator,
             gradients,
             np.asarray(vectors),
-            weighting.of_k(task) * occupations,
-            len(cell_atoms),
+            weight * occupations,
+            atom_count,
         )
 
     # What a solver that splits the k-points into the sectors of their little groups needs
     # (acceleration/SCF/kpoint_sectors.py): a loop without fixed occupations, with LDA+U under
-    # PARSEC_KPOINT_SECTOR_LDAU=on (opt-in; its projectors reduced to the rows of each sector), with a meta-GGA under
+    # PARSEC_KPOINT_SECTOR_LDAU=on (the default; its projectors reduced to the rows of each sector), with a meta-GGA under
     # PARSEC_KPOINT_SECTOR_META_GGA=auto (the default; its orbital term and tau reduced to the sectors,
     # acceleration/Hamiltonian/sector_bloch_meta_gga.py), and with refined levels only under
     # PARSEC_KPOINT_SECTOR_LEVELS=auto (the forces, kept orbitals and states and the exchange of a hybrid go through
@@ -586,6 +597,8 @@ def run_scf_kpoints(
             else (lambda task: 0.5 * float(exchange_term.spin_weight) * weighting.of_k(task)),
             # the nonlocal force takes ``atoms=`` (those of some orbits only, turned onto the others by the sectors)
             "force_atoms": True,
+            # what the nonlocal force reads, for the worker processes of the sectors (kpoint_nonlocal_force)
+            "force_parts": nonlocal_force_parts if compute_forces else None,
         }
         if meta is not None:
             # tau = w_k (2/2h^3) sum_n f_n |(G + ik) u_n|^2 (and g of the orbital form) of the states of a sector
@@ -598,9 +611,7 @@ def run_scf_kpoints(
             sector_geometry["meta_derivatives"] = tuple(system.gradient)
         if hubbard is not None:
             # the occupation matrices of the states of a sector, with the LDA+U projectors reduced to its rows
-            sector_geometry["hubbard_part"] = lambda task, projectors, vectors, occupations, xp=np: {
-                "hubbard": hubbard.occupation_with(projectors, vectors, occupations, weighting.of_k(task), xp=xp)
-            }
+            sector_geometry["hubbard_part"] = SectorHubbardPart(hubbard, lambda task: ("hubbard", weighting.of_k(task)))
             sector_geometry["hubbard_projectors"] = hubbard.projectors
     with timer.stage("solver_setup"):
         solver = make_kpoint_solver(
@@ -1369,14 +1380,11 @@ def _spin_kpoint_loop(
             sector_geometry["meta_derivatives"] = tuple(system.gradient)
         if hubbard is not None:
             # PARSEC_KPOINT_SECTOR_LDAU=spin: the occupation matrices of the states of a sector of either channel
-            def hubbard_part(task, projectors, vectors, occupations, xp=np):
+            def hubbard_labels(task):
                 spin_index, k_index = divmod(task, n_kpoints)
-                name = "hubbard_" + ("up" if spin_index == 0 else "down")
-                return {
-                    name: hubbard.occupation_with(projectors, vectors, occupations, weighting.of_k(k_index), xp=xp)
-                }
+                return "hubbard_" + ("up" if spin_index == 0 else "down"), weighting.of_k(k_index)
 
-            sector_geometry["hubbard_part"] = hubbard_part
+            sector_geometry["hubbard_part"] = SectorHubbardPart(hubbard, hubbard_labels)
             sector_geometry["hubbard_projectors"] = lambda task: hubbard.projectors(task % n_kpoints)
     with timer.stage("solver_setup"):
         solver = make_kpoint_solver(

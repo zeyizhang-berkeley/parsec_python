@@ -91,7 +91,8 @@ def hubbard_setup_lines(system) -> list[str]:
 
     fraction = ldau_smooth_projectors_fraction()
     if fraction:
-        # Only under PARSEC_LDAU_SMOOTH_PROJECTORS (the output of upot.F90 is unchanged without it).
+        # Only with the smooth projectors of PARSEC_LDAU_SMOOTH_PROJECTORS (the default; off keeps the output of
+        # upot.F90 unchanged).
         lines.append(
             f"  PARSEC_LDAU_SMOOTH_PROJECTORS: smooth projectors, taper width f = {fraction:.4f} r_c; "
             "the radii above are those of their support, (1 + f/2) r_c"

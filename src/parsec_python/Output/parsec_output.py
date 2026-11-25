@@ -251,34 +251,100 @@ def density_symmetrization_lines(reports) -> list[str]:
 
 
 def hybrid_mesh_route_lines(record) -> list[str]:
-    """``parsec.out`` lines of a :class:`parsec_python.models.HybridMeshRouteRecord`
-    (``PARSEC_HYBRID_KPOINT_WEDGE=auto``)."""
+    """``parsec.out`` lines of a :class:`parsec_python.models.HybridMeshRouteRecord` (``PARSEC_HYBRID_KPOINT_WEDGE``:
+    the route ``auto`` takes after the semilocal start, and the state the Fock loop of a metal ends in)."""
 
+    instability = getattr(record, "instability", None)
+    # how a metal's Fock loop ends (both NOTEs at the end of a Fock loop): partly filled states, or every state 0 or 1
+    # after a semilocal start with partly filled ones (the broken state of the pairs takes integer occupations)
+    if record.partly_filled:
+        ends = (
+            f"ends with {record.partly_filled} partly filled state(s) at the Fermi level (largest min(f, 1-f) = "
+            f"{record.largest_fractional_occupation:.3E}, partly filled from {record.tolerance:.0E})"
+        )
+    else:
+        ends = (
+            "ends with every state 0 or 1, its semilocal start with "
+            f"{getattr(record, 'start_partly_filled', 0)} partly filled state(s) (from {record.tolerance:.0E})"
+        )
+    # the energies of the two routes of a metal are not comparable (both NOTEs at the end of a Fock loop)
+    comparison = [
+        "       That lower state is an artefact of the finite mesh (the exchange of a state at one k-point with itself",
+        "       favours integer occupations; it falls with the mesh and the smearing): at a tight Exx_Tolerance, a",
+        "       coarse mesh and a low Fermi_Temp the energies of structures run on the time-reversal pairs (a structure",
+        "       of lower symmetry, molecular dynamics, manual movements, spin with forces, a Kpoint_List, a slab,",
+        "       PARSEC_HYBRID_KPOINT_WEDGE=off) are not comparable with those of structures that keep a group and run",
+        "       on the wedge, and the forces of the wedge are the slope of the free energy only along displacements",
+        "       that keep a subgroup of the wedge's operations.",
+    ]
     if record.route == "wedge_partly_filled":
-        # the end of a Fock loop that auto moved to the wedge (SCF/hybrid_periodic.py, BlochExchange.after_loop)
-        kept = (
-            [
+        # the end of a Fock loop on the wedge with partly filled states (SCF/hybrid_periodic.py, BlochExchange.after_loop)
+        how = getattr(record, "reason", "")
+        if how == "carried":
+            kept = [
                 "       This structure kept the wedge its relaxation took at the first structure (a relaxation keeps "
                 "that route);",
                 "       PARSEC_HYBRID_KPOINT_FORCE_WEDGE=off keeps the pairs for the forces and relaxations, "
                 "PARSEC_HYBRID_KPOINT_WEDGE=off for every run.",
             ]
-            if getattr(record, "reason", "") == "carried"
-            else [
+        else:
+            kept = [
                 "       PARSEC_HYBRID_KPOINT_WEDGE=off keeps the pairs (forces and relaxations: "
                 "PARSEC_HYBRID_KPOINT_FORCE_WEDGE=off too).",
             ]
+        pairs = (
+            f"the {record.pairs_points} time-reversal pairs of the {record.mesh_points}-point mesh"
+            if record.pairs_points and record.mesh_points
+            else "the time-reversal pairs of the mesh"
+        )
+        unstable = (
+            [
+                f"       Its Fock loop became unstable at outer iteration {instability} (dexx rose tenfold): a level may "
+                "have broken",
+                "       within the little group of its k-point, which the wedge allows.",
+            ]
+            if instability is not None
+            else []
         )
         return [
             "",
             f" NOTE: hybrid k-point mesh: the Fock loop on the irreducible wedge of {record.points} k-points "
             f"({record.operations} operations and time reversal)",
-            f"       ends with {record.partly_filled} partly filled state(s) at the Fermi level (largest min(f, 1-f) = "
-            f"{record.largest_fractional_occupation:.3E}, partly filled from {record.tolerance:.0E}):",
-            "       a metal, held in the symmetric state of the wedge; on the "
-            f"{record.pairs_points} time-reversal pairs of the {record.mesh_points}-point mesh its Fock loop",
-            "       may break the crystal symmetry at such levels and end lower.",
+            f"       {ends}:",
+            "       a metal, held in the state of the wedge, in which equivalent k-points of the mesh are filled alike.",
+            *unstable,
+            f"       On {pairs} its Fock loop may fill such levels unequally and end lower.",
+            *comparison,
             *kept,
+            "",
+        ]
+    if record.route == "pairs_partly_filled":
+        # the end of a Fock loop on the time-reversal pairs with partly filled states (BlochExchange.after_loop)
+        mesh = f" of the {record.mesh_points}-point mesh" if record.mesh_points else " of the mesh"
+        broke = (
+            [
+                f"       Its Fock loop became unstable at outer iteration {instability} (dexx rose tenfold): it left the",
+                "       symmetric state for a lower one, in which equivalent k-points may be filled unequally.",
+            ]
+            if instability is not None
+            else [
+                "       Its Fock loop filled the levels the start held partly to 0 or 1: equivalent k-points may now be "
+                "filled",
+                "       unequally (a lower, broken state), whether or not dexx rose on the way.",
+            ]
+            if not record.partly_filled
+            else [
+                "       Its Fock loop did not become unstable (dexx never rose tenfold); on the pairs it may still fill "
+                "equivalent",
+                "       k-points unequally at a tighter Exx_Tolerance and end lower.",
+            ]
+        )
+        return [
+            "",
+            f" NOTE: hybrid k-point mesh: the Fock loop on the {record.points} time-reversal pairs{mesh}",
+            f"       {ends}: a metal.",
+            *broke,
+            *comparison,
             "",
         ]
     if record.route == "wedge":
@@ -312,7 +378,8 @@ def hybrid_mesh_route_lines(record) -> list[str]:
         f"{record.tolerance:.0E}): the run keeps the {record.pairs_points} time-reversal pairs of the "
         f"{record.mesh_points}-point mesh,",
         "       whose Fock loop may break the crystal symmetry at such levels (equivalent k-points filled unequally).",
-        f"       PARSEC_HYBRID_KPOINT_WEDGE=on runs {wedge}, the symmetric state.",
+        f"       PARSEC_HYBRID_KPOINT_WEDGE=on (the default) runs {wedge}, in which equivalent k-points are filled "
+        "alike.",
         "",
     ]
 
@@ -393,6 +460,18 @@ def spin_sector_fallback_lines(record) -> list[str]:
             *(f"       {line}" for line in record.multiplets),
             "",
         ]
+    if getattr(record, "route", "spin") == "symmetric_level":
+        # An unpolarized run of weighted sectors (driver._say_symmetric_level): the result is kept.
+        return [
+            "",
+            f" NOTE: weighted symmetry sectors: {record.reason} after {record.stage}",
+            f"       ({record.measure} = {record.largest_fractional_occupation:.3E}).  The result is kept: the density",
+            "       keeps the full point group, so the partners of this level hold one occupation (the symmetric",
+            "       ensemble). The abelian sectors (PARSEC_ORBITAL_GROUP=abelian) or the full grid (--symmetry off)",
+            "       may reach a different, broken-symmetry state, which can lie lower or higher.",
+            *(f"       {line}" for line in record.multiplets),
+            "",
+        ]
     if getattr(record, "route", "spin") == "sector_doublet":
         # PARSEC_SPIN_GUARD_DOUBLETS=note, the abelian sectors: the result is kept.
         return [
@@ -425,6 +504,19 @@ def spin_sector_fallback_lines(record) -> list[str]:
             f"       ({record.measure} = {record.largest_fractional_occupation:.3E}).",
             "       The abelian sectors hold both partners in one sector too, so the calculation goes straight to the",
             "       full grid (the NOTE below; PARSEC_SPIN_GUARD_DOUBLETS=note keeps the result of the sectors).",
+            *(f"       {line}" for line in record.multiplets),
+            "",
+        ]
+    if getattr(record, "route", "spin") == "weighted_hybrid":
+        # PARSEC_ORBITAL_GROUP_HYBRID: an unpolarized hybrid with a partly filled degenerate level
+        return [
+            "",
+            f" NOTE: weighted symmetry sectors: {record.reason} after {record.stage}",
+            f"       ({record.measure} = {record.largest_fractional_occupation:.3E}, kept only below {record.tolerance:.0E}).",
+            "       The one-dimensional sectors of a subgroup with weights give every partner of a degenerate level",
+            "       one occupation and keep the density of the full group; the exact exchange of a partly filled level",
+            "       can lower the energy by splitting it, which those sectors cannot follow, so the calculation starts",
+            "       again in the sectors of the abelian group (PARSEC_ORBITAL_GROUP_HYBRID=off starts there).",
             *(f"       {line}" for line in record.multiplets),
             "",
         ]
@@ -1892,18 +1984,33 @@ def fortran_numerics_lines() -> tuple[str, ...]:
     return (" Numerics of PARSEC 1.5 (PARSEC_FORTRAN_NUMERICS=on; a switch set in the environment wins)",)
 
 
-def local_filter_lines() -> tuple[str, ...]:
-    """The line of the atom data of parsec.out under ``PARSEC_LOCAL_FILTER`` ``all`` (the local potential and the
-    projectors Fourier-filtered to the grid) and ``on`` (the local potential); nothing under ``off`` (the default:
-    PARSEC 1.5's tables, the output of before)."""
+def local_filter_lines(potential=None) -> tuple[str, ...]:
+    """The lines of the atom data of parsec.out under ``PARSEC_LOCAL_FILTER`` ``all`` (the default) and ``on``: what of
+    the tables of the species (``potential`` as the preparation left it) is Fourier-filtered to the grid, and the note
+    of the filter for it (``local_filter_note``: a table kept as the file gives it, a grid that is coarse for the
+    species); nothing under ``off`` (PARSEC 1.5's tables, the output of before)."""
 
     from ..Pseudopotential.local_filter import local_filter_setting
 
     setting = local_filter_setting()
     if setting == "off":
         return ()
-    what = "local potential and projectors" if setting == "all" else "local potential"
-    return (f"  Fourier filter         : {what} filtered to the grid (PARSEC_LOCAL_FILTER=off: the tables)",)
+    if potential is None:
+        what = ("local potential and projectors" if setting == "all" else "local potential") + " filtered to the grid"
+    elif getattr(potential, "filtered_local_potentials", None):
+        if getattr(potential, "filtered_projector_radius", None) is not None:
+            what = "local potential and projectors filtered to the grid"
+        else:
+            what = "local potential filtered to the grid, projectors as the file gives them"
+        if getattr(potential, "has_spin_orbit_channels", False):
+            what += " (spin-orbit projectors as the file gives them)"
+    else:
+        what = "none"
+    lines = [f"  Fourier filter         : {what} (PARSEC_LOCAL_FILTER=off: the tables)"]
+    note = getattr(potential, "local_filter_note", "") if potential is not None else ""
+    if note:
+        lines.append(f"  Fourier filter note    : {note}")
+    return tuple(lines)
 
 
 def kb_quadrature_lines(potential, local_l) -> tuple[str, ...]:
@@ -2468,7 +2575,7 @@ class ParsecTextReporter:
                     # Python addition: the quadrature of the KB denominators (PARSEC_KB_QUADRATURE)
                     *kb_quadrature_lines(potential, specification.local_angular_momentum),
                     # Python addition: the local potential filtered to the grid (PARSEC_LOCAL_FILTER)
-                    *local_filter_lines(),
+                    *local_filter_lines(potential),
                     f" There are {len(atoms):6d} {symbol}  atoms",
                     " and their initial coordinates are:",
                     "",
@@ -3644,6 +3751,12 @@ class ParsecTextReporter:
                 f" {'Rows x states^2 of the whole':30s} : {detail.get('kpoint_sector_work_fraction', 0.0):12.4f}"
                 f"   (states added and solved again {int(detail.get('kpoint_sector_regrowths', 0))} time(s))"
             )
+            if detail.get("kpoint_sector_processes", 0.0):
+                # the sectors solved by a worker process per GPU (PARSEC_KPOINT_SECTOR_PROCESSES)
+                lines.append(
+                    f" {'Sector worker processes':30s} : {int(detail['kpoint_sector_processes']):12d}"
+                    "   (one per GPU; the threads of this process otherwise)"
+                )
             if detail.get("kpoint_sector_pairs", 0.0):
                 # the conjugate pairs of the time-reversal invariant points in the Bloch form (PARSEC_KPOINT_TRIM_REAL)
                 lines.append(

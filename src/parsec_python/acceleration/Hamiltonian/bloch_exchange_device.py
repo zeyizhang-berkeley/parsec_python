@@ -1794,7 +1794,11 @@ def _device_cholesky(cp, matrix):
     except Exception as error:  # cuSOLVER's info flag (LinAlgError), or another failure of the factor
         raise np.linalg.LinAlgError(message) from error
     diagonal = cp.diagonal(lower)
-    if not bool(cp.all(cp.isfinite(lower))) or not bool(cp.all(diagonal.real > 0.0)):
+    # (tests without CuPy's CUB reductions, backends/device_checks.py; a finite diagonal is positive where none of
+    # it is at most zero)
+    from ..backends.device_checks import all_finite, any_set
+
+    if not all_finite(lower) or any_set(diagonal.real <= 0.0):
         raise np.linalg.LinAlgError(message)
     return lower
 

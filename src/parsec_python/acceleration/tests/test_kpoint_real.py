@@ -220,6 +220,9 @@ def _counted_scf(system, k_points, weights, environment, floor: int | None = 0):
 
     counts = {"real": 0, "complex": 0}
     original = device_bloch.DeviceBlochConverter.operator
+    # (the threads of this process: worker processes of the k-point sectors, PARSEC_KPOINT_SECTOR_PROCESSES=auto on
+    # several GPUs, make their operators where this count does not see them; their numbers are those of the threads)
+    environment = {"PARSEC_KPOINT_SECTOR_PROCESSES": "off", **environment}
 
     def counted(self, hamiltonian, **keywords):
         operator = original(self, hamiltonian, **keywords)

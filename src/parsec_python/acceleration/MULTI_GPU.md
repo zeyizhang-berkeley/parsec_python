@@ -372,7 +372,11 @@ PARSEC and the other measurements are in
 The same runner and launch script run a self-consistent hybrid functional
 (`../README.md`, "Self-consistent hybrid functionals"), unpolarized or
 spin-polarized in the symmetry sectors, single points, forces, relaxations
-and molecular dynamics (`SCF/hybrid_mpi.py`). The root runs the Fock loop of
+and molecular dynamics (`SCF/hybrid_mpi.py`). The launch script's default
+`PARSEC_CUPY_DISTRIBUTED_FILTER=1` gives way to `0` for a hybrid (its
+exchange operator is not held by a filter spread over devices; the runner
+says so in `parsec.out`, `PARSEC_LAUNCH_DISTRIBUTED_FILTER` in the switch
+table of `README.md`); a `1` set before the script is refused with a hybrid. The root runs the Fock loop of
 one process; every piece of it that touches orbitals is a command `exx_*`
 that all ranks execute together, and the root alone decides (stop rule,
 adaptive inner criterion, outer DIIS) from scalars the ranks hand it, so a

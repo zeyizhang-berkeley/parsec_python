@@ -468,7 +468,7 @@ class LDAUSectorTests(unittest.TestCase):
             return run(system, points, shares)
 
     def test_the_switch(self) -> None:
-        for value, expected in (("", "off"), ("SPIN", "spin"), ("on", "on")):
+        for value, expected in (("", "on"), ("SPIN", "spin"), ("off", "off")):
             with mock.patch.dict(os.environ, {"PARSEC_KPOINT_SECTOR_LDAU": value}):
                 self.assertEqual(sectors.kpoint_sector_ldau_setting(), expected)
         with mock.patch.dict(os.environ, {"PARSEC_KPOINT_SECTOR_LDAU": "auto"}):

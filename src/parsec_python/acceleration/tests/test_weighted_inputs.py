@@ -71,8 +71,13 @@ def _problem_namespace(**scf):
 
 class SwitchTests(unittest.TestCase):
     def test_values(self) -> None:
+        from ..Symmetry.weighted_inputs import WEIGHTED_INPUT_DEFAULTS
+
         with mock.patch.dict(os.environ, {name: "" for name in WEIGHTED_INPUT_SWITCHES.values()}):
-            self.assertEqual(set(weighted_input_settings().values()), {"auto"})
+            self.assertEqual(
+                weighted_input_settings(),
+                {kind: WEIGHTED_INPUT_DEFAULTS.get(kind, "auto") for kind in WEIGHTED_INPUT_SWITCHES},
+            )
         for name in WEIGHTED_INPUT_SWITCHES.values():
             with mock.patch.dict(os.environ, {name: "OFF"}):
                 self.assertIn("off", weighted_input_settings().values())
@@ -90,12 +95,15 @@ class SwitchTests(unittest.TestCase):
         libxc = _problem_namespace(xc_functional="libxc:gga_x_pbe+gga_c_pbe")
         spin = _problem_namespace(spin_polarized=True)
         meta = _problem_namespace(is_meta_gga=True, xc_functional="scan")
+        meta_cell = _problem_namespace(is_meta_gga=True, xc_functional="scan")
+        meta_cell.periodic_cell = object()
         cases = (
             ("occupations", fixed, False, None),
             ("fixed_count", counted, False, None),
             ("libxc", libxc, False, None),
             ("spin", spin, True, None),
             ("meta_gga", meta, False, None),
+            ("meta_gga_cell", meta_cell, False, None),
         )
         with mock.patch.dict(os.environ, {name: "auto" for name in WEIGHTED_INPUT_SWITCHES.values()}):
             for kind, problem, polarized, _ in cases:
@@ -118,20 +126,43 @@ class SwitchTests(unittest.TestCase):
                 self.assertIsNotNone(refusal(spin, True, context))
                 self.assertIsNone(refusal(counted, False, context))
                 self.assertIsNone(refusal(spin, True, None))
-            # spin on the full grid, with spin-orbit coupling, or with a hybrid keeps it; a cell takes it
+            # spin on the full grid or with spin-orbit coupling keeps it; a cell takes it (a hybrid: below)
             self.assertIsNotNone(refusal(_problem_namespace(spin_polarized=True, spin_symmetry_sector_mode="off"),
                                          True, None))
             cell = _problem_namespace(spin_polarized=True)
             cell.periodic_cell = object()
             self.assertIsNone(refusal(cell, True, None))
             self.assertIsNotNone(refusal(_problem_namespace(self_consistent_spin_orbit=True), True, None))
-            self.assertIsNotNone(refusal(_problem_namespace(spin_polarized=True, is_hybrid=True), True, None))
-            # a meta-GGA hybrid keeps it, as does the meta-GGA of a cell; a spin-polarized meta-GGA cluster takes it
+            # the hybrid of a cluster in one process takes it (PARSEC_ORBITAL_GROUP_HYBRID=auto), unpolarized and with
+            # spin; under off, on several MPI ranks, in a cell and with the units of PARSEC_ORBITAL_IRREPS it keeps it
+            hybrid = _problem_namespace(is_hybrid=True)
+            self.assertIsNone(refusal(hybrid, False, None))
+            self.assertIsNone(refusal(_problem_namespace(spin_polarized=True, is_hybrid=True), True, None))
+            self.assertIsNotNone(refusal(hybrid, False, SimpleNamespace(rank=0, size=4, exchange=True)))
+            hybrid_cell = _problem_namespace(is_hybrid=True)
+            hybrid_cell.periodic_cell = object()
+            self.assertIsNotNone(refusal(hybrid_cell, False, None))
+            with mock.patch.dict(os.environ, {"PARSEC_ORBITAL_IRREPS": "once"}):
+                self.assertIsNotNone(refusal(hybrid, False, None))
+            with mock.patch.dict(os.environ, {"PARSEC_ORBITAL_GROUP_HYBRID": "off"}):
+                self.assertEqual(refusal(hybrid, False, None), "a hybrid functional")
+                self.assertIsNotNone(refusal(_problem_namespace(spin_polarized=True, is_hybrid=True), True, None))
+            # a meta-GGA hybrid keeps it; the meta-GGA of a cell takes it (since 2026-11-23,
+            # PARSEC_ORBITAL_GROUP_META_GGA_CELL), but not under PARSEC_ORBITAL_GROUP_META_GGA=off, which refuses every
+            # meta-GGA; the cell switch leaves a cluster alone; a spin-polarized meta-GGA cluster or cell takes it
             self.assertIsNotNone(refusal(_problem_namespace(is_meta_gga=True, is_hybrid=True), False, None))
-            meta_cell = _problem_namespace(is_meta_gga=True, xc_functional="scan")
-            meta_cell.periodic_cell = object()
-            self.assertIsNotNone(refusal(meta_cell, False, None))
+            self.assertIsNone(refusal(meta_cell, False, None))
+            with mock.patch.dict(os.environ, {WEIGHTED_INPUT_SWITCHES["meta_gga"]: "off"}):
+                self.assertIsNotNone(refusal(meta_cell, False, None))
+            with mock.patch.dict(os.environ, {WEIGHTED_INPUT_SWITCHES["meta_gga_cell"]: "off"}):
+                self.assertIsNone(refusal(meta, False, None))
             self.assertIsNone(refusal(_problem_namespace(is_meta_gga=True, spin_polarized=True), True, None))
+            spin_meta_cell = _problem_namespace(is_meta_gga=True, xc_functional="scan", spin_polarized=True)
+            spin_meta_cell.periodic_cell = object()
+            self.assertIsNone(refusal(spin_meta_cell, True, None))
+            hybrid_meta_cell = _problem_namespace(is_meta_gga=True, is_hybrid=True, xc_functional="scan0")
+            hybrid_meta_cell.periodic_cell = object()
+            self.assertIsNotNone(refusal(hybrid_meta_cell, False, None))
 
 
 class StateCountTests(unittest.TestCase):
@@ -1288,11 +1319,128 @@ class GammaCellTests(unittest.TestCase):
         problem = self._problem()
         problem = replace(problem, eigensolver=replace(problem.eigensolver, fixed_state_count=True))
         weighted, kept, notes = self._run(problem, {"PARSEC_ORBITAL_GROUP_FIXED_COUNT": "auto"})
-        abelian, abelian_kept, _ = self._run(problem, {"PARSEC_ORBITAL_GROUP_FIXED_COUNT": "off"})
+        abelian, abelian_kept, abelian_notes = self._run(problem, {"PARSEC_ORBITAL_GROUP_FIXED_COUNT": "off"})
         self.assertTrue(kept)
         self.assertFalse(abelian_kept)
-        self.assertEqual(notes, [])
+        # (the NOTE of the t2 level of two electrons kept symmetric, driver._say_symmetric_level, is no fallback)
+        self.assertEqual([note for note in notes if note != "symmetric_level"], [])
+        self.assertEqual(abelian_notes, [])
         self.assertAlmostEqual(weighted.energies.total, abelian.energies.total, delta=1e-8)
+
+    def test_the_note_of_the_symmetric_level(self) -> None:
+        # The neutral vacancy at 80 K: its t2 level holds two electrons, a third per partner and spin in the weighted
+        # sectors, which keep that symmetric ensemble and say so (no number changes); the abelian sectors say nothing.
+        problem = self._problem()
+        weighted, kept, notes = self._run(problem, {})
+        _, abelian_kept, abelian_notes = self._run(problem, {"PARSEC_ORBITAL_GROUP": "abelian"})
+        self.assertTrue(kept)
+        self.assertFalse(abelian_kept)
+        self.assertEqual(notes, ["symmetric_level"])
+        self.assertEqual(abelian_notes, [])
+
+
+class SymmetricLevelNoteTests(unittest.TestCase):
+    """The NOTE of an unpolarized run of weighted sectors that ends with a partly filled degenerate level at the Fermi
+    level (``SCF.spin_sectors.weighted_partly_filled_levels``, ``driver._say_symmetric_level``)."""
+
+    @staticmethod
+    def _result(values, occupations, sectors, repeats):
+        """Solved states (Ry, occupation per partner, sector labels, listed partners) as the lists of a run."""
+
+        repeats = np.asarray(repeats)
+        return SimpleNamespace(
+            eigenvalues=np.repeat(np.asarray(values, dtype=float), repeats),
+            occupations=np.repeat(np.asarray(occupations, dtype=float), repeats),
+            sector_states=(np.asarray(sectors), np.asarray(occupations) * repeats, repeats),
+        )
+
+    def test_the_levels_that_count(self) -> None:
+        from ..SCF.spin_sectors import SYMMETRIC_LEVEL_REASON, weighted_partly_filled_levels
+
+        # a state of weight 3 with two electrons per spin over its partners (the t2 of a vacancy)
+        triplet = self._result([-1.0, -0.4], [1.0, 2.0 / 3.0], [1, 3], [1, 3])
+        report = weighted_partly_filled_levels(triplet)
+        self.assertEqual(report.reason, SYMMETRIC_LEVEL_REASON)
+        self.assertAlmostEqual(report.largest, 1.0 / 3.0)
+        self.assertEqual(len(report.lines), 1)
+        self.assertTrue(report.lines[0].startswith("3 levels at"), report.lines[0])
+        self.assertIn("sectors 3.1 3.2 3.3", report.lines[0])
+        # the e of Td held by two states of weight 1 in two sectors, half filled
+        pair = self._result([-1.0, -0.4, -0.4 + 1.0e-6], [1.0, 0.5, 0.5], [1, 1, 2], [1, 1, 1])
+        self.assertAlmostEqual(weighted_partly_filled_levels(pair).largest, 0.5)
+        # lists of two electrons per state count the same
+        doubled = self._result([-1.0, -0.4], [1.0, 2.0 / 3.0], [1, 3], [1, 3])
+        doubled.occupations = 2.0 * doubled.occupations
+        self.assertAlmostEqual(weighted_partly_filled_levels(doubled).largest, 1.0 / 3.0)
+        for result in (
+            self._result([-1.0, -0.4], [1.0, 1.0], [1, 3], [1, 3]),  # filled
+            self._result([-1.0, -0.4], [1.0, 0.02], [1, 3], [1, 3]),  # below the tolerance
+            self._result([-1.0, -0.4, -0.2], [1.0, 0.5, 0.0], [1, 2, 3], [1, 1, 1]),  # one level alone
+            self._result([-1.0, -0.4, -0.4], [1.0, 0.5, 0.5], [1, 2, 2], [1, 1, 1]),  # two states of one sector
+            self._result([-1.0, -0.4, -0.39], [1.0, 0.5, 0.5], [1, 1, 2], [1, 1, 1]),  # 0.01 Ry apart
+            SimpleNamespace(eigenvalues=np.zeros(2), occupations=np.zeros(2), sector_states=None),
+        ):
+            self.assertIsNone(weighted_partly_filled_levels(result))
+
+    def test_who_says_it(self) -> None:
+        from .. import driver
+
+        result = SimpleNamespace(result=self._result([-1.0, -0.4], [1.0, 2.0 / 3.0], [1, 3], [1, 3]), spin=None)
+        result.result.spin = None
+
+        def system(**scf):
+            settings = dict(spin_polarized=False, fixed_occupations=None)
+            settings.update(scf)
+            return SimpleNamespace(
+                backend=SimpleNamespace(symmetry_eigensolver=object()),
+                input=SimpleNamespace(scf=SimpleNamespace(**settings)),
+            )
+
+        for weighted, scf, count in (
+            (True, {}, 1),
+            (False, {}, 0),
+            (True, {"fixed_occupations": (1.0, 0.0)}, 0),
+            (True, {"spin_polarized": True}, 0),
+            # a hybrid: its own guard reads the same levels and starts again in the abelian sectors
+            (True, {"is_hybrid": True}, 0),
+        ):
+            records = []
+            with mock.patch.object(driver, "_weighted_sectors", return_value=weighted):
+                driver._say_symmetric_level(system(**scf), result, records.append)
+                driver._say_symmetric_level(system(**scf), result, None)
+            with self.subTest(weighted=weighted, scf=scf):
+                self.assertEqual(len(records), count)
+                if count:
+                    self.assertEqual(records[0].route, "symmetric_level")
+                    self.assertEqual(records[0].multiplets, weighted_lines(result.result))
+
+    def test_the_lines(self) -> None:
+        from parsec_python.Output.parsec_output import spin_sector_fallback_lines
+        from parsec_python.models import SpinSectorFallbackRecord
+
+        text = "\n".join(
+            spin_sector_fallback_lines(
+                SpinSectorFallbackRecord(
+                    stage="the SCF loop",
+                    largest_fractional_occupation=1.0 / 3.0,
+                    tolerance=0.05,
+                    multiplets=("3 levels at -5.4423 -5.4423 -5.4423 eV",),
+                    reason="a partly filled degenerate level at the Fermi level",
+                    route="symmetric_level",
+                    doublet=True,
+                )
+            )
+        )
+        self.assertIn("NOTE: weighted symmetry sectors: a partly filled degenerate level", text)
+        self.assertIn("The result is kept", text)
+        self.assertIn("PARSEC_ORBITAL_GROUP=abelian", text)
+        self.assertIn("3 levels at", text)
+
+
+def weighted_lines(result):
+    from ..SCF.spin_sectors import weighted_partly_filled_levels
+
+    return weighted_partly_filled_levels(result).lines
 
 
 @unittest.skipUnless(_device_available(), "CUDA runtime and native extension are unavailable")

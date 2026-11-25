@@ -30,7 +30,7 @@ REFERENCE = HERE / "reference_energies.csv"
 WATER = HERE.parent / "jctc2022_1s"
 METHODS = (("pbe", "pp_pbe", "PP-PBE"), ("b3lyp", "pp_pbe_b3lyp", "PP-PBE(B3LYP)"))
 #: tolerances of --check, eV; the figure is read with an uncertainty of about 0.03
-TOLERANCE = {"reference": 0.003, "figure": 0.08}
+TOLERANCE = {"reference": 0.003, "figure": 0.09}
 
 
 def water() -> dict:

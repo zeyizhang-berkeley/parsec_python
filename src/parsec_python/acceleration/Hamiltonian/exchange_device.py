@@ -59,6 +59,22 @@ class on the octant (:meth:`DevicePairSolvers.solve_parity`), accumulates
 sector row (:class:`ParitySector`).  No full-grid block is formed; the
 result is the full-grid path's to round-off.
 
+Weighted sectors.  The sectors of a subgroup ``H`` of the point group ``G``
+with weights (``PARSEC_ORBITAL_GROUP_HYBRID=auto``, :class:`WeightedExchange`)
+hold one partner of some degenerate levels.  The density matrix of their
+weighted, ``G``-averaged density is ``sum_s (o_s/[G:H]) sum_c F_cs F_cs^T``
+(``o_s`` the occupation times the weight, ``F_cs(r) = phi_s(c r)`` for the
+right coset representatives ``c``, :mod:`..Symmetry.exchange_partners`); a
+sector whose levels have all their partners among the solved states takes
+``o_s phi_s phi_s^T`` instead.  The coset images are blocks of their own
+(:class:`ImageExpansion`): partners of every target (tiles of kind
+``image``, the ``W`` of the target only), never targets, since ``K``
+commutes with ``G`` and ``W`` of a solved state lies in its sector.  Their
+pair densities take the parity classes where the images keep the
+reflections of the sectors (the diagonal subgroup of ``H``, normal in ``G``
+for Td over D2d and Oh over D4h), the full grid otherwise.  ``E_x`` and the
+ACE of every solved sector are those of the solved states with ``o_s``.
+
 Nothing here prints or opens files.
 """
 
@@ -289,13 +305,19 @@ class OrbitalSector:
     def _contiguous(selected: np.ndarray) -> bool:
         return bool(selected.size) and bool(np.all(np.diff(selected) == 1))
 
-    def products(self, cp, positions: np.ndarray, right, *, diagonal: bool = False):
+    def products(self, cp, positions: np.ndarray, right, *, diagonal: bool = False, single_dot: bool = False):
         """``C^T R`` (or its diagonal, column by column) on the current device.
 
         ``C`` are the columns ``local[positions]`` and ``R`` a device block
         with the sector's rows.  A basis that was spilled to the host is
         uploaded in row chunks of at most 256 MiB, so that no complete copy
-        of it is made on the device.
+        of it is made on the device.  ``single_dot``: the diagonal of one
+        column as a cuBLAS dot product; a ``(rows, 1)`` block is C- and
+        F-contiguous at once, and CuPy sends its column sum to a CUB
+        segmented reduction, whose kernel a first run compiles (1.5-1.7 s on
+        A100).  The weighted sectors of a point group, which often hold one
+        occupied state per sector, ask for it (the last bit of the sum may
+        differ; other orbitals keep the sum of before).
         """
 
         vectors = self.vectors
@@ -303,6 +325,8 @@ class OrbitalSector:
             raise RuntimeError("these orbitals were dropped after their exchange operator was built")
         if isinstance(vectors, cp.ndarray):
             block = self.columns(cp, positions)
+            if diagonal and single_dot and int(block.shape[1]) == 1:
+                return cp.reshape(block[:, 0] @ right[:, 0], (1,))
             return cp.sum(block * right, axis=0) if diagonal else block.T @ right
         selected = self.local[np.asarray(positions, dtype=np.int64)]
         host = np.asarray(vectors)
@@ -329,22 +353,212 @@ class OrbitalSector:
         return self.expansion.unfold(cp, block)
 
 
+class ImageExpansion:
+    """The expansion of the coset image ``F_c(r) = phi(c r)`` of the orbitals of a sector (weighted sectors).
+
+    ``source`` is the :class:`SectorExpansion` of the sector (the orbits of the subgroup ``H``) and ``row_map[p]``
+    the grid row of ``c r_p`` (:meth:`..Symmetry.exchange_partners.ExchangePartners.row_map`): ``(U_c C)[p] =
+    (U_G C)[row_map[p]]``.  The image of a sector function lies in a sector of ``c^-1 H c``, not of ``H``: it is read
+    (the pair densities of the parity classes, :func:`parity_context`, or the full grid, :meth:`unfold`) and never
+    folded.  The full-grid arrays are formed where they are read and not kept on the host.
+    """
+
+    def __init__(self, source: SectorExpansion, row_map: np.ndarray) -> None:
+        self.source = source
+        self.row_map = np.asarray(row_map, dtype=np.int64)
+        self.full_size = int(source.full_size)
+        self.rows = int(source.rows)
+        self.row_scales = source.row_scales
+        self._device: dict[int, tuple] = {}
+        self._lock = Lock()
+        self._parity: dict = {}
+
+    @property
+    def point_rows(self) -> np.ndarray:
+        return self.source.point_rows[self.row_map]
+
+    @property
+    def point_weights(self) -> np.ndarray:
+        return self.source.point_weights[self.row_map]
+
+    def _arrays(self, cp):
+        device = int(cp.cuda.Device().id)
+        with self._lock:
+            found = self._device.get(device)
+            if found is None:
+                found = (cp.asarray(self.point_rows), cp.asarray(self.point_weights))
+                self._device[device] = found
+        return found
+
+    def unfold(self, cp, block):
+        """``U_c C`` of a block of the sector's columns on the current device (full grid x columns, F order)."""
+
+        point_rows, point_weights = self._arrays(cp)
+        full = cp.asfortranarray(block[point_rows, :])
+        full *= point_weights[:, None]
+        return full
+
+    def fold(self, cp, full):  # pragma: no cover - never called: an image takes no W
+        raise RuntimeError("the coset image of a sector's orbitals is not folded")
+
+    def device_bytes(self) -> int:
+        return int(16 * self.full_size)
+
+    def on_device(self, device: int) -> bool:
+        with self._lock:
+            return int(device) in self._device
+
+
 @dataclass
 class ChannelOrbitals:
-    """The orbitals of one spin channel (``spin_weight`` 1) or of both (2)."""
+    """The orbitals of one spin channel (``spin_weight`` 1) or of both (2).
+
+    The weighted sectors of a point group (``PARSEC_ORBITAL_GROUP_HYBRID``, :class:`WeightedExchange`) add, per state,
+    ``partner_counts`` (the weight of its sector: the partners it stands for, each of occupation ``occupations /
+    partner_counts``) and ``pair_shares`` (the share of its occupation each of its pair terms carries: 1 for a state
+    that stands for itself, ``1/[G:H]`` for one that stands for its coset images), ``images`` (the coset images of
+    the occupied states of the sectors of the images form, an :class:`OrbitalSector` with an :class:`ImageExpansion`
+    each, its columns those of the sector) and the ``weighting`` that made them; ``occupations`` are the occupations
+    of the SCF loop, times the weights.  ``None``, empty and ``None`` for the sectors of an abelian group and the full
+    grid, whose arrays are read as before.
+    """
 
     sectors: tuple[OrbitalSector, ...]
     occupations: np.ndarray
     spin_weight: float
     full_size: int
     volume_element: float
+    partner_counts: np.ndarray | None = None
+    pair_shares: np.ndarray | None = None
+    images: tuple = ()
+    weighting: Any = None
 
     @property
     def state_count(self) -> int:
         return int(self.occupations.size)
 
+    def partner_occupations(self) -> np.ndarray:
+        """The occupation of every partner of each state (``occupations`` without weighted sectors)."""
+
+        if self.partner_counts is None:
+            return self.occupations
+        return self.occupations / self.partner_counts
+
+    def pair_weights(self) -> np.ndarray:
+        """The occupation each pair term of a state carries (``occupations`` without weighted sectors)."""
+
+        if self.pair_shares is None:
+            return self.occupations
+        return self.occupations * self.pair_shares
+
     def occupied_states(self) -> np.ndarray:
-        return np.flatnonzero(self.occupations > exchange_occupation_threshold())
+        return np.flatnonzero(self.partner_occupations() > exchange_occupation_threshold())
+
+    def source(self, index: int) -> OrbitalSector:
+        """``sectors[index]``, or past them the image ``images[index - len(sectors)]`` (the blocks of a plan)."""
+
+        index = int(index)
+        count = len(self.sectors)
+        return self.sectors[index] if index < count else self.images[index - count]
+
+    def all_sources(self) -> tuple:
+        """The sectors and then the images (the indices of :meth:`source`)."""
+
+        return tuple(self.sectors) + tuple(self.images)
+
+
+class WeightedExchange:
+    """The exact exchange of the weighted sectors of one point group (``PARSEC_ORBITAL_GROUP_HYBRID``).
+
+    ``partners`` (:func:`..Symmetry.exchange_partners.exchange_partners`) gives the weight and the form of every
+    solved sector and the coset representatives; the image expansions of a sector are made once
+    (:meth:`image_expansion`).  :meth:`channel` makes the :class:`ChannelOrbitals` of any columns of the sectors (an
+    eigensolver's orbitals, the natural orbitals of the outer DIIS).
+    """
+
+    def __init__(self, reduction) -> None:
+        from ..Symmetry.exchange_partners import exchange_partners
+
+        self.reduction = reduction
+        self.partners = exchange_partners(reduction)
+        self._images: dict = {}
+        self._lock = Lock()
+
+    def sector_weight(self, representation: int) -> float:
+        return float(self.partners.weights[int(representation)])
+
+    def stands_for_images(self, representation: int) -> bool:
+        return bool(self.partners.images[int(representation)])
+
+    def image_expansion(self, representation: int, expansion: SectorExpansion, coset: int) -> ImageExpansion:
+        key = (int(representation), int(coset))
+        with self._lock:
+            found = self._images.get(key)
+            if found is not None and found.source is expansion:
+                return found
+        made = ImageExpansion(expansion, self.partners.row_map(coset))
+        with self._lock:
+            self._images[key] = made
+        return made
+
+    def channel(self, sectors, occupations, spin_weight: float, full_size: int, volume_element: float) -> ChannelOrbitals:
+        """The weighted :class:`ChannelOrbitals` of ``sectors`` (every state in one of them) and ``occupations``."""
+
+        occupations = np.asarray(occupations, dtype=np.float64)
+        counts = np.zeros(occupations.size, dtype=np.float64)
+        shares = np.zeros(occupations.size, dtype=np.float64)
+        cosets = int(self.partners.cosets)
+        for sector in sectors:
+            if sector.representation is None or sector.expansion is None:
+                raise ValueError("the weighted exchange needs the orbitals of the sectors")
+            counts[sector.states] = self.sector_weight(sector.representation)
+            shares[sector.states] = 1.0 / cosets if self.stands_for_images(sector.representation) else 1.0
+        if np.any(counts <= 0.0):
+            raise ValueError("every state of a weighted channel must belong to one of its sectors")
+        partner = occupations / counts
+        images = []
+        threshold = exchange_occupation_threshold()
+        for sector in sectors:
+            if not self.stands_for_images(sector.representation):
+                continue
+            if not np.any(partner[sector.states] > threshold):
+                continue
+            for coset in range(1, cosets):
+                images.append(
+                    OrbitalSector(
+                        representation=sector.representation,
+                        device=sector.device,
+                        vectors=sector.vectors,
+                        local=sector.local,
+                        states=sector.states,
+                        expansion=self.image_expansion(sector.representation, sector.expansion, coset),
+                    )
+                )
+        return ChannelOrbitals(
+            tuple(sectors),
+            occupations,
+            float(spin_weight),
+            int(full_size),
+            float(volume_element),
+            partner_counts=counts,
+            pair_shares=shares,
+            images=tuple(images),
+            weighting=self,
+        )
+
+
+#: ``auto``: the self-consistent hybrid of a cluster solves the weighted sectors of a subgroup of its point group where
+#: the plan of the group takes them (its exchange through the coset images of the weighted states,
+#: :class:`WeightedExchange`); ``off``: a hybrid keeps the abelian group, as before.
+WEIGHTED_HYBRID_SWITCH = "PARSEC_ORBITAL_GROUP_HYBRID"
+
+
+def weighted_hybrid_enabled() -> bool:
+    """Whether ``PARSEC_ORBITAL_GROUP_HYBRID`` lets a hybrid's exchange read weighted sectors (:mod:`..Symmetry.weighted_inputs`)."""
+
+    from ..Symmetry.weighted_inputs import weighted_input_setting
+
+    return weighted_input_setting("hybrid") == "auto"
 
 
 def channel_orbitals(
@@ -354,6 +568,7 @@ def channel_orbitals(
     volume_element: float,
     expansions=None,
     sector_devices=None,
+    weightings=None,
 ):
     """:class:`ChannelOrbitals` of an eigensolver's orbitals.
 
@@ -361,7 +576,11 @@ def channel_orbitals(
     :class:`~parsec_python.acceleration.Eigensolvers.symmetry.CuPySymmetryOrbitals`
     of the sectors; ``expansions`` caches the :class:`SectorExpansion` of
     each representation (a dict filled here), ``sector_devices`` names the
-    device of a spilled sector.
+    device of a spilled sector.  Orbitals of the weighted sectors of a point
+    group (``PARSEC_ORBITAL_GROUP_HYBRID=auto``) take ``occupations`` of the
+    solved states, times their weights (those of the SCF loop, or
+    ``SinglePointResult.sector_states``), and give a weighted channel
+    (:class:`WeightedExchange`, cached per reduction in ``weightings``).
     """
 
     from ..backends.cupy import require_cupy
@@ -370,6 +589,7 @@ def channel_orbitals(
     cp, _ = require_cupy()
     occupations = np.asarray(occupations, dtype=np.float64)
     expansions = {} if expansions is None else expansions
+    weighting = None
     if isinstance(wavefunctions, CuPySymmetryOrbitals):
         if wavefunctions.remote_sectors:
             raise NotImplementedError(
@@ -377,14 +597,28 @@ def channel_orbitals(
                 "symmetry sector in this process (no MPI ranks)"
             )
         if wavefunctions.point_group is not None:
-            # The sectors of a subgroup with weights (Symmetry.PointGroupReduction) hold one partner of a degenerate
-            # level; the pair densities need every partner of every occupied state.  A hybrid run keeps the abelian
-            # group (driver._orbital_group_refusal), so only orbitals of another run arrive here.
-            raise NotImplementedError(
-                "the exchange operator of a hybrid functional needs every partner of every occupied "
-                "level, which the weighted sectors of a point group do not hold (a hybrid run keeps "
-                "the abelian group of its structure)"
-            )
+            # The sectors of a subgroup with weights (Symmetry.PointGroupReduction) hold one partner of some degenerate
+            # levels; the pair densities take the other partners as the coset images of those states
+            # (WeightedExchange, PARSEC_ORBITAL_GROUP_HYBRID=auto).  Under off a hybrid run keeps the abelian group
+            # (driver._orbital_group_refusal), so only orbitals of another run arrive here.
+            if not weighted_hybrid_enabled():
+                raise NotImplementedError(
+                    "the exchange operator of a hybrid functional needs every partner of every occupied "
+                    "level, which the weighted sectors of a point group hold only through the coset images "
+                    f"of {WEIGHTED_HYBRID_SWITCH}=auto (a hybrid run keeps the abelian group of its structure under off)"
+                )
+            if occupations.size != int(np.asarray(wavefunctions.representations).size):
+                raise ValueError(
+                    "the exchange of weighted sectors takes one occupation per solved state (times its weight)"
+                )
+            reduction = wavefunctions.point_group
+            weightings = {} if weightings is None else weightings
+            key = id(reduction)
+            found = weightings.get(key)
+            if found is None or found.reduction is not reduction:
+                found = WeightedExchange(reduction)
+                weightings[key] = found
+            weighting = found
         for record in wavefunctions.sector_handovers or ():
             if record is not None and not getattr(record, "rotated", True):
                 raise NotImplementedError(
@@ -439,6 +673,10 @@ def channel_orbitals(
                     states=selected.astype(np.int64),
                     expansion=expansion,
                 )
+            )
+        if weighting is not None:
+            return weighting.channel(
+                tuple(sectors), occupations, float(spin_weight), int(wavefunctions.full_size), float(volume_element)
             )
         return ChannelOrbitals(
             tuple(sectors),
@@ -1282,7 +1520,10 @@ def parity_context(orbitals: ChannelOrbitals, solvers) -> ParityContext | None:
     if layout is None:
         return None
     found = []
-    for sector in orbitals.sectors:
+    # (the coset images of weighted sectors after the sectors, the indices of ChannelOrbitals.source: their pair
+    # densities take the parity classes where the images keep the same reflections as the sectors)
+    sources = orbitals.all_sources()
+    for sector in sources:
         expansion = sector.expansion
         key = ("operations", id(layout))
         cached = expansion._parity.get(key)
@@ -1297,7 +1538,7 @@ def parity_context(orbitals: ChannelOrbitals, solvers) -> ParityContext | None:
         return None
     group = _parity_group(operations)
     sectors = []
-    for sector, (_operations, character) in zip(orbitals.sectors, found):
+    for sector, (_operations, character) in zip(sources, found):
         key = ("sector", id(layout), group.cosets)
         cached = sector.expansion._parity.get(key)
         if cached is None:
@@ -1314,7 +1555,7 @@ def parity_context(orbitals: ChannelOrbitals, solvers) -> ParityContext | None:
 def parity_columns(cp, context: ParityContext, orbitals: ChannelOrbitals, block) -> Any:
     """The coset form of a block's columns on the current device (``m * size`` x columns, F order)."""
 
-    sector = orbitals.sectors[block.sector]
+    sector = orbitals.source(block.sector)
     columns = sector.columns(cp, block.positions)
     rows, weights, _, _ = context.sectors[block.sector].arrays(cp)
     values = cp.asfortranarray(columns[rows, :])
@@ -1569,9 +1810,12 @@ def _run_parity_tiles(cp, context: ParityContext, orbitals: ChannelOrbitals, sol
             timing[device] += cp.cuda.get_elapsed_time(begin, finish) * 1.0e-3
         pending.clear()
 
+    # (the occupations of the pair terms: those of the SCF loop, or for weighted sectors their share per image)
+    pair_weights = orbitals.pair_weights()
+
     def weights_of(block):
-        sector = orbitals.sectors[block.sector]
-        return cp.asarray(orbitals.occupations[sector.states[block.positions]])
+        sector = orbitals.source(block.sector)
+        return cp.asarray(pair_weights[sector.states[block.positions]])
 
     with cp.cuda.Device(device), solvers.stream(device):
         # The builds of a channel meet (nearly) all eight classes: their
@@ -1667,7 +1911,9 @@ class _Tile:
     first: int
     second: int
     pairs: int
-    kind: str  # "diagonal", "pair" (two occupied blocks) or "empty" (empty first, occupied second)
+    # "diagonal", "pair" (two occupied blocks), "empty" (empty first, occupied second) or "image" (any first, the coset
+    # images of an occupied block of a weighted sector second: the W of the first only)
+    kind: str
 
 
 def _blocks(orbitals: ChannelOrbitals, wanted: set[int], size: int):
@@ -1675,8 +1921,9 @@ def _blocks(orbitals: ChannelOrbitals, wanted: set[int], size: int):
 
     occupied_blocks: list[_Block] = []
     empty_blocks: list[_Block] = []
+    partner = orbitals.partner_occupations()
     for index, sector in enumerate(orbitals.sectors):
-        weights = orbitals.occupations[sector.states]
+        weights = partner[sector.states]
         occupied = np.flatnonzero(weights > exchange_occupation_threshold())
         empty = np.array(
             [position for position in np.flatnonzero(weights <= exchange_occupation_threshold())
@@ -1690,14 +1937,32 @@ def _blocks(orbitals: ChannelOrbitals, wanted: set[int], size: int):
     return occupied_blocks, empty_blocks
 
 
+def _image_blocks(orbitals: ChannelOrbitals, size: int) -> list:
+    """The blocks of the coset images of the occupied states of weighted sectors (none for other orbitals)."""
+
+    blocks: list[_Block] = []
+    if not orbitals.images:
+        return blocks
+    partner = orbitals.partner_occupations()
+    offset = len(orbitals.sectors)
+    for index, image in enumerate(orbitals.images):
+        occupied = np.flatnonzero(partner[image.states] > exchange_occupation_threshold())
+        for start in range(0, occupied.size, size):
+            blocks.append(_Block(offset + index, occupied[start : start + size], True))
+    return blocks
+
+
 @dataclass
 class ExchangePlan:
     """The blocks and tiles of one build of ``W = V_x Psi`` (see the module text).
 
     ``blocks`` are the occupied blocks of every sector (``occupied_blocks``
-    of them) followed by the blocks of the wanted empty states; ``tiles``
-    pair them.  The plan depends on the occupations and the sector columns
-    only, so every MPI rank makes the same one.
+    of them) followed by the blocks of the wanted empty states and, for the
+    weighted sectors of a point group, the blocks of the coset images of the
+    occupied states (``ChannelOrbitals.images``; tiles of kind ``image``,
+    whose second block is a partner only); ``tiles`` pair them.  The plan
+    depends on the occupations and the sector columns only, so every MPI
+    rank makes the same one.
     """
 
     blocks: list
@@ -1738,7 +2003,11 @@ def plan_exchange(
     size = int(batch_size)
     wanted_empty = (all_states - set(occupied_states)) if columns == "all" else set()
     occupied_blocks, empty_blocks = _blocks(orbitals, wanted_empty, size)
-    blocks = occupied_blocks + empty_blocks
+    # The coset images of the occupied states of weighted sectors (PARSEC_ORBITAL_GROUP_HYBRID): partners of every
+    # target, never targets themselves (none for other orbitals).
+    image_blocks = _image_blocks(orbitals, size)
+    images_start = len(occupied_blocks) + len(empty_blocks)
+    blocks = occupied_blocks + empty_blocks + image_blocks
     tiles: list[_Tile] = []
     if known is None:
         for first in range(len(occupied_blocks)):
@@ -1748,6 +2017,8 @@ def plan_exchange(
                 tiles.append(
                     _Tile(first, second, count * occupied_blocks[second].positions.size, "pair")
                 )
+            for offset, image in enumerate(image_blocks):
+                tiles.append(_Tile(first, images_start + offset, count * image.positions.size, "image"))
     for offset, empty in enumerate(empty_blocks):
         for second in range(len(occupied_blocks)):
             tiles.append(
@@ -1756,6 +2027,15 @@ def plan_exchange(
                     second,
                     empty.positions.size * occupied_blocks[second].positions.size,
                     "empty",
+                )
+            )
+        for image_offset, image in enumerate(image_blocks):
+            tiles.append(
+                _Tile(
+                    len(occupied_blocks) + offset,
+                    images_start + image_offset,
+                    empty.positions.size * image.positions.size,
+                    "image",
                 )
             )
     return ExchangePlan(
@@ -1888,6 +2168,9 @@ def run_exchange_tiles(
             timing[device] += cp.cuda.get_elapsed_time(begin, finish) * 1.0e-3
         pending.clear()
 
+    # (the occupations of the pair terms: those of the SCF loop, or for weighted sectors their share per image)
+    pair_weights = orbitals.pair_weights()
+
     def run(device: int) -> None:
         work = assigned[device]
         if not work:
@@ -1910,7 +2193,7 @@ def run_exchange_tiles(
                     sector = orbitals.sectors[block.sector]
                     first_full = sector.full_columns(cp, block.positions)
                     first_acc = cp.zeros(first_full.shape, dtype=cp.float64, order="F")
-                    first_weights = orbitals.occupations[sector.states[block.positions]]
+                    first_weights = pair_weights[sector.states[block.positions]]
                 second_block = blocks[tile.second]
                 if tile.kind == "diagonal":
                     # Pairs i <= j of one block, Exx_Batch_Size at a time:
@@ -1950,11 +2233,10 @@ def run_exchange_tiles(
                 # one solve per row i of the first block, its pairs with every
                 # column j of the second, W_i -= sum_j f_j q_j v_ij (a GEMV)
                 # and W_j -= f_i q_i v_ij.
-                sector = orbitals.sectors[second_block.sector]
+                # (an image block of a weighted sector unfolds through its coset image)
+                sector = orbitals.source(second_block.sector)
                 second_full = sector.full_columns(cp, second_block.positions)
-                second_weights = cp.asarray(
-                    orbitals.occupations[sector.states[second_block.positions]]
-                )
+                second_weights = cp.asarray(pair_weights[sector.states[second_block.positions]])
                 second_acc = (
                     cp.zeros(second_full.shape, dtype=cp.float64, order="F")
                     if tile.kind == "pair"
@@ -2026,15 +2308,20 @@ def sector_exchange_energies(orbitals: ChannelOrbitals, applied: list, sectors=N
 
     cp, _ = require_cupy()
     values: dict[int, float] = {}
+    # (weighted sectors: a state with its weight, sum_s o_s <phi_s|W_s>, the partners of a level alike)
+    partner = orbitals.partner_occupations()
     for index, sector in enumerate(orbitals.sectors):
         if sectors is not None and index not in sectors:
             continue
         weights = orbitals.occupations[sector.states]
-        occupied = np.flatnonzero(weights > exchange_occupation_threshold())
+        occupied = np.flatnonzero(partner[sector.states] > exchange_occupation_threshold())
         if not occupied.size:
             continue
         with cp.cuda.Device(sector.device):
-            products = sector.products(cp, occupied, applied[index][:, occupied], diagonal=True)
+            # (a sector of weighted sectors with one occupied state: a dot product, OrbitalSector.products)
+            products = sector.products(
+                cp, occupied, applied[index][:, occupied], diagonal=True, single_dot=orbitals.weighting is not None
+            )
             values[index] = float(cp.asnumpy(products) @ weights[occupied])
     return values
 
@@ -2413,12 +2700,13 @@ class DeviceCompressedExchange:
         cp, _ = require_cupy()
         factor = -(self.fraction if scaled else 1.0)
         total = 0.0
+        partner = orbitals.partner_occupations()
         for sector in orbitals.sectors:
             xi = self.projectors.get(sector.representation)
             if xi is None:
                 continue
             weights = orbitals.occupations[sector.states]
-            occupied = np.flatnonzero(weights > exchange_occupation_threshold())
+            occupied = np.flatnonzero(partner[sector.states] > exchange_occupation_threshold())
             if not occupied.size:
                 continue
             with cp.cuda.Device(int(xi.device.id)):
@@ -2502,7 +2790,9 @@ def compress_device_exchange(
                     "the exchange matrix M = -Psi^T V_x Psi of a symmetry sector is not "
                     "positive definite; ACE needs orbitals that overlap the occupied ones"
                 ) from error
-            if not bool(cp.all(cp.isfinite(lower))):
+            from ..backends.device_checks import all_finite
+
+            if not all_finite(lower):
                 raise np.linalg.LinAlgError(
                     "the exchange matrix M = -Psi^T V_x Psi of a symmetry sector is not "
                     "positive definite; ACE needs orbitals that overlap the occupied ones"
@@ -2531,12 +2821,16 @@ __all__ = [
     "DeviceCompressedExchange",
     "DeviceExchangeApplication",
     "DevicePairSolvers",
+    "ImageExpansion",
     "OrbitalSector",
     "SectorExpansion",
+    "WEIGHTED_HYBRID_SWITCH",
+    "WeightedExchange",
     "apply_device_exchange",
     "channel_orbitals",
     "compress_device_exchange",
     "estimated_box_points",
     "planned_exchange_bytes",
     "require_exchange_memory",
+    "weighted_hybrid_enabled",
 ]

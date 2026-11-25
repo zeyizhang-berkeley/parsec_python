@@ -208,6 +208,9 @@ class ParsecPseudopotential:
     # The radius the projectors filtered by ``PARSEC_LOCAL_FILTER=all`` end at (their tail beyond the file's support
     # radius); ``None`` for the support of the file (:attr:`projector_support_radius`).
     filtered_projector_radius: float | None = None
+    # What ``PARSEC_LOCAL_FILTER`` notes for this species in parsec.out (a table kept as the file gives it, a grid that
+    # is coarse for the species); empty otherwise.  It changes no number.
+    local_filter_note: str = ""
 
     @property
     def radial_offset(self) -> float:

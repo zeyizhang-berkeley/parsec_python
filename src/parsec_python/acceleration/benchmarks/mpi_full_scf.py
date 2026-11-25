@@ -1270,6 +1270,33 @@ def _input_has_hybrid(path) -> bool:
         return False
 
 
+LAUNCH_DISTRIBUTED_FILTER = 'PARSEC_LAUNCH_DISTRIBUTED_FILTER'
+
+
+def hybrid_launch_filter(hybrid: bool, environ=None):
+    """``PARSEC_CUPY_DISTRIBUTED_FILTER`` of a hybrid functional launched by ``scripts/run_multi_gpu_scf.sh``; the
+    NOTE where it was set to 0, else ``None``.
+
+    The script sets ``PARSEC_CUPY_DISTRIBUTED_FILTER=1`` where it was not given and records in
+    ``PARSEC_LAUNCH_DISTRIBUTED_FILTER`` the value it was given (empty where its default stands).  A filter spread
+    over the GPUs of a rank does not hold the exchange operator of a hybrid (``driver._refuse_hybrid_routes`` refuses
+    the value): where the 1 is the script's own, a hybrid takes 0, every sector basis on one GPU of its rank, the
+    layout of every hybrid of the runner.  A 1 given to the script, or set without it, stays and is refused as
+    before, and nothing changes for any other functional.  Every rank reads the same environment and input.
+    """
+
+    environ = os.environ if environ is None else environ
+    if not hybrid or environ.get('PARSEC_CUPY_DISTRIBUTED_FILTER', '').strip() != '1':
+        return None
+    given = environ.get(LAUNCH_DISTRIBUTED_FILTER)
+    if given is None or given.strip():
+        return None
+    environ['PARSEC_CUPY_DISTRIBUTED_FILTER'] = '0'
+    return ('NOTE: the hybrid functional runs with PARSEC_CUPY_DISTRIBUTED_FILTER=0, every sector basis on one GPU of '
+            'its rank: the default 1 of scripts/run_multi_gpu_scf.sh spreads the filter of a sector over the GPUs of '
+            'its rank, which does not hold the exchange operator')
+
+
 def _input_first_solve_is_chebff(path) -> bool:
     """Whether the input names ``Eigensolver: chebff``, read before MPI starts (as :func:`_input_has_hybrid`).
 
@@ -1706,6 +1733,11 @@ def execute(args, cp, comm, MPI, initialization_seconds, initial_affinity=None):
     # A hybrid functional: the ranks divide the sectors, each basis on one device, and every GPU of every rank
     # solves pair densities of the exchange (SCF/hybrid_mpi.py); a rank may own no sector.
     hybrid = bool(getattr(translation.problem.scf, 'is_hybrid', False))
+    # (with PARSEC_CUPY_DISTRIBUTED_FILTER=0 where the 1 is the default of the launch script, before anything reads
+    # it: hybrid_launch_filter)
+    launch_filter_note = hybrid_launch_filter(hybrid)
+    if launch_filter_note is not None and rank == 0:
+        print(launch_filter_note, flush=True)
     # A spin-polarized calculation divides the sectors of both channels (Spin_Symmetry_Sectors): single points, and
     # forces and relaxations that keep the sectors (PARSEC_SPIN_SECTOR_FORCES=auto); the driver refuses one whose
     # channels stay on the full grid.
@@ -1745,6 +1777,8 @@ def execute(args, cp, comm, MPI, initialization_seconds, initial_affinity=None):
         # computed where the former code read it (relax_initial_structure below): the restarts changed the problem
         restarted = translation.problem is not problem_of_input
     restart_notes = [*restart_notes, *restart_rule_notes]
+    if launch_filter_note is not None:
+        restart_notes = [*restart_notes, f' {launch_filter_note}']
     if _found_supercell is not None:
         restart_notes = [*restart_notes, f' {_trim_route.note}']
     # PARSEC_MOVING_SECTORS (SCF/moving_sectors.py, since 2026-11-22 on the ranks): molecular dynamics and manual

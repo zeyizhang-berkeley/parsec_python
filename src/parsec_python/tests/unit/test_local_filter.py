@@ -242,6 +242,74 @@ class ProjectorTests(unittest.TestCase):
         wave = ParsecRadialSpline.from_positive_grid(potential.radii, potential.radial_wavefunctions[0], 6)(r) / r
         self.assertLess(abs(np.sum(r * r * new * wave) / np.sum(r * r * old * wave) - 1.0), 1e-4)
 
+    def test_a_table_shorter_than_the_filtered_support_keeps_its_tables(self) -> None:
+        from types import SimpleNamespace
+
+        from parsec_python.Pseudopotential.local_filter import filtered_projector_tables
+        from parsec_python.models import SpeciesPotential
+
+        # six radii, the last but one at the projector support: the mask function would vanish where the p projector
+        # does not (its filtered table was not finite)
+        potential = read_parsec_pseudopotential(_DATA / "H_POTRE.DAT")
+        self.assertEqual(float(potential.radii[-2]), float(potential.projector_support_radius))
+        self.assertEqual(filtered_projector_tables(potential, 0, 0.6, 2), ({}, {}, potential.projector_support_radius))
+        grid = SimpleNamespace(spacing=0.6, settings=SimpleNamespace(stencil_half_width=2, double_grid_order=1))
+        with _setting("all"):
+            (filtered,) = apply_local_filters({"H": potential}, {"H": SpeciesPotential(_DATA / "H_POTRE.DAT", 0)},
+                                              grid).values()
+        # both tables of the file (the local part filtered alone is the configuration of on), and parsec.out says why
+        self.assertEqual(filtered.filtered_projectors, {})
+        self.assertIsNone(filtered.filtered_projector_radius)
+        self.assertEqual(filtered.filtered_local_potentials, {})
+        self.assertIn("ends within the support", filtered.local_filter_note)
+        with _setting("on"):  # without projector filter the local table is filtered
+            (local,) = apply_local_filters({"H": potential}, {"H": SpeciesPotential(_DATA / "H_POTRE.DAT", 0)},
+                                           grid).values()
+        self.assertTrue(np.all(np.isfinite(local.filtered_local_potentials[0])))
+
+    def test_parsec_out_says_what_of_each_species_is_filtered(self) -> None:
+        from parsec_python.Output.parsec_output import local_filter_lines
+
+        oxygen = _oxygen()
+        table = filtered_local_table(oxygen, 1, 0.3, 6)
+        local = replace(oxygen, filtered_local_potentials={1: table})
+        both = replace(local, filtered_projectors={0: oxygen.radial_projector(0, 1)[0]}, filtered_projector_radius=2.0)
+        with _setting("off"):
+            self.assertEqual(local_filter_lines(both), ())
+        with _setting("all"):
+            self.assertIn("local potential and projectors filtered", local_filter_lines(both)[0])
+            self.assertIn("projectors as the file gives them", local_filter_lines(local)[0])
+            kept = replace(oxygen, local_filter_note="why")
+            lines = local_filter_lines(kept)
+            self.assertIn(": none", lines[0])
+            self.assertIn("why", lines[1])
+
+
+class CoarseGridNoteTests(unittest.TestCase):
+    def test_the_note_fires_where_the_grid_is_coarse_for_the_species(self) -> None:
+        from types import SimpleNamespace
+
+        from parsec_python.Pseudopotential.local_filter import COARSE_NOTE_LIMIT, core_departure
+        from parsec_python.models import SpeciesPotential
+
+        hydrogen = read_parsec_pseudopotential(_DATA / "water_H_POTRE.DAT")
+        departures = {h: core_departure(hydrogen, 0, filtered_local_table(hydrogen, 0, h, 6)) for h in (0.6, 0.45, 0.3)}
+        self.assertGreater(departures[0.6], COARSE_NOTE_LIMIT)
+        self.assertLess(departures[0.45], COARSE_NOTE_LIMIT)
+        self.assertLess(departures[0.3], 0.2 * COARSE_NOTE_LIMIT)
+        # an unresolvable structure at the very centre does not count (the Fe table of the tests: 5 Ry at 0.03 bohr)
+        iron = read_parsec_pseudopotential(_DATA / "spin_pbe_Fe_POTRE.DAT")
+        self.assertLess(core_departure(iron, 0, filtered_local_table(iron, 0, 0.16, 6)), COARSE_NOTE_LIMIT)
+        specification = {"H": SpeciesPotential(_DATA / "water_H_POTRE.DAT", 0)}
+        for spacing, noted in ((0.6, True), (0.3, False)):
+            grid = SimpleNamespace(spacing=spacing, settings=SimpleNamespace(stencil_half_width=6, double_grid_order=1))
+            with _setting("all"):
+                (result,) = apply_local_filters({"H": hydrogen}, specification, grid).values()
+            self.assertEqual("grid is coarse" in result.local_filter_note, noted)
+            # it changes no number: the table is the filtered table either way
+            np.testing.assert_array_equal(result.filtered_local_potentials[0],
+                                          filtered_local_table(hydrogen, 0, spacing, 6))
+
 
 class ImageReachTests(unittest.TestCase):
     def test_wire_and_slab_images_reach_the_filtered_onset(self) -> None:

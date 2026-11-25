@@ -165,6 +165,19 @@ class SectorMetaGeometry:
         self._devices: dict[Any, Any] = {}
         self._lock = threading.Lock()
 
+    def __getstate__(self) -> dict:
+        """The host data of the geometry, without its lock and device copies (a worker process of the k-point sectors,
+        ``SCF/kpoint_processes.py``, receives it once and makes the copies of its own device)."""
+
+        state = dict(self.__dict__)
+        state.pop("_lock", None)
+        state["_devices"] = {}
+        return state
+
+    def __setstate__(self, state: dict) -> None:
+        self.__dict__.update(state)
+        self._lock = threading.Lock()
+
     def k_shifts(self, k_point) -> np.ndarray:
         """``k'_a = q_a . k``, zero on the directions whose target is another sector (checked to be round-off)."""
 

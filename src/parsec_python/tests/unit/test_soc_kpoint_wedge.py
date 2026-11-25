@@ -310,16 +310,22 @@ class ParserTests(_Directory):
     def test_the_note_of_scalar_and_hybrid_meshes(self) -> None:
         scalar = self.parse(_text(extra="", so_psp=".false."))
         self.assertIn("reduced to its irreducible wedge by 6 operations of the space group and time reversal", self.note(scalar))
-        # PARSEC_HYBRID_KPOINT_WEDGE=on: a hybrid single point takes the wedge of the scalar orbitals; auto (the
-        # default since 2026-11-20) the pairs of off for its semilocal start, with that wedge kept aside for the Fock
-        # loop of an insulating start; off keeps the time-reversal pairs and names the switch
+        # PARSEC_HYBRID_KPOINT_WEDGE=on (the default since 2026-11-23): a hybrid single point takes the wedge of the
+        # scalar orbitals; auto (the default from 2026-11-20 to 2026-11-22) the pairs of off for its semilocal start,
+        # with that wedge kept aside for the Fock loop of an insulating start; off keeps the time-reversal pairs and
+        # names the switch
+        default = self.parse(_text(extra="", so_psp=".false.", xc="PBE0"))
         with mock.patch.dict(os.environ, {"PARSEC_HYBRID_KPOINT_WEDGE": "on"}):
             hybrid = self.parse(_text(extra="", so_psp=".false.", xc="PBE0"))
-        self.assertTrue(hybrid.problem.hybrid_kpoint_wedge)
-        self.assertEqual(hybrid.problem.space_group.order, scalar.problem.space_group.order)
-        self.assertEqual(len(kpoint_sampling(hybrid.problem)[0]), len(kpoint_sampling(scalar.problem)[0]))
-        self.assertIn("the exchange of the hybrid functional sums over the whole mesh through the images", self.note(hybrid))
-        deferred = self.parse(_text(extra="", so_psp=".false.", xc="PBE0"))
+        for translation in (default, hybrid):
+            self.assertTrue(translation.problem.hybrid_kpoint_wedge)
+            self.assertEqual(translation.problem.space_group.order, scalar.problem.space_group.order)
+            self.assertEqual(len(kpoint_sampling(translation.problem)[0]), len(kpoint_sampling(scalar.problem)[0]))
+            self.assertIn(
+                "the exchange of the hybrid functional sums over the whole mesh through the images", self.note(translation)
+            )
+        with mock.patch.dict(os.environ, {"PARSEC_HYBRID_KPOINT_WEDGE": "auto"}):
+            deferred = self.parse(_text(extra="", so_psp=".false.", xc="PBE0"))
         self.assertFalse(deferred.problem.hybrid_kpoint_wedge)
         self.assertEqual(deferred.problem.hybrid_kpoint_wedge_deferred.group.order, scalar.problem.space_group.order)
         self.assertEqual(len(kpoint_sampling(deferred.problem)[0]), 36)

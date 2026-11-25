@@ -227,9 +227,10 @@ def _cartesian_operation(frame, matrix, shift, steps):
     ``tau = -R^-1 t``, ``None`` without a translation).
 
     ``matrix`` and ``shift`` (grid steps) as the reduction holds them: Cartesian, the steps of the axes of a box giving
-    ``t = shift * steps``; or, for an oblique cell in the frame of its grid indices (``frame``), the signed
-    permutation ``W`` of the indices, ``R = S W S^-1`` and ``t = S shift`` (``S`` the steps of the grid axes as
-    columns), so that ``tau = -S W^T shift``."""
+    ``t = shift * steps``; or, for an oblique cell in the frame of its grid indices (``frame``), the integer matrix
+    ``W`` of the indices, ``R = S W S^-1`` and ``t = S shift`` (``S`` the steps of the grid axes as columns), so that
+    ``tau = -S W^-1 shift``: ``W^T`` for a signed permutation, the integer inverse of an operation of
+    ``PARSEC_OBLIQUE_FULL_GROUP`` that is none (a three-fold axis of a hexagonal or cubic cell)."""
 
     matrix = np.asarray(matrix, dtype=np.float64)
     moved = shift is not None and np.any(np.asarray(shift) != 0)
@@ -237,7 +238,10 @@ def _cartesian_operation(frame, matrix, shift, steps):
         translation = -matrix.T @ (np.asarray(shift, dtype=np.float64) * steps) if moved else None
         return matrix.copy(), translation
     rotation = frame.cartesian(matrix)
-    translation = -(frame.steps @ (matrix.T @ np.asarray(shift, dtype=np.float64))) if moved else None
+    absolute = np.abs(matrix)
+    signed = bool(np.all(absolute.sum(axis=0) == 1) and np.all(absolute.sum(axis=1) == 1))
+    inverse = matrix.T if signed else np.rint(np.linalg.inv(matrix))
+    translation = -(frame.steps @ (inverse @ np.asarray(shift, dtype=np.float64))) if moved else None
     return rotation, translation
 
 

@@ -44,40 +44,61 @@ QE at 200 Ry, dual 8. PBE:
 
 | mesh | E this code (Ry/cell) | E QE (Ry/cell) | difference (Ry) | gap this code (eV) | gap QE (eV) | dgap (meV) |
 |---|---|---|---|---|---|---|
-| 2x2x2 | -15.57492092 | -15.57491928 | -1.64e-06 | 0.6102 | 0.6102 | +0.0 |
-| 4x4x4 | -15.74871900 | -15.74871754 | -1.46e-06 | 0.7002 | 0.7002 | +0.0 |
+| 2x2x2 | -15.57491210 | -15.57491928 | +7.18e-06 | 0.6102 | 0.6102 | -0.0 |
+| 4x4x4 | -15.74871176 | -15.74871754 | +5.78e-06 | 0.7002 | 0.7002 | -0.0 |
 
-The logs are of 23 November 2026, whose default integrates the Kleinman-Bylander energies exactly on the logarithmic
-mesh (Simpson's value to 1e-12 relative, as QE): the PBE totals lie 1.6e-6 and 1.5e-6 Ry per cell below QE's.
-PARSEC's trapezoid on that mesh, with which the logs before that date were made (`PARSEC_KB_QUADRATURE=trapezoid`;
-with `PARSEC_FHI_ORIGIN=off`, or with `PARSEC_FORTRAN_NUMERICS=on`, the totals of those logs to the printed digits),
-puts them 3.34e-4 and 3.40e-4 Ry lower (-15.57525517 and -15.74905936 Ry), as QE with those coefficients moves by
--3.3e-4 to -3.6e-4 Ry per cell (`qe/README.md`). In E - E_PBE it cancels to 3 microRy: the meta-GGA rows below moved
-by at most 0.003 mRy, the gaps by at most 0.1 meV. Meta-GGAs, E - E_PBE in mRy per cell:
+The logs are of 24 November 2026. Their defaults integrate the Kleinman-Bylander energies exactly on the logarithmic
+mesh (Simpson's value to 1e-12 relative, as QE) and Fourier-filter the local potential and the projectors to the grid
+(`PARSEC_LOCAL_FILTER=all`, the default since 23 November 2026): the PBE totals lie 7.2e-6 and 5.8e-6 Ry per cell
+above QE's. With the tables of the file (`PARSEC_LOCAL_FILTER=off`, the logs of 23 November 2026, reproduced to the
+printed digits on the same tree) they lay 1.6e-6 and 1.5e-6 Ry below: the filter raises the totals by 8.8e-6 and
+7.2e-6 Ry per cell at this spacing and placement, changes E - E_PBE of the meta-GGAs by at most 0.003 mRy, and
+leaves the gaps (within 0.1 meV) and the SCF iterations as they were. PARSEC's trapezoid on the logarithmic mesh, with which the logs
+before 23 November 2026 were made, puts the totals 3.34e-4 and 3.40e-4 Ry lower (`PARSEC_KB_QUADRATURE=trapezoid`
+on the defaults), as QE with those coefficients moves by -3.3e-4 to -3.6e-4 Ry per cell (`qe/README.md`);
+`PARSEC_FORTRAN_NUMERICS=on`, which takes the trapezoid and the file's tables together with PARSEC 1.5's other
+numerics, gives the totals of those logs to the printed digits (-15.57525517 and -15.74905936 Ry). In E - E_PBE the
+trapezoid cancels to 3 microRy: the meta-GGA rows below moved by at most 0.003 mRy, the gaps by at most 0.1 meV.
+Meta-GGAs, E - E_PBE in mRy per cell:
 
 | functional | mesh | E - E_PBE this code (mRy) | E - E_PBE QE (mRy) | this code - QE (mRy) | gap this code (eV) | gap QE (eV) | dgap (meV) | SCF iterations | gradient form |
 |---|---|---|---|---|---|---|---|---|---|
-| SCAN | 2x2x2 | -7.775 | -7.687 | -0.087 | 0.7954 | 0.7932 | +2.2 | 18 | orbital |
-| SCAN | 4x4x4 | -9.585 | -9.443 | -0.142 | 0.9653 | 0.9605 | +4.8 | 17 | orbital |
-| r2SCAN | 2x2x2 | +0.409 | +0.516 | -0.107 | 0.7651 | 0.7648 | +0.3 | 15 | orbital |
-| r2SCAN | 4x4x4 | -5.978 | -5.888 | -0.090 | 0.8564 | 0.8560 | +0.4 | 16 | orbital |
+| SCAN | 2x2x2 | -7.777 | -7.687 | -0.089 | 0.7954 | 0.7932 | +2.2 | 18 | orbital |
+| SCAN | 4x4x4 | -9.588 | -9.443 | -0.145 | 0.9653 | 0.9605 | +4.8 | 17 | orbital |
+| r2SCAN | 2x2x2 | +0.407 | +0.516 | -0.109 | 0.7651 | 0.7648 | +0.3 | 15 | orbital |
+| r2SCAN | 4x4x4 | -5.981 | -5.888 | -0.092 | 0.8563 | 0.8560 | +0.3 | 16 | orbital |
 | TPSS | 2x2x2 | +14.548 | +14.650 | -0.102 | 0.9631 | 0.9628 | +0.3 | 18 | density |
-| TPSS | 4x4x4 | +20.197 | +20.288 | -0.091 | 0.8712 | 0.8709 | +0.3 | 17 | density |
+| TPSS | 4x4x4 | +20.197 | +20.288 | -0.091 | 0.8711 | 0.8709 | +0.2 | 17 | density |
 
-E - E_PBE agrees within 0.09 to 0.14 mRy per cell, which is QE's own scatter of the meta-GGA totals between 120 and
-250 Ry (+-0.15 mRy per cell, `qe/README.md`); the gaps of r2SCAN and TPSS within 0.4 meV, SCAN's within 2 to 5 meV
+E - E_PBE agrees within 0.09 to 0.15 mRy per cell, which is QE's own scatter of the meta-GGA totals between 120 and
+250 Ry (+-0.15 mRy per cell, `qe/README.md`); the gaps of r2SCAN and TPSS within 0.3 meV, SCAN's within 2 to 5 meV
 (SCAN's grid sensitivity, see `../0d_meta_gga/README.md`; QE's SCAN gap moves by 1-2 meV with its cutoff). At
-h = 0.16 bohr the differences are the same to 0.08 mRy (r2SCAN -0.10 and -0.09, SCAN -0.16 and -0.11 mRy).
+h = 0.16 bohr the differences are the same to 0.08 mRy (r2SCAN -0.10 and -0.09, SCAN -0.16 and -0.10 mRy).
 
 ## TPSS at the Gamma point alone
 
 In a cell sampled at the Gamma point alone, every occupied orbital can have a zero gradient at the same grid points
 (in Si the bond centres, at the density maximum), where `tau` and `sigma` vanish together. TPSS-type functionals
-(`z = tau_W/tau`; the density form of the gradient under `auto`) may then stall or diverge: Si at Gamma stalls at an
-SRE of 7e-3 at h = 0.25 bohr and diverges at h = 0.4, whatever `LibXC_Tau_Threshold` and `LibXC_Enforce_FHC` say.
-Use a k-mesh (the 2x2x2 and 4x4x4 rows above converge in 17 and 18 iterations), or the orbital form
-(`PARSEC_META_GGA_GRADIENT=orbital`: 125 and 173 iterations at h = 0.25 and 0.16 bohr, E - E_PBE within 0.05 and
-0.25 mRy of QE, the gap within 26 and 7 meV). SCAN and r2SCAN, written with `alpha`, are not affected.
+(`z = tau_W/tau`; the density form of the gradient under `auto`) may then stall or diverge, whatever
+`LibXC_Tau_Threshold` and `LibXC_Enforce_FHC` say, and the orbital form (`PARSEC_META_GGA_GRADIENT=orbital`) does
+not converge reliably either. The `tpss` input of `Si_k222` with `Monkhorst_Pack_Grid 1 1 1` (`main.py`, `Max_Iter
+200`, `Convergence_Criterion 1e-6 Ry`; A100, 24 November 2026):
+
+- density form: at h = 0.25 bohr the SCF stalls (SRE between 4.5e-3 and 1.7e-1 in the last 100 of 200 iterations);
+  at h = 0.40 it converges in 21 iterations.
+- orbital form: not converged in 200 iterations at h = 0.25 bohr (SRE 1.7e-5 to 3.6e-4 in the last 100) nor at
+  h = 0.16 (3.1e-6 to 6.7e-5); at the last iteration E - E_PBE lies +0.18 and -0.25 mRy from QE's
+  (-43.673 mRy, QE 7.5 at Gamma) and the gap 43 and 6 meV below QE's 3.801 eV.
+
+The k-point loop of the check script below (`--kmesh 1 --functional tpss`, the same settings) behaves alike: the
+density form stalls at h = 0.25 and diverges at h = 0.40 (the energy jumps to some +200 Ry within ten iterations),
+the orbital form ends its 200 iterations at an SRE of 1.2e-4 (h = 0.25) and 4.4e-6 (h = 0.16, after transient
+blow-ups of the energy). The same holds with the tables of the file (`PARSEC_LOCAL_FILTER=off`), and for the code of
+8 November 2026, with which this section was first written: on both routes its orbital form also ended 200
+iterations unconverged (at h = 0.25 the check script reached an SRE of 1.8e-6, E - E_PBE within 0.05 mRy of QE's and
+the gap 25 meV below it), so the iteration counts given then (125 and 173) are not reproduced; small numerical
+changes move such a loop between stalling and converging. Use a k-mesh: the 2x2x2 and 4x4x4 rows above converge in
+17 and 18 iterations. SCAN and r2SCAN, written with `alpha`, are not affected.
 
 ## Costs
 
@@ -87,17 +108,24 @@ memory of the process):
 
 | mesh | irreducible k-points | functional | SCF iterations | wall (s) | peak device memory (GiB) |
 |---|---|---|---|---|---|
-| 2x2x2 | 3 | PBE | 12 | 8.9 | 0.7 |
-| 2x2x2 | 3 | SCAN | 18 | 17.2 | 0.8 |
-| 2x2x2 | 3 | r2SCAN | 15 | 14.9 | 0.8 |
-| 2x2x2 | 3 | TPSS | 18 | 15.5 | 0.8 |
-| 4x4x4 | 8 | PBE | 11 | 11.2 | 0.8 |
-| 4x4x4 | 8 | SCAN | 17 | 22.6 | 1.0 |
-| 4x4x4 | 8 | r2SCAN | 16 | 21.1 | 1.0 |
-| 4x4x4 | 8 | TPSS | 17 | 21.0 | 1.0 |
+| 2x2x2 | 3 | PBE | 12 | 6.3 | 0.7 |
+| 2x2x2 | 3 | SCAN | 18 | 14.0 | 0.9 |
+| 2x2x2 | 3 | r2SCAN | 15 | 12.3 | 0.9 |
+| 2x2x2 | 3 | TPSS | 18 | 13.0 | 0.9 |
+| 4x4x4 | 8 | PBE | 11 | 9.9 | 0.9 |
+| 4x4x4 | 8 | SCAN | 17 | 21.2 | 1.0 |
+| 4x4x4 | 8 | r2SCAN | 16 | 19.6 | 1.0 |
+| 4x4x4 | 8 | TPSS | 17 | 19.6 | 1.0 |
 
 The orbital terms of a meta-GGA (`tau` of the orbitals of every k-point and `-div(vtau grad)` in every Bloch
-Hamiltonian) and the evaluation of libxc on the GPU make a meta-GGA run 1.7 to 2.0 times as long as PBE here.
+Hamiltonian) and the evaluation of libxc on the GPU make a meta-GGA run 2.0 to 2.2 times as long as PBE here. The
+logs (24 November 2026) are 1.3 to 3.2 s shorter than those of 23 November 2026 (8.9 to 22.6 s): the finiteness
+checks on the device no longer compile CUB reductions on a first run, and the kernels of a run are compiled ahead on
+background threads (`PARSEC_CUPY_COMPILE_AHEAD=auto`, since 24 November 2026; with `off` these inputs take 0.3 to
+1.2 s longer, A100, 24 November 2026), while the projectors filtered to the grid (`PARSEC_LOCAL_FILTER=all`) make
+each application of a Bloch Hamiltonian a little dearer. The k-point loop of these meta-GGAs takes no symmetry
+sectors: since 23 November 2026 a meta-GGA may solve them (`PARSEC_KPOINT_SECTOR_META_GGA=auto`), but they need a
+bulk orthorhombic box of points, and the grid of this fcc cell is not one (the logs say so).
 
 ## The check script
 

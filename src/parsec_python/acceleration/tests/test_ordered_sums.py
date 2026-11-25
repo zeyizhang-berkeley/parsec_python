@@ -38,6 +38,40 @@ class SettingTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 ordered_sums_setting()
 
+    def test_the_long_row_switch(self) -> None:
+        from parsec_python.acceleration.Hamiltonian.complex_csr_device import long_row_split_setting
+
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("PARSEC_LONG_ROW_SPLIT", None)
+            self.assertEqual(long_row_split_setting(), "auto")
+        for value in ("auto", "off", " OFF "):
+            with mock.patch.dict(os.environ, {"PARSEC_LONG_ROW_SPLIT": value}):
+                self.assertEqual(long_row_split_setting(), value.strip().lower())
+        with mock.patch.dict(os.environ, {"PARSEC_LONG_ROW_SPLIT": "on"}):
+            with self.assertRaises(ValueError):
+                long_row_split_setting()
+
+    def test_the_chunks_of_the_rows(self) -> None:
+        """Every entry of a row in exactly one chunk, in order; a row of at most ``chunk`` entries is one chunk (an
+        empty one too); no chunks where no row is longer than ``chunk``."""
+
+        from parsec_python.acceleration.Hamiltonian.complex_csr_device import row_chunks
+
+        lengths = np.array([0, 5, 8, 9, 23, 1, 16, 0])
+        indptr = np.concatenate(([0], np.cumsum(lengths)))
+        begin, end, starts = row_chunks(indptr, chunk=8)
+        self.assertEqual(starts.dtype, np.int32)
+        np.testing.assert_array_equal(starts, [0, 1, 2, 3, 5, 8, 9, 11, 12])
+        for row in range(lengths.size):
+            pieces = list(zip(begin[starts[row]:starts[row + 1]], end[starts[row]:starts[row + 1]]))
+            covered = [p for b, e in pieces for p in range(b, e)]
+            self.assertEqual(covered, list(range(indptr[row], indptr[row + 1])))
+            self.assertTrue(all(e - b <= 8 for b, e in pieces))
+            if lengths[row] <= 8:
+                self.assertEqual(len(pieces), 1)
+        self.assertIsNone(row_chunks(np.array([0, 8, 16, 16]), chunk=8))
+        self.assertIsNone(row_chunks(np.array([0]), chunk=8))
+
 
 @unittest.skipUnless(cupy_available(), "CUDA runtime is unavailable")
 class DeviceTests(unittest.TestCase):
@@ -94,6 +128,77 @@ class DeviceTests(unittest.TestCase):
                         np.testing.assert_allclose(
                             cp.asnumpy(target), block + expected, rtol=0, atol=1.0e-14 * scale, err_msg=label
                         )
+
+    def test_long_rows_in_chunks(self) -> None:
+        """``PARSEC_LONG_ROW_SPLIT=auto`` against ``off`` and SciPy, for :class:`OrderedCSR` and
+        :class:`DeviceComplexCSR`: the same product within round-off, the same bits in every repeat, the bits of
+        ``off`` for rows of at most one chunk and for a matrix of no longer row, and accumulation."""
+
+        import cupy as cp
+        import cupyx.scipy.sparse as cps
+        import scipy.sparse as sp
+
+        from parsec_python.acceleration.Hamiltonian.complex_csr_device import (
+            LONG_ROW_CHUNK,
+            DeviceComplexCSR,
+            OrderedCSR,
+        )
+
+        rng = np.random.default_rng(11)
+        columns = 40000
+        # rows of no, short, one chunk exactly, one entry more and many chunks (the adjoint of filtered projectors)
+        lengths = [0, 300, LONG_ROW_CHUNK, LONG_ROW_CHUNK + 1, 5000, 23000, 31000]
+        pieces = []
+        for length in lengths:
+            row = np.zeros(columns)
+            row[np.sort(rng.choice(columns, size=length, replace=False))] = rng.normal(size=length)
+            pieces.append(row)
+        dense = np.array(pieces)
+        short = np.flatnonzero(np.array(lengths) <= LONG_ROW_CHUNK)
+        for complex_matrix in (False, True):
+            values = dense + (1j * dense * rng.normal(size=dense.shape) if complex_matrix else 0.0)
+            host = sp.csr_matrix(values)
+            for kind in ("ordered", "device"):
+                if kind == "device" and not complex_matrix:
+                    continue
+                matrices = {}
+                for split in ("off", "auto"):
+                    with mock.patch.dict(os.environ, {"PARSEC_LONG_ROW_SPLIT": split}):
+                        matrices[split] = (
+                            OrderedCSR(cps.csr_matrix(host)) if kind == "ordered" else DeviceComplexCSR(cp, host)
+                        )
+                for count in (1, 9, 17):
+                    block = rng.normal(size=(columns, count))
+                    if complex_matrix or kind == "ordered":
+                        block = block + 1j * rng.normal(size=(columns, count))
+                    device = cp.asarray(block)
+                    expected = host @ block
+                    # the round-off of a sum of many terms scales with the sum of their moduli, not with the result
+                    scale = float(np.max(abs(host) @ np.abs(block)))
+                    label = f"{kind} complex {complex_matrix} columns {count}"
+                    off = matrices["off"].product(device)
+                    auto = matrices["auto"].product(device)
+                    np.testing.assert_allclose(cp.asnumpy(auto), expected, rtol=0, atol=1.0e-14 * scale, err_msg=label)
+                    np.testing.assert_allclose(cp.asnumpy(off), expected, rtol=0, atol=1.0e-14 * scale, err_msg=label)
+                    self.assertTrue(bool(cp.array_equal(auto[short], off[short])), label)
+                    for _ in range(5):
+                        self.assertTrue(bool(cp.array_equal(matrices["auto"].product(device), auto)), label)
+                    target = cp.array(auto)
+                    matrices["auto"].product(device, target, accumulate=True)
+                    np.testing.assert_allclose(cp.asnumpy(target), 2.0 * expected, rtol=0, atol=2.0e-14 * scale,
+                                               err_msg=label)
+        # no row longer than a chunk: the kernel of off and its bits
+        host = sp.random(20, 30000, density=0.01, format="csr", random_state=6)
+        host = (host + 1j * sp.random(20, 30000, density=0.01, format="csr", random_state=7)).tocsr()
+        self.assertLessEqual(int(np.diff(host.indptr).max()), LONG_ROW_CHUNK)
+        block = cp.asarray(rng.normal(size=(30000, 9)) + 1j * rng.normal(size=(30000, 9)))
+        products = []
+        for split in ("off", "auto"):
+            with mock.patch.dict(os.environ, {"PARSEC_LONG_ROW_SPLIT": split}):
+                products.append(OrderedCSR(cps.csr_matrix(host)).product(block))
+                products.append(DeviceComplexCSR(cp, host).product(block))
+        self.assertTrue(bool(cp.array_equal(products[0], products[2])))
+        self.assertTrue(bool(cp.array_equal(products[1], products[3])))
 
     def test_the_backend_follows_the_switch(self) -> None:
         import cupyx.scipy.sparse as cps

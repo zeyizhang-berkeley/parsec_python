@@ -581,9 +581,11 @@ class FHIOriginTests(unittest.TestCase):
         np.testing.assert_array_equal(local_potential_derivative_table(off, 2)[off.radii <= 3e-4], 0.0)
         # the LDA+U lookup takes the interval of the radii of a continued table (the index of a Martins mesh picks
         # the one below for a share a/(b r) of the distances: 9.8 % in 0.05 to 1.5 bohr for the file's carbon)
+        # (the linear interpolation of upot.F90: PARSEC_LDAU_SMOOTH_PROJECTORS=off; the default is the smooth projector)
         distances = np.linspace(0.05, 1.5, 2001)
         for potential, exact in ((auto, True), (off, False)):
-            values, _ = interpolate_hubbard_radial(potential, distances)
+            with mock.patch.dict(os.environ, {"PARSEC_LDAU_SMOOTH_PROJECTORS": "off"}):
+                values, _ = interpolate_hubbard_radial(potential, distances)
             radii = np.concatenate(([0.0], potential.radii))
             radial = np.concatenate(([0.0], potential.radial_wavefunctions[2] / potential.radii))
             reference = np.interp(distances, radii, radial)

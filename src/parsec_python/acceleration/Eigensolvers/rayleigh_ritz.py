@@ -10,6 +10,7 @@ import numpy as np
 from scipy.linalg import solve_triangular
 
 from ..backends.cupy import device_stage, require_cupy
+from ..backends.device_checks import all_finite
 from .handover import (
     HANDOVER_MODES,
     HandoverStep,
@@ -995,7 +996,7 @@ def _device_overlap_condition(overlap: Any) -> float:
 
     cp, _ = require_cupy()
     policy = _condition_policy(on_device=True)
-    if policy == "symmetric" and bool(cp.isfinite(overlap).all().item()):
+    if policy == "symmetric" and all_finite(overlap):
         try:
             with cupyx.errstate(linalg="raise"):
                 values = cp.asnumpy(cp.linalg.eigvalsh(overlap))
@@ -1257,7 +1258,7 @@ def solve_whitened_ritz_on_device(
             # The triangular solves report nothing.  A non-finite whitened
             # matrix is rejected here, before cuSOLVER, as the host
             # eigensolver or the audit rejects it.
-            if not bool(cp.isfinite(whitened).all().item()):
+            if not all_finite(whitened):
                 raise np.linalg.LinAlgError("whitened projection is not finite")
             # cuSOLVER reads the lower triangle of the whitened matrix only.
             if eigensolver is not None:
@@ -1419,7 +1420,7 @@ def solve_whitened_handover_on_device(
                 left_projected.T,
                 lower=True,
             ).T
-            if not bool(cp.isfinite(whitened).all().item()):
+            if not all_finite(whitened):
                 raise np.linalg.LinAlgError("whitened projection is not finite")
             if mode == "triangular":
                 eigenvalues, whitened_vectors = cp.linalg.eigh(whitened)

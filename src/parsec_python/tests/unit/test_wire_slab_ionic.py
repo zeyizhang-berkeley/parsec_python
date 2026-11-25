@@ -441,7 +441,18 @@ class PostProcessingTests(unittest.TestCase):
             "begin Kpoint_List\n 0.0 0.0 0.0 1.0\n 0.5 0.0 0.0 1.0\nend Kpoint_List\n"
             "Eigensolver: chebdav\nDiag_Tolerance: 1e-10\n"
         )
-        self.assertEqual(self.run_cli(self.write(extra=kpoints)), 0)
+
+        def write(extra):
+            # h 0.45: at h 0.6 the grid is far too coarse for this H table; both forms of the table carry 0.17-0.19 Ry
+            # too much at X there, which the aliasing of the file's table cancelled, and with the table filtered to
+            # the grid (the default) the gap closes and the two k-points slosh (124 SCF steps into a metallic state
+            # 0.20 Ry above the converged grid); at h 0.45 both forms take 11 steps, the filtered one the closer
+            path = self.write(extra=extra)
+            path.write_text(path.read_text(encoding="utf-8").replace("Grid_Spacing: 0.6", "Grid_Spacing: 0.45"),
+                            encoding="utf-8")
+            return path
+
+        self.assertEqual(self.run_cli(write(kpoints)), 0)
         data = read_parsec_dat(self.directory / "parsec.dat", wavefunctions=False)
         self.assertEqual(int(data.system_type[2]), 3)  # stype(3): slab
         self.assertEqual(data.rmax, 5.0)
@@ -451,7 +462,7 @@ class PostProcessingTests(unittest.TestCase):
         energy = [line for line in first.splitlines() if "Total Energy =" in line][-1]
         # Restart_Run: the stored potential converges at once.
         restart = kpoints + "Restart_Run: .true.\nFF_Maxiter: 9\nChebdav_Degree: 40\n"
-        self.assertEqual(self.run_cli(self.write(extra=restart)), 0)
+        self.assertEqual(self.run_cli(write(restart)), 0)
         second = (self.directory / "parsec.out").read_text()
         self.assertIn("Restarted Run - from parsec.dat", second)
         self.assertLessEqual(second.count("SRE of pot."), 3)
@@ -462,7 +473,7 @@ class PostProcessingTests(unittest.TestCase):
             "nscf_kpoint_unit: reciprocal_lattice_vectors\nbegin nscf_kpoints\n"
             " 0.0 0.0 0.0 1.0\n 0.5 0.0 0.0 1.0\nend nscf_kpoints\n"
         )
-        self.assertEqual(self.run_cli(self.write(extra=nscf)), 0)
+        self.assertEqual(self.run_cli(write(nscf)), 0)
         self.assertIn("NSCF calculation done", (self.directory / "parsec.out").read_text())
         with self.assertRaisesRegex(Exception, "confined"):
             parse_parsec_input(
