@@ -277,6 +277,32 @@ energy of the superposed atoms with the finite-difference gradient lies
 1.7e-3 Ry above that with their exact gradient at h = 0.31 bohr (order 6),
 4.9e-4 at order 12, 3.7e-4 at h = 0.207 and 8.6e-5 at h = 0.155.
 
+`PARSEC_GGA_NUCLEAR_GRADIENT` (opt-in, `V_xc/nuclear_gradient.py`; the
+switch table of `acceleration/README.md`) differentiates the atomic part of
+the density exactly: the gradient is `D n + grad M - D M`, with `M` the
+superposed spherical atomic densities of the tables tapered to zero between
+2.5 and 4.5 bohr (`on`: every atom; `auto`: the atoms of the species with a
+deep hole at the nucleus, the valence d and f shells). The correction
+depends on the positions, so the energy has a term of its own in the
+forces, `F_a = 2 h^3 sum_i [u_i . Hess m_a(x_i) - (D^T u)_i grad m_a(x_i)]`
+with `u = 2 df/dsigma g`, which every force route adds
+(`ForceResult.nuclear_gradient`; a spin channel takes the share `n_s / n`
+of the correction). The energy is then smooth at the grid
+point: Au on a grid point, the slope over 1e-3 and 2e-3 bohr against the
+force, Au2 cluster PBE 5.3e-8 and 1.5e-7 Ry/bohr (finite-difference
+gradient 1.74e-4 and 3.2e-4), Au2 cell 1.1e-7 and 4.2e-7 (1.1e-4 and
+2.5e-5); at 2e-5 and 4e-5 bohr within 2.4e-8 (the cluster) and 1.6e-6 (the
+cell, the precision of its energy) (A100,
+`f_au2_nuc*`, `f_au2c_nuc*` of the consistency matrix). It is not the
+default: it does not make the energy more accurate. The SCF totals of Au2,
+Ag2, Cu2, fcc Cu, fcc Au and Si8 (PBE, order 12) against those at
+h = 0.15 bohr come nearer at some spacings between 0.35 and 0.2 bohr and
+move away at others (Ag2 at 0.35 bohr 4.0e-3 -> 8.0e-3 Ry, Cu2 -0.190 ->
+-0.173 Ry), CO moves away at every spacing when every atom takes it, and
+the spread of the total over six shifts of the grid at h = 0.3 bohr grows
+for Au2 (4.9e-3 -> 5.2e-3 Ry), Ag2, H2O, CO and CH4 and shrinks for Cu2
+(3.1e-2 -> 2.5e-2 Ry).
+
 The radial derivatives are the tables of `pseudo.f90`
 (`Pseudopotential/radial_derivatives.py`): an 18th-order central difference
 on the logarithmic grid, the local potential tabulated as `r^2 dV/dr` with

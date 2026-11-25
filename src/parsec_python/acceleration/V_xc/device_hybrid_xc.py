@@ -29,6 +29,7 @@ import numpy as np
 
 from parsec_python.V_xc import XCResult
 from parsec_python.V_xc.ca_lda_spin import SpinXCResult
+from parsec_python.V_xc.nuclear_gradient import share_potentials, spin_shares
 from parsec_python.V_xc.semilocal_components import ComponentSemilocal
 
 from . import device_xc
@@ -224,7 +225,9 @@ def device_hybrid_supported(functional, grid) -> bool:
 class _HybridEvaluatorBase(_DeviceEvaluatorBase):
     """Device, kernels, geometry and the frozen core density of a hybrid's semilocal part."""
 
-    def __init__(self, functional, grid, *, core_density=None, reducer=None, device_id=None) -> None:
+    def __init__(
+        self, functional, grid, *, core_density=None, reducer=None, device_id=None, nuclear_gradient=None
+    ) -> None:
         from ..backends.cupy import require_cupy
 
         if not device_grid_supported(grid):
@@ -242,6 +245,8 @@ class _HybridEvaluatorBase(_DeviceEvaluatorBase):
         self._core_source = core_density if callable(core_density) else (lambda: core_density)
         self._core_host = None
         self._core_device = None
+        # PARSEC_GGA_NUCLEAR_GRADIENT
+        self._nuclear_source = nuclear_gradient
         reduction = None if reducer is None else reducer.reduction
         with cp.cuda.Device(self.device_id):
             self._kernels = evaluator_kernels(
@@ -292,6 +297,9 @@ class DeviceHybridXCEvaluator(_HybridEvaluatorBase):
             count = self.size
             kernels = self._kernels
             gradient = self.geometry.gradient(cp, kernels, density)
+            nuclear = self._nuclear()
+            if nuclear is not None:
+                gradient += nuclear
             energy_density = cp.empty(count, dtype=np.float64)
             epsilon = cp.empty(count, dtype=np.float64)
             f_n = cp.empty(count, dtype=np.float64)
@@ -349,6 +357,12 @@ class DeviceSpinHybridXCEvaluator(_HybridEvaluatorBase):
             kernels = self._kernels
             gradient_up = self.geometry.gradient(cp, kernels, up)
             gradient_down = self.geometry.gradient(cp, kernels, down)
+            nuclear = self._nuclear()
+            if nuclear is not None:
+                # the share n_s / n of each channel (parsec_python.V_xc.nuclear_gradient.spin_shares)
+                w_up, w_down = spin_shares(up, down, cp)
+                gradient_up += w_up * nuclear
+                gradient_down += w_down * nuclear
             energy_density = cp.empty(count, dtype=np.float64)
             f_up = cp.empty(count, dtype=np.float64)
             f_down = cp.empty(count, dtype=np.float64)
@@ -370,6 +384,10 @@ class DeviceSpinHybridXCEvaluator(_HybridEvaluatorBase):
                 flux_down,
             )
             del gradient_up, gradient_down
+            if nuclear is not None:
+                extra_up, extra_down = share_potentials(up, down, nuclear, flux_up, flux_down, cp)
+                f_up += extra_up
+                f_down += extra_down
             potential_up = self.geometry.adjoint(cp, kernels, flux_up, f_up, 2.0)
             potential_down = self.geometry.adjoint(cp, kernels, flux_down, f_down, 2.0)
             total_energy = self._integral(energy_density)

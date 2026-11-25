@@ -30,6 +30,7 @@ def _settings():
     """The setting function of every switch of the umbrella."""
 
     from parsec_python.Forces.wire_slab import wire_slab_gaussian_force_setting, wire_slab_gaussian_setting
+    from parsec_python.Grid.cluster import sphere_ties_setting
     from parsec_python.Hartree.variational import hartree_variational_setting
     from parsec_python.Input.parsec_input import cubic_spline_default_setting
     from parsec_python.Hamiltonian.hubbard import ldau_smooth_projectors_fraction
@@ -44,6 +45,7 @@ def _settings():
     from parsec_python.SCF.wire_slab import gaussian_solve_setting
     from parsec_python.V_ion.ionic_potential import projector_center_setting
     from parsec_python.V_xc.ca_lda import ca_continuity_setting
+    from parsec_python.V_xc.nuclear_gradient import nuclear_gradient_setting
 
     table = {
         "PARSEC_CUBIC_SPLINE_DEFAULT": (cubic_spline_default_setting, "on"),
@@ -66,6 +68,8 @@ def _settings():
         "PARSEC_LOCAL_FILTER": (local_filter_setting, "all"),
         # ldau_smooth_projectors_fraction returns the width of the taper, 0.0 for off
         "PARSEC_LDAU_SMOOTH_PROJECTORS": (ldau_smooth_projectors_fraction, 0.2),
+        "PARSEC_SPHERE_TIES": (sphere_ties_setting, "symmetric"),
+        "PARSEC_GGA_NUCLEAR_GRADIENT": (nuclear_gradient_setting, "off"),
     }
     return table
 

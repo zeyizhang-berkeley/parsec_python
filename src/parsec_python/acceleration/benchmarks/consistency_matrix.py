@@ -16,14 +16,17 @@ repository, so that the matrix can be run unchanged on any later tree.  Groups:
     mesh, two slabs (one under PARSEC_HARTREE_VARIATIONAL=off) and a wire; spin, spin-orbit (a Gamma cell, and since
     308edad4e AuH and Au2 clusters on the device, on the whole grid and in their double-group sectors) and LDA+U;
     SCAN in the weighted sectors of a Gamma-point cell (added after 308edad4e); Au with PBE on a grid point at steps
-    of 2e-5 and 4e-5 bohr (``FINE_STEPS``: the GGA energy varies on a scale of 1e-3 bohr there, see ``au2_gga``).
+    of 2e-5 and 4e-5 bohr (``FINE_STEPS``: the GGA energy varies on a scale of 1e-3 bohr there, see ``au2_gga``);
+    the same and other gradient functionals under ``PARSEC_GGA_NUCLEAR_GRADIENT=on`` (``nuclear``, added after
+    7e1b4e080), whose energy is smooth there, at both kinds of steps.
     The force
     compared is the total before its net part was removed (``forces_total + forces_net / N``), the derivative of the
     energy.  ``dgrid`` is the distance of the atom from the nearest grid point where the archive holds the grid.
 ``mpi``
     One case per launch under ``srun`` or ``mpirun`` (2 or 4 ranks, one GPU each): the MPI full-SCF runner for a
     cluster, a Gamma cell and (added 2026-11-23) the SCF of a PBE0 cell below and above the floor of the sectors of
-    a Gamma-point hybrid, ``--mpi`` of the command line for a k-point mesh.  Rank 0 then runs the same input in
+    a Gamma-point hybrid, ``--mpi`` of the command line for a k-point mesh (and, added after 7e1b4e080, for a
+    non-collinear cell against the sectors of its magnetic group in one process).  Rank 0 then runs the same input in
     one process and compares: energies within 1e-8 Ry, forces within 1e-7 Ry/bohr.
 ``symmetry``
     The default route against the same input without symmetry: ``--symmetry off`` with
@@ -57,7 +60,10 @@ repository, so that the matrix can be run unchanged on any later tree.  Groups:
     ``on``) against the whole grid (``off``); a spin-orbit cell with a 2 x 2 x 2 mesh and forces in the double-group
     sectors of its k-points that ``PARSEC_SOC_KPOINT_SECTORS=on`` forces at any size, against ``off``; and (added
     after 308edad4e) the energy and forces of AuH in the Kramers sector on the device against those of the
-    reference solver (``PARSEC_SOC_DEVICE_FORCES=off``) on both routine sets, forces within 1e-7 Ry/bohr.
+    reference solver (``PARSEC_SOC_DEVICE_FORCES=off``) on both routine sets, forces within 1e-7 Ry/bohr; (added
+    after 7e1b4e080) a non-collinear Au pair with a 2 x 2 x 2 mesh in the sectors of the magnetic group of its moments
+    that ``PARSEC_NONCOLLINEAR_KPOINT_SECTORS=on`` forces at any size (parallel moments with forces, antiparallel ones
+    in Kramers pairs; the guard off), against ``off``, and O2 from antiparallel moments, whose guard leaves the sectors.
 The groups ``traj``, ``band``, ``kpoint`` and ``soc`` and the MPI band case were added after the first run of the
 matrix (on ed4144f13); ``--group all`` takes them.  The MPI cases also run on several nodes (the line names them).
 
@@ -250,8 +256,11 @@ ALL_OFF = {
     # after 308edad4e: the forces, relaxations and dynamics of self-consistent spin-orbit clusters on the device
     # (off: the reference solver)
     "PARSEC_SOC_DEVICE_FORCES": "off",
-    # after 308edad4e: the order of the squares in the sphere test of a cluster grid (dot, the default, as before)
+    # after 308edad4e: the order of the squares in the sphere test of a cluster grid (dot: the former rule; the default
+    # is symmetric after 7e1b4e080)
     "PARSEC_SPHERE_TIES": "dot",
+    # after 7e1b4e080: the grid the default radius rule keeps off its sphere (first: the shift of the first axis)
+    "PARSEC_DOMAIN_SHELL_SHIFT": "first",
     # after 308edad4e: the double-group sectors of the k-points of a spin-orbit loop
     "PARSEC_SOC_KPOINT_SECTORS": "off",
     # after 308edad4e: the double-group sectors of the k-points of a spin-polarized spin-orbit loop (opt-in on)
@@ -264,6 +273,12 @@ ALL_OFF = {
     "PARSEC_KPOINT_SECTOR_LDAU": "off",
     # after 308edad4e: the kernels of a run compiled ahead on background threads (the same binaries)
     "PARSEC_CUPY_COMPILE_AHEAD": "off",
+    # after 7e1b4e080: the exact gradient of the superposed atomic densities in the density gradient of the gradient
+    # functionals (opt-in auto and on)
+    "PARSEC_GGA_NUCLEAR_GRADIENT": "off",
+    # after 7e1b4e080: the sectors of the magnetic group of the moments of a non-collinear k-point loop (opt-in auto
+    # and on)
+    "PARSEC_NONCOLLINEAR_KPOINT_SECTORS": "off",
 }
 NO_SYMMETRY_ENV = {"PARSEC_PERIODIC_SYMMETRY": "off", "PARSEC_KPOINT_SECTORS": "off"}
 NO_SYMMETRY_ARGS = ("--symmetry", "off")
@@ -298,6 +313,7 @@ PP_FILES = {
     "N_FHI": "examples/3d_hybrid_functionals/N_FHIPP.DAT",
     "Cs_POTRE": "src/parsec_python/tests/data/spin_ca_C_POTRE.DAT",
     "Ns_POTRE": "src/parsec_python/tests/data/spin_ca_N_POTRE.DAT",
+    "Os_POTRE": "src/parsec_python/tests/data/spin_ca_O_POTRE.DAT",
 }
 
 
@@ -347,6 +363,7 @@ SPECIES = {
     "N_FHI": ("N_FHIPP.DAT", _fhi("N", 1.6, "2 3 0")),
     "Cs_POTRE": ("C_POTRE.DAT", _potre("C", "d")),
     "Ns_POTRE": ("N_POTRE.DAT", _potre("N", "d")),
+    "Os_POTRE": ("O_POTRE.DAT", _potre("O", "p")),
 }
 
 # ---------------------------------------------------------------------------------------------------------------
@@ -875,6 +892,51 @@ def au20_soc(name, *, criterion=1.0e-9):
     return Structure(name, text, positions, ("Auso_POTRE",), None, 0)
 
 
+def au2_noncollinear(name, moments, *, criterion=1.0e-10, move=0.05, forces=True):
+    """Two Au atoms 8 bohr apart along z in an 8 x 8 x 16 bohr cell with non-collinear magnetism (TM Au with its
+    spin-orbit channels, CA, 1000 K, initial polarization 0.3, the moments ``moments`` of the two atoms), atom 0 moved by
+    ``move`` along z, the 2 x 2 x 2 mesh, h = 0.4 bohr.  Added after 7e1b4e080: the sectors of the magnetic group of the
+    moments (PARSEC_NONCOLLINEAR_KPOINT_SECTORS); the moments decay in the SCF of this cell, the field of its start is
+    theirs."""
+
+    vectors = np.diag([8.0, 8.0, 16.0])
+    positions = np.array([[4.0, 4.0, 4.0 + move], [4.0, 4.0, 12.0]])
+    rows = "".join(f"  {x:.6f} {y:.6f} {z:.6f}\n" for x, y, z in np.asarray(moments, dtype=float))
+
+    def text(p):
+        blocks = atom_blocks([("Auso_POTRE", p, "Initial_Spin_Polarization: 0.3\n")]).rstrip("\n")
+        return (
+            cell_head(vectors, 0.4)
+            + scf_block("ca", 40, temperature=1000.0, criterion=criterion, diag=criterion / 10, mixing=0.25,
+                        forces=forces, extra="Non_Collinear_magnetism: .true.\n")
+            + mesh_text((2, 2, 2)) + blocks + "\nbegin Initial_NCL_Moment\n" + rows + "end Initial_NCL_Moment\n\n"
+        )
+
+    return Structure(name, text, positions, ("Auso_POTRE",), vectors, 3)
+
+
+def o2_noncollinear(name, *, criterion=1.0e-8):
+    """O2 along z (bond 2.28 bohr) in a 12 bohr cube with non-collinear magnetism and antiparallel start moments, no
+    spin-orbit coupling, CA, 500 K, Gamma, h = 0.3 bohr.  Added after 7e1b4e080: the sectors of the magnetic group of the
+    moments (the inversion between the atoms times time reversal pairs them) would keep a symmetric state 77 mRy above the
+    triplet that the loop without sectors reaches; the guard of PARSEC_KPOINT_SECTOR_GUARD sends the loop back to one task
+    per k-point (its pi* levels half filled across a sector and its Kramers partner)."""
+
+    vectors = np.diag([12.0, 12.0, 12.0])
+    positions = np.array([[6.0, 6.0, 4.86], [6.0, 6.0, 7.14]])
+
+    def text(p):
+        blocks = atom_blocks([("Os_POTRE", p, "Initial_Spin_Polarization: 0.3\n")]).rstrip("\n")
+        return (
+            cell_head(vectors, 0.3)
+            + scf_block("ca", 16, temperature=500.0, criterion=criterion, diag=criterion / 10, mixing=0.2,
+                        forces=False, extra="Non_Collinear_magnetism: .true.\n")
+            + blocks + "\nbegin Initial_NCL_Moment\n  0 0 1\n  0 0 -1\nend Initial_NCL_Moment\n\n"
+        )
+
+    return Structure(name, text, positions, ("Os_POTRE",), vectors, 3)
+
+
 def _hybrid_tolerance(xc) -> str:
     """The Fock-loop stop of a hybrid ``xc`` in a case (1e-10 Ry: totals to about 1e-10 Ry), none for another."""
 
@@ -927,6 +989,32 @@ def ag3(name):
 
     def text(p):
         return cluster_head(10.0, 0.45) + scf_block("ca", 26) + atom_blocks([("Ag_POTRE", p, "")])
+
+    return Structure(name, text, positions, ("Ag_POTRE",), None, 0)
+
+
+#: PARSEC_GGA_NUCLEAR_GRADIENT=on: the exact gradient of the superposed atomic densities in the density gradient of
+#: the gradient functionals (V_xc/nuclear_gradient.py; added after 7e1b4e080)
+NUCLEAR_ON = {"PARSEC_GGA_NUCLEAR_GRADIENT": "on"}
+
+
+def nuclear(structure, **env):
+    """``structure`` under ``PARSEC_GGA_NUCLEAR_GRADIENT=on`` and ``env`` (its runs and those of its reference)."""
+
+    structure.env = {**structure.env, **NUCLEAR_ON, **env}
+    return structure
+
+
+def ag1_spin(name):
+    """One Ag atom (TM Ag, local s, PBE, spin doublet) at the origin, a grid point (h = 0.31; the cases move it by
+    their offset along OFFSET_DIRECTION).  At the grid point beside the nucleus the minority density is ~1e-12 of the
+    majority one: the d shell of both channels vanishes there and the s electron is in one."""
+
+    positions = np.zeros((1, 3))
+
+    def text(p):
+        return (cluster_head(10.0, 0.31) + scf_block("pbe", 10, extra="Spin_Polarization: .true.\n")
+                + atom_blocks([("Ag_POTRE", p, "Initial_Spin_Polarization: 0.3\n")]))
 
     return Structure(name, text, positions, ("Ag_POTRE",), None, 0)
 
@@ -1000,6 +1088,23 @@ def o2(name, *, symmetric=False, criterion=1.0e-10, xc="pbe"):
         )
 
     return Structure(name, text, positions, ("O_FHI",), None, 0)
+
+
+def o2_cell(name, *, mesh=(2, 2, 2)):
+    """O2 triplet (O FHI, PBE, spin) in a 10 bohr cube at h = 0.3 with a Monkhorst-Pack mesh and forces: a spin cell
+    with k-points, whose result holds the densities of its two channels (the k-point spin loop)."""
+
+    vectors = np.diag([10.0, 10.0, 10.0])
+    positions = np.array([[5.0, 5.0, 3.85], [5.02, 4.99, 6.17]])
+
+    def text(p):
+        return (
+            cell_head(vectors, 0.3)
+            + scf_block("pbe", 10, extra="Spin_Polarization: .true.\n")
+            + mesh_text(mesh) + atom_blocks([("O_FHI", p, "Initial_Spin_Polarization: 0.3\n")])
+        )
+
+    return Structure(name, text, positions, ("O_FHI",), vectors, 3)
 
 
 def bn_slab(name, *, fortran=None, mesh=None, snap=True, criterion=1.0e-10, potre=False, forces=True):
@@ -1946,6 +2051,31 @@ def force_checks():
         # the step (cell 4.9e-7 and 1.3e-6, cluster 8.1e-8 and 4.4e-7 Ry/bohr on A100)
         ("f_au2_pbe_fine", au2_gga("au2_pbe_fine"), ((0, 0),), on),
         ("f_au2c_pbe_fine", au2_gga("au2c_pbe_fine", cluster=True), ((0, 0),), on),
+        # the same under PARSEC_GGA_NUCLEAR_GRADIENT=on (added after 7e1b4e080): the energy is smooth at the grid point,
+        # so the slopes over 1e-3 and 2e-3 bohr follow the force as those over 2e-5 and 4e-5 do; with the other
+        # gradient routes (a cell with k-points, spin, a hybrid, a meta-GGA in the weighted sectors of a cell)
+        ("f_au2_nuc", nuclear(au2_gga("au2_nuc")), ((0, 0), (1, 0)), on),
+        ("f_au2_nuc_fine", nuclear(au2_gga("au2_nuc_fine")), ((0, 0),), on),
+        ("f_au2c_nuc", nuclear(au2_gga("au2c_nuc", cluster=True)), ((0, 0), (1, 0)), on),
+        ("f_au2c_nuc_fine", nuclear(au2_gga("au2c_nuc_fine", cluster=True)), ((0, 0),), on),
+        ("f_c8p_d_nuc", nuclear(c8p("c8p_d_nuc", False)), ((6, 0), (0, 0)), on),
+        ("f_c8p_f_nuc", nuclear(c8p("c8p_f_nuc", True)), ((6, 0), (0, 0)), on),
+        ("f_ch4_nuc", nuclear(ch4("ch4_nuc")), ((0, 0), (1, 0)), on),
+        ("f_o2s_nuc", nuclear(o2("o2s_nuc")), ((0, 2), (1, 0)), on),
+        ("f_ch4_pbe0_nuc", nuclear(ch4("ch4_pbe0_nuc", xc="pbe0")), ((0, 0), (1, 0)), on),
+        # a spin cell with k-points (its result holds density_up and density_down)
+        ("f_o2k_nuc", nuclear(o2_cell("o2k_nuc")), ((0, 2), (1, 0)), on),
+        # (the density form of the meta-GGA's gradient: the orbital form, the default of SCAN, takes no correction)
+        ("f_si8td_scan_nuc", nuclear(si8_td_meta("si8td_scan_nuc"), PARSEC_META_GGA_GRADIENT="density"),
+         ((4, 0), (5, 1)), on),
+        # a spin-polarized d-shell atom 5e-4 bohr from a grid point (the minority density ~1e-12 at the grid point
+        # beside the nucleus): under on the channels take the share n_s / n of the correction
+        # (V_xc.nuclear_gradient.spin_shares; with half of it in each channel the SCF loops of these structures
+        # stalled), the energy keeps its feature on the scale of 1e-3 bohr and the force is its derivative at the fine
+        # steps; auto leaves spin runs to the finite-difference gradient (skips_run)
+        ("f_ag1s_nuc_fine", nuclear(ag1_spin("ag1s_nuc_fine")), ((0, 0), (0, 2)), (0, 5.0e-4)),
+        ("f_ag1s_auto_fine", nuclear(ag1_spin("ag1s_auto_fine"), PARSEC_GGA_NUCLEAR_GRADIENT="auto"), ((0, 0),),
+         (0, 5.0e-4)),
         # no Cubic_Spline in the input (added after the first run, when such an input took PARSEC 1.5's linear tables
         # and these cases were exempt; after 30edaacf1 the default of PARSEC_CUBIC_SPLINE_DEFAULT is the cubic spline)
         ("f_si8k_lin_d", linear(diamond("si8k_lin_d", "Si_POTRE", A_SI, "ca", 24, mesh=(2, 2, 2))),
@@ -2022,7 +2152,9 @@ def force_checks():
     # a kink at every radial sample a grid point crosses, so the slope of the energy over a step is not the force at
     # the point; with the default cubic spline the three cases above are ordinary checks.
     # Cases whose energy varies on a scale below the steps of FORCE_STEPS: steps that resolve it
-    fine = {"f_au2_pbe_fine": FINE_STEPS, "f_au2c_pbe_fine": FINE_STEPS}
+    fine = {"f_au2_pbe_fine": FINE_STEPS, "f_au2c_pbe_fine": FINE_STEPS, "f_au2_nuc_fine": FINE_STEPS,
+            "f_au2c_nuc_fine": FINE_STEPS, "f_ag1s_nuc_fine": FINE_STEPS,
+            "f_ag1s_auto_fine": FINE_STEPS}
     return [ForceCheck("force", name, notes.get(name, ""), structure, targets, offset, exempt=exempt.get(name, {}),
                        steps=fine.get(name, FORCE_STEPS))
             for name, structure, targets, offset in table]
@@ -2094,6 +2226,13 @@ def symmetry_checks():
         ("s_ribbon_wire_gamma", ribbon_wire("ribbon"), None),
         # the weighted sectors of a meta-GGA of a Gamma-point cell (added after 308edad4e)
         ("s_si8td_scan_gamma", si8_td_meta("si8td_sym", steps=0.37, criterion=1.0e-9), None),
+        # the sectors under PARSEC_GGA_NUCLEAR_GRADIENT=on (added after 7e1b4e080): the correction is a vector field
+        # of the atoms that the operations carry
+        ("s_ch4_td_nuc", nuclear(ch4("ch4_td_nuc", perturb=False, criterion=1.0e-9)), None),
+        ("s_o2_spin_nuc", nuclear(o2("o2_sym_nuc", symmetric=True, criterion=1.0e-9)), None),
+        ("s_ch4_td_pbe0_nuc", nuclear(ch4("ch4_td_pbe0_nuc", perturb=False, criterion=1.0e-9, xc="pbe0")), None),
+        ("s_si8td_scan_nuc", nuclear(si8_td_meta("si8td_sym_nuc", steps=0.37, criterion=1.0e-9),
+                                     PARSEC_META_GGA_GRADIENT="density"), None),
     ]
     out = []
     for name, structure, reference in checks:
@@ -2249,6 +2388,9 @@ def kpoint_checks():
         SymmetryCheck("kpoint", "k_c64_k222_real", "", real_on, None, real_off, ()),
         SymmetryCheck("kpoint", "k_c64_k222_sectors", "", c64_cube("k_c64_sectors", (2, 2, 2)), None,
                       {"PARSEC_KPOINT_SECTORS": "off"}, ()),
+        # the k-point sectors under PARSEC_GGA_NUCLEAR_GRADIENT=on (added after 7e1b4e080; above their floor)
+        SymmetryCheck("kpoint", "k_c64_k222_sectors_nuc", "", nuclear(c64_cube("k_c64_sectors_nuc", (2, 2, 2))), None,
+                      {"PARSEC_KPOINT_SECTORS": "off"}, ()),
     ]
 
 
@@ -2284,6 +2426,22 @@ def soc_checks():
     structure.env = {"PARSEC_SOC_KPOINT_SECTORS": "on"}
     checks.append(SymmetryCheck("soc", "o_ge8k_soc_sectors", "", structure, make("o_ge8k_soc_sectors_off"),
                                 {"PARSEC_SOC_KPOINT_SECTORS": "off"}, ()))
+    # (added after 7e1b4e080) the sectors of the magnetic group of non-collinear moments
+    # (PARSEC_NONCOLLINEAR_KPOINT_SECTORS): parallel moments along z with atom 0 moved (C2z), forces; antiparallel ones
+    # unmoved (the Kramers pairs of the inversion between them); the guard off, whose tests 1 and 3 these decaying
+    # moments would fail (the subject is the algebra of the sectors); and O2 from antiparallel moments, where the guard
+    # leaves the sectors
+    for name, moments, move in (("o_au2k_nc_sectors", [[0, 0, 1], [0, 0, 1]], 0.05),
+                                ("o_au2k_nc_pairs", [[0, 0, 1], [0, 0, -1]], 0.0)):
+        make = lambda n, moments=moments, move=move: au2_noncollinear(n, moments, move=move, forces=bool(move))
+        structure = make(name)
+        structure.env = {"PARSEC_NONCOLLINEAR_KPOINT_SECTORS": "on", "PARSEC_KPOINT_SECTOR_GUARD": "off"}
+        checks.append(SymmetryCheck("soc", name, "", structure, make(name + "_off"),
+                                    {"PARSEC_NONCOLLINEAR_KPOINT_SECTORS": "off"}, ()))
+    structure = o2_noncollinear("o_o2_nc_guard")
+    structure.env = {"PARSEC_NONCOLLINEAR_KPOINT_SECTORS": "on"}
+    checks.append(SymmetryCheck("soc", "o_o2_nc_guard", "", structure, o2_noncollinear("o_o2_nc_guard_off"),
+                                {"PARSEC_NONCOLLINEAR_KPOINT_SECTORS": "off"}, ()))
     return checks
 
 
@@ -2307,8 +2465,20 @@ def mpi_checks():
         # the translation classes of one process (PARSEC_MPI_EXCHANGE_POOL)
         ("m_c8p_pbe0_gamma", c8_pbe0("m_c8p_pbe0", forces=False), "runner"),
         ("m_si64_pbe0_gamma", si64_pbe0("m_si64_pbe0"), "runner"),
+        # PARSEC_GGA_NUCLEAR_GRADIENT=on (added after 7e1b4e080)
+        ("m_c8p_gamma_nuc", nuclear(diamond("m_c8p_nuc", "C_POTRE", A_C, "pbe", 20)), "runner"),
+        ("m_o2_spin_nuc", nuclear(o2("m_o2_nuc", symmetric=True)), "runner"),
+        ("m_c8p_k222_nuc", nuclear(diamond("m_c8p_k222_nuc", "C_POTRE", A_C, "pbe", 20, mesh=(2, 2, 2))), "cli"),
+        # a non-collinear cell (added after 7e1b4e080): the rows of the spinors over the ranks against the sectors of
+        # the magnetic group of its moments in one process (PARSEC_NONCOLLINEAR_KPOINT_SECTORS=on; no forces, which the
+        # row-distributed solver does not form)
+        ("m_au2k_nc", au2_noncollinear("m_au2k_nc", [[0, 0, 1], [0, 0, 1]], forces=False), "cli"),
     ]
-    return [MpiCheck("mpi", name, "", structure, launcher) for name, structure, launcher in table]
+    checks = [MpiCheck("mpi", name, "", structure, launcher) for name, structure, launcher in table]
+    for check in checks:
+        if check.name == "m_au2k_nc":
+            check.structure.env = {"PARSEC_NONCOLLINEAR_KPOINT_SECTORS": "on", "PARSEC_KPOINT_SECTOR_GUARD": "off"}
+    return checks
 
 
 GROUPS = {

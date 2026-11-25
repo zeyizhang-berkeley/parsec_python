@@ -55,6 +55,77 @@ from .single_point import SCFWarmStart
 
 #: ``tol`` of ``restart_run.F90`` for the spacing and the cell vectors (bohr).
 RESTART_TOLERANCE = 1.0e-10
+#: Relative half-width of the shell around a cluster's sphere whose grid points the rules of ``PARSEC_SPHERE_TIES``
+#: may decide otherwise (a few units in the last place of ``|r|^2``; the points off the sphere lie at least a part in
+#: about ``(R/h)^2`` away).
+SPHERE_TIE_SHELL = 1.0e-9
+
+
+def _on_cluster_sphere(grid, integer_points) -> np.ndarray:
+    """Whether each of ``integer_points`` (``k`` of the position ``(k + shift) h``) lies on the sphere of the cluster
+    domain of ``grid``, to :data:`SPHERE_TIE_SHELL` of ``R^2``."""
+
+    settings = grid.settings
+    positions = (np.asarray(integer_points, dtype=np.float64).reshape(-1, 3) + np.asarray(settings.shift)) * float(
+        settings.spacing
+    )
+    limit = float(settings.radius) ** 2
+    return np.abs(np.einsum("ij,ij->i", positions, positions) - limit) <= SPHERE_TIE_SHELL * limit
+
+
+def sphere_tie_difference(grid, missing_rows, extra_points) -> tuple[int, int] | None:
+    """``(missing, extra)`` where a file of the same spacing and radius differs from ``grid`` only on its sphere.
+
+    ``missing_rows``: the rows of ``grid`` without a stored value; ``extra_points``: the integer coordinates of the
+    stored points that are no point of ``grid``.  A cluster sphere whose grid passes through points exactly on the
+    sphere holds those points or not by the rule of ``PARSEC_SPHERE_TIES`` (``Grid/cluster.py``): a file of this code
+    before 2026-11-24 (``dot``) or of PARSEC 1.5 (``fortran``) holds other ones than the default ``symmetric``.  Where
+    every differing point lies on the sphere the file restarts the run (the missing points take zero, the extra ones
+    are dropped); ``None`` where the grid is no cluster sphere, nothing differs, or a differing point lies off the
+    sphere (another grid, which stays an error).
+    """
+
+    settings = getattr(grid, "settings", None)
+    if _is_periodic(grid) or settings is None or getattr(settings, "domain_shape", "sphere") != "sphere":
+        return None
+    missing_rows = np.asarray(missing_rows, dtype=np.int64).reshape(-1)
+    extra_points = np.asarray(extra_points, dtype=np.int64).reshape(-1, 3)
+    if missing_rows.size == 0 and extra_points.shape[0] == 0:
+        return None
+    candidates = np.concatenate([np.asarray(grid.integer_coordinates)[missing_rows].reshape(-1, 3), extra_points])
+    if not bool(np.all(_on_cluster_sphere(grid, candidates))):
+        return None
+    return int(missing_rows.size), int(extra_points.shape[0])
+
+
+def _parsec_dat_tie_difference(data: ParsecDat, grid) -> tuple[int, int] | None:
+    """:func:`sphere_tie_difference` of a ``parsec.dat`` (its wedge unfolded with its own operations)."""
+
+    if _is_periodic(grid):
+        return None
+    try:
+        mapping = grid_rows_of_file(data, grid)
+    except ValueError:
+        return None
+    used = np.zeros(int(np.asarray(data.points).shape[0]), dtype=bool)
+    used[mapping.point_of_row[mapping.point_of_row >= 0]] = True
+    return sphere_tie_difference(
+        grid, np.flatnonzero(mapping.point_of_row < 0), np.asarray(data.points, dtype=np.int64)[~used]
+    )
+
+
+def sphere_tie_note(missing: int, extra: int, name: str = "parsec.dat") -> str:
+    """The line of the output for a restart file that differs from the grid of the run only on its sphere."""
+
+    from ..Grid.cluster import sphere_ties_setting
+
+    return (
+        f" NOTE: {name} decides the grid points exactly on the sphere otherwise than this run "
+        f"(PARSEC_SPHERE_TIES={sphere_ties_setting()}): {missing} points of this grid take a stored density and "
+        f"potential of zero and {extra} stored points are dropped. A file of this code before 2026-11-24 holds the "
+        "grid of PARSEC_SPHERE_TIES=dot, one of PARSEC 1.5 that of fortran, one of this code since then that of "
+        "symmetric (the default); the file's value restarts it on its own grid"
+    )
 
 
 class RestartError(ValueError):
@@ -97,6 +168,9 @@ class RestartFields:
     file_operations: int
     stored_states: int | None = None
     stored_kpoints: int | None = None
+    # ``(missing, extra)`` where the file differs from the grid of the run only by the points exactly on the sphere
+    # (:func:`sphere_tie_difference`), ``None`` otherwise
+    sphere_ties: tuple[int, int] | None = None
 
     @property
     def total_density(self) -> np.ndarray:
@@ -221,7 +295,8 @@ def check_restart_file(
         # compares its radius (l.265) as a cluster does.
         return False
     same_radius = abs(radius - float(data.rmax)) <= 1.0e-12 * max(1.0, radius)
-    if same_radius and data.ndim != grid.size:
+    # (a file whose points differ from the grid's only on the sphere restarts the run: restart_fields)
+    if same_radius and data.ndim != grid.size and _parsec_dat_tie_difference(data, grid) is None:
         raise RestartError(
             "despite the same grid spacing and sphere radius, parsec.dat holds "
             f"{data.ndim} grid points and this run {grid.size}",
@@ -375,12 +450,17 @@ def restart_fields(
     if spinors:
         spin_count = 2
     mapping = grid_rows_of_file(data, grid)
-    if not extrapolate and mapping.missing:
-        raise RestartError(
-            f"{mapping.missing} points of this grid have no value in parsec.dat "
-            "although the spacing and the sphere radius are the same",
-            367,
-        )
+    ties = None
+    if not extrapolate and (mapping.missing or data.ndim != grid.size or mapping.dropped):
+        # the points exactly on a cluster's sphere decided by another rule of PARSEC_SPHERE_TIES: the missing ones
+        # take zero, the extra ones are dropped (sphere_tie_difference); any other difference is another grid
+        ties = _parsec_dat_tie_difference(data, grid)
+        if ties is None and mapping.missing:
+            raise RestartError(
+                f"{mapping.missing} points of this grid have no value in parsec.dat "
+                "although the spacing and the sphere radius are the same",
+                367,
+            )
     return RestartFields(
         date_label=data.date_label,
         potentials=tuple(mapping.field(values) for values in data.potentials[:spin_count]),
@@ -396,6 +476,7 @@ def restart_fields(
             default=None,
         ),
         stored_kpoints=len(data.levels[0]) if data.levels else None,
+        sphere_ties=ties,
     )
 
 
@@ -510,16 +591,19 @@ def restart_report_lines(fields: RestartFields) -> list[str]:
             f"and {fields.file_operations} symmetry operations; Python unfolds it "
             "onto the full grid"
         )
-    if fields.missing_points:
-        lines.append(
-            f" {fields.missing_points} grid points lie outside the stored domain: "
-            "their stored density and potential are zero"
-        )
-    if fields.dropped_points:
-        lines.append(
-            f" {fields.dropped_points} stored points lie outside the current domain "
-            "and are dropped"
-        )
+    if fields.sphere_ties is not None:
+        lines.append(sphere_tie_note(*fields.sphere_ties))
+    else:
+        if fields.missing_points:
+            lines.append(
+                f" {fields.missing_points} grid points lie outside the stored domain: "
+                "their stored density and potential are zero"
+            )
+        if fields.dropped_points:
+            lines.append(
+                f" {fields.dropped_points} stored points lie outside the current domain "
+                "and are dropped"
+            )
     lines.append(
         " The first SCF iteration solves the eigenproblem of the stored potential "
         "from scratch; the stored wavefunctions are not read (restart_run.F90)"
@@ -604,6 +688,29 @@ class WfnDatRestart:
     eigenvalues: tuple[np.ndarray, ...]
 
 
+def _wfn_dat_targets(data, grid) -> np.ndarray:
+    """The row of ``grid`` of every point of ``wfn.dat``, ``-1`` for a point that is none of the grid."""
+
+    from ..Output.parsec_dat import fortran_integer_coordinates
+
+    rows = {
+        tuple(int(value) for value in point): row
+        for row, point in enumerate(fortran_integer_coordinates(grid))
+    }
+    return np.array([rows.get(tuple(int(v) for v in point), -1) for point in data.points], dtype=np.int64)
+
+
+def _wfn_dat_tie_difference(data, grid, targets=None) -> tuple[int, int] | None:
+    """:func:`sphere_tie_difference` of a ``wfn.dat`` of the full grid."""
+
+    if _is_periodic(grid):
+        return None
+    targets = _wfn_dat_targets(data, grid) if targets is None else targets
+    held = np.zeros(int(grid.size), dtype=bool)
+    held[targets[targets >= 0]] = True
+    return sphere_tie_difference(grid, np.flatnonzero(~held), np.asarray(data.points, dtype=np.int64)[targets < 0])
+
+
 def check_wfn_dat(data, grid) -> bool:
     """The checks of ``restart.F90`` (errors 321-329); returns ``ixtrpflg``.
 
@@ -647,7 +754,10 @@ def check_wfn_dat(data, grid) -> bool:
                 324,
             )
         same = abs(float(data.rmax) - radius) <= 1.0e-12 * max(1.0, radius)
-        if same and (data.ndim != grid.size or data.nwedge != grid.size):
+        # (a file whose points differ from the grid's only on the sphere restarts the run: load_wfndat_restart)
+        if same and (data.ndim != grid.size or data.nwedge != grid.size) and (
+            data.ndim != data.nwedge or _wfn_dat_tie_difference(data, grid) is None
+        ):
             raise RestartError(
                 "despite the same grid spacing and sphere size, the stored "
                 "Hamiltonian size is incompatible with the current one",
@@ -736,7 +846,6 @@ def load_wfndat_restart(
     empty.
     """
 
-    from ..Output.parsec_dat import fortran_integer_coordinates
     from ..Output.wfn_dat import read_wfn_dat
     from .single_point import _number_of_states
 
@@ -750,19 +859,19 @@ def load_wfndat_restart(
         source, periodic=_is_periodic(grid), spin_count=spin_count, complex_values=False
     )
     extrapolate = check_wfn_dat(data, grid)
-    rows = {
-        tuple(int(value) for value in point): row
-        for row, point in enumerate(fortran_integer_coordinates(grid))
-    }
-    targets = np.array([rows.get(tuple(int(v) for v in point), -1) for point in data.points])
+    targets = _wfn_dat_targets(data, grid)
     present = targets >= 0
     dropped = int(np.count_nonzero(~present))
     missing = int(grid.size - np.count_nonzero(present))
-    if not extrapolate and missing:
-        raise RestartError(
-            f"{missing} points of this grid have no value in wfn.dat although the "
-            "spacing and the domain are the same"
-        )
+    ties = None
+    if not extrapolate and (missing or dropped):
+        # the points exactly on a cluster's sphere decided by another rule of PARSEC_SPHERE_TIES
+        ties = _wfn_dat_tie_difference(data, grid, targets)
+        if ties is None and missing:
+            raise RestartError(
+                f"{missing} points of this grid have no value in wfn.dat although the "
+                "spacing and the domain are the same"
+            )
 
     def on_grid(values):
         values = np.asarray(values)
@@ -782,6 +891,7 @@ def load_wfndat_restart(
         dropped_points=dropped,
         file_points=data.nwedge,
         file_operations=1,
+        sphere_ties=ties,
     )
     wavefunctions = tuple(on_grid(channel.wavefunctions[:, :keep]) for channel in data.channels)
     eigenvalues = tuple(np.asarray(channel.energies[:keep]) for channel in data.channels)
@@ -816,7 +926,9 @@ def wfndat_report_lines(restart: WfnDatRestart) -> list[str]:
             " stored data for a smaller sphere.",
             "",
         ]
-    if fields.dropped_points:
+    if fields.sphere_ties is not None:
+        lines.append(sphere_tie_note(*fields.sphere_ties, name="wfn.dat"))
+    elif fields.dropped_points:
         lines.append(
             f" {fields.dropped_points} stored points lie outside the current domain "
             "and are dropped"
@@ -853,6 +965,7 @@ def with_first_warm_start(backend, warm_start: SCFWarmStart):
 
 __all__ = [
     "RESTART_TOLERANCE",
+    "SPHERE_TIE_SHELL",
     "RestartError",
     "RestartFields",
     "WfnDatRestart",
@@ -863,6 +976,8 @@ __all__ = [
     "restart_fields",
     "restart_report_lines",
     "restart_warm_start",
+    "sphere_tie_difference",
+    "sphere_tie_note",
     "spin_orbit_start",
     "wfndat_report_lines",
     "with_first_warm_start",

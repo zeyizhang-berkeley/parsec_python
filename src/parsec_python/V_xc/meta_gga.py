@@ -56,6 +56,7 @@ import scipy.sparse as sp
 
 from .ca_lda import XCResult
 from .ca_lda_spin import SpinXCResult, spin_densities_with_core
+from .nuclear_gradient import active_correction, note_flux, recording, share_potentials, spin_shares
 from .pbe import _DENSITY_THRESHOLD, _gga_density
 
 
@@ -596,6 +597,10 @@ def meta_gga_xc(
             gradients = gradients + gradient.apply(np.asarray(core_density, dtype=np.float64))
     else:
         gradients = gradient.apply(density)
+    # PARSEC_GGA_NUCLEAR_GRADIENT: the exact gradient of the atomic part (the density form; V_xc.nuclear_gradient)
+    nuclear = None if orbital else active_correction(grid)
+    if nuclear is not None:
+        gradients = gradients + nuclear
     sigma = np.einsum("ij,ij->j", gradients, gradients)
     lapl = _laplacian_of(negative_laplacian, density) if _needs(evaluator, "needs_laplacian") else None
     floored = _floored(evaluator) and _needs(evaluator, "needs_tau")
@@ -606,6 +611,8 @@ def meta_gga_xc(
     if floored:
         vrho, vsigma, vtau = weizsaecker_chain(np, density, sigma, given_tau[1], vrho, vsigma, vtau)
     density_potential = gradient.adjoint(2.0 * vsigma[None, :] * gradients)
+    if nuclear is not None:
+        note_flux(grid, 2.0 * vsigma[None, :] * gradients, density_potential)
     potential = vrho if orbital else vrho + density_potential
     if vlapl is not None:
         potential = potential + _laplacian_adjoint(negative_laplacian, vlapl)
@@ -670,6 +677,11 @@ def meta_gga_xc_spin(
     else:
         grad_up = gradient.apply(up)
         grad_down = gradient.apply(down)
+    nuclear = None if orbital else active_correction(grid)
+    if nuclear is not None:
+        w_up, w_down = spin_shares(up, down)
+        grad_up = grad_up + w_up * nuclear
+        grad_down = grad_down + w_down * nuclear
     s_uu = np.einsum("ij,ij->j", grad_up, grad_up)
     s_ud = np.einsum("ij,ij->j", grad_up, grad_down)
     s_dd = np.einsum("ij,ij->j", grad_down, grad_down)
@@ -694,6 +706,14 @@ def meta_gga_xc_spin(
     flux_down = 2.0 * vs_dd[None, :] * grad_down + vs_ud[None, :] * grad_up
     divergence_up = gradient.adjoint(flux_up)
     divergence_down = gradient.adjoint(flux_down)
+    if nuclear is not None:
+        # the local terms of the share n_s / n (V_xc.nuclear_gradient.share_potentials), on the density part
+        extra_up, extra_down = share_potentials(up, down, nuclear, flux_up, flux_down)
+        divergence_up = divergence_up + extra_up
+        divergence_down = divergence_down + extra_down
+        if recording(grid):
+            flux = w_up * flux_up + w_down * flux_down
+            note_flux(grid, flux, gradient.adjoint(flux))
     potential_up = v_up if orbital else v_up + divergence_up
     potential_down = v_down if orbital else v_down + divergence_down
     if vl_up is not None:

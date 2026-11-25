@@ -304,18 +304,22 @@ def refine_energy(
     channels = getattr(result, "spin", None)
 
     semilocal_started = perf_counter()
-    semilocal: B3LYPSemilocalEnergies = (
-        b3lyp_semilocal_energies(
-            density, grid, core_density if core_correction else None
+    from ..V_xc.nuclear_gradient import applied
+
+    # PARSEC_GGA_NUCLEAR_GRADIENT: the density gradient of the SCF (V_xc.nuclear_gradient)
+    with applied(getattr(system, "reference", None) or system):
+        semilocal: B3LYPSemilocalEnergies = (
+            b3lyp_semilocal_energies(
+                density, grid, core_density if core_correction else None
+            )
+            if channels is None
+            else b3lyp_spin_semilocal_energies(
+                np.asarray(channels[0].density, dtype=np.float64),
+                np.asarray(channels[1].density, dtype=np.float64),
+                grid,
+                core_density if core_correction else None,
+            )
         )
-        if channels is None
-        else b3lyp_spin_semilocal_energies(
-            np.asarray(channels[0].density, dtype=np.float64),
-            np.asarray(channels[1].density, dtype=np.float64),
-            grid,
-            core_density if core_correction else None,
-        )
-    )
     semilocal_seconds = perf_counter() - semilocal_started
 
     # (orbitals, occupations in the convention of the exact exchange, the

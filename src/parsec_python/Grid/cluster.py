@@ -70,43 +70,64 @@ class RealSpaceGrid:
 
 
 SPHERE_TIES_SWITCH = "PARSEC_SPHERE_TIES"
-_SPHERE_TIES = ("dot", "symmetric")
+SPHERE_TIES_DEFAULT = "symmetric"
+_SPHERE_TIES = ("symmetric", "dot", "fortran")
 
 
 def sphere_ties_setting() -> str:
-    """``PARSEC_SPHERE_TIES``: how a point exactly on the sphere is decided.
+    """``PARSEC_SPHERE_TIES``: how the sphere test of a cluster decides a point exactly on the sphere.
 
-    ``dot`` (the default): ``x^2 + y^2 + z^2 <= R^2`` with the squares summed as ``np.einsum`` sums them, as before.
-    A point on the sphere (on a grid through the origin, ``Grid_Shift`` zero, whose ``(R/h)^2`` is an integer; on the
-    shifted grid ``(R/h)^2 = 2 k + 3/4``) is then decided by the round-off of that sum, which depends on the order of
-    its coordinates: of ``(12, 20, 9) h`` and ``(20, 12, 9) h`` at ``R = 25 h`` one is in and the other out, and the
-    domain loses the operations that permute the axes (C4z, S4z, the threefold axes).  ``symmetric`` (opt-in): the
-    three squares summed in ascending order, a value every signed permutation of the axes leaves unchanged, so a point
-    and its images under those operations are in or out together (the points off the sphere are decided as before).
-    Another value is an error when the grid is built.
+    A point ``r`` of the domain has ``|r|^2 <= R^2``.  Exactly on the sphere lie points of a grid through the origin
+    (``Grid_Shift`` zero, which ``Ignore_Symmetry`` and ``Foldblock_Side_Length`` 2 also give) where ``R/h`` is an
+    integer, or of a grid shifted by half a step along one axis where ``R/h`` is an integer plus 1/2 (other shifts
+    can do so too; for a rational ``R/h`` never the grid shifted by half a step along every axis, where
+    ``|r|^2 / h^2 = 2 k + 3/4``, nor along two).  Such a point is in or out by the round-off of ``x^2 + y^2 + z^2``,
+    which depends on the order of the three terms:
+
+    ``symmetric`` (the default since 2026-11-24): the squares summed in ascending order against ``R * R``.  Every
+    signed permutation of the axes leaves that value unchanged, so a point and its images under the operations of
+    the grid are in or out together, and the domain keeps the operations that permute the axes (C4, S4, the
+    threefold axes).  Every step is one rounded IEEE operation, the same on any machine.
+    ``dot`` (the default before): ``np.einsum`` of the coordinates against ``R ** 2``.  NumPy 2.4 and 2.5 on x86-64
+    sum ``(x^2 + z^2) + y^2`` for the C-ordered coordinates of the builders (``(x^2 + y^2) + z^2`` for Fortran-ordered
+    ones): of ``(12, 20, 9) h`` and ``(20, 12, 9) h`` at ``R = 25 h`` (``h`` 0.4) one is in and the other out, and
+    the domain loses C4z and S4z; ``R ** 2`` is the C library's ``pow``, which on some systems differs from ``R * R``
+    in the last place.
+    ``fortran``: ``(x^2 + y^2) + z^2`` against ``R * R``, the order of ``dot_product`` in ``outside_domain``
+    (``grid_partition.f90``) as gfortran ``-O2`` compiles it for x86-64 (the value under
+    ``PARSEC_FORTRAN_NUMERICS=on``): the points of PARSEC 1.5's grids exactly.  A build that fuses the multiplications
+    with the additions (gfortran for a processor with FMA; one such build forms ``fma(z, z, fma(x, x, y^2))``)
+    decides some of these points otherwise.
+
+    Points off the sphere are in or out under every value alike.  The value is also read through
+    ``PARSEC_FORTRAN_NUMERICS`` (:func:`parsec_python.fortran_numerics.switch_value`); another value is an error when
+    the grid is built or the run is prepared.
     """
 
-    import os
+    from ..fortran_numerics import switch_value
 
-    text = os.environ.get(SPHERE_TIES_SWITCH, "dot").strip().lower() or "dot"
+    text = switch_value(SPHERE_TIES_SWITCH, SPHERE_TIES_DEFAULT) or SPHERE_TIES_DEFAULT
     if text not in _SPHERE_TIES:
         raise ValueError(f"{SPHERE_TIES_SWITCH} must be one of {', '.join(_SPHERE_TIES)}, not {text!r}")
     return text
 
 
-def _squared_radii(coordinates: np.ndarray) -> np.ndarray:
-    """``|r|^2`` of every point as the sphere test takes it (:func:`sphere_ties_setting`)."""
+def _inside_sphere(coordinates: np.ndarray, radius: float) -> np.ndarray:
+    """``|r|^2 <= R^2`` of every point as :func:`sphere_ties_setting` forms both sides."""
 
-    if sphere_ties_setting() == "symmetric":
-        values = np.asarray(coordinates, dtype=np.float64)
-        squares = np.sort(values * values, axis=1)
-        return (squares[:, 0] + squares[:, 1]) + squares[:, 2]
-    return np.einsum("ij,ij->i", coordinates, coordinates)
+    rule = sphere_ties_setting()
+    if rule == "dot":
+        return np.einsum("ij,ij->i", coordinates, coordinates) <= radius**2
+    values = np.asarray(coordinates, dtype=np.float64)
+    squares = values * values
+    if rule == "symmetric":
+        squares = np.sort(squares, axis=1)
+    return (squares[:, 0] + squares[:, 1]) + squares[:, 2] <= radius * radius
 
 
 def _inside_domain(settings: GridSettings, coordinates: np.ndarray) -> np.ndarray:
     if settings.domain_shape == "sphere":
-        return _squared_radii(coordinates) <= settings.radius**2
+        return _inside_sphere(coordinates, settings.radius)
     if settings.domain_shape == "ellipsoid":
         # grid_partition.f90 outside_domain, case 1.
         radii = np.asarray(settings.domain_parameters, dtype=float)

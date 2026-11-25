@@ -7,8 +7,10 @@ slab that makes its energy stationary, the controlled Hartree boundary values of
 atom and for the Gaussian charges of wires and slabs; the converged band solves, the Fermi level of a gapped system
 at the root of its electron count, FHI tables continued below their first radial sample, the Coulomb tail of a
 splined local potential beyond its Coulomb onset, the local potential and projectors Fourier-filtered to the grid,
-smooth LDA+U projectors and (opt-in) a later-SCF filter degree that returns where a loop stalls.  ``on`` gives every one
-of them the value of PARSEC 1.5 at once (:data:`FORTRAN_NUMERICS_VALUES`, and for a cluster or slab whose input gives its
+smooth LDA+U projectors, grid points exactly on a cluster's sphere decided alike for all images under the operations
+of the grid, and (opt-in) a later-SCF filter degree that returns where a loop stalls and the exact gradient of the
+superposed atomic densities in the density gradient beside a nucleus.  ``on`` gives every one of them the value of
+PARSEC 1.5 at once (:data:`FORTRAN_NUMERICS_VALUES`, and for a cluster or slab whose input gives its
 domain the defaults ``Hartree_Boundary_Tolerance: off`` and ``Hartree_Atomic_Tail: off`` of
 :func:`fortran_boundary_defaults`).  A switch set in the environment, or a keyword in the input, wins over the
 umbrella.  ``off`` (the default) leaves every default as it is.
@@ -71,6 +73,12 @@ FORTRAN_NUMERICS_VALUES = {
     # the LDA+U projectors of upot.F90, interpolated linearly and cut at r_c (Hamiltonian/hubbard.py,
     # ldau_smooth_projectors_fraction, which reads it through switch_value)
     "PARSEC_LDAU_SMOOTH_PROJECTORS": "off",
+    # the grid points exactly on a cluster's sphere as outside_domain (grid_partition.f90) decides them,
+    # (x^2 + y^2) + z^2 against R*R (Grid/cluster.py, sphere_ties_setting, which reads it through switch_value)
+    "PARSEC_SPHERE_TIES": "fortran",
+    # the finite-difference density gradient of exc.f90 at every point, also beside a nucleus (V_xc/nuclear_gradient.py,
+    # nuclear_gradient_setting, which reads it through switch_value; off is its default as well)
+    "PARSEC_GGA_NUCLEAR_GRADIENT": "off",
 }
 
 

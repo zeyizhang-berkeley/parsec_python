@@ -5172,6 +5172,13 @@ def _parse_parsec_input(
     ca_continuity_setting()
     # PARSEC_SPLINE_COULOMB_TAIL (where a splined local potential takes -2 Z/r): the same
     spline_coulomb_tail_setting()
+    # PARSEC_DOMAIN_SHELL_SHIFT (the grid the default radius rule keeps off its sphere) and PARSEC_SPHERE_TIES (the
+    # points exactly on a cluster's sphere): the same
+    from ..Grid.cluster import sphere_ties_setting
+    from ..Hartree.domain import domain_shell_shift_setting
+
+    domain_shell_shift_setting()
+    sphere_ties_setting()
     # the irreducible wedge of a hybrid's mesh (PARSEC_HYBRID_KPOINT_WEDGE; SinglePointInput.hybrid_kpoint_wedge)
     hybrid_kpoint_wedge = False
     # the wedge an auto hybrid takes after an insulating semilocal start (SinglePointInput.hybrid_kpoint_wedge_deferred)
@@ -5994,7 +6001,7 @@ def _parse_parsec_input(
                 potentials,
                 electrons,
                 spacing=grid.spacing,
-                shift=grid.shift[0],
+                shift=tuple(grid.shift),
                 stencil_half_width=grid.stencil_half_width,
                 budget=domain_energy_tolerance,
                 boundary_tolerance=None if default_tolerance else boundary_tolerance,

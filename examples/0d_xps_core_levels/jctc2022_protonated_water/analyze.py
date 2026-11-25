@@ -29,7 +29,8 @@ CASES = HERE / "cases"
 REFERENCE = HERE / "reference_energies.csv"
 WATER = HERE.parent / "jctc2022_1s"
 METHODS = (("pbe", "pp_pbe", "PP-PBE"), ("b3lyp", "pp_pbe_b3lyp", "PP-PBE(B3LYP)"))
-#: tolerances of --check, eV; the figure is read with an uncertainty of about 0.03
+#: tolerances of --check, eV; the figure is read with an uncertainty of about 0.03, and the grid-converged values
+#: lie 0.04 above it on average and 0.09 at n = 12 (README)
 TOLERANCE = {"reference": 0.003, "figure": 0.09}
 
 

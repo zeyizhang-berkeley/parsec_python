@@ -334,16 +334,60 @@ def series_bound(
     return float(np.sum(2.0 * charges / radius * ratio ** (order + 1) / (1.0 - ratio)))
 
 
-def _on_grid_shell(radius: float, spacing: float, shift: float) -> bool:
-    """Whether ``radius**2`` is a value ``|r|**2`` of the grid points, to 1e-9.
+DOMAIN_SHELL_SHIFT_SWITCH = "PARSEC_DOMAIN_SHELL_SHIFT"
 
-    The points of the shifted grid have ``|r|**2 / h**2 = 2 k + 3/4`` and
-    those of a grid through the origin an integer.  The grid builders decide
-    such points by round-off.
+
+def domain_shell_shift_setting() -> str:
+    """``PARSEC_DOMAIN_SHELL_SHIFT``: which grid the default rule keeps off its sphere (:func:`_on_grid_shell`).
+
+    ``axes`` (the default since 2026-11-24): the grid of the shift of every axis, ``(k_x + s_x, k_y + s_y,
+    k_z + s_z) h``, tested on its points.  ``first`` (the rule before): the grid that the shift of the first axis gives
+    to every axis, so that a ``Grid_Shift`` block whose axes differ (``0 0 0.5``) could leave points on the sphere of
+    the radius it chose.  Read for every input; another value is an error.
     """
 
+    import os
+
+    value = os.environ.get(DOMAIN_SHELL_SHIFT_SWITCH, "axes").strip().lower() or "axes"
+    if value not in ("axes", "first"):
+        raise ValueError(f"{DOMAIN_SHELL_SHIFT_SWITCH} must be axes or first, not {value!r}")
+    return value
+
+
+def _grid_point_near_sphere(squared: float, shifts) -> bool:
+    """Whether a point ``(k + s)`` (in grid steps, ``s`` the shift of each axis) has ``|r|**2`` within 1e-9 of
+    ``squared`` (relative)."""
+
+    reach = int(math.ceil(math.sqrt(squared))) + 2
+    steps = np.arange(-reach, reach + 1, dtype=np.float64)
+    first, second, third = ((steps + float(s)) ** 2 for s in shifts)
+    third = np.unique(third)
+    remainder = (squared - (first[:, None] + second[None, :])).ravel()
+    remainder = remainder[remainder >= -1.0e-9 * squared]
+    if remainder.size == 0:
+        return False
+    above = np.clip(np.searchsorted(third, remainder), 0, third.size - 1)
+    below = np.clip(above - 1, 0, third.size - 1)
+    gap = np.minimum(np.abs(third[above] - remainder), np.abs(third[below] - remainder))
+    return bool(np.any(gap / squared < 1.0e-9))
+
+
+def _on_grid_shell(radius: float, spacing: float, shift) -> bool:
+    """Whether ``radius**2`` is a value ``|r|**2`` of the grid points, to 1e-9.
+
+    ``shift``: the grid shift of each axis (one number: every axis alike).  Under ``PARSEC_DOMAIN_SHELL_SHIFT=axes``
+    (the default) the points ``(k + s)`` of the three axes are tested: an axis through the origin adds an integer
+    square, a shifted one ``k^2 + k + 1/4``.  Under ``first`` the shift of the first axis stands for all three, as
+    before: the points of the shifted grid have ``|r|**2 / h**2 = 2 k + 3/4`` and those of a grid through the origin
+    an integer.  The grid builders decide such points by the order of the squares (``PARSEC_SPHERE_TIES``).
+    """
+
+    shifts = np.atleast_1d(np.asarray(shift, dtype=np.float64)).reshape(-1)
     squared = (radius / spacing) ** 2
-    if abs(shift - 0.5) < 1.0e-12:
+    if domain_shell_shift_setting() == "axes":
+        return _grid_point_near_sphere(squared, np.resize(shifts, 3))
+    first = float(shifts[0])
+    if abs(first - 0.5) < 1.0e-12:
         nearest = 2.0 * round((squared - 0.75) / 2.0) + 0.75
     else:
         nearest = float(round(squared))

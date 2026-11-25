@@ -28,8 +28,13 @@ k-point set (magnetism breaks time-reversal symmetry, so ``k`` and ``-k``
 must both appear: Fortran's reduced grid uses no time reversal here,
 ``irrbz.f90``); unequal weights weight every level by its k-point
 (:mod:`~parsec_python.SCF.kpoint_weights`).  The magnetization is a vector
-field, which ``Symmetrize_Charge_Density`` (a scalar average) does not
-treat: the input reader refuses that combination with a non-trivial group.
+field, which ``Symmetrize_Charge_Density`` averages by PARSEC's rule only
+(:func:`symmetrize_noncollinear`: the density and ``|m|`` as scalars, the
+direction kept).  With the accelerated package the k-points of a periodic
+cell can split into the sectors of the magnetic group of the initial
+moments (``PARSEC_NONCOLLINEAR_KPOINT_SECTORS``, opt-in,
+:mod:`parsec_python.acceleration.SCF.kpoint_spinor_sectors`), with the
+symmetry guard of :func:`run_self_consistent_noncollinear_kpoints`.
 """
 
 from __future__ import annotations
@@ -59,6 +64,7 @@ from .kpoints_soc import (
     _k_point_operators,
     _number_of_states,
     _result_weights,
+    _sector_geometry,
     _spinor_hamiltonian,
     _state_sz,
     _validated_k_points,
@@ -229,6 +235,94 @@ def symmetrize_noncollinear(density, magnetization, group, volume_element):
     return new_density, magnetization * scale[None, :], (total_report, up_report, down_report)
 
 
+class NoncollinearSectorsAbandoned(RuntimeError):
+    """The non-collinear loop in the sectors of its k-points failed a test of their guard (``PARSEC_KPOINT_SECTOR_GUARD
+    =auto``): a partly filled multiplet across the sectors or Kramers partners of a k-point in the start Hamiltonian
+    (test 1, ``stage`` "the start Hamiltonian"), a density or magnetization that breaks an operation they take (test
+    2), or a fractional occupation of such a multiplet at the end (test 3; :meth:`parsec_python.acceleration.SCF.
+    kpoint_spinor_sectors.SpinorSectorKPointSolver.noncollinear_multiplets`, ``noncollinear_asymmetries``):
+    :func:`run_self_consistent_noncollinear_kpoints` runs it again with one task per k-point.  ``report`` is a
+    ``FractionalOccupations`` of :mod:`parsec_python.acceleration.SCF.spin_sectors`, ``measured`` the values of the
+    timings that the loop without sectors then carries."""
+
+    def __init__(self, report, measured: dict, stage: str = "the SCF loop") -> None:
+        self.report = report
+        self.measured = dict(measured)
+        self.stage = stage
+        super().__init__(
+            f"non-collinear k-point sectors: {report.reason} after {stage} ({report.measure} = {report.largest:.3e} "
+            f">= {report.tolerance:.0e}): " + "; ".join(report.lines)
+        )
+
+
+def _multiplet_guard(solver, levels, occupations, weights, *, end: bool, measured: dict) -> dict:
+    """Test 1 (``end`` false: the levels of the start Hamiltonian) or test 3 (``end``: Fermi-Dirac occupations at the
+    end of the loop) of the guard of a non-collinear loop in sectors: the largest value of
+    ``SpinorSectorKPointSolver.noncollinear_multiplets`` as ``noncollinear_guard_start_share`` or
+    ``noncollinear_guard_fractional_share`` (nothing where no k-point is in sectors); above
+    :data:`..acceleration.SCF.spin_sectors.SPIN_SECTOR_OCCUPATION_TOLERANCE` it raises
+    :class:`NoncollinearSectorsAbandoned` under ``PARSEC_KPOINT_SECTOR_GUARD=auto`` (``off`` measures only)."""
+
+    measure = getattr(solver, "noncollinear_multiplets", None)
+    if not callable(measure):
+        return {}
+    found = measure(levels, occupations, weights, end=end)
+    from ..acceleration.SCF.kpoint_sectors import sector_guard_setting
+    from ..acceleration.SCF.spin_sectors import SPIN_SECTOR_OCCUPATION_TOLERANCE, FractionalOccupations
+
+    largest = max((value for value, _ in found), default=0.0)
+    key = "noncollinear_guard_fractional_share" if end else "noncollinear_guard_start_share"
+    values = {key: float(largest)}
+    trips = [line for value, line in found if (value >= SPIN_SECTOR_OCCUPATION_TOLERANCE if end
+                                               else value > SPIN_SECTOR_OCCUPATION_TOLERANCE)]
+    if trips and sector_guard_setting() == "auto":
+        report = FractionalOccupations(
+            largest=float(largest),
+            tolerance=SPIN_SECTOR_OCCUPATION_TOLERANCE,
+            lines=tuple(trips),
+            reason="a fractional occupation of a multiplet across the non-collinear k-point sectors" if end
+            else "a partly filled multiplet across the non-collinear k-point sectors",
+            measure="largest w_k min(f, 1-f)" if end else "largest w_k min(n, d - n) of d levels holding n electrons",
+        )
+        raise NoncollinearSectorsAbandoned(
+            report, {**measured, **values}, "the SCF loop" if end else "the start Hamiltonian"
+        )
+    return values
+
+
+def _sector_guard(solver, density, magnetization, volume_element: float, measured: dict | None = None) -> dict:
+    """Test 2 of the guard of a non-collinear loop in the sectors of its k-points: the largest asymmetry of its final
+    density and magnetization under the operations of the sectors (``noncollinear_guard_asymmetry`` of the timings,
+    empty where no k-point is in sectors); at :data:`..acceleration.SCF.spin_sectors.DENSITY_SYMMETRY_TOLERANCE` or
+    above it raises :class:`NoncollinearSectorsAbandoned` (``PARSEC_KPOINT_SECTOR_GUARD=auto``; ``off`` keeps the
+    result and only measures)."""
+
+    measure = getattr(solver, "noncollinear_asymmetries", None)
+    if not callable(measure):
+        return dict(measured or {})
+    found = measure(density, magnetization, volume_element)
+    if not found:
+        return dict(measured or {})
+    from ..acceleration.SCF.kpoint_sectors import sector_guard_setting
+    from ..acceleration.SCF.spin_sectors import DENSITY_SYMMETRY_TOLERANCE, FractionalOccupations
+
+    largest = max(value for _, value in found)
+    values = {**(measured or {}), "noncollinear_guard_asymmetry": float(largest)}
+    if sector_guard_setting() == "auto" and not largest < DENSITY_SYMMETRY_TOLERANCE:
+        report = FractionalOccupations(
+            largest=float(largest),
+            tolerance=DENSITY_SYMMETRY_TOLERANCE,
+            lines=tuple(
+                f"{label}: {value:.4f} from its image" for label, value in found
+                if not value < DENSITY_SYMMETRY_TOLERANCE
+            ),
+            reason="a density or magnetization that breaks the symmetry the non-collinear k-point sectors assume",
+            measure="largest int |n(g r) - n(r)| [e] or int sum_j |m_j(g r) - (R' m(r))_j| [mu_B]",
+        )
+        raise NoncollinearSectorsAbandoned(report, values)
+    return values
+
+
 def _run_noncollinear(
     system,
     hamiltonian_for_k: Callable[[int, np.ndarray, np.ndarray], object],
@@ -241,6 +335,7 @@ def _run_noncollinear(
     initial_potential: tuple[np.ndarray, np.ndarray] | None = None,
     extras: SpinorForceExtras | None = None,
     warm_start=None,
+    allow_sectors: bool = False,
 ) -> SelfConsistentSOCResult:
     settings = system.input.scf
     n_grid = system.grid.size
@@ -284,6 +379,18 @@ def _run_noncollinear(
         )
         return {"density": density_k, "magnetization": magnetization_k}
 
+    # the sectors of the magnetic group of the initial moments (PARSEC_NONCOLLINEAR_KPOINT_SECTORS; None under off or
+    # for the loop the guard sends back to one task per k-point: the job of before)
+    geometry = None
+    if allow_sectors and k_points is not None:
+        geometry = _sector_geometry(
+            system,
+            k_points,
+            weighting,
+            bool(extras is not None and extras.compute_forces),
+            noncollinear=True,
+            field=input_field,
+        )
     solver = make_kpoint_solver(
         KPointJob(
             n_kpoints,
@@ -294,6 +401,7 @@ def _run_noncollinear(
             ),
             accumulate,
             extras=extras if extras is not None else (lambda task, vectors, xp=np: _state_sz([vectors], xp)),
+            geometry=geometry,
         ),
         problem_size=system.grid.size,
     )
@@ -316,6 +424,11 @@ def _run_noncollinear(
     energies = None
     converged = False
     specifications = system.input.pseudopotentials
+    # the guard of the sectors (PARSEC_KPOINT_SECTOR_GUARD): test 1 on the levels of a start of the loop's own (not a
+    # warm start or given potentials), the measured values in the timings
+    guard_start = warm_start is None and initial_potential is None
+    guard_values: dict = {}
+    k_weights = [weighting.of_k(task) for task in range(n_kpoints)]
     periodic_cell = getattr(system.input, "periodic_cell", None)
     sphere_masks = atomic_sphere_masks(
         system.grid.coordinates,
@@ -353,6 +466,15 @@ def _run_noncollinear(
                 )
                 pooled_eigenvalues = stacked
                 pooled_occupations = stacked_occupations
+                if iteration == 1 and guard_start:
+                    # test 1 of the guard of the sectors: no partly filled multiplet across the sectors or Kramers
+                    # partners of a k-point in the start Hamiltonian (before the loop spends its iterations on it)
+                    guard_values.update(
+                        _multiplet_guard(
+                            solver, eigenvalues_by_k, split_pooled(stacked_occupations, eigenvalues_by_k),
+                            k_weights, end=False, measured=guard_values,
+                        )
+                    )
 
                 parts = solver.accumulate(split_pooled(stacked_occupations, eigenvalues_by_k))
                 density = parts["density"]
@@ -477,6 +599,15 @@ def _run_noncollinear(
                 converged = True
                 break
 
+        if settings.fermi_temperature_kelvin > 0.0:
+            # test 3: no fractional occupation of such a multiplet at the end (Fermi-Dirac occupations)
+            guard_values.update(
+                _multiplet_guard(
+                    solver, eigenvalues_by_k, split_pooled(pooled_occupations, eigenvalues_by_k), k_weights,
+                    end=True, measured=guard_values,
+                )
+            )
+        guard_values = _sector_guard(solver, density, magnetization, volume_element, guard_values)
         moment_vector = volume_element * np.sum(magnetization, axis=1)
         from .single_point import dispersion_after_convergence, dispersion_wanted
         dispersion = None
@@ -494,6 +625,8 @@ def _run_noncollinear(
                 state_moments, nonlocal_forces = extras.collect(solver)
             else:
                 state_moments = np.concatenate(solver.extras())
+        timings = solver_timings(timer, solver)
+        timings.update(guard_values)
         return SelfConsistentSOCResult(
             converged=converged,
             iterations=iteration,
@@ -511,7 +644,7 @@ def _run_noncollinear(
             k_points=k_points,
             k_weights=None if k_points is None else _result_weights(weighting, n_kpoints),
             state_moments=state_moments,
-            timings=solver_timings(timer, solver),
+            timings=timings,
             scf_potentials={
                 "effective_potential": output_potential,
                 "xc_field": output_field,
@@ -655,6 +788,16 @@ def run_self_consistent_noncollinear_kpoints(
     also returns the nonlocal force (``result.nonlocal_forces``), accumulated from the orbitals of every k-point by
     a last pass after the SCF loop (see :class:`~parsec_python.SCF.kpoints_soc.SpinorForceExtras`); ``warm_start``
     continues from the structure before (Andrew Grieder's ionic loops).
+
+    With the accelerated package and ``PARSEC_NONCOLLINEAR_KPOINT_SECTORS=auto`` or ``on`` (opt-in) the k-points split
+    into the sectors of the magnetic group of the initial moments (:mod:`parsec_python.acceleration.SCF.
+    kpoint_spinor_sectors`; the operations the start field breaks are left out).  Where such a loop fails a test of
+    the guard (``PARSEC_KPOINT_SECTOR_GUARD=auto``: a partly filled multiplet across the sectors or Kramers partners of a
+    k-point in the start Hamiltonian, after its first solve; a final density or magnetization that breaks an operation
+    of the sectors; a fractional occupation of such a multiplet at the end), the loop runs again from the same start
+    with one task per k-point: ``callback`` first receives a
+    :class:`parsec_python.models.SpinSectorFallbackRecord` (the note of ``parsec.out``) and the result's ``timings``
+    hold ``noncollinear_sector_abandoned`` = 1; ``noncollinear_guard_asymmetry`` is what the test measured.
     """
     from .single_point import refuse_hubbard_and_dispersion
 
@@ -695,26 +838,63 @@ def run_self_consistent_noncollinear_kpoints(
             "the nonlocal force of a non-collinear k-point run accumulated in the SCF step (compute_forces, "
             "Andrew Grieder's ionic loops) needs equal k-point weights"
         )
-    extras = SpinorForceExtras(
-        system, k_points, weighting.weight if weighting.uniform else 1.0, operators_for, compute_forces
-    )
-    return _run_noncollinear(
-        system,
-        hamiltonian_for_k,
-        k_points.shape[0],
-        weighting,
-        callback,
-        k_points,
-        keep_wavefunctions=keep_wavefunctions,
-        iteration_state_callback=iteration_state_callback,
-        initial_potential=initial_potential,
-        extras=extras,
-        warm_start=warm_start,
-    )
+
+    def run(allow_sectors: bool) -> SelfConsistentSOCResult:
+        extras = SpinorForceExtras(
+            system, k_points, weighting.weight if weighting.uniform else 1.0, operators_for, compute_forces
+        )
+        return _run_noncollinear(
+            system,
+            hamiltonian_for_k,
+            k_points.shape[0],
+            weighting,
+            callback,
+            k_points,
+            keep_wavefunctions=keep_wavefunctions,
+            iteration_state_callback=iteration_state_callback,
+            initial_potential=initial_potential,
+            extras=extras,
+            warm_start=warm_start,
+            allow_sectors=allow_sectors,
+        )
+
+    try:
+        return run(True)
+    except NoncollinearSectorsAbandoned as error:
+        # only the report leaves this block: the frames of the loop in the sectors, and their orbitals, go
+        abandoned = (error.report, error.measured, error.stage)
+    report, measured, stage = abandoned
+    try:
+        # the device memory of the loop in the sectors, which its arrays returned to the CuPy pool, back to the devices
+        # before the loop with one task per k-point
+        from ..acceleration.SCF.kpoint_spinor_sectors import release_device_pools
+    except ImportError:
+        pass
+    else:
+        release_device_pools()
+    if callback is not None:
+        from ..models import SpinSectorFallbackRecord
+
+        callback(
+            SpinSectorFallbackRecord(
+                stage=stage,
+                largest_fractional_occupation=report.largest,
+                tolerance=report.tolerance,
+                multiplets=tuple(report.lines),
+                reason=report.reason,
+                measure=report.measure,
+                route="kpoint",
+            )
+        )
+    result = run(False)
+    result.timings["noncollinear_sector_abandoned"] = 1.0
+    result.timings.update(measured)
+    return result
 
 
 __all__ = [
     "NoncollinearMoments",
+    "NoncollinearSectorsAbandoned",
     "atomic_sphere_masks",
     "noncollinear_moments",
     "run_self_consistent_noncollinear",

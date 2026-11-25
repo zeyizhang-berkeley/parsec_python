@@ -68,6 +68,7 @@ from ..V_xc.selection import (
     evaluate_spin_xc,
     evaluate_unpolarized_xc,
 )
+from ..V_xc.nuclear_gradient import recording, with_correction
 from .single_point import _species_densities, initial_spin_densities
 from .single_point import run_scf as _run_scf
 
@@ -266,6 +267,7 @@ class PeriodicPreparedSinglePointSystem:
             zero_average = getattr(self.input.scf, "zero_average_xc_potential", False)
         return bool(zero_average) and getattr(self.input.grid, "periodicity", 3) == 3
 
+    @with_correction
     def evaluate_xc(
         self,
         density: np.ndarray,
@@ -326,6 +328,7 @@ class PeriodicPreparedSinglePointSystem:
             return result
         return replace(result, potential=_without_average(result.potential))
 
+    @with_correction
     def evaluate_xc_spin_polarized(
         self,
         density_up: np.ndarray,
@@ -385,6 +388,7 @@ class PeriodicPreparedSinglePointSystem:
             potential_down=_without_average(result.potential_down),
         )
 
+    @with_correction
     def evaluate_spin_xc(
         self,
         density_up: np.ndarray,
@@ -498,6 +502,7 @@ class PeriodicPreparedSinglePointSystem:
             values = symmetrized_gradient(values, self.density_symmetry, self.input.periodic_cell.lattice_vectors)
         return tau, tuple(values)
 
+    @with_correction
     def evaluate_meta_gga_start_xc(self, density: np.ndarray) -> XCResult:
         """PBE of the start density of a meta-GGA loop (PARSEC 1.5's first iteration), with the zero-average shift."""
 
@@ -506,6 +511,7 @@ class PeriodicPreparedSinglePointSystem:
             return result
         return replace(result, potential=_without_average(result.potential))
 
+    @with_correction
     def evaluate_meta_gga_start_spin_xc(self, density_up: np.ndarray, density_down: np.ndarray):
         """Spin PBE of the start densities of a meta-GGA loop, with the zero-average shift."""
 
@@ -542,7 +548,8 @@ def set_periodic_xc_provider(provider=None) -> None:
 
 
 def _provided_xc(system, density):
-    if _xc_provider is None:
+    if _xc_provider is None or recording(system.grid):
+        # (the force term of PARSEC_GGA_NUCLEAR_GRADIENT reads the flux of the readable functional)
         return None
     return _xc_provider(system, density)
 
@@ -565,7 +572,7 @@ def set_periodic_spin_xc_provider(provider=None) -> None:
 
 
 def _provided_spin_xc(system, kind: str, density_up, density_down):
-    if _spin_xc_provider is None:
+    if _spin_xc_provider is None or recording(system.grid):
         return None
     return _spin_xc_provider(system, kind, density_up, density_down)
 

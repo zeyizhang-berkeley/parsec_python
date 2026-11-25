@@ -86,6 +86,7 @@ import numpy as np
 
 from parsec_python.V_xc import XCResult
 from parsec_python.V_xc.ca_lda_spin import SpinXCResult
+from parsec_python.V_xc.nuclear_gradient import share_potentials, spin_shares
 from parsec_python.V_xc.pbe import first_derivative_coefficients
 from parsec_python.V_xc.selection import XC_DISPLAY_NAMES
 
@@ -691,9 +692,13 @@ class _DeviceEvaluatorBase:
         reducer=None,
         device_id: int | None = None,
         ionization_energy_difference: float = 0.0,
+        nuclear_gradient=None,
     ) -> None:
         from ..backends.cupy import require_cupy
 
+        # PARSEC_GGA_NUCLEAR_GRADIENT: a callable returning the correction of the present structure
+        # (parsec_python.V_xc.nuclear_gradient.system_correction), or None
+        self._nuclear_source = nuclear_gradient
         available = (
             DEVICE_SPIN_XC_FUNCTIONALS if self.spin_polarized else DEVICE_XC_FUNCTIONALS
         )
@@ -753,6 +758,32 @@ class _DeviceEvaluatorBase:
             + (" on the symmetry orbits" if reducer is not None else "")
         )
 
+    def _nuclear(self, scale: float = 1.0):
+        """The correction of the density gradient at the evaluator's points (``PARSEC_GGA_NUCLEAR_GRADIENT``,
+        :mod:`parsec_python.V_xc.nuclear_gradient`; ``scale`` 0.5 for a spin channel), or ``None``.
+
+        The gradient of the stencil geometry is that of the grid rows of the values: the full grid, or the
+        representative rows of the orbits of a reducer (the correction is a vector field that the operations of the
+        group carry, as the flux is).
+        """
+
+        source = getattr(self, "_nuclear_source", None)
+        if source is None:
+            return None
+        correction = source()
+        if correction is None:
+            return None
+        rows = None if self.reducer is None else self.reducer.reduction.representative_rows
+        values = correction.device_values(self._cp, rows, self.device_id)
+        return values if scale == 1.0 else scale * values
+
+    def _nuclear_bytes(self) -> int:
+        from parsec_python.V_xc.nuclear_gradient import nuclear_gradient_setting
+
+        if getattr(self, "_nuclear_source", None) is None or nuclear_gradient_setting() == "off":
+            return 0
+        return 24 * int(self.size)
+
     @property
     def device_bytes(self) -> int:
         """Bytes the evaluator keeps on its device between evaluations."""
@@ -780,7 +811,7 @@ class _DeviceEvaluatorBase:
         fields = evaluation_fields(
             self.functional, spin_polarized=self.spin_polarized, core=core > 0
         )
-        return geometry + weights + core + 8 * self.size * fields
+        return geometry + weights + core + 8 * self.size * fields + self._nuclear_bytes()
 
     def _values(self, field) -> np.ndarray:
         if self.reducer is not None:
@@ -858,6 +889,9 @@ class DeviceXCEvaluator(_DeviceEvaluatorBase):
                 )
             elif functional in _GGA_FUNCTIONALS:
                 gradient = self.geometry.gradient(cp, kernels, density)
+                nuclear = self._nuclear()
+                if nuclear is not None:
+                    gradient += nuclear
                 f_n = cp.empty(count, dtype=np.float64)
                 flux = cp.empty((3, count), dtype=np.float64)
                 _launch(
@@ -974,6 +1008,12 @@ class DeviceSpinXCEvaluator(_DeviceEvaluatorBase):
             elif functional in _GGA_FUNCTIONALS:
                 gradient_up = self.geometry.gradient(cp, kernels, up)
                 gradient_down = self.geometry.gradient(cp, kernels, down)
+                nuclear = self._nuclear()
+                if nuclear is not None:
+                    # the share n_s / n of each channel (parsec_python.V_xc.nuclear_gradient.spin_shares)
+                    w_up, w_down = spin_shares(up, down, cp)
+                    gradient_up += w_up * nuclear
+                    gradient_down += w_down * nuclear
                 f_up = cp.empty(count, dtype=np.float64)
                 f_down = cp.empty(count, dtype=np.float64)
                 flux_up = cp.empty((3, count), dtype=np.float64)
@@ -992,6 +1032,10 @@ class DeviceSpinXCEvaluator(_DeviceEvaluatorBase):
                     flux_down,
                 )
                 del gradient_up, gradient_down
+                if nuclear is not None:
+                    extra_up, extra_down = share_potentials(up, down, nuclear, flux_up, flux_down, cp)
+                    f_up += extra_up
+                    f_down += extra_down
                 potential_up = self.geometry.adjoint(cp, kernels, flux_up, f_up, 2.0)
                 potential_down = self.geometry.adjoint(cp, kernels, flux_down, f_down, 2.0)
             else:
@@ -1053,6 +1097,12 @@ class DeviceSpinXCEvaluator(_DeviceEvaluatorBase):
             kernels = self._kernels
             gradient_up = self.geometry.gradient(cp, kernels, up)
             gradient_down = self.geometry.gradient(cp, kernels, down)
+            nuclear = self._nuclear()
+            if nuclear is not None:
+                # the share n_s / n of each channel (parsec_python.V_xc.nuclear_gradient.spin_shares)
+                w_up, w_down = spin_shares(up, down, cp)
+                gradient_up += w_up * nuclear
+                gradient_down += w_down * nuclear
             s_uu = gradient_up[0] * gradient_up[0] + gradient_up[1] * gradient_up[1] + gradient_up[2] * gradient_up[2]
             s_dd = (
                 gradient_down[0] * gradient_down[0]
@@ -1098,6 +1148,10 @@ class DeviceSpinXCEvaluator(_DeviceEvaluatorBase):
             flux_up = 2.0 * f_uu * gradient_up + f_ud * gradient_down
             flux_down = 2.0 * f_dd * gradient_down + f_ud * gradient_up
             del gradient_up, gradient_down
+            if nuclear is not None:
+                extra_up, extra_down = share_potentials(up, down, nuclear, flux_up, flux_down, cp)
+                f_up += extra_up
+                f_down += extra_down
             potential_up = self.geometry.adjoint(cp, kernels, flux_up, f_up, 2.0)
             potential_down = self.geometry.adjoint(cp, kernels, flux_down, f_down, 2.0)
             energy_density = 2.0 * f
@@ -1116,6 +1170,7 @@ def accelerated_xc_evaluators(
     reducer=None,
     device_id: int | None = None,
     core_density: Callable[[], np.ndarray | None] | None = None,
+    nuclear_gradient=None,
 ):
     """The device evaluators the accelerated driver uses, ``(unpolarized, spin)``.
 
@@ -1124,7 +1179,8 @@ def accelerated_xc_evaluators(
     functional ``PARSEC_CUPY_XC`` (or, for CA-LDA of a periodic cell,
     ``PARSEC_PERIODIC_CA_XC``) leaves on the host, or a grid this module does
     not handle.  ``core_density`` returns the frozen core density of the
-    present structure (default: that of ``reference``).
+    present structure (default: that of ``reference``), ``nuclear_gradient`` the correction of its density
+    gradient (``PARSEC_GGA_NUCLEAR_GRADIENT``; default: that of ``reference``).
     """
 
     scf = getattr(getattr(reference, "input", None), "scf", None)
@@ -1143,6 +1199,7 @@ def accelerated_xc_evaluators(
         "ionization_energy_difference": float(
             getattr(scf, "ionization_energy_difference", 0.0)
         ),
+        "nuclear_gradient": nuclear_gradient if nuclear_gradient is not None else _nuclear_source(reference),
     }
     # Zero_Average_Vxc of a 3-D cell (potshift): the readable evaluate_xc
     # shifts its potentials; the device evaluators get the same shift.
@@ -1163,6 +1220,7 @@ def accelerated_xc_evaluators(
             reducer=reducer,
             device_id=device_id,
             core_density=keywords["core_density"],
+            nuclear_gradient=keywords["nuclear_gradient"],
         )
         if zero_average:
             unpolarized = None if unpolarized is None else ZeroAverageXC(unpolarized)
@@ -1181,6 +1239,23 @@ def accelerated_xc_evaluators(
         return None, None
     evaluator = DeviceXCEvaluator(functional, grid, reducer=reducer, **keywords)
     return (ZeroAverageXC(evaluator) if zero_average else evaluator), None
+
+
+def _nuclear_source(reference):
+    """``lambda: system_correction(reference)`` (:mod:`parsec_python.V_xc.nuclear_gradient`)."""
+
+    from parsec_python.V_xc.nuclear_gradient import system_correction
+
+    return lambda: system_correction(reference)
+
+
+def nuclear_source(reference):
+    """The correction source of the device evaluators of a structure that ``reference()`` returns (the driver
+    rebinds its reference system when atoms move)."""
+
+    from parsec_python.V_xc.nuclear_gradient import system_correction
+
+    return lambda: system_correction(reference())
 
 
 class ZeroAverageXC:
@@ -1235,6 +1310,7 @@ __all__ = [
     "ZeroAverageXC",
     "accelerated_xc_evaluators",
     "device_grid_supported",
+    "nuclear_source",
     "device_xc_mode",
     "device_xc_selected",
     "evaluation_fields",

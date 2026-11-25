@@ -4826,17 +4826,23 @@ def _refuse_meta_gga_routes(problem, *, mpi_context) -> None:
             )
 
 
-def _hybrid_xc_evaluators(reference, *, backend, reducer, device_id, core_density):
+def _hybrid_xc_evaluators(reference, *, backend, reducer, device_id, core_density, nuclear_gradient=None):
     """``(unpolarized, spin, (start unpolarized, start spin))`` evaluators of a hybrid.
 
     The semilocal part of the hybrid on the device where
     :func:`.V_xc.device_hybrid_xc.device_hybrid_supported` allows it, and
     the start functional of the Fock loop where ``PARSEC_CUPY_XC`` puts it on
     the device (:func:`.V_xc.accelerated_xc_evaluators`); ``None`` entries
-    keep the host functionals of the reference system.
+    keep the host functionals of the reference system.  ``nuclear_gradient`` returns the correction of the density
+    gradient of the present structure (``PARSEC_GGA_NUCLEAR_GRADIENT``; default: that of ``reference``).
     """
 
     from types import SimpleNamespace
+
+    from .V_xc.device_xc import nuclear_source
+
+    if nuclear_gradient is None:
+        nuclear_gradient = nuclear_source(lambda: reference)
 
     from parsec_python.SCF.hybrid import hybrid_definition, hybrid_functional_of
 
@@ -4860,7 +4866,11 @@ def _hybrid_xc_evaluators(reference, *, backend, reducer, device_id, core_densit
             from .V_xc.device_libxc import DeviceLibxcXCEvaluator, DeviceSpinLibxcXCEvaluator
 
             keywords = dict(
-                name=functional.name, core_density=core_density, reducer=reducer, device_id=device_id
+                name=functional.name,
+                core_density=core_density,
+                reducer=reducer,
+                device_id=device_id,
+                nuclear_gradient=nuclear_gradient,
             )
             if spin:
                 spin_evaluator = DeviceSpinLibxcXCEvaluator(functional.semilocal, reference.grid, **keywords)
@@ -4876,6 +4886,7 @@ def _hybrid_xc_evaluators(reference, *, backend, reducer, device_id, core_densit
                     core_density=core_density,
                     reducer=reducer,
                     device_id=device_id,
+                    nuclear_gradient=nuclear_gradient,
                 )
             else:
                 unpolarized = DeviceHybridXCEvaluator(
@@ -4884,6 +4895,7 @@ def _hybrid_xc_evaluators(reference, *, backend, reducer, device_id, core_densit
                     core_density=core_density,
                     reducer=reducer,
                     device_id=device_id,
+                    nuclear_gradient=nuclear_gradient,
                 )
     # Zero_Average_Vxc of a 3-D cell (potshift): the device evaluators of the hybrid and of its start functional
     # shift their potentials as the reference system's evaluate_xc does (the default of an unpolarized cell).
@@ -4908,6 +4920,7 @@ def _hybrid_xc_evaluators(reference, *, backend, reducer, device_id, core_densit
         reducer=reducer,
         device_id=device_id,
         core_density=core_density,
+        nuclear_gradient=nuclear_gradient,
     )
     return unpolarized, spin_evaluator, start
 
@@ -6645,6 +6658,8 @@ def _prepare_single_point(
     # A hybrid functional: the semilocal part of the hybrid and the start
     # functional of its Fock loop (V_xc/device_hybrid_xc.py, device_xc.py).
     hybrid_start_xc = (None, None)
+    from .V_xc.device_xc import nuclear_source
+
     if native_xc_evaluator is None and getattr(
         getattr(getattr(reference, "input", None), "scf", None), "is_meta_gga", False
     ):
@@ -6682,6 +6697,7 @@ def _prepare_single_point(
                         core_density=lambda: reference.core_density,
                         spin=True,
                         permutations=permutations and spin_sectors,
+                        nuclear_gradient=nuclear_source(lambda: reference),
                     )
                 else:
                     native_xc_evaluator = DeviceMetaGGAOnOrbits(
@@ -6691,6 +6707,7 @@ def _prepare_single_point(
                         device_id=hartree_device if isinstance(hartree_device, int) else 0,
                         core_density=lambda: reference.core_density,
                         permutations=permutations,
+                        nuclear_gradient=nuclear_source(lambda: reference),
                     )
             except ValueError:
                 # No device evaluation of this functional or grid: the host one.
@@ -6711,6 +6728,7 @@ def _prepare_single_point(
                 reducer=scf_reducer,
                 device_id=hartree_device,
                 core_density=lambda: reference.core_density,
+                nuclear_gradient=nuclear_source(lambda: reference),
             )[2]
     elif native_xc_evaluator is None and getattr(
         getattr(getattr(reference, "input", None), "scf", None), "is_hybrid", False
@@ -6721,6 +6739,7 @@ def _prepare_single_point(
             reducer=scf_reducer,
             device_id=hartree_device,
             core_density=lambda: reference.core_density,
+            nuclear_gradient=nuclear_source(lambda: reference),
         )
     elif native_xc_evaluator is None:
         # The other functionals on the device where PARSEC_CUPY_XC puts them
@@ -6734,6 +6753,7 @@ def _prepare_single_point(
             device_id=hartree_device,
             # The structure of the present atoms (move_atoms rebinds it).
             core_density=lambda: reference.core_density,
+            nuclear_gradient=nuclear_source(lambda: reference),
         )
         planned = getattr(native_xc_evaluator, "planned_device_bytes", None)
         if symmetry_eigensolver is not None and planned is not None:

@@ -105,6 +105,7 @@ from ..models import (
     SinglePointResult,
 )
 from .filter_degree import LaterFilterDegree
+from ..V_xc.nuclear_gradient import with_correction
 from ..V_xc import (
     NoncollinearXCResult,
     SpinPolarizedXCResult,
@@ -293,6 +294,7 @@ class PreparedSinglePointSystem:
             return result
         return self.hartree_variational.potential(density, result, tail_charges(self), self.atoms)
 
+    @with_correction
     def evaluate_xc(
         self, density: np.ndarray, tau: np.ndarray | None = None, density_gradient: np.ndarray | None = None
     ) -> XCResult:
@@ -337,6 +339,7 @@ class PreparedSinglePointSystem:
             ionization_energy_difference=self.input.scf.ionization_energy_difference,
         )
 
+    @with_correction
     def evaluate_xc_spin_polarized(
         self, density_up: np.ndarray, density_down: np.ndarray
     ) -> SpinPolarizedXCResult:
@@ -399,6 +402,8 @@ class PreparedSinglePointSystem:
         """Non-collinear XC (``V_avg`` and ``B_xc``) from ``n`` and ``m(r)``."""
 
         return noncollinear_xc(density, magnetization, self.evaluate_xc_spin_polarized)
+
+    @with_correction
     def evaluate_spin_xc(
         self,
         density_up: np.ndarray,

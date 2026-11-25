@@ -69,6 +69,9 @@ class ForceResult:
     # A periodic cell (``forcnloc.f90`` with ``is_pbc``): the ion-ion term is
     # the Ewald force, and no torque is reported.
     periodic: bool = False
+    # The term of the correction of the density gradient of a gradient functional near the nuclei
+    # (PARSEC_GGA_NUCLEAR_GRADIENT, parsec_python.V_xc.nuclear_gradient), Ry/bohr; ``None`` without it.
+    nuclear_gradient: np.ndarray | None = None
     # The spin-orbit term of a spinor calculation (``forcso`` of
     # ``soforc.F90``), Ry/bohr; ``None`` without spin-orbit coupling.
     spin_orbit: np.ndarray | None = None
@@ -111,6 +114,7 @@ def assemble_forces(
     keep_torque: bool = False,
     keep_net_force: bool = False,
     hartree_boundary: np.ndarray | None = None,
+    nuclear_gradient: np.ndarray | None = None,
 ) -> ForceResult:
     """Combine the force terms as ``forcnloc.f90`` does at its end.
 
@@ -125,9 +129,13 @@ def assemble_forces(
     ``total``, as ``forcnloc.F90:869-875`` does with ``fex_is``.
     ``hartree_boundary`` is the explicit term of the atomic tail of a
     cluster's Hartree boundary (:func:`parsec_python.Hartree.variational.hartree_tail_forces`).
+    ``nuclear_gradient`` is the term of the correction of the density gradient near the nuclei
+    (:func:`parsec_python.V_xc.nuclear_gradient.correction_forces`).
     """
 
     unsymmetrized = ion_ion + local.total + nonlocal_pseudopotential
+    if nuclear_gradient is not None:
+        unsymmetrized = unsymmetrized + nuclear_gradient
     if hartree_boundary is not None:
         unsymmetrized = unsymmetrized + hartree_boundary
     if spin_orbit is not None:
@@ -166,6 +174,7 @@ def assemble_forces(
         spin_orbit=spin_orbit,
         **({"net_force_kept": True} if keep_net_force else {}),
         **({} if hartree_boundary is None else {"hartree_boundary": hartree_boundary}),
+        **({} if nuclear_gradient is None else {"nuclear_gradient": nuclear_gradient}),
     )
 
 
@@ -316,14 +325,20 @@ def embedding_force_fields(system, result) -> tuple[np.ndarray, np.ndarray, bool
 
 
 def correction_forces(system, result) -> dict[str, np.ndarray]:
-    """The LDA+U and TS force terms of a result, by their field names.
+    """The LDA+U, TS and nuclear-gradient force terms of a result, by their field names.
 
-    Empty without LDA+U and without a TS correction, so the call of
+    Empty without LDA+U, without a TS correction and under
+    ``PARSEC_GGA_NUCLEAR_GRADIENT=off``, so the call of
     :func:`assemble_forces` stays what it was.  The TS forces are those of
     the correction of the converged density (an unconverged loop has none).
     """
 
     terms: dict[str, np.ndarray] = {}
+    from ..V_xc.nuclear_gradient import correction_forces as nuclear_gradient_forces
+
+    nuclear = nuclear_gradient_forces(system, result)
+    if nuclear is not None:
+        terms["nuclear_gradient"] = nuclear
     if getattr(system, "hubbard", None) is not None:
         from .hubbard_force import hubbard_forces
 

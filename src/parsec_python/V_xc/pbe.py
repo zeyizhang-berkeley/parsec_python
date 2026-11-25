@@ -31,6 +31,7 @@ from scipy.ndimage import correlate1d
 
 from ..Grid import RealSpaceGrid
 from .ca_lda import SpinPolarizedXCResult, XCResult
+from .nuclear_gradient import active_correction, note_flux, recording, share_potentials, spin_shares
 
 
 # Original PBE constants.  GAMMA is (1-ln(2))/pi**2.
@@ -384,6 +385,27 @@ def density_gradient(values: np.ndarray, grid) -> np.ndarray:
     return gradients
 
 
+def gradient_transpose(fluxes, grid) -> np.ndarray:
+    """``D^T`` of the gradient of :func:`density_gradient` applied to Cartesian ``fluxes`` ``(3, n)``: the exact
+    transpose on every grid (zero padding of a cluster, wraparound of a cell, oblique and general periodic grids)."""
+
+    fluxes = np.asarray(fluxes, dtype=np.float64)
+    if getattr(grid, "is_general_periodic", False):
+        from ..Laplacian.nonorthogonal import cartesian_gradient_transpose
+
+        return cartesian_gradient_transpose(fluxes, grid, first_derivative_coefficients(grid.settings.expansion_order))
+    mix = _oblique_mix(grid)
+    if mix is not None:
+        return _oblique_divergence_adjoint(
+            fluxes, grid, first_derivative_coefficients(grid.settings.expansion_order), mix
+        )
+    weights, boundary = _derivative_stencil(grid)
+    total = np.zeros(grid.size, dtype=np.float64)
+    for axis in range(3):
+        total += _from_box(correlate1d(_to_box(fluxes[axis], grid), -weights, axis=axis, mode=boundary, cval=0.0), grid)
+    return total
+
+
 def discrete_gga(
     density: np.ndarray,
     grid,
@@ -413,11 +435,16 @@ def discrete_gga(
 
         weights = first_derivative_coefficients(grid.settings.expansion_order)
         gradients = cartesian_gradient(density, grid, weights)
+        nuclear = active_correction(grid)
+        if nuclear is not None:
+            gradients = gradients + nuclear
         sigma = np.einsum("ij,ij->j", gradients, gradients)
         energy_hartree, fn_hartree, fsigma_hartree = partials(density, sigma)
         potential_hartree = fn_hartree + cartesian_gradient_transpose(
             2.0 * fsigma_hartree[None, :] * gradients, grid, weights
         )
+        if nuclear is not None:
+            note_flux(grid, 2.0 * fsigma_hartree[None, :] * gradients, potential_hartree - fn_hartree)
         return energy_hartree, potential_hartree
 
     mix = _oblique_mix(grid)
@@ -427,10 +454,15 @@ def discrete_gga(
         weights = first_derivative_coefficients(grid.settings.expansion_order)
         gradients = np.empty((3, grid.size), dtype=np.float64)
         gradients[:] = _oblique_gradient(density, grid, weights, mix)
+        nuclear = active_correction(grid)
+        if nuclear is not None:
+            gradients += nuclear
         sigma = np.einsum("kj,kj->j", gradients, gradients)
         energy_hartree, fn_hartree, fsigma_hartree = partials(density, sigma)
         potential_hartree = fn_hartree.copy()
         potential_hartree += _oblique_divergence_adjoint(2.0 * fsigma_hartree * gradients, grid, weights, mix)
+        if nuclear is not None:
+            note_flux(grid, 2.0 * fsigma_hartree * gradients, potential_hartree - fn_hartree)
         return energy_hartree, potential_hartree
 
     weights, boundary = _derivative_stencil(grid)
@@ -448,6 +480,13 @@ def discrete_gga(
         gradient = _from_box(derivative_box, grid)
         gradients[axis] = gradient
         sigma += gradient * gradient
+    nuclear = active_correction(grid)
+    if nuclear is not None:
+        # PARSEC_GGA_NUCLEAR_GRADIENT: the exact gradient of the atomic part (V_xc.nuclear_gradient)
+        gradients += nuclear
+        sigma = np.zeros(grid.size, dtype=np.float64)
+        for axis in range(3):
+            sigma += gradients[axis] * gradients[axis]
 
     energy_hartree, fn_hartree, fsigma_hartree = partials(density, sigma)
     potential_hartree = fn_hartree.copy()
@@ -463,6 +502,8 @@ def discrete_gga(
             cval=0.0,
         )
         potential_hartree += _from_box(adjoint_box, grid)
+    if nuclear is not None:
+        note_flux(grid, 2.0 * fsigma_hartree * gradients, potential_hartree - fn_hartree)
     return energy_hartree, potential_hartree
 
 
@@ -748,6 +789,12 @@ def discrete_spin_gga_ab(up: np.ndarray, down: np.ndarray, grid, partials) -> Sp
 
     grad_up = gradient(up)
     grad_down = gradient(down)
+    nuclear = active_correction(grid)
+    if nuclear is not None:
+        # the share n_s / n of the correction in each channel (V_xc.nuclear_gradient.spin_shares)
+        w_up, w_down = spin_shares(up, down)
+        grad_up = [g + w_up * c for g, c in zip(grad_up, nuclear)]
+        grad_down = [g + w_down * c for g, c in zip(grad_down, nuclear)]
     s_uu = sum(g * g for g in grad_up)
     s_dd = sum(g * g for g in grad_down)
     s_ud = sum(a * b for a, b in zip(grad_up, grad_down))
@@ -775,6 +822,15 @@ def discrete_spin_gga_ab(up: np.ndarray, down: np.ndarray, grid, partials) -> Sp
     potential_down = f_down + divergence_adjoint(
         [2.0 * f_dd * gd + f_ud * gu for gu, gd in zip(grad_up, grad_down)]
     )
+    if nuclear is not None:
+        u_up = np.array([2.0 * f_uu * gu + f_ud * gd for gu, gd in zip(grad_up, grad_down)])
+        u_down = np.array([2.0 * f_dd * gd + f_ud * gu for gu, gd in zip(grad_up, grad_down)])
+        extra_up, extra_down = share_potentials(up, down, nuclear, u_up, u_down)
+        potential_up = potential_up + extra_up
+        potential_down = potential_down + extra_down
+        if recording(grid):
+            flux = w_up * u_up + w_down * u_down
+            note_flux(grid, flux, gradient_transpose(flux, grid))
 
     energy_density = 2.0 * f
     return SpinPolarizedXCResult(
@@ -803,6 +859,11 @@ def _pbe_spin_polarized_general_periodic(
     weights = first_derivative_coefficients(grid.settings.expansion_order)
     grad_up = cartesian_gradient(up, grid, weights)
     grad_down = cartesian_gradient(down, grid, weights)
+    nuclear = active_correction(grid)
+    if nuclear is not None:
+        w_up, w_down = spin_shares(up, down)
+        grad_up = grad_up + w_up * nuclear
+        grad_down = grad_down + w_down * nuclear
     s_uu = np.einsum("ij,ij->j", grad_up, grad_up)
     s_dd = np.einsum("ij,ij->j", grad_down, grad_down)
     s_ud = np.einsum("ij,ij->j", grad_up, grad_down)
@@ -813,6 +874,15 @@ def _pbe_spin_polarized_general_periodic(
     potential_down = f_down + cartesian_gradient_transpose(
         2.0 * f_dd[None, :] * grad_down + f_ud[None, :] * grad_up, grid, weights
     )
+    if nuclear is not None:
+        u_up = 2.0 * f_uu[None, :] * grad_up + f_ud[None, :] * grad_down
+        u_down = 2.0 * f_dd[None, :] * grad_down + f_ud[None, :] * grad_up
+        extra_up, extra_down = share_potentials(up, down, nuclear, u_up, u_down)
+        potential_up = potential_up + extra_up
+        potential_down = potential_down + extra_down
+        if recording(grid):
+            flux = w_up * u_up + w_down * u_down
+            note_flux(grid, flux, gradient_transpose(flux, grid))
     energy_density = 2.0 * f
     return SpinPolarizedXCResult(
         potential_up=2.0 * potential_up,

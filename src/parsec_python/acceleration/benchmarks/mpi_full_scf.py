@@ -1824,6 +1824,13 @@ def execute(args, cp, comm, MPI, initialization_seconds, initial_affinity=None):
     from parsec_python.SCF.filter_degree import filter_degree_stall_setting
 
     filter_degree_stall_setting()
+    # PARSEC_GGA_NUCLEAR_GRADIENT (V_xc/nuclear_gradient.py) likewise: every rank corrects the density gradient alike.
+    from parsec_python.V_xc.nuclear_gradient import forces_refusal, nuclear_gradient_setting
+
+    nuclear_gradient_setting()
+    refusal = forces_refusal(translation)
+    if refusal is not None:
+        raise ValueError(refusal)
     use_symmetry, symmetry_note = symmetry_decision(translation)
     # Whether the atoms stay in the point group of the first structure, which Ignore_Symmetry does not tell.
     # The command line may overrule that keyword, but not a run that leaves the group.

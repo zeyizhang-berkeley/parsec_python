@@ -2455,6 +2455,13 @@ def _run(
         from parsec_python.Hamiltonian.hubbard import ldau_smooth_projectors_fraction
 
         ldau_smooth_projectors_fraction()
+        # PARSEC_GGA_NUCLEAR_GRADIENT: the density gradient of the gradient functionals beside the nuclei
+        from parsec_python.V_xc.nuclear_gradient import forces_refusal, nuclear_gradient_setting
+
+        nuclear_gradient_setting()
+        refusal = forces_refusal(translation)
+        if refusal is not None:
+            raise ValueError(refusal)
         if translation.problem.scf.spin_polarized:
             # PARSEC_SPIN_FALLBACK_DENSITY: the density of the full grid a spin cluster leaves its sectors for
             from .SCF.fallback_density import fallback_density_setting

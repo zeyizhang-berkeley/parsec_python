@@ -179,7 +179,7 @@ class RadiusEstimatesThread:
         self._arguments = (float(settings.radius), float(system.electron_count))
         self._options = dict(
             spacing=settings.spacing,
-            shift=settings.shift[0],
+            shift=tuple(settings.shift),
             stencil_half_width=settings.stencil_half_width,
             budget=float(
                 getattr(translation, "domain_energy_tolerance", DOMAIN_ENERGY_TOLERANCE)

@@ -1508,6 +1508,7 @@ class KPointSectors:
         other.k_index = int(k_index)
         other.counts = list(self.counts)
         other._potential = (None, None)
+        other._potential_before = (None, None)
         other._exchange = {}
         other._meta_fields = (None, None)
         return other
@@ -1671,8 +1672,16 @@ class KPointSectors:
     def _orbit_means(self, potential: np.ndarray) -> np.ndarray:
         cached, means = self._potential
         if cached is not potential:
+            # the potential before (the sectors of a non-collinear k-point alternate between the potentials of their two
+            # components, V + B_a and V - B_a: kpoint_spinor_sectors)
+            before = getattr(self, "_potential_before", (None, None))
+            if before[0] is potential:
+                self._potential_before = self._potential
+                self._potential = before
+                return before[1]
             means = self.decomposition.invariant_wedge_values(potential)
             # the array is held, so that its identity is not reused by another one while cached
+            self._potential_before = self._potential
             self._potential = (potential, means)
         return means
 
@@ -2015,8 +2024,9 @@ def check_kpoint_sector_switches(problem=None) -> None:
     density group of the k-point wedge), ``PARSEC_KPOINT_SECTOR_CLASSES``, ``PARSEC_KPOINT_SECTOR_REAL``, the real
     arithmetic of the Gamma point (``PARSEC_KPOINT_REAL_GAMMA``, :mod:`.kpoint_real`),
     ``PARSEC_KPOINT_SECTOR_WARM_GROWTH``, ``PARSEC_KPOINT_SECTOR_LDAU``, ``PARSEC_KPOINT_SECTOR_META_GGA``,
-    ``PARSEC_KPOINT_SECTOR_PROCESSES``, ``PARSEC_SOC_KPOINT_SECTORS`` and ``PARSEC_SOC_SPIN_KPOINT_SECTORS``
-    (:mod:`.kpoint_spinor_sectors`).  Reading them changes nothing else.  With ``problem`` (the input of the run) a
+    ``PARSEC_KPOINT_SECTOR_PROCESSES``, ``PARSEC_SOC_KPOINT_SECTORS``, ``PARSEC_SOC_SPIN_KPOINT_SECTORS``,
+    ``PARSEC_NONCOLLINEAR_KPOINT_SECTORS`` (:mod:`.kpoint_spinor_sectors`) and ``PARSEC_KPOINT_SECTOR_GUARD``.  Reading
+    them changes nothing else.  With ``problem`` (the input of the run) a
     meta-GGA under ``PARSEC_KPOINT_KINETIC=bloch`` is refused as well: the orbital term keeps the gradient form of the kinetic term of a k-point
     (:func:`parsec_python.Laplacian.finite_difference.bloch_laplacian_or_none`, which would stop its k-point loop after
     the first iteration, the first with the term)."""
@@ -2056,11 +2066,19 @@ def check_kpoint_sector_switches(problem=None) -> None:
     from .kpoint_processes import sector_processes_setting
 
     sector_processes_setting()
-    # the double-group sectors of the k-points of a spin-orbit loop (PARSEC_SOC_KPOINT_SECTORS)
-    from .kpoint_spinor_sectors import soc_kpoint_sectors_setting, soc_spin_kpoint_sectors_setting
+    # the double-group sectors of the k-points of a spin-orbit loop (PARSEC_SOC_KPOINT_SECTORS) and of the non-collinear
+    # loop (PARSEC_NONCOLLINEAR_KPOINT_SECTORS)
+    from .kpoint_spinor_sectors import (
+        noncollinear_kpoint_sectors_setting,
+        soc_kpoint_sectors_setting,
+        soc_spin_kpoint_sectors_setting,
+    )
 
     soc_kpoint_sectors_setting()
     soc_spin_kpoint_sectors_setting()
+    noncollinear_kpoint_sectors_setting()
+    # the symmetry guard of the sectors (the spin-polarized and the non-collinear loops read it)
+    sector_guard_setting()
     scf = getattr(problem, "scf", None)
     if getattr(scf, "is_meta_gga", False) and getattr(problem, "periodic_cell", None) is not None:
         from parsec_python.Laplacian.finite_difference import kpoint_kinetic_setting

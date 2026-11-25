@@ -223,6 +223,37 @@ level of the hydronium oxygen relative to the water molecule of the 2022 set:
 - The structures are the first entry of each published file, the global
   minimum. The hole is on the oxygen with three hydrogens bound (Figure S2 of
   the paper); the initial state has the charge +1, the final state +2.
+- With the tables of the potential files (`PARSEC_LOCAL_FILTER=off`, the runs
+  before 24 November 2026) these values were 0 to 0.028 eV lower and nearer
+  the figure (mean absolute difference 0.027 / 0.024, largest 0.072 / 0.071),
+  but less accurate. With those tables the binding energy depends on where
+  the oxygen with the hole lies between the grid points. Moved rigidly to
+  eight places within a grid step, the water molecule, H3O+(H2O)1 and
+  H3O+(H2O)12 give PBE binding energies (SCF to 1e-6 Ry, as in all the checks
+  here) that spread over 23.5, 18.3 and 23.3 meV, and over 2.0, 1.2 and
+  1.4 meV with the filtered tables; the means over the places agree within
+  1.4 meV. The oxygen of the water molecule lies at the centre of a grid cube,
+  where the files' tables put its binding energy 15.7 meV above that mean;
+  the hydronium oxygens lie elsewhere. The difference comes from the tables
+  of O with the 1s hole and of O (water -14.2 and -1.1 of -15.5 meV,
+  H3O+(H2O)8 +4.2 and +8.1 of +12.2 meV); that of H gives 0.4 meV at most.
+  The sampled local energy of the two tables with their atomic valence
+  densities, at the place of each hole oxygen, reproduces the changes of the
+  water molecule and the 20 clusters up to a common constant within 0.8 meV
+  rms.
+- On a grid of 0.07 Å, where both kinds of tables give the same shifts within
+  0.4 meV (n = 1, 6, 8 and 12; 0.06 Å those of n = 1 and 12 and 0.05 Å that
+  of n = 1 within 0.1 meV of 0.07 Å), the shifts of the 20 clusters lie 0.5
+  to 2.1 meV above those of the table; those of the earlier runs were 0.6 to
+  29.8 meV below. A wall 7 Å instead of 5 Å beyond the outermost nucleus, and
+  the boundary values of PARSEC (`Hartree_Boundary_Tolerance: off`) or of the
+  tolerance 1e-6 Ry, change the binding energies of the water molecule,
+  H3O+(H2O)1 and H3O+(H2O)12 by 0.1 meV at most. The distance of the
+  converged values from the figure (PBE 0.041 on average, 0.090 at n = 12) is
+  therefore not one of the grid, the places of the atoms, the wall or the
+  boundary values of these runs; the paper gives neither the grid of its
+  cluster runs nor the places of the atoms on it. `analyze.py --check` allows
+  0.09 from the figure.
 
 2024 set:
 
@@ -285,11 +316,16 @@ the hole) to +4.5e-4 Ry; with the exact Kleinman-Bylander quadrature of
 -7.3e-3 Ry (PF5 with the P 1s hole) to +6.3e-3 Ry (POF3) away from those of
 the runs of 22 November 2026, and the binding energies -15 to +13 meV. The
 O 1s binding energies moved most, down by 10 to 15 meV for six molecules of
-the 2022 set. For the water molecule the 0.10 Å grid gives 548.204 eV
-(PBE) without the filter and 548.188 eV with it, against 548.192 eV with
-either on grids of 0.07 and 0.05 Å: the filter takes the error of the grid
-from +11 to -4 meV. The water molecule is the reference of the protonated
-clusters, whose values above rose by 0 to 0.028 eV. The 2024 binding
+the 2022 set: most of its hole oxygens lie midway between the grid points
+along two or three axes, where the files' O and O 1s-hole tables raise the
+binding energy most (the sampled local energy of the two tables gives the
+changes of the 15 molecules of the O set up to a constant within 0.5 meV
+rms; see the protonated water above). For the water molecule the 0.10 Å grid
+gives 548.204 eV (PBE) without the filter and 548.188 eV with it, against
+548.192 eV with either on grids of 0.07 and 0.05 Å: the filter takes the
+error of the grid from +11 to -4 meV. The water molecule is the reference of
+the protonated clusters, whose values above rose by 0 to 0.028 eV, to within
+2.1 meV of those of the 0.07 Å grid. The 2024 binding
 energies moved by 2 meV at most and the totals of the atoms of Table 1 by
 up to 0.012 eV (the O ion; their largest difference from the paper is now
 0.008 eV, before 0.010 eV).

@@ -291,6 +291,9 @@ def _ionic_payload(forces=None, relaxation=None, dynamics=None) -> dict[str, np.
         boundary = getattr(forces, "hartree_boundary", None)
         if boundary is not None:
             payload["forces_hartree_boundary"] = np.asarray(boundary)
+        nuclear = getattr(forces, "nuclear_gradient", None)
+        if nuclear is not None:
+            payload["forces_nuclear_gradient"] = np.asarray(nuclear)
     if relaxation is not None and relaxation.records:
         records = relaxation.records
         payload["relaxation_positions"] = np.asarray([item.positions for item in records])
@@ -2461,8 +2464,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     # the accelerated command line does, so that a value it does not know is refused before the SCF
     from parsec_python.Hamiltonian.hubbard import ldau_smooth_projectors_fraction
 
+    from parsec_python.V_xc.nuclear_gradient import forces_refusal, nuclear_gradient_setting
+
     try:
         ldau_smooth_projectors_fraction()
+        # PARSEC_GGA_NUCLEAR_GRADIENT: the density gradient of the gradient functionals beside the nuclei
+        nuclear_gradient_setting()
+        refusal = forces_refusal(translation)
+        if refusal is not None:
+            raise ValueError(refusal)
     except ValueError as error:
         print(f"Input error: {error}", file=sys.stderr)
         return 2

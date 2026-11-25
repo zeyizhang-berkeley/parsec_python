@@ -33,6 +33,7 @@ import numpy as np
 
 from parsec_python.V_xc import XCResult
 from parsec_python.V_xc.ca_lda_spin import SpinXCResult
+from parsec_python.V_xc.nuclear_gradient import share_potentials, spin_shares
 from parsec_python.V_xc.libxc import LibxcSemilocal, is_libxc_functional, libxc_semilocal
 
 from . import device_xc
@@ -82,7 +83,9 @@ def device_libxc_supported(semilocal, grid) -> bool:
 class _LibxcEvaluatorBase(_DeviceEvaluatorBase):
     """Device, kernels, stencil geometry, core density of a libxc functional (LDA or GGA)."""
 
-    def __init__(self, semilocal, grid, *, name=None, core_density=None, reducer=None, device_id=None) -> None:
+    def __init__(
+        self, semilocal, grid, *, name=None, core_density=None, reducer=None, device_id=None, nuclear_gradient=None
+    ) -> None:
         from ..backends.cupy import require_cupy
 
         if isinstance(semilocal, str):
@@ -106,6 +109,8 @@ class _LibxcEvaluatorBase(_DeviceEvaluatorBase):
         self._core_source = core_density if callable(core_density) else (lambda: core_density)
         self._core_host = None
         self._core_device = None
+        # PARSEC_GGA_NUCLEAR_GRADIENT (a GGA's gradient only)
+        self._nuclear_source = nuclear_gradient if semilocal.family == "gga" else None
         reduction = None if reducer is None else reducer.reduction
         with cp.cuda.Device(self.device_id):
             self._kernels = _libxc_kernels(cp, self.device_id)
@@ -160,6 +165,9 @@ class DeviceLibxcXCEvaluator(_LibxcEvaluatorBase):
             count = self.size
             kernels = self._kernels
             gradient = self.geometry.gradient(cp, kernels, density)
+            nuclear = self._nuclear()
+            if nuclear is not None:
+                gradient += nuclear
             sigma = cp.empty(count, dtype=np.float64)
             _launch(kernels["libxc_sigma"], count, gradient, sigma)
             energy, vrho, vsigma, _, _ = self.semilocal.evaluate_layout(density, sigma, polarized=False)
@@ -220,10 +228,17 @@ class DeviceSpinLibxcXCEvaluator(_LibxcEvaluatorBase):
             kernels = self._kernels
             gradient_up = self.geometry.gradient(cp, kernels, up)
             gradient_down = self.geometry.gradient(cp, kernels, down)
+            nuclear = self._nuclear()
+            if nuclear is not None:
+                # the share n_s / n of each channel (parsec_python.V_xc.nuclear_gradient.spin_shares)
+                w_up, w_down = spin_shares(up, down, cp)
+                gradient_up += w_up * nuclear
+                gradient_down += w_down * nuclear
             rho = cp.empty((count, 2), dtype=np.float64)
             sigma = cp.empty((count, 3), dtype=np.float64)
             _launch(kernels["libxc_spin_inputs"], count, up, down, gradient_up, gradient_down, rho, sigma)
-            del up, down
+            if nuclear is None:
+                del up, down
             energy, vrho, vsigma, _, _ = self.semilocal.evaluate_layout(rho, sigma, polarized=True)
             del rho, sigma
             energy_density = cp.empty(count, dtype=np.float64)
@@ -246,6 +261,10 @@ class DeviceSpinLibxcXCEvaluator(_LibxcEvaluatorBase):
                 flux_down,
             )
             del gradient_up, gradient_down, energy, vrho, vsigma
+            if nuclear is not None:
+                extra_up, extra_down = share_potentials(up, down, nuclear, flux_up, flux_down, cp)
+                f_up += extra_up
+                f_down += extra_down
             potential_up = self.geometry.adjoint(cp, kernels, flux_up, f_up, 2.0)
             potential_down = self.geometry.adjoint(cp, kernels, flux_down, f_down, 2.0)
             total_energy = self._integral(energy_density)
@@ -257,7 +276,7 @@ class DeviceSpinLibxcXCEvaluator(_LibxcEvaluatorBase):
             )
 
 
-def libxc_xc_evaluators(reference, *, spec: str, reducer=None, device_id=None, core_density=None):
+def libxc_xc_evaluators(reference, *, spec: str, reducer=None, device_id=None, core_density=None, nuclear_gradient=None):
     """``(unpolarized, spin)`` device evaluators of the libxc functional ``spec`` (one of them ``None``).
 
     ``(None, None)`` where the device does not take it: a meta-GGA (its grid
@@ -275,6 +294,7 @@ def libxc_xc_evaluators(reference, *, spec: str, reducer=None, device_id=None, c
         "core_density": core_density if core_density is not None else (lambda: reference.core_density),
         "reducer": reducer,
         "device_id": device_id,
+        "nuclear_gradient": nuclear_gradient,
     }
     if bool(getattr(scf, "spin_polarized", False)):
         return None, DeviceSpinLibxcXCEvaluator(semilocal, reference.grid, **keywords)

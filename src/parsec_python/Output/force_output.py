@@ -165,6 +165,16 @@ def force_report_lines(forces, output_level: int = 1, *, periodic: bool = False)
                 " ===========================================",
                 *_table(positions, boundary),
             ]
+        # Python addition: the correction of the density gradient beside the nuclei moves with the atoms
+        # (PARSEC_GGA_NUCLEAR_GRADIENT); PARSEC has no such term.
+        nuclear = getattr(forces, "nuclear_gradient", None)
+        if nuclear is not None:
+            lines += [
+                "",
+                " Reporting nuclear-gradient XC force components",
+                " ==============================================",
+                *_table(positions, nuclear),
+            ]
         # Python addition: a slab whose SCF took the derivative of its Hartree energy (PARSEC_HARTREE_VARIATIONAL)
         variational = getattr(forces, "hartree_variational", None)
         if variational:

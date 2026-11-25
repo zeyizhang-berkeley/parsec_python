@@ -652,6 +652,70 @@ class GridMappingTests(unittest.TestCase):
         # the same grid restarts as before
         self.assertFalse(check_restart_file(stored, periodic, spin_count=1, complex_wavefunctions=False))
 
+    def test_a_file_that_decides_the_points_on_the_sphere_otherwise_restarts(self) -> None:
+        # Grid_Shift 0, R = 21 h: points lie exactly on the sphere, and PARSEC_SPHERE_TIES decides them by its rule
+        import os
+
+        from parsec_python.Output.wfn_dat import wfn_dat_from_result
+        from parsec_python.SCF.restart import _wfn_dat_tie_difference, check_wfn_dat, restart_report_lines
+
+        grids = {}
+        for rule in ("dot", "fortran", "symmetric"):
+            with patch.dict(os.environ, {"PARSEC_SPHERE_TIES": rule}):
+                grids[rule] = _cluster_grid(spacing=0.4, radius=8.4, shift=(0.0, 0.0, 0.0))
+        self.assertEqual((grids["dot"].size, grids["symmetric"].size), (38807, 38839))
+        current = grids["symmetric"]
+        for rule in ("dot", "fortran"):
+            stored = grids[rule]
+            result = _Result(stored)
+            data, _ = dat.parsec_dat_from_result(result, stored, WavefunctionSelection())
+            mine = {tuple(p) for p in current.integer_coordinates.tolist()}
+            theirs = {tuple(p) for p in stored.integer_coordinates.tolist()}
+            expected = (len(mine - theirs), len(theirs - mine))
+            self.assertGreater(sum(expected), 0)
+            with self.subTest(file=rule):
+                self.assertFalse(check_restart_file(data, current, spin_count=1, complex_wavefunctions=False))
+                fields = restart_fields(data, current, spin_count=1)
+                self.assertEqual(fields.sphere_ties, expected)
+                rows = current.rows_for_integer_coordinates(stored.integer_coordinates)
+                kept = rows >= 0
+                np.testing.assert_array_equal(fields.potentials[0][rows[kept]], result.next_effective_potential[kept])
+                held = np.zeros(current.size, dtype=bool)
+                held[rows[kept]] = True
+                self.assertEqual(float(np.abs(fields.potentials[0][~held]).sum()), 0.0)
+                self.assertTrue(any("PARSEC_SPHERE_TIES=symmetric" in line for line in restart_report_lines(fields)))
+                # wfn.dat (restart.F90): the same
+                wfn = wfn_dat_from_result(result, stored)
+                self.assertFalse(check_wfn_dat(wfn, current))
+                self.assertEqual(_wfn_dat_tie_difference(wfn, current), expected)
+        # a file of the same grid: nothing to note
+        same, _ = dat.parsec_dat_from_result(_Result(current), current, WavefunctionSelection())
+        self.assertIsNone(restart_fields(same, current, spin_count=1).sphere_ties)
+        # a point off the sphere is another grid: the errors of before
+        stored = grids["dot"]
+        inner = int(np.argmin(np.einsum("ij,ij->i", stored.coordinates, stored.coordinates)))
+        data, _ = dat.parsec_dat_from_result(_Result(stored), stored, WavefunctionSelection())
+        keep = np.ones(stored.size, dtype=bool)
+        keep[inner] = False
+        from dataclasses import replace
+
+        holed = replace(
+            data, ndim=stored.size - 1, points=np.asarray(data.points)[keep],
+            potentials=tuple(np.asarray(v)[keep] for v in data.potentials),
+            densities=tuple(np.asarray(v)[keep] for v in data.densities),
+        )
+        with self.assertRaises(RestartError) as caught:
+            restart_fields(holed, current, spin_count=1)
+        self.assertEqual(caught.exception.code, 367)
+        wfn = wfn_dat_from_result(_Result(stored), stored)
+        holed_wfn = replace(wfn, ndim=stored.size - 1, points=np.asarray(wfn.points)[keep])
+        with self.assertRaises(RestartError) as caught:
+            check_wfn_dat(holed_wfn, current)
+        self.assertEqual(caught.exception.code, 326)
+        # the same radius on a grid shifted by half a step has no point on the sphere: another grid
+        with self.assertRaisesRegex(RestartError, "Ignore_Symmetry"):
+            restart_fields(data, _cluster_grid(spacing=0.4, radius=8.4), spin_count=1)
+
     def test_warm_start_takes_the_stored_potential_or_rebuilds_it(self) -> None:
         grid = _cluster_grid()
         result = _Result(grid)

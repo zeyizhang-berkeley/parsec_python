@@ -38,6 +38,7 @@ import numpy as np
 from scipy.ndimage import correlate1d
 
 from ..Grid import RealSpaceGrid
+from .nuclear_gradient import active_correction, spin_shares
 from .pbe import _embed_active, _gather_active, first_derivative_coefficients
 
 
@@ -365,12 +366,15 @@ def lyp_correlation_energy_density(density: np.ndarray, sigma: np.ndarray) -> np
     return energy
 
 
-def density_gradient_squared(density: np.ndarray, grid: RealSpaceGrid) -> np.ndarray:
+def density_gradient_squared(density: np.ndarray, grid: RealSpaceGrid, share: float = 1.0) -> np.ndarray:
     """Return ``sigma = |D n|**2`` on the active grid.
 
     ``D`` is the centered first derivative of the order of the grid, with the
     density extended by zero outside the active domain: the gradient of
-    :func:`parsec_python.V_xc.pbe`.
+    :func:`parsec_python.V_xc.pbe`.  In a scope of
+    :mod:`parsec_python.V_xc.nuclear_gradient` (``PARSEC_GGA_NUCLEAR_GRADIENT=on``)
+    the gradient is ``D n + share c``, ``share`` the channel's ``n_s / n`` for a spin channel
+    (:func:`parsec_python.V_xc.nuclear_gradient.spin_shares`).
     """
 
     density = np.asarray(density, dtype=np.float64)
@@ -380,11 +384,14 @@ def density_gradient_squared(density: np.ndarray, grid: RealSpaceGrid) -> np.nda
     weights = weights / grid.spacing
     full_density = _embed_active(density, grid)
     sigma = np.zeros(grid.size, dtype=np.float64)
+    nuclear = active_correction(grid)
     for axis in range(3):
         derivative_box = correlate1d(
             full_density, weights, axis=axis, mode="constant", cval=0.0
         )
         gradient = _gather_active(derivative_box, grid)
+        if nuclear is not None:
+            gradient = gradient + share * nuclear[axis]
         sigma += gradient * gradient
     return sigma
 
@@ -481,8 +488,9 @@ def b3lyp_spin_semilocal_energies(
         raise ValueError("the functional requires nonnegative spin densities")
     up = np.maximum(up, 0.0)
     down = np.maximum(down, 0.0)
-    sigma_up = density_gradient_squared(up, grid)
-    sigma_down = density_gradient_squared(down, grid)
+    w_up, w_down = spin_shares(up, down)
+    sigma_up = density_gradient_squared(up, grid, w_up)
+    sigma_down = density_gradient_squared(down, grid, w_down)
     # The gradient is linear: this is |D n_up + D n_down|**2.
     sigma_total = density_gradient_squared(up + down, grid)
     scale = 2.0 * grid.volume_element

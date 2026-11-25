@@ -69,7 +69,9 @@ from .pbe import (
     _pw92_unpolarized,
     _to_box,
     first_derivative_coefficients,
+    gradient_transpose,
 )
+from .nuclear_gradient import active_correction, note_flux, recording, share_potentials, spin_shares
 
 
 # 2**(4/3) - 2 and f''(0) = 8/(9 (2**(4/3) - 2)) of the spin interpolation,
@@ -344,6 +346,12 @@ def discrete_spin_gga(
 
     gradient_up = gradient(up)
     gradient_down = gradient(down)
+    nuclear = active_correction(grid)
+    if nuclear is not None:
+        # the share n_s / n of the correction in each channel (V_xc.nuclear_gradient.spin_shares)
+        w_up, w_down = spin_shares(up, down)
+        gradient_up = gradient_up + w_up * nuclear
+        gradient_down = gradient_down + w_down * nuclear
     gradient_total = gradient_up + gradient_down
     (
         energy_hartree,
@@ -377,9 +385,20 @@ def discrete_spin_gga(
 
     # Hartree -> Rydberg at the public boundary.
     energy_density = 2.0 * energy_hartree
+    potential_up = potential(f_up, f_sigma_up, gradient_up)
+    potential_down = potential(f_down, f_sigma_down, gradient_down)
+    if nuclear is not None:
+        u_up = 2.0 * f_sigma_up[None, :] * gradient_up + 2.0 * f_sigma_total[None, :] * gradient_total
+        u_down = 2.0 * f_sigma_down[None, :] * gradient_down + 2.0 * f_sigma_total[None, :] * gradient_total
+        extra_up, extra_down = share_potentials(up, down, nuclear, u_up, u_down)
+        potential_up = potential_up + extra_up
+        potential_down = potential_down + extra_down
+        if recording(grid):
+            flux = w_up * u_up + w_down * u_down
+            note_flux(grid, flux, gradient_transpose(flux, grid))
     return SpinXCResult(
-        potential_up=2.0 * potential(f_up, f_sigma_up, gradient_up),
-        potential_down=2.0 * potential(f_down, f_sigma_down, gradient_down),
+        potential_up=2.0 * potential_up,
+        potential_down=2.0 * potential_down,
         energy_density=energy_density,
         total_energy=float(grid.volume_element * np.sum(energy_density)),
     )
@@ -397,6 +416,11 @@ def _spin_gga_oblique(up: np.ndarray, down: np.ndarray, grid, partials, mix: np.
     weights = first_derivative_coefficients(grid.settings.expansion_order)
     gradient_up = _oblique_gradient(up, grid, weights, mix)
     gradient_down = _oblique_gradient(down, grid, weights, mix)
+    nuclear = active_correction(grid)
+    if nuclear is not None:
+        w_up, w_down = spin_shares(up, down)
+        gradient_up = gradient_up + w_up * nuclear
+        gradient_down = gradient_down + w_down * nuclear
     gradient_total = gradient_up + gradient_down
     (
         energy_hartree,
@@ -418,9 +442,20 @@ def _spin_gga_oblique(up: np.ndarray, down: np.ndarray, grid, partials, mix: np.
         return f_density + _oblique_divergence_adjoint(fluxes, grid, weights, mix)
 
     energy_density = 2.0 * energy_hartree
+    potential_up = potential(f_up, f_sigma_up, gradient_up)
+    potential_down = potential(f_down, f_sigma_down, gradient_down)
+    if nuclear is not None:
+        u_up = 2.0 * f_sigma_up[None, :] * gradient_up + 2.0 * f_sigma_total[None, :] * gradient_total
+        u_down = 2.0 * f_sigma_down[None, :] * gradient_down + 2.0 * f_sigma_total[None, :] * gradient_total
+        extra_up, extra_down = share_potentials(up, down, nuclear, u_up, u_down)
+        potential_up = potential_up + extra_up
+        potential_down = potential_down + extra_down
+        if recording(grid):
+            flux = w_up * u_up + w_down * u_down
+            note_flux(grid, flux, gradient_transpose(flux, grid))
     return SpinXCResult(
-        potential_up=2.0 * potential(f_up, f_sigma_up, gradient_up),
-        potential_down=2.0 * potential(f_down, f_sigma_down, gradient_down),
+        potential_up=2.0 * potential_up,
+        potential_down=2.0 * potential_down,
         energy_density=energy_density,
         total_energy=float(grid.volume_element * np.sum(energy_density)),
     )
@@ -444,6 +479,11 @@ def _spin_gga_general_periodic(
     weights = first_derivative_coefficients(grid.settings.expansion_order)
     gradient_up = cartesian_gradient(up, grid, weights)
     gradient_down = cartesian_gradient(down, grid, weights)
+    nuclear = active_correction(grid)
+    if nuclear is not None:
+        w_up, w_down = spin_shares(up, down)
+        gradient_up = gradient_up + w_up * nuclear
+        gradient_down = gradient_down + w_down * nuclear
     gradient_total = gradient_up + gradient_down
     (
         energy_hartree,
@@ -468,9 +508,20 @@ def _spin_gga_general_periodic(
         return f_density + cartesian_gradient_transpose(flux, grid, weights)
 
     energy_density = 2.0 * energy_hartree
+    potential_up = potential(f_up, f_sigma_up, gradient_up)
+    potential_down = potential(f_down, f_sigma_down, gradient_down)
+    if nuclear is not None:
+        u_up = 2.0 * f_sigma_up[None, :] * gradient_up + 2.0 * f_sigma_total[None, :] * gradient_total
+        u_down = 2.0 * f_sigma_down[None, :] * gradient_down + 2.0 * f_sigma_total[None, :] * gradient_total
+        extra_up, extra_down = share_potentials(up, down, nuclear, u_up, u_down)
+        potential_up = potential_up + extra_up
+        potential_down = potential_down + extra_down
+        if recording(grid):
+            flux = w_up * u_up + w_down * u_down
+            note_flux(grid, flux, gradient_transpose(flux, grid))
     return SpinXCResult(
-        potential_up=2.0 * potential(f_up, f_sigma_up, gradient_up),
-        potential_down=2.0 * potential(f_down, f_sigma_down, gradient_down),
+        potential_up=2.0 * potential_up,
+        potential_down=2.0 * potential_down,
         energy_density=energy_density,
         total_energy=float(grid.volume_element * np.sum(energy_density)),
     )

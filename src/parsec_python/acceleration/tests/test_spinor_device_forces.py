@@ -217,28 +217,62 @@ class SphereTiesTests(unittest.TestCase):
         settings = GridSettings(spacing=0.4, radius=10.0, expansion_order=8, shift=shift)
         return build_cluster_grid(settings), build_cluster_grid_by_slabs(settings)
 
+    # The six orders of |(9, 12, 20)| h, on the sphere R = 25 h (h 0.4 bohr) of the grid through the origin, and whether
+    # each is a point of PARSEC 1.5's grid of that sphere (gfortran -O2 for x86-64, read from its parsec.dat): the
+    # points of the grid of PARSEC_SPHERE_TIES=fortran, all 65,179 of them, are those of that file.
+    _PARSEC15 = {(9, 12, 20): True, (9, 20, 12): False, (12, 9, 20): True, (12, 20, 9): True, (20, 9, 12): False,
+                 (20, 12, 9): True}
+
     def test_the_symmetric_rule_keeps_the_permutations_of_the_axes(self) -> None:
         from parsec_python.acceleration.SCF.soc_sectors import _four_fold_operation
         from parsec_python.Grid.cluster import SPHERE_TIES_SWITCH, sphere_ties_setting
 
-        found = {}
-        for value in ("dot", "symmetric"):
-            with mock.patch.dict(os.environ, {SPHERE_TIES_SWITCH: value}):
-                self.assertEqual(sphere_ties_setting(), value)
+        found, members = {}, {}
+        for value in ("dot", "symmetric", "fortran", None):
+            environment = {} if value is None else {SPHERE_TIES_SWITCH: value}
+            with mock.patch.dict(os.environ, environment):
+                if value is None:
+                    os.environ.pop(SPHERE_TIES_SWITCH, None)
+                    os.environ.pop("PARSEC_FORTRAN_NUMERICS", None)
+                self.assertEqual(sphere_ties_setting(), value or "symmetric")
                 for shift in ((0.0, 0.0, 0.0), (0.5, 0.5, 0.5)):
                     readable, accelerated = self._grids(shift)
                     np.testing.assert_array_equal(readable.integer_coordinates, accelerated.integer_coordinates)
                     operation = _four_fold_operation(readable, self._AU4, 1.0e-6)
                     found[value, shift[0]] = (readable.size, None if operation is None else operation[1])
-        # R = 25 h through the origin: 16 points on the sphere whose images under C4z are not points of the grid
-        self.assertEqual(found["dot", 0.0][1], None)
-        self.assertEqual(found["symmetric", 0.0], (found["dot", 0.0][0] + 16, "S4z"))
-        # the shifted grid has no point on this sphere: the same grid either way
-        self.assertEqual(found["dot", 0.5], found["symmetric", 0.5])
-        self.assertEqual(found["dot", 0.5][1], "S4z")
+                    if shift[0] == 0.0:
+                        rows = readable.rows_for_integer_coordinates(np.asarray(list(self._PARSEC15)))
+                        members[value] = dict(zip(self._PARSEC15, (bool(row >= 0) for row in rows)))
+        # the default is symmetric
+        self.assertEqual(found[None, 0.0], found["symmetric", 0.0])
+        # R = 25 h through the origin: the symmetric rule keeps all six orders and the four-fold images
+        self.assertEqual(found["symmetric", 0.0], (65195, "S4z"))
+        self.assertEqual(members["symmetric"], dict.fromkeys(self._PARSEC15, True))
+        # (dot, the rule before, decides them by the order in which np.einsum sums the squares, which this test does
+        # not pin: both builders take the same decisions, checked above)
+        # PARSEC 1.5's grid: 16 points fewer; (x^2 + y^2) + z^2 keeps the swap of x and y, so S4z
+        self.assertEqual(members["fortran"], self._PARSEC15)
+        self.assertEqual(found["fortran", 0.0], (65179, "S4z"))
+        # the shifted grid has no point on this sphere: the same grid under every value
+        for value in ("dot", "fortran", None):
+            self.assertEqual(found[value, 0.5], found["symmetric", 0.5])
+        self.assertEqual(found["symmetric", 0.5][1], "S4z")
         with mock.patch.dict(os.environ, {SPHERE_TIES_SWITCH: "sorted"}):
             with self.assertRaises(ValueError):
                 self._grids((0.0, 0.0, 0.0))
+
+    def test_the_numerics_of_parsec_15_take_its_rule(self) -> None:
+        from parsec_python.Grid.cluster import SPHERE_TIES_SWITCH, sphere_ties_setting
+
+        with mock.patch.dict(os.environ, {"PARSEC_FORTRAN_NUMERICS": "on"}):
+            os.environ.pop(SPHERE_TIES_SWITCH, None)
+            self.assertEqual(sphere_ties_setting(), "fortran")
+            readable, _ = self._grids((0.0, 0.0, 0.0))
+            rows = readable.rows_for_integer_coordinates(np.asarray(list(self._PARSEC15)))
+            self.assertEqual(dict(zip(self._PARSEC15, (bool(row >= 0) for row in rows))), self._PARSEC15)
+            # a value set in the environment wins
+            os.environ[SPHERE_TIES_SWITCH] = "symmetric"
+            self.assertEqual(sphere_ties_setting(), "symmetric")
 
 
 class RouteNoteTests(unittest.TestCase):

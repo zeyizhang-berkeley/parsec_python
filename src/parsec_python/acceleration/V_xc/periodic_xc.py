@@ -62,6 +62,7 @@ from collections import OrderedDict
 import threading
 
 from parsec_python.SCF.pbc import set_periodic_spin_xc_provider, set_periodic_xc_provider
+from parsec_python.V_xc.nuclear_gradient import nuclear_gradient_setting, system_correction
 from parsec_python.V_xc.selection import as_spin_polarized_result
 
 from .device_xc import (
@@ -127,14 +128,18 @@ class _Evaluators:
             entry = self._entries.get(key)
             if entry is not None:
                 self._entries.move_to_end(key)
+        # PARSEC_GGA_NUCLEAR_GRADIENT: the evaluator reads the correction of the present structure, so the cache keeps
+        # the prepared system only where the switch is not off (under off it holds the core density alone, as before)
+        keep_system = nuclear_gradient_setting() != "off"
         if entry is None:
-            holder = [system.core_density]
+            holder = [system.core_density, system if keep_system else None]
             evaluator = (DeviceSpinXCEvaluator if spin else DeviceXCEvaluator)(
                 functional,
                 grid,
                 core_density=lambda: holder[0],
                 device_id=device_id,
                 ionization_energy_difference=float(system.input.scf.ionization_energy_difference),
+                nuclear_gradient=lambda: None if holder[1] is None else system_correction(holder[1]),
             )
             if spin:
                 evaluator.form = form
@@ -146,6 +151,7 @@ class _Evaluators:
         _, holder, evaluator = entry
         # a moved structure has a new core density (the evaluator uploads it once)
         holder[0] = system.core_density
+        holder[1] = system if keep_system else None
         return evaluator
 
     def clear(self) -> None:

@@ -207,27 +207,35 @@ def _spin_nonlocal_forces(system, channels, operator, atom_count: int) -> np.nda
 
 
 def correction_forces(system, result) -> dict[str, np.ndarray]:
-    """The LDA+U and TS force terms of an accelerated result, by their field names.
+    """The LDA+U, TS and nuclear-gradient force terms of an accelerated result, by their field names.
 
-    Empty without LDA+U and TS, so that :func:`assemble_forces` is called as
-    before.  The LDA+U term is formed where the orbitals are
+    Empty without LDA+U and TS and under ``PARSEC_GGA_NUCLEAR_GRADIENT=off``, so that :func:`assemble_forces` is
+    called as before.  The LDA+U term is formed where the orbitals are
     (``system.hubbard_device``, Hamiltonian.hubbard_device) or, on the CPU
     backends, by :func:`parsec_python.Forces.total.correction_forces` from
     the host orbitals; the TS forces are those of the correction of the
     converged density.
     """
 
+    from parsec_python.V_xc.nuclear_gradient import correction_forces as nuclear_gradient_forces
+
     device = getattr(system, "hubbard_device", None)
     if device is None:
         if getattr(system, "hubbard", None) is None and getattr(result, "dispersion", None) is None:
-            return {}
+            # PARSEC_GGA_NUCLEAR_GRADIENT: the term of the correction of the density gradient near the nuclei
+            nuclear = nuclear_gradient_forces(system, result)
+            return {} if nuclear is None else {"nuclear_gradient": nuclear}
         from parsec_python.Forces.total import correction_forces as host_correction_forces
 
+        # (the host terms hold the nuclear-gradient term too)
         return host_correction_forces(system, result)
+    nuclear = nuclear_gradient_forces(system, result)
     terms = {"hubbard": device.forces(system, result)}
     dispersion = getattr(result, "dispersion", None)
     if dispersion is not None:
         terms["dispersion"] = np.asarray(dispersion.forces, dtype=np.float64)
+    if nuclear is not None:
+        terms["nuclear_gradient"] = nuclear
     return terms
 
 

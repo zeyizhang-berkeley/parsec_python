@@ -1310,7 +1310,7 @@ def rule_would_give_lines(system, translation) -> list[str]:
             system.pseudopotentials,
             system.electron_count,
             spacing=problem.grid.spacing,
-            shift=problem.grid.shift[0],
+            shift=tuple(problem.grid.shift),
             stencil_half_width=problem.grid.stencil_half_width,
             budget=getattr(
                 translation, "domain_energy_tolerance", DOMAIN_ENERGY_TOLERANCE
@@ -1512,7 +1512,7 @@ def domain_finish_lines(
                 result.pseudopotentials,
                 result.electron_count,
                 spacing=settings.spacing,
-                shift=settings.shift[0],
+                shift=tuple(settings.shift),
                 stencil_half_width=settings.stencil_half_width,
                 budget=budget,
                 highest_occupied=highest,
@@ -1982,6 +1982,23 @@ def fortran_numerics_lines() -> tuple[str, ...]:
     if fortran_numerics_setting() != "on":
         return ()
     return (" Numerics of PARSEC 1.5 (PARSEC_FORTRAN_NUMERICS=on; a switch set in the environment wins)",)
+
+
+def nuclear_gradient_lines(system, symbol: str) -> tuple[str, ...]:
+    """The line of the atom data of parsec.out for a species whose density gradient takes the exact gradient of its
+    atomic density beside the nucleus (``PARSEC_GGA_NUCLEAR_GRADIENT`` ``auto`` or ``on``,
+    :func:`parsec_python.V_xc.nuclear_gradient.corrected_atoms`); nothing under ``off`` (the output of before), for
+    a functional that takes no correction, or for a species the run does not correct."""
+
+    from ..V_xc.nuclear_gradient import TAPER_INNER, TAPER_OUTER, corrected_atoms, nuclear_gradient_setting
+
+    setting = nuclear_gradient_setting()
+    if setting == "off" or symbol not in corrected_atoms(system):
+        return ()
+    return (
+        f"  density gradient       : D n + grad m - D m of its atomic density m, {TAPER_INNER:g} to "
+        f"{TAPER_OUTER:g} bohr (PARSEC_GGA_NUCLEAR_GRADIENT={setting})",
+    )
 
 
 def local_filter_lines(potential=None) -> tuple[str, ...]:
@@ -2576,6 +2593,8 @@ class ParsecTextReporter:
                     *kb_quadrature_lines(potential, specification.local_angular_momentum),
                     # Python addition: the local potential filtered to the grid (PARSEC_LOCAL_FILTER)
                     *local_filter_lines(potential),
+                    # Python addition: the exact gradient of the atomic density (PARSEC_GGA_NUCLEAR_GRADIENT)
+                    *nuclear_gradient_lines(system, symbol),
                     f" There are {len(atoms):6d} {symbol}  atoms",
                     " and their initial coordinates are:",
                     "",
@@ -3934,8 +3953,16 @@ class ParsecTextReporter:
         """Per-iteration report for :func:`run_self_consistent_soc`.
 
         Eigenvalues here are already SOC-split spinor states (one set, not
-        two spin channels), each holding at most one electron.
+        two spin channels), each holding at most one electron.  The note that
+        a non-collinear k-point loop leaves the sectors of its k-points
+        (``SpinSectorFallbackRecord``, the symmetry guard) has no levels of
+        its own: its lines, as :meth:`iteration` writes them.
         """
+        from ..models import SpinSectorFallbackRecord
+
+        if isinstance(step, SpinSectorFallbackRecord):
+            self.write("\n".join(spin_sector_fallback_lines(step)))
+            return
         energies = step.energies
         atom_count = len(self.problem.atoms)
         energy_per_atom_ev = energies.total * RYDBERG_TO_EV / max(atom_count, 1)
@@ -4074,6 +4101,19 @@ class ParsecTextReporter:
                     lines.append(f" {label:34s} : {text}")
             lines.append(" " + "-" * 50)
             lines.append(" (worker rows are seconds summed over the workers)")
+        if "noncollinear_guard_asymmetry" in timings:
+            # test 2 of the guard of a non-collinear loop in the sectors of its k-points (PARSEC_KPOINT_SECTOR_GUARD)
+            from ..acceleration.SCF.spin_sectors import DENSITY_SYMMETRY_TOLERANCE
+
+            lines.append(
+                " K-point sector guard (measured, tolerance"
+                + ("; in the sectors the loop left)" if timings.get("noncollinear_sector_abandoned") else ")")
+            )
+            lines.append(
+                f"   {'Test 2, asymmetry':28s} : {timings['noncollinear_guard_asymmetry']:12.4E}"
+                f"   (largest int |n(g r) - n(r)| [e] or int sum_j |m_j(g r) - (R' m(r))_j| [mu_B];"
+                f" {DENSITY_SYMMETRY_TOLERANCE:.0E})"
+            )
         lines.append("")
         return lines
 

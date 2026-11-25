@@ -222,8 +222,10 @@ class MetaGGALoop:
         if callable(evaluate):
             return evaluate(density)
         from ..V_xc import pbe
+        from ..V_xc.nuclear_gradient import applied
 
-        result = pbe(self._to_public(density), self.system.grid, self.system.core_density)
+        with applied(self.system):
+            result = pbe(self._to_public(density), self.system.grid, self.system.core_density)
         if self.adapter is None:
             return result
         return replace(result, potential=self._to_internal(result.potential))
@@ -235,10 +237,12 @@ class MetaGGALoop:
         if callable(evaluate):
             return evaluate(density_up, density_down)
         from ..V_xc import pbe_spin
+        from ..V_xc.nuclear_gradient import applied
 
-        result = pbe_spin(
-            self._to_public(density_up), self._to_public(density_down), self.system.grid, self.system.core_density
-        )
+        with applied(self.system):
+            result = pbe_spin(
+                self._to_public(density_up), self._to_public(density_down), self.system.grid, self.system.core_density
+            )
         if self.adapter is None:
             return result
         return replace(

@@ -612,6 +612,45 @@ class RuleOnInputsTests(unittest.TestCase):
         )
         self.assertEqual(shifted.domain.radius_text, "4.9 ang")
 
+    def test_no_grid_point_lies_on_the_sphere_of_a_grid_shifted_along_some_axes(self) -> None:
+        # Grid_Shift 0 0 0.5: an axis shifted by half a step adds k^2 + k + 1/4, so R = 39.5 h has points on the sphere
+        text = (
+            "Grid_Spacing: 0.2 ang\nbegin Grid_Shift\n{shift}\nend Grid_Shift\nStates_Num: 4\nAtom_Types_Num: 1\n"
+            "Atom_Type: H\nLocal_Component: s\nbegin Atom_Coord\n 0.0 0.0 0.0\n 1.4 0.0 0.0\nend Atom_Coord\n"
+        )
+        for shift in ("0 0 0.5", "0.5 0 0"):
+            chosen = {}
+            for value in ("axes", "first"):
+                with self.subTest(shift=shift, value=value), patch.dict(
+                    os.environ, {domain.DOMAIN_SHELL_SHIFT_SWITCH: value}
+                ):
+                    translation = parse_text(text.format(shift=shift), DATA)
+                    grid = translation.problem.grid
+                    squared = (grid.radius / grid.spacing) ** 2
+                    points = build_cluster_grid(replace(grid, radius=grid.radius * 1.01))
+                    lengths = np.einsum("ij,ij->i", points.coordinates, points.coordinates) / grid.spacing**2
+                    on_sphere = int(np.count_nonzero(np.abs(lengths - squared) < 1.0e-9 * squared))
+                    chosen[value] = (translation.domain.radius_text, on_sphere)
+            # the first axis alone (the rule before) keeps the grid through the origin off the sphere, not this one
+            # (the H table of the test data has no atomic density: the radius of 7.5 ang of vacuum, 39.5 h)
+            self.assertEqual(chosen["first"], ("7.9 ang", 162))
+            self.assertEqual(chosen["axes"], ("8.0 ang", 0))
+        # the same grid on every axis: the test of before
+        for spacing, shift in ((0.4, (0.0, 0.0, 0.0)), (0.4, (0.5, 0.5, 0.5)), (0.37, (0.5, 0.5, 0.5))):
+            for multiple in (20.0, 20.5, 21.25, 22.0):
+                with patch.dict(os.environ, {domain.DOMAIN_SHELL_SHIFT_SWITCH: "first"}):
+                    before = domain._on_grid_shell(multiple * spacing, spacing, shift)
+                self.assertEqual(domain._on_grid_shell(multiple * spacing, spacing, shift), before)
+        self.assertTrue(domain._on_grid_shell(22.5 * 0.4, 0.4, (0.0, 0.0, 0.5)))
+        self.assertFalse(domain._on_grid_shell(23.0 * 0.4, 0.4, (0.0, 0.0, 0.5)))
+        with patch.dict(os.environ, {domain.DOMAIN_SHELL_SHIFT_SWITCH: "first"}):
+            self.assertFalse(domain._on_grid_shell(22.5 * 0.4, 0.4, (0.0, 0.0, 0.5)))
+            self.assertTrue(domain._on_grid_shell(23.0 * 0.4, 0.4, (0.0, 0.0, 0.5)))
+        with patch.dict(os.environ, {domain.DOMAIN_SHELL_SHIFT_SWITCH: "both"}):
+            with self.assertRaisesRegex(ValueError, domain.DOMAIN_SHELL_SHIFT_SWITCH):
+                parse_text(text.format(shift="0 0 0.5").replace("Grid_Spacing", "Boundary_Sphere_Radius: 4.0\n"
+                                                                "Grid_Spacing"), DATA)
+
     def rule(self, atoms, **options):
         potentials = load_pseudopotentials(
             {

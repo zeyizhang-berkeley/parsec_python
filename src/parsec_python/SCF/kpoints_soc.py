@@ -439,29 +439,44 @@ def _spinor_solver(
 
 
 def _sector_geometry(
-    system, k_points: np.ndarray, weighting: KPointWeights, compute_forces: bool, *, magnetic: bool = False
+    system,
+    k_points: np.ndarray,
+    weighting: KPointWeights,
+    compute_forces: bool,
+    *,
+    magnetic: bool = False,
+    noncollinear: bool = False,
+    field: np.ndarray | None = None,
 ) -> dict | None:
     """What the solver of the double-group sectors of the k-points of a spin-orbit loop needs
     (``PARSEC_SOC_KPOINT_SECTORS``, :mod:`parsec_python.acceleration.SCF.kpoint_spinor_sectors`), ``None`` under
     ``off`` (the job of before) or where the accelerated package is not installed.  ``magnetic``: the loop of a
-    collinear magnetization along z, which takes them under ``PARSEC_SOC_SPIN_KPOINT_SECTORS=on`` only."""
+    collinear magnetization along z, which takes them under ``PARSEC_SOC_SPIN_KPOINT_SECTORS=on`` only.
+    ``noncollinear``: the non-collinear loop (``PARSEC_NONCOLLINEAR_KPOINT_SECTORS``, with or without spin-orbit
+    species), with the initial moment of every atom (``initial_spin_polarization`` of its species times its
+    ``initial_moment``) and ``field``, the exchange-correlation field ``B_xc`` of its first eigenproblem."""
 
     try:
         from ..acceleration.SCF.kpoint_spinor_sectors import (
+            noncollinear_kpoint_sectors_setting,
             soc_kpoint_sectors_setting,
             soc_spin_kpoint_sectors_setting,
         )
     except ImportError:
         return None
-    if soc_kpoint_sectors_setting() == "off":
+    if noncollinear:
+        if noncollinear_kpoint_sectors_setting() == "off":
+            return None
+    elif soc_kpoint_sectors_setting() == "off":
         return None
     if magnetic and soc_spin_kpoint_sectors_setting() == "off":
         return None
     n_kpoints = int(np.asarray(k_points).reshape(-1, 3).shape[0])
-    return {
+    atoms = tuple(system.cell_atoms)
+    geometry = {
         "spinor": True,
         "grid": system.grid,
-        "atoms": tuple(system.cell_atoms),
+        "atoms": atoms,
         "k_points": np.asarray(k_points, dtype=np.float64),
         "weights": np.asarray([weighting.of_k(task) for task in range(n_kpoints)], dtype=np.float64),
         "lattice": np.asarray(system.input.periodic_cell.lattice_vectors, dtype=np.float64),
@@ -469,6 +484,29 @@ def _sector_geometry(
         "forces": bool(compute_forces),
         "magnetic": bool(magnetic),
     }
+    if noncollinear:
+        specifications = system.input.pseudopotentials
+        moments = np.zeros((len(atoms), 3), dtype=np.float64)
+        for index, atom in enumerate(atoms):
+            if atom.initial_moment is not None:
+                polarization = float(specifications[atom.symbol].initial_spin_polarization)
+                moments[index] = polarization * np.asarray(atom.initial_moment, dtype=np.float64)
+        # the entries of the spin-orbit projectors of the whole grid (16 per point of the sphere of an atom), for the
+        # estimate of the device memory of the sectors
+        from ..V_ion.ionic_potential import _projector_support_radius
+
+        entries = 0.0
+        for atom in atoms:
+            if getattr(specifications[atom.symbol], "spin_orbit", False):
+                radius = float(_projector_support_radius(system.pseudopotentials[atom.symbol]))
+                entries += 16.0 * (4.0 * np.pi / 3.0) * radius**3 / float(system.grid.volume_element)
+        geometry.update(
+            noncollinear=True,
+            moments=moments,
+            field=None if field is None else np.asarray(field, dtype=np.float64),
+            soc_entries=entries,
+        )
+    return geometry
 
 
 def run_self_consistent_soc_kpoints(

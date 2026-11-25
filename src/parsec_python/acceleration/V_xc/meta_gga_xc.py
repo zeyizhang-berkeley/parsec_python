@@ -21,6 +21,8 @@ from __future__ import annotations
 
 from dataclasses import replace
 
+from parsec_python.V_xc.nuclear_gradient import share_potentials, spin_shares
+
 import numpy as np
 
 
@@ -138,7 +140,7 @@ class DeviceMetaGGAOnOrbits:
 
     def __init__(
         self, evaluator, grid, *, reducer=None, device_id: int = 0, core_density=None, spin: bool = False,
-        permutations: bool = False,
+        permutations: bool = False, nuclear_gradient=None,
     ) -> None:
         import numpy as np
 
@@ -160,6 +162,8 @@ class DeviceMetaGGAOnOrbits:
         self._core_source = core_density if callable(core_density) else (lambda: core_density)
         self._core_host = None
         self._core_device = None
+        # PARSEC_GGA_NUCLEAR_GRADIENT (the density form of the gradient)
+        self._nuclear_source = nuclear_gradient
         reduction = None if reducer is None else reducer.reduction
         operations = getattr(reduction, "operations", None)
         if operations is not None and not permutations and not all(
@@ -216,6 +220,13 @@ class DeviceMetaGGAOnOrbits:
             return int(cp.count_nonzero(mask))
         return int(cp.sum(self._multiplicities * mask))
 
+    def _nuclear(self, scale: float = 1.0):
+        """The correction of the density gradient at the values (``device_xc._DeviceEvaluatorBase._nuclear``)."""
+
+        from .device_xc import _DeviceEvaluatorBase
+
+        return _DeviceEvaluatorBase._nuclear(self, scale)
+
     def _given_gradient(self, components, core, scale: float):
         """``g`` of the orbital form at the values ``(3, count)``, with ``scale`` times the core density's gradient."""
 
@@ -259,6 +270,9 @@ class DeviceMetaGGAOnOrbits:
                     if orbital
                     else geometry.gradient(cp, kernels, density)
                 )
+                nuclear = None if orbital else self._nuclear()
+                if nuclear is not None:
+                    gradient = gradient + nuclear
                 sigma = cp.sum(gradient * gradient, axis=0)
                 floored = _floored(self.evaluator)
                 given, below = (
@@ -312,6 +326,12 @@ class DeviceMetaGGAOnOrbits:
                 else:
                     grad_up = geometry.gradient(cp, kernels, up)
                     grad_down = geometry.gradient(cp, kernels, down)
+                    nuclear = self._nuclear()
+                    if nuclear is not None:
+                        # the share n_s / n of each channel (parsec_python.V_xc.nuclear_gradient.spin_shares)
+                        w_up, w_down = spin_shares(up, down, cp)
+                        grad_up = grad_up + w_up * nuclear
+                        grad_down = grad_down + w_down * nuclear
                 s_uu = cp.sum(grad_up * grad_up, axis=0)
                 s_ud = cp.sum(grad_up * grad_down, axis=0)
                 s_dd = cp.sum(grad_down * grad_down, axis=0)
@@ -331,6 +351,10 @@ class DeviceMetaGGAOnOrbits:
                     v_down, vs_dd, vt_down = weizsaecker_chain(cp, down, s_dd, below_down, v_down, vs_dd, vt_down)
                 flux_up = cp.ascontiguousarray(2.0 * vs_uu[None, :] * grad_up + vs_ud[None, :] * grad_down)
                 flux_down = cp.ascontiguousarray(2.0 * vs_dd[None, :] * grad_down + vs_ud[None, :] * grad_up)
+                if not orbital and nuclear is not None:
+                    extra_up, extra_down = share_potentials(up, down, nuclear, flux_up, flux_down, cp)
+                    v_up = v_up + extra_up
+                    v_down = v_down + extra_down
                 v_up = cp.ascontiguousarray(v_up)
                 v_down = cp.ascontiguousarray(v_down)
                 extra = {}
