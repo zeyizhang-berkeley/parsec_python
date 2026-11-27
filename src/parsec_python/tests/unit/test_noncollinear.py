@@ -123,6 +123,226 @@ class NoncollinearXCTests(unittest.TestCase):
         np.testing.assert_allclose(rotated.field, rotation @ base.field, rtol=1e-8, atol=1e-10)
 
 
+class NoncollinearAxisFrameTests(unittest.TestCase):
+    """The frames of a gradient functional (PARSEC_NONCOLLINEAR_GGA_FRAME, V_xc.noncollinear)."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.grid = build_cluster_grid(
+            GridSettings(spacing=0.6, radius=3.6, expansion_order=8, shift=(0.5, 0.5, 0.5))
+        )
+        x = cls.grid.coordinates
+        r2 = np.einsum("ij,ij->i", x, x)
+        cls.n = 0.3 * np.exp(-0.6 * r2) + 0.02
+        # a polarization with a nodal plane through grid points (the plane of x nearest 0.4)
+        plane = x[np.argmin(np.abs(x[:, 0] - 0.4)), 0]
+        cls.signed = 0.4 * cls.n * np.tanh(2.0 * (x[:, 0] - plane))
+        cls.core = 0.05 * np.exp(-2.0 * r2)
+
+    def _pbe(self, up, down):
+        return pbe_spin_polarized(up, down, self.grid, self.core)
+
+    def test_collinear_magnetization_is_the_collinear_functional(self) -> None:
+        # along z, nodes included: the collinear PBE of (n +- m_z)/2, bit for bit
+        from parsec_python.V_xc.noncollinear import axis_frame_xc
+
+        m = np.zeros((3, self.n.size))
+        m[2] = self.signed
+        result = axis_frame_xc(self.n, m, self._pbe, np.array([0.0, 0.0, 1.0]), self.core)
+        direct = self._pbe(0.5 * (self.n + self.signed), 0.5 * (self.n - self.signed))
+        self.assertEqual(result.total_energy, direct.total_energy)
+        np.testing.assert_array_equal(result.potential, 0.5 * (direct.potential_up + direct.potential_down))
+        np.testing.assert_array_equal(result.field[2], 0.5 * (direct.potential_up - direct.potential_down))
+        np.testing.assert_array_equal(result.field[:2], 0.0)
+        # the local frame of |m| differs at the nodes on this grid
+        local = noncollinear_xc(self.n, m, self._pbe)
+        self.assertGreater(abs(local.total_energy - direct.total_energy), 1.0e-8)
+
+    def test_rotation_covariance(self) -> None:
+        from parsec_python.V_xc.noncollinear import axis_frame_xc
+
+        x = self.grid.coordinates
+        m = np.stack([0.05 * self.n * np.sin(x[:, 1]), 0.02 * self.n * np.cos(x[:, 2]), self.signed])
+        rotation = _rotation([0.3, 1.0, 0.2], 1.1)
+        z = np.array([0.0, 0.0, 1.0])
+        base = axis_frame_xc(self.n, m, self._pbe, z, self.core)
+        rotated = axis_frame_xc(self.n, rotation @ m, self._pbe, rotation @ z, self.core)
+        self.assertAlmostEqual(rotated.total_energy, base.total_energy, places=11)
+        np.testing.assert_allclose(rotated.potential, base.potential, rtol=1e-9, atol=1e-11)
+        np.testing.assert_allclose(rotated.field, rotation @ base.field, rtol=1e-8, atol=1e-10)
+
+    def test_potential_and_field_are_the_derivatives_of_the_energy(self) -> None:
+        # central differences of the energy in m (every component) and n at points beside the node and elsewhere,
+        # with transverse parts (the term of the axis' dependence on m included)
+        from parsec_python.V_xc.noncollinear import axis_frame_xc
+
+        x = self.grid.coordinates
+        m = np.stack([0.05 * self.n * np.sin(x[:, 1]), 0.02 * self.n * np.cos(x[:, 2]), self.signed])
+        z = np.array([0.0, 0.0, 1.0])
+        base = axis_frame_xc(self.n, m, self._pbe, z, self.core)
+        dv = self.grid.volume_element
+        near = np.argsort(np.abs(self.signed))[:3]
+        points = list(near) + [0, self.n.size // 3, int(np.argmax(self.n))]
+        step = 1.0e-6
+        for i in points:
+            for k in range(3):
+                plus, minus = m.copy(), m.copy()
+                plus[k, i] += step
+                minus[k, i] -= step
+                slope = (
+                    axis_frame_xc(self.n, plus, self._pbe, z, self.core).total_energy
+                    - axis_frame_xc(self.n, minus, self._pbe, z, self.core).total_energy
+                ) / (2.0 * step * dv)
+                self.assertAlmostEqual(slope, base.field[k, i], delta=2.0e-5 * (1.0 + abs(slope)))
+            plus, minus = self.n.copy(), self.n.copy()
+            plus[i] += step
+            minus[i] -= step
+            slope = (
+                axis_frame_xc(plus, m, self._pbe, z, self.core).total_energy
+                - axis_frame_xc(minus, m, self._pbe, z, self.core).total_energy
+            ) / (2.0 * step * dv)
+            self.assertAlmostEqual(slope, base.potential[i], delta=2.0e-5 * (1.0 + abs(slope)))
+
+    def test_field_is_continuous_where_m_vanishes(self) -> None:
+        # transverse noise at the nodes of m_z turns the field of the local frame there, not that of the axis frame
+        from parsec_python.V_xc.noncollinear import axis_frame_xc
+
+        m = np.zeros((3, self.n.size))
+        m[2] = self.signed
+        noisy = m.copy()
+        rng = np.random.default_rng(3)
+        noisy[:2] = 1.0e-7 * rng.normal(size=(2, self.n.size))
+        z = np.array([0.0, 0.0, 1.0])
+        axis_change = np.max(np.abs(axis_frame_xc(self.n, noisy, self._pbe, z).field
+                                    - axis_frame_xc(self.n, m, self._pbe, z).field))
+        local_change = np.max(np.abs(noncollinear_xc(self.n, noisy, self._pbe).field
+                                     - noncollinear_xc(self.n, m, self._pbe).field))
+        self.assertLess(axis_change, 1.0e-4)
+        self.assertGreater(local_change, 1.0e-3)
+
+    def test_collinear_frame(self) -> None:
+        # the collinear functional of m.u, the field along u: transverse parts get no field and no energy; the field
+        # and potential are the derivatives of that energy
+        from parsec_python.V_xc.noncollinear import collinear_frame_xc
+
+        x = self.grid.coordinates
+        u = np.array([0.0, 0.6, 0.8])
+        m = np.outer(u, self.signed) + np.stack([0.05 * self.n * np.sin(x[:, 1]), 0.0 * self.n, 0.0 * self.n])
+        result = collinear_frame_xc(self.n, m, self._pbe, u)
+        a = u @ m
+        direct = self._pbe(0.5 * (self.n + a), 0.5 * (self.n - a))
+        self.assertEqual(result.total_energy, direct.total_energy)
+        np.testing.assert_array_equal(result.field, np.outer(u, 0.5 * (direct.potential_up - direct.potential_down)))
+        np.testing.assert_array_equal(result.potential, 0.5 * (direct.potential_up + direct.potential_down))
+        dv = self.grid.volume_element
+        step = 1.0e-6
+        for i in (0, int(np.argmin(np.abs(self.signed))), int(np.argmax(self.n))):
+            for k in range(3):
+                plus, minus = m.copy(), m.copy()
+                plus[k, i] += step
+                minus[k, i] -= step
+                slope = (
+                    collinear_frame_xc(self.n, plus, self._pbe, u).total_energy
+                    - collinear_frame_xc(self.n, minus, self._pbe, u).total_energy
+                ) / (2.0 * step * dv)
+                self.assertAlmostEqual(slope, result.field[k, i], delta=2.0e-5 * (1.0 + abs(slope)))
+
+    def test_guard_of_the_axis_frame(self) -> None:
+        # a magnetic state far from one axis (two halves with orthogonal moments) leaves the axis frame after
+        # GUARD_EVALUATIONS evaluations in a row; a collinear one keeps it
+        from parsec_python.V_xc.noncollinear import (
+            FRAME_AXIS, FRAME_LOCAL, GUARD_EVALUATIONS, NoncollinearFrame, axis_frame_xc,
+        )
+
+        x = self.grid.coordinates
+        z = np.array([0.0, 0.0, 1.0])
+        canted = np.zeros((3, self.n.size))
+        left = x[:, 0] < 0.0
+        canted[2, left] = 0.3 * self.n[left]
+        canted[0, ~left] = 0.3 * self.n[~left]
+        frame = NoncollinearFrame(FRAME_AXIS, z)
+        for count in range(1, GUARD_EVALUATIONS):
+            result = frame.evaluate(self.n, canted, self._pbe, None, 1.0)
+            self.assertEqual(frame.mode, FRAME_AXIS)
+        self.assertEqual(result.total_energy, axis_frame_xc(self.n, canted, self._pbe, z).total_energy)
+        result = frame.evaluate(self.n, canted, self._pbe, None, 1.0)
+        self.assertEqual((frame.mode, frame.left_axis_at), (FRAME_LOCAL, GUARD_EVALUATIONS))
+        self.assertEqual(result.total_energy, noncollinear_xc(self.n, canted, self._pbe).total_energy)
+        collinear = np.zeros((3, self.n.size))
+        collinear[2] = self.signed
+        frame = NoncollinearFrame(FRAME_AXIS, z)
+        for _ in range(2 * GUARD_EVALUATIONS):
+            frame.evaluate(self.n, collinear, self._pbe, None, 1.0)
+        self.assertEqual((frame.mode, frame.left_axis_at), (FRAME_AXIS, None))
+
+    def test_which_runs_take_which_frame(self) -> None:
+        from parsec_python.V_xc.noncollinear import frame_decision
+
+        species = {"Au": SpeciesPotential(_AU_POTRE, 0, initial_spin_polarization=0.3)}
+
+        def atoms(*moments):
+            return [Atom("Au", [float(i), 0.0, 0.0], moment) for i, moment in enumerate(moments)]
+
+        def decide(functional, positions, spin_orbit=False, setting="auto"):
+            frame = frame_decision(functional, positions, species, spin_orbit, setting)
+            return frame.mode, None if frame.axis is None else tuple(np.round(frame.axis, 12))
+
+        parallel = atoms([0, 0, 1], [0, 0, 2])
+        antiparallel = atoms([1, 1, 0], [-1, -1, 0])
+        canted = atoms([0, 0, 1], [1, 0, 1])
+        self.assertEqual(decide("pbe", parallel), ("collinear", (0.0, 0.0, 1.0)))
+        self.assertEqual(decide("pbe", parallel, spin_orbit=True), ("axis", (0.0, 0.0, 1.0)))
+        half = round(np.sqrt(0.5), 12)
+        self.assertEqual(decide("pbe", antiparallel), ("collinear", (half, half, 0.0)))
+        # no initial moment (Quantum ESPRESSO's compute_ux), non-collinear moments, off, the local functionals
+        self.assertEqual(decide("pbe", atoms(None, None)), ("local", None))
+        self.assertEqual(decide("pbe", canted, spin_orbit=True), ("local", None))
+        self.assertEqual(decide("pbe", parallel, setting="off"), ("local", None))
+        self.assertEqual(decide("ca", parallel), ("local", None))
+        self.assertEqual(decide("pw92", parallel, spin_orbit=True), ("local", None))
+        self.assertEqual(decide("libxc:lda_x+lda_c_pw", parallel), ("local", None))
+
+    def test_the_frame_is_decided_once_per_run(self) -> None:
+        # the moved structures keep the frame of the first one, also with atoms rebuilt without their moments (the
+        # Fortran-derived ionic loops)
+        from dataclasses import replace
+
+        from parsec_python.V_xc.noncollinear import system_frame
+
+        problem = _au_cluster([0, 0, 1], xc="pbe")
+        system = prepare_single_point(problem)
+        # decided when the system is built: a copy made before the first XC evaluation (the loosened SCF of an
+        # upscaled relaxation) shares the object
+        frame = system.noncollinear_frame
+        self.assertIsNotNone(frame)
+        scf = replace(system.input.scf, convergence_criterion=1e-3)
+        loosened = replace(system, input=replace(system.input, scf=scf))
+        self.assertIs(loosened.noncollinear_frame, frame)
+        self.assertIs(system_frame(loosened), frame)
+        self.assertIs(system_frame(system), frame)
+        self.assertEqual(frame.mode, "collinear")
+        self.assertIsNone(prepare_single_point(_au_cluster(None, nc=False, xc="pbe")).noncollinear_frame)
+        bare = tuple(Atom(atom.symbol, atom.position) for atom in system.atoms)
+        moved = replace(system, atoms=bare, input=replace(system.input, atoms=bare))
+        self.assertIs(system_frame(moved), frame)
+        fresh = prepare_single_point(replace(problem, atoms=list(bare)))
+        self.assertEqual(system_frame(fresh).mode, "local")
+
+    def test_setting(self) -> None:
+        from unittest import mock
+
+        from parsec_python.V_xc.noncollinear import NONCOLLINEAR_GGA_FRAME_ENV, noncollinear_gga_frame_setting
+
+        with mock.patch.dict("os.environ", {NONCOLLINEAR_GGA_FRAME_ENV: "", "PARSEC_FORTRAN_NUMERICS": "off"}):
+            self.assertEqual(noncollinear_gga_frame_setting(), "auto")
+        with mock.patch.dict("os.environ", {NONCOLLINEAR_GGA_FRAME_ENV: "", "PARSEC_FORTRAN_NUMERICS": "on"}):
+            self.assertEqual(noncollinear_gga_frame_setting(), "off")
+        for value in ("yes", "on"):
+            with mock.patch.dict("os.environ", {NONCOLLINEAR_GGA_FRAME_ENV: value}):
+                with self.assertRaisesRegex(ValueError, NONCOLLINEAR_GGA_FRAME_ENV):
+                    noncollinear_gga_frame_setting()
+
+
 class ZeemanFieldTests(unittest.TestCase):
     def test_hermitian_and_pauli_structure(self) -> None:
         rng = np.random.default_rng(1)
@@ -216,7 +436,7 @@ class NoncollinearEnergyTests(unittest.TestCase):
             self.assertAlmostEqual(getattr(general, name), getattr(collinear, name), places=10, msg=name)
 
 
-def _au_cluster(direction, *, soc=False, nc=True, polarization=0.3, convergence=1e-4):
+def _au_cluster(direction, *, soc=False, nc=True, polarization=0.3, convergence=1e-4, xc="ca"):
     return SinglePointInput(
         atoms=[Atom("Au", [0.0, 0.0, 0.0], direction)],
         pseudopotentials={
@@ -232,6 +452,7 @@ def _au_cluster(direction, *, soc=False, nc=True, polarization=0.3, convergence=
             noncollinear=nc,
             spin_polarized=not nc,
             self_consistent_spin_orbit=soc,
+            xc_functional=xc,
         ),
         hartree=HartreeSettings(multipole_order=4),
         eigensolver=EigensolverSettings(method="chebff", tolerance=1.0e-6),
@@ -419,6 +640,47 @@ class NoncollinearPeriodicTests(unittest.TestCase):
         self.assertAlmostEqual(general.magnetic_moment, abs(collinear.magnetic_moment), delta=1e-2)
 
 
+# O2 in an 8 bohr cell at Gamma with PBE (O FHI), Spin_Polarization or Non_Collinear_magnetism in {extra}
+_O2_PBE_INPUT = """\
+Periodic_System: .true.
+Boundary_Conditions: bulk
+begin Cell_Shape
+  8.0 0.0 0.0
+  0.0 8.0 0.0
+  0.0 0.0 8.0
+end Cell_Shape
+Lattice_Vector_Scale: 1.0 bohr
+Grid_Spacing: 0.4999999995
+Initial_Density: sad
+Coordinate_Unit: Cartesian_Bohr
+Expansion_Order: 8
+Correlation_Type: pbe
+States_Num: 16
+Fermi_Temp: 500 K
+Max_Iter: 100
+Convergence_Criterion: 1e-09 Ry
+Eigensolver: chebff
+Diag_Tolerance: 1e-10
+Mixing_Method: Anderson
+Mixing_Param: 0.2
+Memory_Param: 4
+{extra}Atom_Types_Num: 1
+Atom_Type: O
+Pseudopotential_Format: fhipp
+Potential_Num: 3
+Local_Component: d
+Core_Cutoff_Radius: 1.6
+begin Electron_Per_Orbital
+2 4 0
+end Electron_Per_Orbital
+Cubic_Spline: .true.
+Initial_Spin_Polarization: 0.3
+begin Atom_Coord
+  4.0 4.0 2.83
+  4.0 4.0 5.14
+end Atom_Coord
+"""
+
 _CLUSTER_INPUT = """\
 Boundary_Sphere_Radius: 6.0
 Grid_Spacing: 0.6
@@ -494,6 +756,32 @@ class NoncollinearInputAndCliTests(unittest.TestCase):
         self.assertEqual(cli_main([str(path), "--quiet"]), 0)
         archive = read_archive(directory / "parsec_python_results.npz")
         self.assertGreater(_cos(archive["magnetic_moment_vector"], [1, 0, 0]), 0.999)
+
+    def test_gradient_functional_reaches_the_collinear_driver(self) -> None:
+        # O2 with PBE from parallel moments (the default collinear frame): converged, the energy of the collinear spin
+        # driver; along z and along x alike (no spin-orbit coupling)
+        o_fhi = Path(__file__).resolve().parents[4] / "examples" / "3d_hybrid_functionals" / "O_FHIPP.DAT"
+        energies = {}
+        for label, extra in (
+            ("spin", "Spin_Polarization: .true.\n"),
+            ("z", "Non_Collinear_magnetism: .true.\n"),
+            ("x", "Non_Collinear_magnetism: .true.\n"),
+        ):
+            directory = self._directory()
+            (directory / "O_FHIPP.DAT").write_bytes(o_fhi.read_bytes())
+            moments = {"z": "0 0 1", "x": "1 0 0"}.get(label)
+            text = _O2_PBE_INPUT.format(extra=extra) + (
+                f"begin Initial_NCL_Moment\n{moments}\n{moments}\nend Initial_NCL_Moment\n" if moments else ""
+            )
+            path = directory / "parsec.in"
+            path.write_text(text, encoding="utf-8")
+            self.assertEqual(cli_main([str(path), "--quiet"]), 0, label)
+            archive = read_archive(directory / "parsec_python_results.npz")
+            energies[label] = float(archive["energy_total_ry"])
+            if moments:
+                self.assertGreater(_cos(archive["magnetic_moment_vector"], [float(v) for v in moments.split()]), 0.999)
+        self.assertAlmostEqual(energies["z"], energies["spin"], delta=1.0e-8)
+        self.assertAlmostEqual(energies["x"], energies["spin"], delta=1.0e-8)
 
     def test_moment_block_without_the_flag_is_rejected(self) -> None:
         directory = self._directory()

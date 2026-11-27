@@ -153,6 +153,15 @@ class PeriodicPreparedSinglePointSystem:
     # permutations of the grid points (symm_scalar of newrho.F90); ``None``
     # without it.  The SCF loops average every new density over it.
     density_symmetry: GridPointGroup | None = None
+    # the frame of the XC of a non-collinear run (V_xc.noncollinear.system_frame): decided once from the input when
+    # the system is built, carried by every copy (``replace``) and so by the moved structures
+    noncollinear_frame: object | None = field(default=None, compare=False, repr=False)
+
+    def __post_init__(self) -> None:
+        if self.noncollinear_frame is None and getattr(getattr(self.input, "scf", None), "noncollinear", False):
+            from ..V_xc.noncollinear import problem_frame
+
+            object.__setattr__(self, "noncollinear_frame", problem_frame(self.input))
 
     @property
     def cell_atoms(self) -> tuple:
@@ -468,7 +477,12 @@ class PeriodicPreparedSinglePointSystem:
                 "zero_average_xc_potential (Fortran potshift) is not implemented for "
                 "non-collinear magnetism"
             )
-        return noncollinear_xc(density, magnetization, self.evaluate_xc_spin_polarized)
+        from ..V_xc.noncollinear import system_frame
+
+        # the frame of the run under PARSEC_NONCOLLINEAR_GGA_FRAME (V_xc/noncollinear.py)
+        return system_frame(self).evaluate(
+            density, magnetization, self.evaluate_xc_spin_polarized, self.core_density, self.grid.volume_element
+        )
 
     # ----- the hooks of a meta-GGA loop (parsec_python.SCF.meta_gga) -----
 

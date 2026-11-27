@@ -191,6 +191,15 @@ class PreparedSinglePointSystem:
     hubbard: HubbardProjectors | None = None
     embedding: object | None = None
     hartree_variational: object | None = None
+    # the frame of the XC of a non-collinear run (V_xc.noncollinear.system_frame): decided once from the input when
+    # the system is built, carried by every copy (``replace``) and so by the moved structures
+    noncollinear_frame: object | None = field(default=None, compare=False, repr=False)
+
+    def __post_init__(self) -> None:
+        if self.noncollinear_frame is None and getattr(getattr(self.input, "scf", None), "noncollinear", False):
+            from ..V_xc.noncollinear import problem_frame
+
+            object.__setattr__(self, "noncollinear_frame", problem_frame(self.input))
 
     @property
     def hartree_boundary_tail_maximum(self) -> float | None:
@@ -399,9 +408,14 @@ class PreparedSinglePointSystem:
     def evaluate_xc_noncollinear(
         self, density: np.ndarray, magnetization: np.ndarray
     ) -> NoncollinearXCResult:
-        """Non-collinear XC (``V_avg`` and ``B_xc``) from ``n`` and ``m(r)``."""
+        """Non-collinear XC (``V_avg`` and ``B_xc``) from ``n`` and ``m(r)``; a gradient functional in the frame of
+        ``PARSEC_NONCOLLINEAR_GGA_FRAME`` (:mod:`parsec_python.V_xc.noncollinear`)."""
 
-        return noncollinear_xc(density, magnetization, self.evaluate_xc_spin_polarized)
+        from ..V_xc.noncollinear import system_frame
+
+        return system_frame(self).evaluate(
+            density, magnetization, self.evaluate_xc_spin_polarized, self.core_density, self.grid.volume_element
+        )
 
     @with_correction
     def evaluate_spin_xc(

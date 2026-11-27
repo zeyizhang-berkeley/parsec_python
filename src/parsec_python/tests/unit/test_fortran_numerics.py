@@ -45,6 +45,7 @@ def _settings():
     from parsec_python.SCF.wire_slab import gaussian_solve_setting
     from parsec_python.V_ion.ionic_potential import projector_center_setting
     from parsec_python.V_xc.ca_lda import ca_continuity_setting
+    from parsec_python.V_xc.noncollinear import noncollinear_gga_frame_setting
     from parsec_python.V_xc.nuclear_gradient import nuclear_gradient_setting
 
     table = {
@@ -70,6 +71,7 @@ def _settings():
         "PARSEC_LDAU_SMOOTH_PROJECTORS": (ldau_smooth_projectors_fraction, 0.2),
         "PARSEC_SPHERE_TIES": (sphere_ties_setting, "symmetric"),
         "PARSEC_GGA_NUCLEAR_GRADIENT": (nuclear_gradient_setting, "off"),
+        "PARSEC_NONCOLLINEAR_GGA_FRAME": (noncollinear_gga_frame_setting, "auto"),
     }
     return table
 

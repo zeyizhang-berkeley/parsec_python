@@ -2470,6 +2470,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         ldau_smooth_projectors_fraction()
         # PARSEC_GGA_NUCLEAR_GRADIENT: the density gradient of the gradient functionals beside the nuclei
         nuclear_gradient_setting()
+        # PARSEC_NONCOLLINEAR_GGA_FRAME: the frame of a non-collinear gradient functional (V_xc/noncollinear.py)
+        from parsec_python.V_xc.noncollinear import noncollinear_gga_frame_setting
+
+        noncollinear_gga_frame_setting()
         refusal = forces_refusal(translation)
         if refusal is not None:
             raise ValueError(refusal)

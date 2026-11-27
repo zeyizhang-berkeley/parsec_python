@@ -1828,6 +1828,10 @@ def execute(args, cp, comm, MPI, initialization_seconds, initial_affinity=None):
     from parsec_python.V_xc.nuclear_gradient import forces_refusal, nuclear_gradient_setting
 
     nuclear_gradient_setting()
+    # PARSEC_NONCOLLINEAR_GGA_FRAME (V_xc/noncollinear.py) likewise: every rank takes the same frame.
+    from parsec_python.V_xc.noncollinear import noncollinear_gga_frame_setting
+
+    noncollinear_gga_frame_setting()
     refusal = forces_refusal(translation)
     if refusal is not None:
         raise ValueError(refusal)

@@ -2025,7 +2025,8 @@ def check_kpoint_sector_switches(problem=None) -> None:
     arithmetic of the Gamma point (``PARSEC_KPOINT_REAL_GAMMA``, :mod:`.kpoint_real`),
     ``PARSEC_KPOINT_SECTOR_WARM_GROWTH``, ``PARSEC_KPOINT_SECTOR_LDAU``, ``PARSEC_KPOINT_SECTOR_META_GGA``,
     ``PARSEC_KPOINT_SECTOR_PROCESSES``, ``PARSEC_SOC_KPOINT_SECTORS``, ``PARSEC_SOC_SPIN_KPOINT_SECTORS``,
-    ``PARSEC_NONCOLLINEAR_KPOINT_SECTORS`` (:mod:`.kpoint_spinor_sectors`) and ``PARSEC_KPOINT_SECTOR_GUARD``.  Reading
+    ``PARSEC_NONCOLLINEAR_KPOINT_SECTORS`` (:mod:`.kpoint_spinor_sectors`), ``PARSEC_NONCOLLINEAR_SECTOR_STABILITY``
+    (:mod:`.noncollinear_stability`) and ``PARSEC_KPOINT_SECTOR_GUARD``.  Reading
     them changes nothing else.  With ``problem`` (the input of the run) a
     meta-GGA under ``PARSEC_KPOINT_KINETIC=bloch`` is refused as well: the orbital term keeps the gradient form of the kinetic term of a k-point
     (:func:`parsec_python.Laplacian.finite_difference.bloch_laplacian_or_none`, which would stop its k-point loop after
@@ -2077,6 +2078,10 @@ def check_kpoint_sector_switches(problem=None) -> None:
     soc_kpoint_sectors_setting()
     soc_spin_kpoint_sectors_setting()
     noncollinear_kpoint_sectors_setting()
+    # the stability test of the state of a non-collinear loop in sectors (PARSEC_NONCOLLINEAR_SECTOR_STABILITY)
+    from .noncollinear_stability import noncollinear_sector_stability_setting
+
+    noncollinear_sector_stability_setting()
     # the symmetry guard of the sectors (the spin-polarized and the non-collinear loops read it)
     sector_guard_setting()
     scf = getattr(problem, "scf", None)

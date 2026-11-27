@@ -2722,6 +2722,10 @@ class SpinSectorFallbackRecord:
     # against ``tolerance``; ``measure`` empty where the reason has none), said before the loop starts;
     # ``spin_flip_stable``: the state of such a loop passed the test of PARSEC_SPIN_FLIP_STABILITY=auto and is kept
     # (``largest_fractional_occupation`` the largest eigenvalue of the response, ``multiplets`` the summary);
+    # ``kpoint_stable``: the state of a non-collinear loop in the sectors of its k-points passed the stability test of
+    # PARSEC_NONCOLLINEAR_SECTOR_STABILITY=auto and is kept (the same fields);
+    # ``kpoint_continued``: which state an unstable loop of those sectors kept after the loop without sectors continued
+    # from it, displaced (``largest_fractional_occupation`` the free energy of that loop below the sectors');
     # ``doublet``, ``sector_doublet`` and ``kpoint_doublet`` (the k-point sectors): the note of a kept result
     # (PARSEC_SPIN_GUARD_DOUBLETS); ``symmetric_level``: the note of an unpolarized run of weighted sectors that ends
     # with a partly filled degenerate level at the Fermi level, kept (acceleration.driver._say_symmetric_level);

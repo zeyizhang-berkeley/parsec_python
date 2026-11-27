@@ -398,21 +398,28 @@ class DevicePoolTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {"PARSEC_KPOINT_BACKEND": "cupy", "PARSEC_CUPY_DEVICES": "0"}):
             with cp.cuda.Device(0):
                 pool = cp.get_default_memory_pool()
-                block = cp.zeros(256 << 20, dtype=cp.uint8)
+                # the pool as the tests before left it: free parts of blocks that live arrays still hold cannot go
+                # back, so the test measures from what remains after a release
+                pool.free_all_blocks()
+                residual = pool.free_bytes()
+                # larger than every free part that remains: a block of its own from the device
+                size = (256 << 20) + residual
+                block = cp.zeros(size, dtype=cp.uint8)
                 del block
-                self.assertGreaterEqual(pool.free_bytes(), 256 << 20)
+                self.assertGreaterEqual(pool.free_bytes(), residual + size)
                 device_free = float(cp.cuda.runtime.memGetInfo()[0])
-                self.assertGreaterEqual(module.free_device_bytes("cupy"), device_free + (256 << 20) - (16 << 20))
+                self.assertGreaterEqual(module.free_device_bytes("cupy"), device_free + size - (16 << 20))
                 module.release_device_pools("cupy")
-                self.assertEqual(pool.free_bytes(), 0)
-                self.assertGreaterEqual(float(cp.cuda.runtime.memGetInfo()[0]), device_free + (256 << 20) - (16 << 20))
+                self.assertLessEqual(pool.free_bytes(), residual)
+                self.assertGreaterEqual(float(cp.cuda.runtime.memGetInfo()[0]), device_free + size - (16 << 20))
 
 
 class NoncollinearMultipletGuardTests(unittest.TestCase):
     def test_a_partly_filled_multiplet_at_the_start_leaves_the_sectors(self) -> None:
         # O2 from antiparallel moments at Gamma (no spin-orbit coupling): its four pi* levels, two in a sector and two
         # in its Kramers partner (the inversion times time reversal), hold two electrons; test 1 sends the loop to one
-        # task per k-point, which reaches the triplet as the loop without sectors does
+        # task per k-point, which reaches the triplet as the loop without sectors does (test 1 is that of
+        # PARSEC_NONCOLLINEAR_SECTOR_STABILITY=off; the stability test of auto: test_noncollinear_stability)
         side = 8.0
         atoms = [Atom("O", [4.0, 4.0, 2.86], [0, 0, 1]), Atom("O", [4.0, 4.0, 5.14], [0, 0, -1])]
         oxygen = Path(__file__).resolve().parents[2] / "tests" / "data" / "spin_ca_O_POTRE.DAT"
@@ -429,7 +436,9 @@ class NoncollinearMultipletGuardTests(unittest.TestCase):
         system = prepare_periodic_single_point(problem)
         results, steps = {}, []
         for value in ("off", "on"):
-            with mock.patch.dict(os.environ, {**_DEVICE, NONCOLLINEAR_SWITCH: value}):
+            with mock.patch.dict(
+                os.environ, {**_DEVICE, NONCOLLINEAR_SWITCH: value, "PARSEC_NONCOLLINEAR_SECTOR_STABILITY": "off"}
+            ):
                 results[value] = run_self_consistent_noncollinear_kpoints(
                     system, np.zeros((1, 3)), np.ones(1), callback=steps.append if value == "on" else None
                 )

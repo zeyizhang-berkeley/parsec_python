@@ -68,8 +68,9 @@ in its symmetric form), which is why it is not the default.  The MPI k-point sol
 per k-point.  ``off`` keeps one task per k-point, bit for bit as before.
 
 **Non-collinear magnetism** (:func:`parsec_python.SCF.noncollinear.run_self_consistent_noncollinear_kpoints`, with or
-without spin-orbit species; :data:`NONCOLLINEAR_SWITCH`, opt-in, under the rules of ``auto`` and ``on`` above).  The
-exchange-correlation field adds ``B(r).sigma`` to ``H_k``; ``G = U(R') P_g`` keeps it where ``B(g r) = R' B(r)``, so the
+without spin-orbit species; :data:`NONCOLLINEAR_SWITCH`, opt-in, under the rules of ``auto`` and ``on``
+above).  The exchange-correlation field adds ``B(r).sigma`` to ``H_k``; ``G = U(R') P_g`` keeps it where ``B(g r) =
+R' B(r)``, so the
 operations taken are those of the magnetic group of the initial moments: ``m_(g a) = R' m_a`` for every atom ``a``
 (``initial_spin_polarization`` of its species times its ``Initial_NCL_Moment``; :class:`_MomentInvariance`), among the
 translations of the cell and the operations that map the set of k-points onto itself without time reversal (the
@@ -96,25 +97,25 @@ the free memory of the device; else the rank of the groups is lowered, down to o
 The guard (``PARSEC_KPOINT_SECTOR_GUARD``; a loop that fails a test runs again from the same start with one task per
 k-point, with a NOTE): the start field keeps every operation the sectors take, ``B(g r) = R' B(r)`` within
 :data:`FIELD_TOLERANCE` of the largest ``|B|`` (an operation it breaks, the field of the structure before in a
-relaxation or dynamics run of lower symmetry, is left out and the k-points are planned again without it); then the
-three tests of the collinear spin loops.  Test 1: no partly filled multiplet across the sectors or Kramers partners of a
-k-point in the start Hamiltonian; test 2: at the end the density and magnetization keep the operations of the sectors
-(:meth:`SpinorSectorKPointSolver.noncollinear_asymmetries`, ``spin_sectors.DENSITY_SYMMETRY_TOLERANCE``); test 3: with
-Fermi-Dirac occupations, no fractional occupation of such a multiplet at the end
-(:meth:`SpinorSectorKPointSolver.noncollinear_multiplets`, ``spin_sectors.SPIN_SECTOR_OCCUPATION_TOLERANCE`` of the
-electrons ``w_k`` the k-point adds).  The sectors hold every state in its symmetric form, and the loop without sectors
-does not: from antiparallel start moments it reaches the triplet of O2 (2 bohr magnetons, 77 mRy below the symmetric
-state the sectors would keep, its four pi* levels half filled).  Test 2 sees only an operation some k-point lacks; at a
-single k-point (Gamma) every operation is that k-point's, the density is symmetric by construction, and tests 1 and 3
-are the guard: the pi* levels of O2 form a partly filled multiplet across a sector and its Kramers partner.  Tests 1
-and 3 count the electrons ``w_k`` of the k-point, as those of the collinear loops: on a mesh of ``N`` equally weighted
-k-points test 3 cannot trip above about ten of them (``0.5 / N < 0.05``), test 1 for a multiplet of four levels holding
-two electrons above about forty; there the guard rests on test 2, and tests 1 and 3 are the guard at Gamma and on
-meshes of few k-points.  After a loop the guard left, the free blocks of the CuPy pools go back to the devices
-(:func:`release_device_pools`) before the loop with one task per k-point.  A state
-that breaks an operation of the sectors without such a multiplet (a moment that turns in a field of its own) is held in
-its symmetric form unseen; the loop without sectors moves out of it only by the noise of its eigensolver (by 1e-4
-bohr magnetons without spin-orbit coupling, 0.36 degrees for magnetic Au pairs with it, in the tests).
+relaxation or dynamics run of lower symmetry, is left out and the k-points are planned again without it); at the end
+of the loop the density and magnetization keep the operations of the sectors (test 2,
+:meth:`SpinorSectorKPointSolver.noncollinear_asymmetries`, ``spin_sectors.DENSITY_SYMMETRY_TOLERANCE``: an operation
+some k-point lacks holds only where the state keeps it); then, under ``PARSEC_NONCOLLINEAR_SECTOR_STABILITY=auto``
+(the default), the stability test of :mod:`.noncollinear_stability`: the sectors hold every state in its symmetric
+form, a self-consistent state of their group that need not be a minimum, and the loop without sectors leaves such a
+state where it is unstable (from antiparallel start moments it reaches the triplet of O2, 2 bohr magnetons and 77 mRy
+below the symmetric state of the sectors, its four pi* levels half filled across a sector and its Kramers partner);
+the largest eigenvalue of the SCF response to perturbations that break the operations of the sectors decides, probed
+on the whole grid from the Ritz states of the sectors (:meth:`SpinorSectorKPointSolver.whole_states`); from an
+unstable state the loop without sectors continues, displaced along the direction the free energy goes down, and the
+lower state is kept (a loop in sectors that did not converge is kept untested, with a note).  Under ``off`` the
+tests of the collinear spin loops on the levels take its place: no partly filled multiplet across the sectors or
+Kramers partners of a k-point in the start Hamiltonian (test 1), and with Fermi-Dirac occupations no fractional
+occupation of such a multiplet at the end (test 3; :meth:`SpinorSectorKPointSolver.noncollinear_multiplets`,
+``spin_sectors.SPIN_SECTOR_OCCUPATION_TOLERANCE`` of the electrons ``w_k`` the k-point adds); the levels at the Fermi
+level of a metal form such multiplets, so that test 1 sends every metallic cell back to one task per k-point after
+its first solve, stable or not.  After a loop the guard left, the free blocks of the CuPy pools go back to the devices
+(:func:`release_device_pools`) before the loop with one task per k-point.
 """
 
 from __future__ import annotations
@@ -204,12 +205,13 @@ NONCOLLINEAR_DEFAULT = "off"
 
 def noncollinear_kpoint_sectors_setting() -> str:
     """``PARSEC_NONCOLLINEAR_KPOINT_SECTORS``: ``off`` (the default) keeps one task per k-point, bit for bit as before;
-    ``auto`` (opt-in) splits the k-points of the non-collinear loop into the sectors of the magnetic group of the
-    initial moments under the rules of ``auto`` of :data:`SWITCH` (the floor of :data:`MINIMUM_ENTRIES`, at most half
-    the work, one device of the process), :data:`MINIMUM_SECTOR_STATES` and the estimate of the device memory; ``on``
-    takes the largest group at any size.  Not the default: the guard sends every metallic state of the tests, whose
-    levels at the Fermi level form partly filled multiplets across the sectors, back to one task per k-point after the
-    first solve (5 to 10 % slower than ``off``; module text).  Another value is an error before the SCF."""
+    ``auto`` (opt-in) splits the k-points of the non-collinear loop into the sectors of the magnetic group of the initial
+    moments under the rules of ``auto`` of :data:`SWITCH` (the floor of :data:`MINIMUM_ENTRIES`, at most half the work,
+    one device of the process), :data:`MINIMUM_SECTOR_STATES` and the estimate of the device memory, with the guard and
+    its stability test (module text; from a state that is unstable against perturbations that break the operations of
+    the sectors the loop without sectors continues); ``on`` takes the largest group at any size.  Not the default: a
+    stability test that converges its largest eigenvalue takes 12 to 30 steps of the loop without sectors, about what the
+    sectors save on the timed cells.  Another value is an error before the SCF."""
 
     text = os.environ.get(NONCOLLINEAR_SWITCH, NONCOLLINEAR_DEFAULT).strip().lower() or NONCOLLINEAR_DEFAULT
     if text not in _SETTINGS:
@@ -1917,6 +1919,107 @@ class SpinorSectorKPointSolver:
             found.append(
                 (label + ", magnetization", float(volume_element * np.sum(np.abs(magnetization[:, rows] - turned))))
             )
+        return found
+
+    def stability_operations(self):
+        """``(cell group, [(operation, sign)])`` of the stability test of a non-collinear loop in sectors
+        (:mod:`.noncollinear_stability`): the operations the sectors of its k-points take (``sign`` 1) and those of
+        their Kramers pairs times time reversal (-1); ``None`` where no k-point of a non-collinear loop is in sectors."""
+
+        split = [plan for plan in self._plans if plan is not None and plan.noncollinear]
+        if not split:
+            return None
+        operations: set[tuple[int, int]] = set()
+        for plan in split:
+            operations.update((int(element), 1) for element in plan.elements if element)
+            if plan.antiunitary is not None:
+                operations.add((int(plan.antiunitary), -1))
+        return split[0].cell, sorted(operations)
+
+    def whole_states(self, working: int) -> dict[int, Any]:
+        """The Ritz states of the k-points as subspaces of the whole grid of ``working`` columns each, on the host, for
+        a solver with one task per k-point (the stability test, :mod:`.noncollinear_stability`): the Ritz pairs of the
+        solved sectors and of their Kramers partners, the lowest ``working`` of their union unfolded to whole-grid
+        spinors (orthonormal: the sectors are orthogonal), seeded random columns orthogonal to them where the union holds
+        fewer; the state of a k-point solved whole as it is.  A k-point whose sectors hold no device Ritz state in the
+        u gauge is left out (its solver then starts afresh)."""
+
+        from ..Eigensolvers.chebff_spinor import SpinorEigvalState
+
+        exported = self._inner.export_states()
+        rows = 2 * self._grid_size
+        working = min(int(working), rows)
+        rng = np.random.default_rng(20261125)
+        found: dict[int, Any] = {}
+        for k_index, plan in enumerate(self._plans):
+            if plan is None:
+                state = exported.get(self._position[(k_index, None)])
+                if isinstance(state, SpinorEigvalState) and state.vectors is not None and state.working_states == working:
+                    found[k_index] = state
+                continue
+            states: dict[int, Any] = {}
+            for sector in plan.solved:
+                state = exported.get(self._position[(k_index, sector)])
+                if (
+                    not isinstance(state, SpinorEigvalState)
+                    or state.vectors is None
+                    or getattr(state, "gauge", None) is not None
+                ):
+                    states = {}
+                    break
+                states[sector] = state
+            if not states:
+                continue
+            entries = []
+            for sector, state in states.items():
+                values = np.asarray(state.eigenvalues, dtype=np.float64)[: int(state.vectors.shape[1])]
+                for column, value in enumerate(values):
+                    entries.append((float(value), sector, False, column))
+                    if plan.partner[sector] is not None:
+                        entries.append((float(value), sector, True, column))
+            entries.sort()
+            kept = entries[:working]
+            vectors = np.empty((rows, working), dtype=np.complex128)
+            for sector, state in states.items():
+                places = [place for place, entry in enumerate(kept) if entry[1] == sector]
+                if not places:
+                    continue
+                columns = sorted({kept[place][3] for place in places})
+                where = {column: position for position, column in enumerate(columns)}
+                whole = plan.unfold(sector, np.asarray(state.vectors)[:, columns])
+                for partner in (False, True):
+                    chosen = [place for place in places if kept[place][2] == partner]
+                    if not chosen:
+                        continue
+                    source = plan.partner_spinors(whole) if partner else whole
+                    vectors[:, chosen] = source[:, [where[kept[place][3]] for place in chosen]]
+                    del source
+                del whole
+            values = np.asarray([entry[0] for entry in kept], dtype=np.float64)
+            if len(kept) < working:
+                head = vectors[:, : len(kept)]
+                extra = rng.standard_normal((rows, working - len(kept))) + 1j * rng.standard_normal(
+                    (rows, working - len(kept))
+                )
+                for _ in range(2):
+                    extra -= head @ (head.conj().T @ extra)
+                vectors[:, len(kept):] = np.linalg.qr(extra)[0]
+                values = np.concatenate([values, np.full(working - len(kept), float(np.max(values, initial=0.0)))])
+            bounds = [state.filter_lower_bound for state in states.values() if state.filter_lower_bound is not None]
+            found[k_index] = SpinorEigvalState(
+                vectors=vectors,
+                eigenvalues=values,
+                working_states=working,
+                operator_dimension=rows,
+                first_filter=all(bool(state.first_filter) for state in states.values()),
+                filter_lower_bound=max(bounds) if bounds else None,
+                filters_completed=max(int(state.filters_completed) for state in states.values()),
+            )
+            # (the host copies of the sector states of this k-point go as its whole-grid subspace is made: at most one
+            # k-point holds both)
+            for sector in plan.solved:
+                exported.pop(self._position[(k_index, sector)], None)
+            del states
         return found
 
     def residuals(self) -> list[float]:

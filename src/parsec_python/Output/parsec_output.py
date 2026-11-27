@@ -425,13 +425,31 @@ def spin_sector_fallback_lines(record) -> list[str]:
             "",
         ]
     if getattr(record, "route", "spin") == "kpoint":
+        # (the bound of the stability test of the non-collinear sectors, PARSEC_NONCOLLINEAR_SECTOR_STABILITY, as it is)
+        bound = f"{record.tolerance:g}" if record.measure.startswith("largest eigenvalue") else f"{record.tolerance:.0E}"
         return [
             "",
             f" NOTE: k-point sectors: {record.reason} after {record.stage}",
             f"       ({record.measure} = {record.largest_fractional_occupation:.3E}, "
-            f"kept only below {record.tolerance:.0E}).",
+            f"kept only below {bound}).",
             "       The sectors of the k-points cannot hold a state that breaks the symmetry they assume;",
             "       the loop starts again with one task per k-point (PARSEC_KPOINT_SECTOR_GUARD=off keeps the sectors).",
+            *(f"       {line}" for line in record.multiplets),
+            "",
+        ]
+    if getattr(record, "route", "spin") == "kpoint_continued":
+        # PARSEC_NONCOLLINEAR_SECTOR_STABILITY=auto: the loop without sectors from an unstable state, displaced
+        return [
+            "",
+            f" NOTE: k-point sectors: {record.reason}:",
+            *(f"       {line}" for line in record.multiplets),
+            "",
+        ]
+    if getattr(record, "route", "spin") == "kpoint_stable":
+        # PARSEC_NONCOLLINEAR_SECTOR_STABILITY=auto: the state of a non-collinear loop in sectors passed its test
+        return [
+            "",
+            f" NOTE: k-point sectors: {record.reason} (kept):",
             *(f"       {line}" for line in record.multiplets),
             "",
         ]
@@ -1984,6 +2002,31 @@ def fortran_numerics_lines() -> tuple[str, ...]:
     return (" Numerics of PARSEC 1.5 (PARSEC_FORTRAN_NUMERICS=on; a switch set in the environment wins)",)
 
 
+def noncollinear_frame_lines(problem) -> tuple[str, ...]:
+    """The line of the header of a non-collinear run whose gradient functional takes the collinear or the axis frame
+    (``PARSEC_NONCOLLINEAR_GGA_FRAME``, :func:`parsec_python.V_xc.noncollinear.frame_decision`); nothing for the local
+    frame (``off``, a local functional, no or non-collinear initial moments: the output of before)."""
+
+    scf = getattr(problem, "scf", None)
+    if scf is None or not getattr(scf, "noncollinear", False):
+        return ()
+    from ..V_xc.noncollinear import FRAME_AXIS, FRAME_COLLINEAR, problem_frame
+
+    frame = problem_frame(problem)
+    if frame.mode == FRAME_COLLINEAR:
+        return (
+            f" Non-collinear {scf.xc_functional}: the collinear frame, the signed projection of m on the axis of the "
+            f"initial moments (PARSEC_NONCOLLINEAR_GGA_FRAME={frame.setting})",
+        )
+    if frame.mode == FRAME_AXIS:
+        return (
+            f" Non-collinear {scf.xc_functional} with spin-orbit coupling: the axis frame, the signed polarization "
+            f"along the principal axis of m, the local frame where m leaves it (PARSEC_NONCOLLINEAR_GGA_FRAME="
+            f"{frame.setting})",
+        )
+    return ()
+
+
 def nuclear_gradient_lines(system, symbol: str) -> tuple[str, ...]:
     """The line of the atom data of parsec.out for a species whose density gradient takes the exact gradient of its
     atomic density beside the nucleus (``PARSEC_GGA_NUCLEAR_GRADIENT`` ``auto`` or ``on``,
@@ -2319,6 +2362,7 @@ class ParsecTextReporter:
                 or self._complex_wavefunctions()
                 else " WAVEFUNCTIONS ARE REAL!"
             ),
+            *noncollinear_frame_lines(self.problem),
             (
                 " The Finite-difference expansion is of order "
                 f"{grid.expansion_order:2d}"
@@ -4113,6 +4157,27 @@ class ParsecTextReporter:
                 f"   {'Test 2, asymmetry':28s} : {timings['noncollinear_guard_asymmetry']:12.4E}"
                 f"   (largest int |n(g r) - n(r)| [e] or int sum_j |m_j(g r) - (R' m(r))_j| [mu_B];"
                 f" {DENSITY_SYMMETRY_TOLERANCE:.0E})"
+            )
+            if "noncollinear_stability_largest" in timings:
+                # the stability test of the state of the sectors (PARSEC_NONCOLLINEAR_SECTOR_STABILITY)
+                from ..acceleration.SCF.noncollinear_stability import BOUND
+
+                lines.append(
+                    f"   {'Stability, response':28s} : {timings['noncollinear_stability_largest']:12.4E}"
+                    "   (largest eigenvalue of the SCF response to perturbations that break the operations of the"
+                    f" sectors; unstable from {BOUND:g}; {int(timings.get('noncollinear_stability_probes', 0))} probes,"
+                    f" {timings.get('noncollinear_stability_seconds', 0.0):.2f} s)"
+                )
+        if "noncollinear_frame_left_axis" in timings:
+            # PARSEC_NONCOLLINEAR_GGA_FRAME: the guard of the axis frame (V_xc.noncollinear.NoncollinearFrame)
+            from ..V_xc.noncollinear import GUARD_DEAD_BAND, GUARD_EVALUATIONS, GUARD_MOMENT, GUARD_RATIO
+
+            lines.append(
+                f" NOTE: the magnetization left the axis of the axis frame (PARSEC_NONCOLLINEAR_GGA_FRAME): from XC "
+                f"evaluation {int(timings['noncollinear_frame_left_axis'])} on the local frame (n +- |m|)/2, after "
+                f"{GUARD_EVALUATIONS} evaluations in a row with int |m| >= {GUARD_MOMENT:g} and the second eigenvalue "
+                f"of sum m m^T above {GUARD_RATIO:g} of the first or more than {GUARD_DEAD_BAND:g} of int |m| where "
+                "|sigma| < |m|/2"
             )
         lines.append("")
         return lines
