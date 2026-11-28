@@ -414,7 +414,12 @@ class PreparedSinglePointSystem:
         from ..V_xc.noncollinear import system_frame
 
         return system_frame(self).evaluate(
-            density, magnetization, self.evaluate_xc_spin_polarized, self.core_density, self.grid.volume_element
+            density,
+            magnetization,
+            self.evaluate_xc_spin_polarized,
+            self.core_density,
+            self.grid.volume_element,
+            system=self,
         )
 
     @with_correction

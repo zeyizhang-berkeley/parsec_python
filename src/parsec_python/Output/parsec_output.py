@@ -2003,16 +2003,34 @@ def fortran_numerics_lines() -> tuple[str, ...]:
 
 
 def noncollinear_frame_lines(problem) -> tuple[str, ...]:
-    """The line of the header of a non-collinear run whose gradient functional takes the collinear or the axis frame
-    (``PARSEC_NONCOLLINEAR_GGA_FRAME``, :func:`parsec_python.V_xc.noncollinear.frame_decision`); nothing for the local
-    frame (``off``, a local functional, no or non-collinear initial moments: the output of before)."""
+    """The line of the header of a non-collinear run whose gradient functional takes the collinear, the axis or the
+    multicollinear frame (``PARSEC_NONCOLLINEAR_GGA_FRAME``, :func:`parsec_python.V_xc.noncollinear.frame_decision`),
+    or a NOTE where ``auto`` keeps the local frame for want of a device; nothing for the local frame otherwise
+    (``off``, a local functional, no initial moment: the output of before)."""
 
     scf = getattr(problem, "scf", None)
     if scf is None or not getattr(scf, "noncollinear", False):
         return ()
-    from ..V_xc.noncollinear import FRAME_AXIS, FRAME_COLLINEAR, problem_frame
+    from ..V_xc.noncollinear import FRAME_AXIS, FRAME_COLLINEAR, FRAME_MULTICOLLINEAR, problem_frame
 
     frame = problem_frame(problem)
+    if getattr(frame, "multicollinear_declined", False):
+        return (
+            f" NOTE: non-collinear {scf.xc_functional} from non-collinear initial moments keeps the local frame (n +- "
+            "|m|)/2 here: the multicollinear frame, which converges where it stalls, needs a CUDA device (on every MPI "
+            "rank) for its cost "
+            "(PARSEC_NONCOLLINEAR_GGA_FRAME=multicollinear takes it on the host, at some 80 times the time of an XC "
+            "evaluation)",
+        )
+    if frame.mode == FRAME_MULTICOLLINEAR:
+        from ..V_xc.multicollinear import BLEND_LOWER, BLEND_UPPER, multicollinear_rule
+
+        rule = multicollinear_rule()
+        return (
+            f" Non-collinear {scf.xc_functional}: the multicollinear functional where |m| < {BLEND_LOWER:g} (n + "
+            f"n_core), the local frame above {BLEND_UPPER:g} ({rule.points}-point Lebedev rule, "
+            f"{rule.evaluations} evaluations per point; PARSEC_NONCOLLINEAR_GGA_FRAME={frame.setting})",
+        )
     if frame.mode == FRAME_COLLINEAR:
         return (
             f" Non-collinear {scf.xc_functional}: the collinear frame, the signed projection of m on the axis of the "
@@ -4167,6 +4185,17 @@ class ParsecTextReporter:
                     "   (largest eigenvalue of the SCF response to perturbations that break the operations of the"
                     f" sectors; unstable from {BOUND:g}; {int(timings.get('noncollinear_stability_probes', 0))} probes,"
                     f" {timings.get('noncollinear_stability_seconds', 0.0):.2f} s)"
+                )
+            if "noncollinear_line_gain" in timings:
+                # PARSEC_NONCOLLINEAR_SECTOR_CONTINUATION=auto: the line search along the top Ritz vector
+                from ..acceleration.SCF.noncollinear_stability import GAIN
+
+                lines.append(
+                    f"   {'Stability, line search':28s} : {timings['noncollinear_line_gain']:12.4E}"
+                    "   (free energy [Ry] below the state of the sectors along the top Ritz vector; a continuation"
+                    f" from {GAIN:g}; largest change {timings.get('noncollinear_line_shift', 0.0):+.4g} Ry,"
+                    f" {int(timings.get('noncollinear_line_points', 0))} points,"
+                    f" {timings.get('noncollinear_line_seconds', 0.0):.2f} s)"
                 )
         if "noncollinear_frame_left_axis" in timings:
             # PARSEC_NONCOLLINEAR_GGA_FRAME: the guard of the axis frame (V_xc.noncollinear.NoncollinearFrame)

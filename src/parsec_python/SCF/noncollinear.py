@@ -41,6 +41,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from itertools import product
+from types import SimpleNamespace
 from typing import Callable
 
 import numpy as np
@@ -339,7 +340,12 @@ def _run_noncollinear(
     extras: SpinorForceExtras | None = None,
     warm_start=None,
     allow_sectors: bool = False,
+    start_states: dict | None = None,
+    give_up: Callable[[int, float], bool] | None = None,
 ) -> SelfConsistentSOCResult:
+    # ``start_states``: Ritz states by task that the solver starts from (the continuation of an unstable state of the
+    # sectors); ``give_up(iteration, free energy, residual)``: true stops the loop unconverged (PARSEC_NONCOLLINEAR_
+    # SECTOR_CONTINUATION=auto, acceleration.SCF.noncollinear_stability.ContinuationWatch)
     settings = system.input.scf
     n_grid = system.grid.size
     volume_element = system.grid.volume_element
@@ -454,8 +460,14 @@ def _run_noncollinear(
         [getattr(specifications[atom.symbol], "atomic_radius", 0.0) for atom in system.atoms],
         None if periodic_cell is None else periodic_cell.lattice_vectors,
     )
+    stopped = 0
     with solver:
         import_subspaces(solver, warm_start)
+        if start_states and getattr(solver, "import_states", None) is not None:
+            solver.import_states(start_states)
+            # (the solver holds them now; the caller's dict lets them go with the solver's first solve)
+            start_states.clear()
+        start_states = None
         timer.lap()  # what came before the loop (potentials, solver start-up) is not part of iteration 1
         for iteration in range(1, settings.max_iterations + 1):
             used_potential = input_potential  # what enters this eigenproblem (the mixed one replaces it below)
@@ -609,6 +621,12 @@ def _run_noncollinear(
             if selected_residual < settings.convergence_criterion:
                 converged = True
                 break
+            if give_up is not None and give_up(iteration, _free_energy(SimpleNamespace(
+                energies=energies, occupations=pooled_occupations, electron_count=system.electron_count,
+                k_weights=None if k_points is None else _result_weights(weighting, n_kpoints),
+            ), settings.fermi_temperature_kelvin), selected_residual):
+                stopped = iteration
+                break
 
         if settings.fermi_temperature_kelvin > 0.0 and not stability:
             # test 3: no fractional occupation of such a multiplet at the end (Fermi-Dirac occupations)
@@ -651,6 +669,8 @@ def _run_noncollinear(
                 state_moments = np.concatenate(solver.extras())
         timings = solver_timings(timer, solver)
         timings.update(guard_values)
+        if stopped:
+            timings["noncollinear_continuation_stopped"] = float(stopped)
         frame = getattr(system, "noncollinear_frame", None)
         if getattr(frame, "left_axis_at", None) is not None:
             # PARSEC_NONCOLLINEAR_GGA_FRAME: the guard of the axis frame took the local frame at that evaluation
@@ -724,9 +744,11 @@ def _run_noncollinear(
             result.timings["noncollinear_stability_untested"] = 1.0
         return result
 
-    def step_output(step_solver, potential, field, passes: int) -> np.ndarray:
-        """``(V_out, B_out)`` as one array of one step of the loop at ``(potential, field)`` with ``step_solver`` (the
-        stability test; ``passes`` eigensolver steps from the states it holds)."""
+    def step_output(step_solver, potential, field, passes: int, energy: bool = False):
+        """``((V_out, B_out), (n, m), free energy)`` of one step of the loop at ``(potential, field)`` with
+        ``step_solver`` (the stability test; ``passes`` eigensolver steps from the states it holds), each pair as one
+        array; the free energy (that of the density matrix of the step, :func:`_free_energy`) only with ``energy``,
+        else ``None``."""
 
         for _ in range(passes):
             levels = step_solver.solve(
@@ -740,19 +762,77 @@ def _run_noncollinear(
         step_parts = step_solver.accumulate(split_pooled(filled, levels))
         step_density, step_magnetization, _ = symmetrized(step_parts["density"], step_parts["magnetization"])
         step_hartree = system.solve_hartree(step_density, initial_potential=hartree_potential)
-        _, step_potential, step_field = output_fields(step_density, step_magnetization, step_hartree.potential)
-        return np.concatenate([step_potential, np.asarray(step_field, dtype=np.float64).reshape(-1)])
+        step_xc, step_potential, step_field = output_fields(step_density, step_magnetization, step_hartree.potential)
+        free = None
+        if energy:
+            energy_occupations, band_energy_weight = weighting.band_energy_terms(filled, level_weights)
+            step_energies = total_energy_noncollinear(
+                np.concatenate(levels), energy_occupations, step_density, step_magnetization, potential,
+                np.asarray(field, dtype=np.float64).reshape(3, -1), ionic_potential, step_hartree.potential,
+                step_xc.potential, step_xc.field, step_xc.total_energy, system.ion_ion_energy, volume_element,
+                alpha_z_energy=system.alpha_z_energy, band_energy_weight=band_energy_weight,
+            )
+            free = _free_energy(SimpleNamespace(
+                energies=step_energies, occupations=filled, electron_count=system.electron_count,
+                k_weights=None if k_points is None else _result_weights(weighting, n_kpoints),
+            ), settings.fermi_temperature_kelvin)
+        return (
+            np.concatenate([step_potential, np.asarray(step_field, dtype=np.float64).reshape(-1)]),
+            np.concatenate([np.asarray(step_density, dtype=np.float64).reshape(-1),
+                            np.asarray(step_magnetization, dtype=np.float64).reshape(-1)]),
+            free,
+        )
 
     # (without spin-orbit coupling the moments turn freely: those rotations are no instability)
     spin_orbit = any(
         getattr(specification, "spin_orbit", False) for specification in system.input.pseudopotentials.values()
     )
-    values, report = _state_stability(
-        job, stability_start, step_output, density, system.grid.size, guard_values, not spin_orbit
+    from ..acceleration.SCF.noncollinear_stability import noncollinear_sector_continuation_setting
+
+    continuation = noncollinear_sector_continuation_setting() == "auto"
+    labels = None
+    if continuation:
+        from ..acceleration.SCF.noncollinear_stability import nearest_atoms
+
+        # (the nearest atom of every grid point, made only for an unstable state: the partition of its flip pattern)
+        def labels():
+            return nearest_atoms(
+                system.grid.coordinates, [atom.position for atom in system.atoms],
+                None if periodic_cell is None else periodic_cell.lattice_vectors,
+            )
+    values, report, line, kept_states = _state_stability(
+        job, stability_start, step_output, density, system.grid.size, guard_values, not spin_orbit, continuation,
+        labels,
     )
     result.timings.update(values)
+    if report.unstable and line is not None and not line.pays:
+        # PARSEC_NONCOLLINEAR_SECTOR_CONTINUATION=auto: no point of the line search along the top Ritz vector lies
+        # GAIN below the state of the sectors: a continuation would not pay, the state of the sectors is kept
+        del kept_states
+        result.timings["noncollinear_sector_abandoned"] = 0.0
+        result.timings["noncollinear_continuation_skipped"] = 1.0
+        if callback is not None:
+            from ..models import SpinSectorFallbackRecord
+
+            callback(
+                SpinSectorFallbackRecord(
+                    stage="the line search along the direction of the instability",
+                    largest_fractional_occupation=float(line.gain),
+                    tolerance=float(line.tolerance),
+                    multiplets=(report.text(), line.text()),
+                    reason=(
+                        "the state of the sectors is kept: its free energy goes down by less than "
+                        f"{line.tolerance:g} Ry along the direction of the instability, which does not pay a loop "
+                        "without sectors"
+                    ),
+                    measure="free energy below that of the sectors along the top Ritz vector [Ry]",
+                    route="kpoint_continued",
+                )
+            )
+        return result
     if report.unstable:
-        raise _unstable(report, values, guard_values, result)
+        raise _unstable(report, values, guard_values, result, line, kept_states)
+    del kept_states
     if callback is not None:
         from ..models import SpinSectorFallbackRecord
 
@@ -793,19 +873,31 @@ def _stability_wanted(solver) -> bool:
     return sector_guard_setting() == "auto" and noncollinear_sector_stability_setting() == "auto"
 
 
-def _state_stability(job, start, step_output, density, problem_size: int, measured: dict, rotations: bool) -> dict:
+def _state_stability(job, start, step_output, density, problem_size: int, measured: dict, rotations: bool,
+                     continuation: bool = False, labels=None):
     """The stability test of the converged state of a non-collinear loop in sectors (:mod:`parsec_python.acceleration.
     SCF.noncollinear_stability`) with a solver of one task per k-point that starts from the Ritz states of the sectors
     (``start``: those states, the operations of the sectors and the input ``(V, B)`` of the last step); the timings of
-    the test and its report.  ``rotations``: a loop without spin-orbit coupling, whose rotations of the moments the test
-    leaves out.  The solver of the test is that of the loop without sectors (one task per k-point), which keeps its
-    subspaces on the host where the device is short (``PARSEC_KPOINT_STATE_STORAGE``)."""
+    the test, its report, the line search and the states for a continuation (``None`` both but where ``continuation``,
+    ``PARSEC_NONCOLLINEAR_SECTOR_CONTINUATION=auto``, and the state is unstable: the line search of the free energy along
+    the top Ritz vector, :func:`..acceleration.SCF.noncollinear_stability.line_search`, with the same solver, and the
+    Ritz states of the sectors on the whole grid, by task).  ``rotations``: a loop without spin-orbit coupling, whose
+    rotations of the moments the test leaves out.  The solver of the test is that of the loop without sectors (one task
+    per k-point), which keeps its subspaces on the host where the device is short (``PARSEC_KPOINT_STATE_STORAGE``)."""
 
     import time
     from dataclasses import replace
 
     from ..acceleration.SCF import kpoint_spinor_sectors as sectors
-    from ..acceleration.SCF.noncollinear_stability import PASSES, SectorSymmetry, sector_state_stability
+    from ..acceleration.SCF.noncollinear_stability import (
+        LINE_PASSES,
+        PASSES,
+        PATTERN_PASSES,
+        SectorSymmetry,
+        flip_pattern,
+        line_search,
+        sector_state_stability,
+    )
     from ..acceleration.SCF.spin_sectors import FractionalOccupations
     from .kpoint_solver import start_kpoint_setup_notes, stop_kpoint_setup_notes
 
@@ -832,14 +924,66 @@ def _state_stability(job, start, step_output, density, problem_size: int, measur
         def output(potential, field):
             probed = time.perf_counter()
             probe_solver.import_states({task: replace(state) for task, state in states.items()})
-            found = step_output(probe_solver, potential, field, PASSES)
+            found, found_density, _ = step_output(probe_solver, potential, field, PASSES)
             probes.append(time.perf_counter() - probed)
-            return found
+            return found, found_density
 
         report = sector_state_stability(output, base, SectorSymmetry(cell, operations), density, rotations=rotations)
+        report.seconds = time.perf_counter() - started + unfolded
+        line = None
+        if continuation and report.unstable and report.vector is not None and report.centre is not None:
+            # the free energy along the top Ritz vector, each point from the states of the centre or of the point
+            # before on its side
+            def restart():
+                probe_solver.import_states({task: replace(state) for task, state in states.items()})
+
+            restart()
+            centre = np.asarray(report.centre, dtype=np.float64)
+            direction = np.asarray(report.vector, dtype=np.float64)
+            points = np.size(density)
+
+            def free_energy(shift):
+                displaced = centre + float(shift) * direction
+                return step_output(
+                    probe_solver, displaced[:points], displaced[points:].reshape(3, points), LINE_PASSES, energy=True
+                )[2]
+
+            line = line_search(free_energy, restart=restart)
+            patterns = []
+            if labels is not None:
+                partition = labels()
+                for candidate in (direction, *report.others):
+                    found_pattern = flip_pattern(centre, candidate, partition, int(np.max(partition)) + 1)
+                    if found_pattern is not None and not any(
+                        np.array_equal(found_pattern[1], other[1]) for other in patterns
+                    ):
+                        patterns.append(found_pattern)
+            pattern_states = None
+            started_pattern = time.perf_counter()
+            for start_point, flipped in patterns:
+                # the finite-amplitude starts: the local fields of the atoms that a soft mode lowers turned over (a new
+                # moment pattern), each from the states of the centre with more eigensolver steps; the lowest is kept
+                restart()
+                found = step_output(
+                    probe_solver, start_point[:points], start_point[points:].reshape(3, points), PATTERN_PASSES,
+                    energy=True,
+                )[2]
+                if line.pattern is None or found < line.pattern:
+                    line = replace(line, pattern=float(found), flipped=int(np.count_nonzero(flipped)),
+                                   start=start_point)
+                    if line.from_pattern and line.pays:
+                        # (the continuation starts from the states of that pattern)
+                        pattern_states = dict(probe_solver.export_states())
+            if patterns:
+                line = replace(line, seconds=line.seconds + time.perf_counter() - started_pattern,
+                               patterns=len(patterns))
+    kept_states = None
+    if line is not None and line.pays:
+        kept_states = pattern_states if pattern_states is not None else {
+            task: replace(state) for task, state in states.items()
+        }
     del states
     sectors.release_device_pools()
-    report.seconds = time.perf_counter() - started + unfolded
     report.passes = PASSES
     values = {
         "noncollinear_stability_largest": float(report.largest),
@@ -851,32 +995,66 @@ def _state_stability(job, start, step_output, density, problem_size: int, measur
         "noncollinear_stability_first_probe_seconds": float(probes[0]) if probes else 0.0,
         "noncollinear_stability_later_probe_seconds": float(sum(probes[1:])),
     }
-    return values, report
+    if report.metric_largest is not None:
+        # (the Ritz values of the response in the inner product of the energy: bounded by its largest eigenvalue)
+        values["noncollinear_stability_metric_largest"] = float(report.metric_largest)
+    if line is not None:
+        values.update({
+            "noncollinear_line_gain": float(line.reference - line.lowest),
+            "noncollinear_line_shift": float(line.shift),
+            "noncollinear_line_points": float(len(line.points)),
+            "noncollinear_line_seconds": float(line.seconds),
+        })
+        if line.pattern is not None:
+            values["noncollinear_pattern_gain"] = float(line.reference - line.pattern)
+            values["noncollinear_pattern_flipped"] = float(line.flipped)
+    return values, report, line, kept_states
 
 
-def _unstable(report, values: dict, measured: dict, kept) -> "NoncollinearSectorsAbandoned":
+def _unstable(report, values: dict, measured: dict, kept, line=None, states=None) -> "NoncollinearSectorsAbandoned":
     """What a loop in sectors whose state the stability test found unstable raises: the loop without sectors continues
-    from the input of its last step displaced along the Ritz vector of the largest eigenvalue (largest change
-    :data:`..acceleration.SCF.noncollinear_stability.DISPLACEMENT`), and the lower of its state and ``kept`` (the result
-    of the sectors) is the result."""
+    from the input of its last step displaced along the Ritz vector of the largest eigenvalue, and the lower of its state
+    and ``kept`` (the result of the sectors) is the result.  The displacement is the lowest point of the line search
+    ``line`` (``PARSEC_NONCOLLINEAR_SECTOR_CONTINUATION=auto``; the loop then starts from ``states``, the Ritz states of
+    the sectors on the whole grid) or :data:`..acceleration.SCF.noncollinear_stability.DISPLACEMENT` (``off``, or no
+    line search)."""
 
     from ..acceleration.SCF.noncollinear_stability import DISPLACEMENT
     from ..acceleration.SCF.spin_sectors import FractionalOccupations
 
+    shift = DISPLACEMENT if line is None else float(line.shift)
     continuation = None
-    if report.vector is not None and report.centre is not None:
-        displaced = np.asarray(report.centre, dtype=np.float64) + DISPLACEMENT * np.asarray(report.vector)
+    if line is not None and line.from_pattern:
+        displaced = np.asarray(line.start, dtype=np.float64)
         points = displaced.size // 4
         continuation = (displaced[:points].copy(), displaced[points:].reshape(3, points).copy())
+    elif report.vector is not None and report.centre is not None:
+        displaced = np.asarray(report.centre, dtype=np.float64) + shift * np.asarray(report.vector)
+        points = displaced.size // 4
+        continuation = (displaced[:points].copy(), displaced[points:].reshape(3, points).copy())
+    if line is None:
+        how = [
+            "the loop without sectors continues from the state of the sectors displaced along the Ritz vector of "
+            f"that eigenvalue (largest change {DISPLACEMENT:g} Ry); the lower of the two states is kept",
+        ]
+    elif line.from_pattern:
+        how = [
+            line.text(),
+            f"the loop without sectors starts again from the state of the sectors with the local field of {line.flipped} "
+            "atom(s) turned over (the moment pattern of the instability) and the states of that pattern; the lower of "
+            "the two states is kept",
+        ]
+    else:
+        how = [
+            line.text(),
+            "the loop without sectors continues from the lowest point of that line with the Ritz states of the sectors "
+            f"(largest change {shift:+.4g} Ry); the lower of the two states is kept",
+        ]
     error = NoncollinearSectorsAbandoned(
         FractionalOccupations(
             largest=float(report.largest),
             tolerance=float(report.bound),
-            lines=(
-                report.text(),
-                "the loop without sectors continues from the state of the sectors displaced along the Ritz vector of "
-                f"that eigenvalue (largest change {DISPLACEMENT:g} Ry); the lower of the two states is kept",
-            ),
+            lines=(report.text(), *how),
             reason=(
                 "a symmetric state of the non-collinear k-point sectors that is unstable against perturbations that "
                 "break their operations (an eigenvalue of the SCF response above 1: the free energy goes down along it)"
@@ -888,7 +1066,16 @@ def _unstable(report, values: dict, measured: dict, kept) -> "NoncollinearSector
     )
     error.continuation = continuation
     error.kept = kept
+    error.line = line
+    error.states = states
     return error
+
+
+def _dispersion_energy(result) -> float:
+    """The dispersion correction (Van_Der_Waals) in the total energy of a result, 0 where it has none (a loop that did
+    not converge)."""
+
+    return float(getattr(result.energies, "dispersion", 0.0) or 0.0)
 
 
 def _free_energy(result, temperature: float) -> float:
@@ -1084,7 +1271,7 @@ def run_self_consistent_noncollinear_kpoints(
             "Andrew Grieder's ionic loops) needs equal k-point weights"
         )
 
-    def run(allow_sectors: bool, start=None) -> SelfConsistentSOCResult:
+    def run(allow_sectors: bool, start=None, start_states=None, give_up=None) -> SelfConsistentSOCResult:
         extras = SpinorForceExtras(
             system, k_points, weighting.weight if weighting.uniform else 1.0, operators_for, compute_forces
         )
@@ -1101,6 +1288,8 @@ def run_self_consistent_noncollinear_kpoints(
             extras=extras,
             warm_start=warm_start if start is None else None,
             allow_sectors=allow_sectors,
+            start_states=start_states,
+            give_up=give_up,
         )
 
     try:
@@ -1109,8 +1298,10 @@ def run_self_consistent_noncollinear_kpoints(
         # only the report, and the result of an unstable state, leave this block: the frames of the loop in the
         # sectors, and their orbitals, go
         abandoned = (error.report, error.measured, error.stage, getattr(error, "continuation", None),
-                     getattr(error, "kept", None))
-    report, measured, stage, continuation, kept = abandoned
+                     getattr(error, "kept", None), getattr(error, "line", None), getattr(error, "states", None))
+        error.states = None
+    report, measured, stage, continuation, kept, line, start_states = abandoned
+    abandoned = None
     try:
         # the device memory of the loop in the sectors, which its arrays returned to the CuPy pool, back to the devices
         # before the loop with one task per k-point
@@ -1141,28 +1332,52 @@ def run_self_consistent_noncollinear_kpoints(
     # an unstable state of the sectors: the loop without sectors continues from it, displaced along the direction the
     # free energy goes down; the lower of the two states is the result
     temperature = float(system.input.scf.fermi_temperature_kelvin)
-    continued = run(False, start=continuation)
+    watch = None
+    if line is not None:
+        # PARSEC_NONCOLLINEAR_SECTOR_CONTINUATION=auto: from the flip pattern or the lowest point of the line search,
+        # stopped where its free energy stays within GAIN of the state of the sectors or above it, or where its residual
+        # stalls far above the criterion; its iterations carry no dispersion correction, so the state of the sectors is compared without it
+        from ..acceleration.SCF.noncollinear_stability import ContinuationWatch
+
+        watch = ContinuationWatch(_free_energy(kept, temperature) - _dispersion_energy(kept),
+                                  criterion=float(system.input.scf.convergence_criterion))
+    continued = run(False, start=continuation, start_states=start_states, give_up=watch)
+    start_states = None
     below = _free_energy(kept, temperature) - _free_energy(continued, temperature)
     chosen = continued if continued.converged and below > CONTINUATION_MARGIN else kept
+    if (_dispersion_energy(kept) == 0.0) != (_dispersion_energy(continued) == 0.0):
+        # (an unconverged loop carries no dispersion correction: both without it)
+        below = (_free_energy(kept, temperature) - _dispersion_energy(kept)) - (
+            _free_energy(continued, temperature) - _dispersion_energy(continued)
+        )
     chosen.timings["noncollinear_sector_abandoned"] = 1.0 if chosen is continued else 0.0
     chosen.timings.update(measured)
     chosen.timings["noncollinear_continuation_iterations"] = float(continued.iterations)
     chosen.timings["noncollinear_continuation_lower"] = float(below)
+    stopped = watch is not None and watch.stopped_at is not None
+    if stopped:
+        chosen.timings["noncollinear_continuation_stopped"] = float(watch.stopped_at)
     if callback is not None:
         from ..models import SpinSectorFallbackRecord
 
+        lines = [
+            f"its free energy {below:+.6e} Ry below that of the sectors after {continued.iterations} iterations"
+            + ("" if continued.converged else " (not converged)")
+        ]
+        if stopped:
+            lines.append(f"(stopped: {watch.reason}; its lowest {watch.kept - watch.lowest:+.3e} Ry below)")
         callback(
             SpinSectorFallbackRecord(
                 stage="the loop without sectors from the displaced state",
                 largest_fractional_occupation=float(below),
                 tolerance=float(CONTINUATION_MARGIN),
-                multiplets=(
-                    f"its free energy {below:+.6e} Ry below that of the sectors after {continued.iterations} iterations"
-                    + ("" if continued.converged else " (not converged)"),
-                ),
+                multiplets=tuple(lines),
                 reason=(
                     "the state of the loop without sectors is kept: it lies below the unstable state of the sectors"
                     if chosen is continued
+                    else "the state of the sectors is kept: the loop without sectors from the displaced state did not "
+                    "converge"
+                    if watch is not None and below > CONTINUATION_MARGIN
                     else "the state of the sectors is kept: the loop without sectors from the displaced state did not "
                     "end below it"
                 ),

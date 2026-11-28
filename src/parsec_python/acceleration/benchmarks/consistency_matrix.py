@@ -20,7 +20,9 @@ repository, so that the matrix can be run unchanged on any later tree.  Groups:
     the same and other gradient functionals under ``PARSEC_GGA_NUCLEAR_GRADIENT=on`` (``nuclear``, added after
     7e1b4e080), whose energy is smooth there, at both kinds of steps; non-collinear PBE in the frames of
     ``PARSEC_NONCOLLINEAR_GGA_FRAME`` (added after 2bd841307: O2 at Gamma off and on a grid point, the Au pair with
-    spin-orbit coupling and a 2x2x2 mesh, also in its sectors under ``PARSEC_GGA_NUCLEAR_GRADIENT=on``).
+    spin-orbit coupling and a 2x2x2 mesh, also in its sectors under ``PARSEC_GGA_NUCLEAR_GRADIENT=on``; added after
+    46012d489, its multicollinear frame: O2 from canted moments off and on grid points and under
+    ``PARSEC_GGA_NUCLEAR_GRADIENT=on``, B2 from canted moments, the H3 triangle in its 120-degree state, the Au pair).
     The force
     compared is the total before its net part was removed (``forces_total + forces_net / N``), the derivative of the
     energy.  ``dgrid`` is the distance of the atom from the nearest grid point where the archive holds the grid.
@@ -29,7 +31,7 @@ repository, so that the matrix can be run unchanged on any later tree.  Groups:
     cluster, a Gamma cell and (added 2026-11-23) the SCF of a PBE0 cell below and above the floor of the sectors of
     a Gamma-point hybrid, ``--mpi`` of the command line for a k-point mesh (and, added after 7e1b4e080, for a
     non-collinear cell against the sectors of its magnetic group in one process, with CA and, added after 2bd841307,
-    with PBE).  Rank 0 then runs the same input in
+    with PBE, and after 46012d489 in the multicollinear frame).  Rank 0 then runs the same input in
     one process and compares: energies within 1e-8 Ry, forces within 1e-7 Ry/bohr.
 ``symmetry``
     The default route against the same input without symmetry: ``--symmetry off`` with
@@ -71,7 +73,9 @@ repository, so that the matrix can be run unchanged on any later tree.  Groups:
     (``PARSEC_NONCOLLINEAR_SECTOR_STABILITY``), which keeps the sectors, against ``off``, and non-collinear PBE in the
     frames of ``PARSEC_NONCOLLINEAR_GGA_FRAME`` from collinear moments against the collinear spin driver (O2 at Gamma
     on both routine sets, along z and x, O2 with a 2x2x2 mesh, the O2 cluster; energies within 1e-8 Ry, forces within
-    1e-6 Ry/bohr) and the PBE Au pair in its sectors against ``off``.
+    1e-6 Ry/bohr) and the PBE Au pair in its sectors against ``off``; (added after 46012d489) the multicollinear frame
+    from canted moments against the collinear spin driver (O2 at Gamma on both routine sets, with the 2x2x2 mesh, the
+    O2 cluster) and O2 with the 2x2x2 mesh and the Au pair in their sectors against ``off``.
 The groups ``traj``, ``band``, ``kpoint`` and ``soc`` and the MPI band case were added after the first run of the
 matrix (on ed4144f13); ``--group all`` takes them.  The MPI cases also run on several nodes (the line names them).
 
@@ -289,6 +293,9 @@ ALL_OFF = {
     "PARSEC_NONCOLLINEAR_KPOINT_SECTORS": "off",
     # after 2bd841307: the stability test of the state of such a loop in sectors in place of tests 1 and 3 of its guard
     "PARSEC_NONCOLLINEAR_SECTOR_STABILITY": "off",
+    # after 46012d489: the line search along the direction of an instability that test finds and the watch of the
+    # loop without sectors that continues from it
+    "PARSEC_NONCOLLINEAR_SECTOR_CONTINUATION": "off",
     # after 2bd841307: the collinear and axis frames of a non-collinear gradient functional (the local frame of |m|
     # under off)
     "PARSEC_NONCOLLINEAR_GGA_FRAME": "off",
@@ -1015,6 +1022,65 @@ def o2_nc_cluster(name):
     return o2(name).with_text(name, lambda text: text.replace("States_Num: 10\n", "States_Num: 16\n").replace(
         "Spin_Polarization: .true.\n", "Non_Collinear_magnetism: .true.\n")
         + "begin Initial_NCL_Moment\n  0 1 0\n  0 1 0\nend Initial_NCL_Moment\n")
+
+
+#: the multicollinear frame of a non-collinear gradient functional (added after 46012d489)
+MULTICOLLINEAR = {"PARSEC_NONCOLLINEAR_GGA_FRAME": "multicollinear"}
+#: canted initial moments 45 degrees apart (in the xz plane)
+CANTED_45 = ((0.0, 0.0, 1.0), (0.707107, 0.0, 0.707107))
+
+
+def multicollinear(structure):
+    """``structure`` under ``PARSEC_NONCOLLINEAR_GGA_FRAME=multicollinear`` (its runs and those of its reference)."""
+
+    structure.env = {**structure.env, **MULTICOLLINEAR}
+    return structure
+
+
+def h3_nc_pbe(name, *, criterion=1.0e-10, forces=True):
+    """An H3 triangle (H POTRE, side 4 bohr, PBE, 500 K) in its 120-degree non-collinear state (initial moments in the
+    plane 120 degrees apart, ``Initial_Spin_Polarization`` 0.8), a cluster of radius 9 bohr at h = 0.45 about a grid
+    point, atom 1 moved 0.03 bohr along y (added after 46012d489: the multicollinear frame; the local frame converges
+    this state, 2.3 mRy above the multicollinear one)."""
+
+    r = 4.0 / np.sqrt(3.0)
+    angles = np.deg2rad([90.0, 210.0, 330.0])
+    positions = np.stack([r * np.cos(angles), r * np.sin(angles), np.zeros(3)], axis=1)
+    positions[1, 1] += 0.03
+    s3 = np.sqrt(3.0) / 2.0
+
+    def text(p):
+        return (
+            cluster_head(9.0, 0.45)
+            + scf_block("pbe", 10, temperature=500.0, criterion=criterion, diag=criterion / 10, mixing=0.2,
+                        forces=forces, extra="Non_Collinear_magnetism: .true.\n")
+            + atom_blocks([("H_POTRE", p, "Initial_Spin_Polarization: 0.8\n")]).rstrip("\n")
+            + f"\nbegin Initial_NCL_Moment\n  1 0 0\n  -0.5 {s3:.6f} 0\n  -0.5 {-s3:.6f} 0\nend Initial_NCL_Moment\n\n"
+        )
+
+    return Structure(name, text, positions, ("H_POTRE",), None, 0)
+
+
+def o2_hex_nc_pbe(name, *, fortran=None, criterion=1.0e-10):
+    """O2 (O POTRE, PBE, 500 K) in a hexagonal 9 bohr cell at Gamma, h = 0.35, from moments 45 degrees apart (added
+    after 46012d489: the multicollinear frame on an oblique grid, whose gradients the host takes around the device's
+    pointwise sum); the Fortran-derived routines (``fortran`` True) or the default ones (``False``: the oblique stencil
+    of ``V_xc.pbe._oblique_mix``; also what ``None`` chooses for this input with forces)."""
+
+    vectors = np.array([[9.0, 0.0, 0.0], [-4.5, 4.5 * np.sqrt(3.0), 0.0], [0.0, 0.0, 9.0]])
+    centre = 0.5 * vectors.sum(axis=0)
+    positions = np.array([centre + [0.0, 0.0, -1.17], centre + [0.03, -0.02, 1.14]])
+
+    def text(p):
+        blocks = atom_blocks([("Os_POTRE", p, "Initial_Spin_Polarization: 0.3\n")]).rstrip("\n")
+        return (
+            cell_head(vectors, 0.35, fortran=fortran)
+            + scf_block("pbe", 16, temperature=500.0, criterion=criterion, diag=criterion / 10, mixing=0.2,
+                        forces=True, extra="Non_Collinear_magnetism: .true.\n")
+            + blocks + "\nbegin Initial_NCL_Moment\n  0 0 1\n  0.707107 0 0.707107\nend Initial_NCL_Moment\n\n"
+        )
+
+    return Structure(name, text, positions, ("Os_POTRE",), vectors, 3)
 
 
 def au2_nc_pbe(name, moments=((0, 0, 1), (0, 0, 1)), *, forces=True, criterion=1.0e-10, env=None):
@@ -2217,6 +2283,29 @@ def force_checks():
         ("f_b2_nc_pbe", b2_nc_pbe("b2_nc_pbe"), ((1, 2), (0, 0)), on),
         ("f_au2k_nc_pbe_nuc", nuclear(au2_nc_pbe("au2k_nc_pbe_nuc", env={
             "PARSEC_NONCOLLINEAR_KPOINT_SECTORS": "on", "PARSEC_KPOINT_SECTOR_GUARD": "off"})), ((0, 2), (1, 2)), on),
+        # the multicollinear frame (PARSEC_NONCOLLINEAR_GGA_FRAME=multicollinear, added after 46012d489): O2 from
+        # canted moments (it ends in the triplet) off and on grid points, B2 with the core correction, the H3 triangle
+        # in its 120-degree state (a cluster), the Au pair with spin-orbit coupling and its mesh, and under
+        # PARSEC_GGA_NUCLEAR_GRADIENT=on (its term on the host route of the frame)
+        ("f_o2_nc_pbe_mc", multicollinear(o2_nc_pbe("o2_nc_pbe_mc", moments=CANTED_45)), ((0, 2), (1, 0)), on),
+        ("f_o2_nc_pbe_grid_mc", multicollinear(o2_nc_pbe("o2_nc_pbe_grid_mc", grid=True, moments=CANTED_45)),
+         ((0, 2), (0, 0)), on),
+        # B2 from 45 degrees at Initial_Spin_Polarization 0.3 reaches a collinear state of total moment 2 with unequal
+        # atoms (a stationary state of the collinear functional too); atom 1 there, and atom 0 from the seed of the
+        # quintet (0.67), since moving atom 0 by -2e-3 bohr along x leaves that start stalled at a weighted residual of
+        # 1.6e-4 in the multicollinear frame (the local frame reaches the quintet from it: an SCF basin)
+        ("f_b2_nc_pbe_mc", multicollinear(b2_nc_pbe("b2_nc_pbe_mc", moments=CANTED_45)), ((1, 2),), on),
+        ("f_b2q_nc_pbe_mc", multicollinear(b2_nc_pbe("b2q_nc_pbe_mc", moments=CANTED_45).with_text(
+            "b2q_nc_pbe_mc", lambda text: text.replace("Initial_Spin_Polarization: 0.3\n",
+                                                       "Initial_Spin_Polarization: 0.67\n"))), ((0, 0), (0, 2)), on),
+        ("f_h3_nc_pbe_mc", multicollinear(h3_nc_pbe("h3_nc_pbe_mc")), ((1, 1), (0, 0)), on),
+        ("f_au2k_nc_pbe_mc", multicollinear(au2_nc_pbe("au2k_nc_pbe_mc")), ((0, 2), (1, 2)), on),
+        ("f_o2_nc_pbe_mc_nuc", nuclear(multicollinear(o2_nc_pbe("o2_nc_pbe_mc_nuc", moments=CANTED_45))),
+         ((0, 2), (1, 0)), on),
+        # the default frame of canted moments on an oblique grid, both routine sets (the host stencils around the
+        # device's pointwise sum)
+        ("f_o2hex_nc_pbe_mc", o2_hex_nc_pbe("o2hex_nc_pbe_mc", fortran=True), ((0, 2), (1, 0)), on),
+        ("f_o2hex_nc_pbe_mc_d", o2_hex_nc_pbe("o2hex_nc_pbe_mc_d", fortran=False), ((0, 2), (1, 1)), on),
     ]
     notes = {
         "f_ag4u_d_grid": "atom 0: LDA+U energy kink reported before",
@@ -2570,6 +2659,35 @@ def soc_checks():
     structure.env = {"PARSEC_NONCOLLINEAR_KPOINT_SECTORS": "on", "PARSEC_KPOINT_SECTOR_GUARD": "off"}
     checks.append(SymmetryCheck("soc", "o_au2k_nc_pbe_sectors", "", structure, make("o_au2k_nc_pbe_sectors_off"),
                                 {"PARSEC_NONCOLLINEAR_KPOINT_SECTORS": "off"}, ()))
+    # (added after 46012d489) the multicollinear frame (PARSEC_NONCOLLINEAR_GGA_FRAME=multicollinear) from canted
+    # moments, which end in the triplet, against the collinear spin driver (O2 at Gamma on both routine sets, with the
+    # 2x2x2 mesh, the O2 cluster), and the Au pair in its sectors against the whole grid (B2 from parallel moments,
+    # whose transverse modes the frame frees, does not converge at 1e-10 Ry in 400 iterations, and from canted ones it
+    # reaches a state of its own: f_b2_nc_pbe_mc)
+    for name, nc_structure, spin_structure in (
+        ("o_o2_nc_pbe_mc", multicollinear(o2_nc_pbe("o_o2_nc_pbe_mc", moments=CANTED_45)),
+         o2_nc_pbe("o_o2_nc_pbe_mc_spin", nc=False)),
+        ("o_o2_nc_pbe_mc_f", multicollinear(o2_nc_pbe("o_o2_nc_pbe_mc_f", moments=((1, 0, 0), (0.6, 0.8, 0)),
+                                                      fortran=True)),
+         o2_nc_pbe("o_o2_nc_pbe_mc_f_spin", nc=False, fortran=True)),
+        ("o_o2k_nc_pbe_mc", multicollinear(o2_nc_pbe("o_o2k_nc_pbe_mc", mesh=(2, 2, 2), moments=CANTED_45)),
+         o2_nc_pbe("o_o2k_nc_pbe_mc_spin", nc=False, mesh=(2, 2, 2))),
+        ("o_o2c_nc_pbe_mc", multicollinear(o2_nc_cluster("o_o2c_nc_pbe_mc")), o2("o_o2c_nc_pbe_mc_spin")),
+    ):
+        checks.append(SymmetryCheck("soc", name, "", nc_structure, spin_structure, {}, (), energy_tolerance=1.0e-8,
+                                    force_tolerance=1.0e-6))
+    # and O2 from canted moments with the 2x2x2 mesh in the sectors of their magnetic group (the guard off) against
+    # the whole grid: a magnetic state of the frame in the sectors
+    make_o2 = lambda n: multicollinear(o2_nc_pbe(n, mesh=(2, 2, 2), moments=CANTED_45))
+    structure = make_o2("o_o2k_nc_pbe_mc_sectors")
+    structure.env.update({"PARSEC_NONCOLLINEAR_KPOINT_SECTORS": "on", "PARSEC_KPOINT_SECTOR_GUARD": "off"})
+    checks.append(SymmetryCheck("soc", "o_o2k_nc_pbe_mc_sectors", "", structure, make_o2("o_o2k_nc_pbe_mc_sectors_off"),
+                                {"PARSEC_NONCOLLINEAR_KPOINT_SECTORS": "off"}, ()))
+    structure = multicollinear(make("o_au2k_nc_pbe_mc_sectors"))
+    structure.env.update({"PARSEC_NONCOLLINEAR_KPOINT_SECTORS": "on", "PARSEC_KPOINT_SECTOR_GUARD": "off"})
+    checks.append(SymmetryCheck("soc", "o_au2k_nc_pbe_mc_sectors", "", structure,
+                                multicollinear(make("o_au2k_nc_pbe_mc_sectors_off")),
+                                {"PARSEC_NONCOLLINEAR_KPOINT_SECTORS": "off"}, ()))
     return checks
 
 
@@ -2604,11 +2722,14 @@ def mpi_checks():
         # the same with PBE in the axis frame of spin-orbit coupling (added after 2bd841307,
         # PARSEC_NONCOLLINEAR_GGA_FRAME=auto)
         ("m_au2k_nc_pbe", au2_nc_pbe("m_au2k_nc_pbe", forces=False), "cli"),
+        # and in the multicollinear frame (added after 46012d489, PARSEC_NONCOLLINEAR_GGA_FRAME=multicollinear)
+        ("m_au2k_nc_pbe_mc", multicollinear(au2_nc_pbe("m_au2k_nc_pbe_mc", forces=False)), "cli"),
     ]
     checks = [MpiCheck("mpi", name, "", structure, launcher) for name, structure, launcher in table]
     for check in checks:
-        if check.name in ("m_au2k_nc", "m_au2k_nc_pbe"):
-            check.structure.env = {"PARSEC_NONCOLLINEAR_KPOINT_SECTORS": "on", "PARSEC_KPOINT_SECTOR_GUARD": "off"}
+        if check.name in ("m_au2k_nc", "m_au2k_nc_pbe", "m_au2k_nc_pbe_mc"):
+            check.structure.env = {**check.structure.env, "PARSEC_NONCOLLINEAR_KPOINT_SECTORS": "on",
+                                   "PARSEC_KPOINT_SECTOR_GUARD": "off"}
     return checks
 
 

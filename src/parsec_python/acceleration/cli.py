@@ -1748,6 +1748,11 @@ def _join_mpi(arguments: argparse.Namespace) -> int | None:
     except ImportError as error:
         print(f"Input error: --mpi needs mpi4py: {error}", file=sys.stderr)
         return 2
+    # PARSEC_NONCOLLINEAR_GGA_FRAME=auto: every rank takes the multicollinear frame of a non-collinear start only where
+    # every rank has a device for its sum (V_xc/noncollinear.py frame_decision), so the ranks take one frame
+    from .V_xc.multicollinear_xc import agree_across_ranks
+
+    agree_across_ranks(context.comm)
     if arguments.dry_run:
         return None
     arguments.mpi_rank = context.rank

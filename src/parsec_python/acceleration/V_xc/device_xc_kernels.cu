@@ -629,6 +629,130 @@ GGA_SPIN_KERNEL(spin_gga_pbe, pbe_spin)
 GGA_SPIN_KERNEL(spin_gga_pw91, pw91_spin)
 #endif
 
+// The multicollinear functional of V_xc/multicollinear.py (Hartree) at every value: the sum over the vectors v of
+// the rule (rows of ``vectors``, weights ``weights``, the origin among them) of the collinear functional of
+// (T +- v.m)/2 with the gradients (D T +- v.Dm)/2, blended in q = |m|/T with the pointwise local frame.  Inputs
+// T = n + n_core, m (3 x count), D T (3 x count), Dm (component a, axis i: (3 a + i) x count); outputs the energy
+// density, de/dT, de/dm (3), de/dDT (3) and de/dDm (9) in the layout of the inputs.  The same operations as the
+// NumPy module in another order of the sums (round-off).
+static __device__ __forceinline__ void mc_accumulate(const double out[6], double weight, const double v[3],
+                                                    const double gu[3], const double gd[3], const double gt[3],
+                                                    double* e, double* dt, double dm[3], double dgt[3],
+                                                    double dgm[9]) {
+    *e += weight * out[0];
+    *dt += weight * (0.5 * (out[1] + out[2]));
+    double half_difference = 0.5 * (out[1] - out[2]);
+    for (int a = 0; a < 3; ++a) dm[a] += weight * v[a] * half_difference;
+    for (int i = 0; i < 3; ++i) {
+        double fa = out[3] * gu[i];
+        double fb = out[4] * gd[i];
+        dgt[i] += weight * (fa + fb + 2.0 * out[5] * gt[i]);
+        double difference = fa - fb;
+        for (int a = 0; a < 3; ++a) dgm[3 * a + i] += weight * v[a] * difference;
+    }
+}
+
+#define MC_SPIN_KERNEL(NAME, PARTIALS)                                                                         \
+    extern "C" __global__ void NAME(index_t count, const double* total, const double* magnetization,          \
+                                    const double* gradient_total, const double* gradient_m, int nodes,        \
+                                    const double* vectors, const double* weights, double lower, double upper, \
+                                    double* energy, double* d_total, double* d_m, double* d_gradient_total,   \
+                                    double* d_gradient_m) {                                                   \
+        index_t w = (index_t)blockIdx.x * blockDim.x + threadIdx.x;                                            \
+        if (w >= count) return;                                                                                \
+        double t = total[w];                                                                                   \
+        double m[3], gt[3], gm[9];                                                                             \
+        for (int a = 0; a < 3; ++a) {                                                                          \
+            m[a] = magnetization[a * count + w];                                                               \
+            gt[a] = gradient_total[a * count + w];                                                             \
+        }                                                                                                      \
+        for (int k = 0; k < 9; ++k) gm[k] = gradient_m[k * count + w];                                         \
+        double e = 0.0, dt = 0.0, dm[3] = {0.0, 0.0, 0.0}, dgt[3] = {0.0, 0.0, 0.0};                           \
+        double dgm[9] = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0};                                         \
+        if (t > 0.0) {                                                                                         \
+            double sigma_total = gt[0] * gt[0] + gt[1] * gt[1] + gt[2] * gt[2];                                \
+            double magnitude = sqrt(m[0] * m[0] + m[1] * m[1] + m[2] * m[2]);                                  \
+            double ratio = magnitude / t;                                                                      \
+            double width = upper - lower;                                                                      \
+            double s = fmin(fmax((ratio - lower) / width, 0.0), 1.0);                                          \
+            double chi = s * s * s * (10.0 + s * (-15.0 + 6.0 * s));                                           \
+            double slope = 30.0 * s * s * (1.0 - s) * (1.0 - s) / width;                                       \
+            double out[6], gu[3], gd[3];                                                                       \
+            double e_mc = 0.0, dt_mc = 0.0, dm_mc[3] = {0.0, 0.0, 0.0}, dgt_mc[3] = {0.0, 0.0, 0.0};           \
+            double dgm_mc[9] = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0};                                  \
+            if (chi < 1.0) {                                                                                   \
+                for (int node = 0; node < nodes; ++node) {                                                     \
+                    const double* v = vectors + 3 * node;                                                      \
+                    double projection = v[0] * m[0] + v[1] * m[1] + v[2] * m[2];                               \
+                    for (int i = 0; i < 3; ++i) {                                                              \
+                        double g = v[0] * gm[i] + v[1] * gm[3 + i] + v[2] * gm[6 + i];                         \
+                        gu[i] = 0.5 * (gt[i] + g);                                                             \
+                        gd[i] = 0.5 * (gt[i] - g);                                                             \
+                    }                                                                                          \
+                    PARTIALS(0.5 * (t + projection), 0.5 * (t - projection),                                   \
+                             gu[0] * gu[0] + gu[1] * gu[1] + gu[2] * gu[2],                                    \
+                             gd[0] * gd[0] + gd[1] * gd[1] + gd[2] * gd[2], sigma_total, out);                 \
+                    mc_accumulate(out, weights[node], v, gu, gd, gt, &e_mc, &dt_mc, dm_mc, dgt_mc, dgm_mc);    \
+                }                                                                                              \
+            }                                                                                                  \
+            double e_local = 0.0;                                                                              \
+            if (chi > 0.0) {                                                                                   \
+                double direction[3] = {m[0] / magnitude, m[1] / magnitude, m[2] / magnitude};                  \
+                for (int i = 0; i < 3; ++i) {                                                                  \
+                    double g = direction[0] * gm[i] + direction[1] * gm[3 + i] + direction[2] * gm[6 + i];     \
+                    gu[i] = 0.5 * (gt[i] + g);                                                                 \
+                    gd[i] = 0.5 * (gt[i] - g);                                                                 \
+                }                                                                                              \
+                PARTIALS(0.5 * (t + magnitude), 0.5 * (t - magnitude),                                         \
+                         gu[0] * gu[0] + gu[1] * gu[1] + gu[2] * gu[2],                                        \
+                         gd[0] * gd[0] + gd[1] * gd[1] + gd[2] * gd[2], sigma_total, out);                     \
+                e_local = out[0];                                                                              \
+                double difference[3], q[3];                                                                    \
+                for (int i = 0; i < 3; ++i) difference[i] = out[3] * gu[i] - out[4] * gd[i];                   \
+                for (int a = 0; a < 3; ++a)                                                                    \
+                    q[a] = gm[3 * a] * difference[0] + gm[3 * a + 1] * difference[1] + gm[3 * a + 2] * difference[2]; \
+                double along = direction[0] * q[0] + direction[1] * q[1] + direction[2] * q[2];                \
+                e += chi * e_local;                                                                            \
+                dt += chi * (0.5 * (out[1] + out[2]));                                                         \
+                for (int a = 0; a < 3; ++a)                                                                    \
+                    dm[a] += chi * (0.5 * (out[1] - out[2]) * direction[a] + (q[a] - direction[a] * along) / magnitude); \
+                for (int i = 0; i < 3; ++i) {                                                                  \
+                    dgt[i] += chi * (out[3] * gu[i] + out[4] * gd[i] + 2.0 * out[5] * gt[i]);                  \
+                    for (int a = 0; a < 3; ++a) dgm[3 * a + i] += chi * direction[a] * difference[i];          \
+                }                                                                                              \
+            }                                                                                                  \
+            double keep = 1.0 - chi;                                                                           \
+            if (chi < 1.0) {                                                                                   \
+                e += keep * e_mc;                                                                              \
+                dt += keep * dt_mc;                                                                            \
+                for (int a = 0; a < 3; ++a) {                                                                  \
+                    dm[a] += keep * dm_mc[a];                                                                  \
+                    dgt[a] += keep * dgt_mc[a];                                                                \
+                }                                                                                              \
+                for (int k = 0; k < 9; ++k) dgm[k] += keep * dgm_mc[k];                                        \
+            }                                                                                                  \
+            if (chi > 0.0 && chi < 1.0) {                                                                      \
+                double factor = slope * (e_local - e_mc) / t;                                                  \
+                dt -= factor * ratio;                                                                          \
+                for (int a = 0; a < 3; ++a) dm[a] += factor * m[a] / magnitude;                                \
+            }                                                                                                  \
+        }                                                                                                      \
+        energy[w] = e;                                                                                         \
+        d_total[w] = dt;                                                                                       \
+        for (int a = 0; a < 3; ++a) {                                                                          \
+            d_m[a * count + w] = dm[a];                                                                        \
+            d_gradient_total[a * count + w] = dgt[a];                                                          \
+        }                                                                                                      \
+        for (int k = 0; k < 9; ++k) d_gradient_m[k * count + w] = dgm[k];                                      \
+    }
+
+#ifdef KERNEL_mc_spin_gga_pbe
+MC_SPIN_KERNEL(mc_spin_gga_pbe, pbe_spin)
+#endif
+#ifdef KERNEL_mc_spin_gga_pw91
+MC_SPIN_KERNEL(mc_spin_gga_pw91, pw91_spin)
+#endif
+
 // ---------------------------------------------------------------------------
 // Local density functionals (pw92_lda.py, local_density.py), Rydberg
 // ---------------------------------------------------------------------------

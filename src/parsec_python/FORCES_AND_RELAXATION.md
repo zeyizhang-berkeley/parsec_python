@@ -815,9 +815,10 @@ case:
 
 - **Ion-ion, local ionic, core correction, SCF residual**: the total density, the exchange-correlation potential averaged
   over the two spin directions (`V_avg` of the local-rotation form, whose `B_xc.sigma` part does not depend on the
-  positions; for a non-collinear gradient functional in the collinear or axis frame of
-  `PARSEC_NONCOLLINEAR_GGA_FRAME`, `V_xc/noncollinear.py`, its `V_avg` is also the derivative of the energy in the core
-  density, whose sum with the valence density scales the axis frame), and the last `V_out - V_in` of the averaged
+  positions; for a non-collinear gradient functional in the collinear, axis or multicollinear frame of
+  `PARSEC_NONCOLLINEAR_GGA_FRAME`, `V_xc/noncollinear.py` and `V_xc/multicollinear.py`, its `V_avg` is also the
+  derivative of the energy in the core density, whose sum with the valence density scales the axis frame and is the
+  density of the multicollinear one), and the last `V_out - V_in` of the averaged
   potential. The result records these (`xc_potential`, `input_effective_potential`, `output_effective_potential`).
 - **Kleinman-Bylander projectors**: they act alike on both spin components, so the force is that of the spin-polarized
   case on the `2N` components at the weight `f_n/2` (`Forces/spin_orbit.py`, `spinor_nonlocal_forces`).

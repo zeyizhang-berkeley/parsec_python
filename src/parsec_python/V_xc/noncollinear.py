@@ -63,18 +63,28 @@ structures of a relaxation or dynamics, :func:`system_frame`):
   (``int |m| >= GUARD_MOMENT``) with the second eigenvalue above
   ``GUARD_RATIO`` of the first or more than ``GUARD_DEAD_BAND`` of ``int |m|``
   where ``|sigma| < |m|/2``;
+* PBE or PW91 with non-collinear initial moments: the **multicollinear frame**
+  (:mod:`parsec_python.V_xc.multicollinear`), the multicollinear functional of
+  Pu et al. (Phys. Rev. Research 5, 013036 (2023)), an average of the collinear
+  functional over projection axes, with a radial rule in place of its second
+  derivatives and the local frame where ``|m|`` approaches ``n + n_core``: smooth
+  in ``m`` and ``grad m`` at every point, the nodes of ``m`` among them, and the
+  collinear functional in the collinear limit.  Where a CUDA device sums it
+  (:func:`multicollinear_available`: CuPy with a device, not under
+  ``PARSEC_CUPY_XC=off`` or ``PARSEC_DEVICE=cpu``); without one the host would
+  take some 80 times the time of the local frame per evaluation, and ``auto``
+  keeps the local frame, with a NOTE in parsec.out;
 * every other run (a local functional, CA, PW92 or a libxc LDA, whose field
   vanishes with ``|m|``; no initial moment, as Quantum ESPRESSO's
-  ``compute_ux``; non-collinear initial moments): the local frame above.
+  ``compute_ux``; the other gradient functionals with non-collinear initial
+  moments): the local frame above.
 
-``off`` (and ``PARSEC_FORTRAN_NUMERICS=on``): the local frame for every run, as
-``bxc.F90`` of PARSEC 1.5.  The collinear frame is the signed frame of a fixed
-quantization axis that Quantum ESPRESSO takes for a gradient functional when
-the starting moments are collinear (``compute_rho`` with ``lsign``), with the
-field kept on that axis.  A frame that is continuous for every non-collinear
-magnetization and exact in the collinear limit is the multicollinear functional
-(Pu et al., Phys. Rev. Research 5, 013036 (2023)), an average of the collinear
-functional over projection axes, which this module does not implement.
+``multicollinear``: the multicollinear frame for every run of PBE or PW91 (the
+others as under ``auto``).  ``off`` (and ``PARSEC_FORTRAN_NUMERICS=on``): the
+local frame for every run, as ``bxc.F90`` of PARSEC 1.5.  The collinear frame
+is the signed frame of a fixed quantization axis that Quantum ESPRESSO takes
+for a gradient functional when the starting moments are collinear
+(``compute_rho`` with ``lsign``), with the field kept on that axis.
 """
 
 from __future__ import annotations
@@ -90,7 +100,7 @@ _MAGNETIZATION_FLOOR = 1.0e-12
 
 NONCOLLINEAR_GGA_FRAME_ENV = "PARSEC_NONCOLLINEAR_GGA_FRAME"
 NONCOLLINEAR_GGA_FRAME_DEFAULT = "auto"
-NONCOLLINEAR_GGA_FRAME_VALUES = ("auto", "off")
+NONCOLLINEAR_GGA_FRAME_VALUES = ("auto", "multicollinear", "off")
 #: the spin functionals without a density gradient: their field vanishes with ``|m|``, they keep the local frame
 LOCAL_SPIN_FUNCTIONALS = frozenset(("ca", "pw92"))
 #: the guard of the axis frame: a magnetic state (``int |m| >= GUARD_MOMENT`` Bohr magnetons) whose second eigenvalue
@@ -104,6 +114,9 @@ GUARD_EVALUATIONS = 10
 AXIS_FRAME_SOFTNESS = 1.0e-2
 #: two initial moments are collinear where ``|u x v| <= COLLINEAR_MOMENT_TOLERANCE |u| |v|``
 COLLINEAR_MOMENT_TOLERANCE = 1.0e-6
+#: ``auto`` takes the multicollinear frame for non-collinear initial moments of PBE and PW91 where a device sums it
+#: (:func:`multicollinear_available`); the local frame without one
+AUTO_MULTICOLLINEAR = True
 
 
 @dataclass(frozen=True)
@@ -139,16 +152,19 @@ def local_spin_densities(
 
 
 def noncollinear_gga_frame_setting() -> str:
-    """``PARSEC_NONCOLLINEAR_GGA_FRAME``: ``auto`` (the default) or ``off`` (the module docstring).  An unknown value
-    is an error."""
+    """``PARSEC_NONCOLLINEAR_GGA_FRAME``: ``auto`` (the default), ``multicollinear`` or ``off`` (the module
+    docstring).  An unknown value, or one of ``PARSEC_NONCOLLINEAR_MC_POINTS``
+    (:func:`parsec_python.V_xc.multicollinear.multicollinear_points_setting`), is an error."""
 
     from ..fortran_numerics import switch_value
+    from .multicollinear import multicollinear_points_setting
 
     value = switch_value(NONCOLLINEAR_GGA_FRAME_ENV, NONCOLLINEAR_GGA_FRAME_DEFAULT)
     if value not in NONCOLLINEAR_GGA_FRAME_VALUES:
         raise ValueError(
             f"{NONCOLLINEAR_GGA_FRAME_ENV} must be one of {', '.join(NONCOLLINEAR_GGA_FRAME_VALUES)}, not {value!r}"
         )
+    multicollinear_points_setting()
     return value
 
 
@@ -209,16 +225,18 @@ def initial_moment_axis(moments) -> tuple[bool, np.ndarray | None]:
 FRAME_LOCAL = "local"
 FRAME_COLLINEAR = "collinear"
 FRAME_AXIS = "axis"
+FRAME_MULTICOLLINEAR = "multicollinear"
 
 
 class NoncollinearFrame:
     """The frame of the XC of one non-collinear run (the module docstring), decided once from its input
-    (:func:`frame_decision`): ``mode`` ``local``, ``collinear`` (along the fixed ``axis``) or ``axis`` (the principal
-    axis of ``m``; ``axis`` where ``m`` is zero), with the guard of the axis frame.  ``left_axis_at`` is the evaluation
+    (:func:`frame_decision`): ``mode`` ``local``, ``collinear`` (along the fixed ``axis``), ``axis`` (the principal
+    axis of ``m``; ``axis`` where ``m`` is zero), with the guard of the axis frame, or ``multicollinear``
+    (:mod:`parsec_python.V_xc.multicollinear`, which needs the system of the run).  ``left_axis_at`` is the evaluation
     at which the guard took the local frame (``None`` while it has not)."""
 
     def __init__(self, mode: str, axis: np.ndarray | None = None, setting: str = NONCOLLINEAR_GGA_FRAME_DEFAULT):
-        if mode not in (FRAME_LOCAL, FRAME_COLLINEAR, FRAME_AXIS):
+        if mode not in (FRAME_LOCAL, FRAME_COLLINEAR, FRAME_AXIS, FRAME_MULTICOLLINEAR):
             raise ValueError(f"unknown non-collinear frame {mode!r}")
         self.mode = mode
         self.axis = None if axis is None else np.asarray(axis, dtype=float)
@@ -226,6 +244,9 @@ class NoncollinearFrame:
         self.evaluations = 0
         self.strikes = 0
         self.left_axis_at: int | None = None
+        #: the local frame that ``auto`` keeps for non-collinear initial moments without a device for the
+        #: multicollinear frame (:func:`frame_decision`)
+        self.multicollinear_declined = False
 
     def __repr__(self) -> str:
         return f"NoncollinearFrame(mode={self.mode!r}, axis={self.axis!r}, left_axis_at={self.left_axis_at!r})"
@@ -260,10 +281,19 @@ class NoncollinearFrame:
         spin_functional: Callable[[np.ndarray, np.ndarray], SpinPolarizedXCResult],
         core_density: np.ndarray | None = None,
         volume_element: float | None = None,
+        system=None,
     ) -> NoncollinearXCResult:
-        """The XC of ``(n, m)`` in this frame (the guard of the axis frame counts every evaluation)."""
+        """The XC of ``(n, m)`` in this frame (the guard of the axis frame counts every evaluation).  The
+        multicollinear frame evaluates the functional of ``system`` (a prepared system: its grid, functional and core
+        density) and needs it."""
 
         self.evaluations += 1
+        if self.mode == FRAME_MULTICOLLINEAR:
+            if system is None:
+                raise ValueError("the multicollinear frame needs the system of the run")
+            from .multicollinear import system_multicollinear_xc
+
+            return system_multicollinear_xc(system, density, magnetization)
         if self.mode == FRAME_COLLINEAR:
             return collinear_frame_xc(density, magnetization, spin_functional, self.axis)
         if self.mode == FRAME_AXIS:
@@ -282,19 +312,41 @@ class NoncollinearFrame:
 def frame_decision(
     functional, atoms, specifications, spin_orbit: bool, setting: str | None = None
 ) -> NoncollinearFrame:
-    """The frame of a non-collinear run from its input (the module docstring): the local frame under ``off``, for a
-    local functional, without an initial moment and for non-collinear initial moments; else the collinear frame along
-    the axis of the initial moments without spin-orbit coupling and the axis frame with it.  ``atoms`` carry
-    ``initial_moment`` (``None`` for an atom without one), ``specifications`` the species with
-    ``initial_spin_polarization``."""
+    """The frame of a non-collinear run from its input (the module docstring): the local frame under ``off`` and for
+    a local functional; the multicollinear frame for PBE and PW91 under ``multicollinear`` and, under ``auto``
+    (:data:`AUTO_MULTICOLLINEAR`), for their non-collinear initial moments where a device sums it (else the local frame
+    with ``multicollinear_declined``); the local frame without an initial moment
+    and for the non-collinear moments of the other functionals; else the collinear frame along the axis of the initial
+    moments without spin-orbit coupling and the axis frame with it.  ``atoms`` carry ``initial_moment`` (``None`` for
+    an atom without one), ``specifications`` the species with ``initial_spin_polarization``."""
+
+    from .multicollinear import MULTICOLLINEAR_FUNCTIONALS
 
     setting = noncollinear_gga_frame_setting() if setting is None else setting
     if setting == "off" or is_local_functional(functional):
         return NoncollinearFrame(FRAME_LOCAL, None, setting)
+    if setting == "multicollinear" and functional in MULTICOLLINEAR_FUNCTIONALS:
+        return NoncollinearFrame(FRAME_MULTICOLLINEAR, None, setting)
     collinear, axis = initial_moment_axis(initial_moments(atoms, specifications))
+    if axis is not None and not collinear and AUTO_MULTICOLLINEAR and functional in MULTICOLLINEAR_FUNCTIONALS:
+        if multicollinear_available():
+            return NoncollinearFrame(FRAME_MULTICOLLINEAR, None, setting)
+        # without a device the host would sum the rule at some 80 times the cost of the local frame
+        frame = NoncollinearFrame(FRAME_LOCAL, None, setting)
+        frame.multicollinear_declined = True
+        return frame
     if axis is None or not collinear:
         return NoncollinearFrame(FRAME_LOCAL, None, setting)
     return NoncollinearFrame(FRAME_AXIS if spin_orbit else FRAME_COLLINEAR, axis, setting)
+
+
+def multicollinear_available() -> bool:
+    """Whether the multicollinear sum has a CUDA device in this process
+    (:func:`parsec_python.acceleration.V_xc.multicollinear_xc.device_available`)."""
+
+    from ..acceleration.V_xc.multicollinear_xc import device_available
+
+    return device_available()
 
 
 def problem_frame(problem, setting: str | None = None) -> NoncollinearFrame:

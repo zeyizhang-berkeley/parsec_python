@@ -481,7 +481,12 @@ class PeriodicPreparedSinglePointSystem:
 
         # the frame of the run under PARSEC_NONCOLLINEAR_GGA_FRAME (V_xc/noncollinear.py)
         return system_frame(self).evaluate(
-            density, magnetization, self.evaluate_xc_spin_polarized, self.core_density, self.grid.volume_element
+            density,
+            magnetization,
+            self.evaluate_xc_spin_polarized,
+            self.core_density,
+            self.grid.volume_element,
+            system=self,
         )
 
     # ----- the hooks of a meta-GGA loop (parsec_python.SCF.meta_gga) -----

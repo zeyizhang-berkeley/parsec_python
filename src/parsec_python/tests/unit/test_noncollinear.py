@@ -294,9 +294,22 @@ class NoncollinearAxisFrameTests(unittest.TestCase):
         self.assertEqual(decide("pbe", parallel, spin_orbit=True), ("axis", (0.0, 0.0, 1.0)))
         half = round(np.sqrt(0.5), 12)
         self.assertEqual(decide("pbe", antiparallel), ("collinear", (half, half, 0.0)))
-        # no initial moment (Quantum ESPRESSO's compute_ux), non-collinear moments, off, the local functionals
+        # non-collinear moments of PBE and PW91: the multicollinear frame (V_xc.multicollinear); no initial moment
+        # (Quantum ESPRESSO's compute_ux), off, the local functionals: the local frame
+        from unittest import mock
+
+        with mock.patch("parsec_python.V_xc.noncollinear.multicollinear_available", return_value=True):
+            self.assertEqual(decide("pbe", canted, spin_orbit=True), ("multicollinear", None))
+            self.assertEqual(decide("pw91", canted), ("multicollinear", None))
+        # without a device for its sum auto keeps the local frame (a NOTE in parsec.out); the value takes it anyway
+        with mock.patch("parsec_python.V_xc.noncollinear.multicollinear_available", return_value=False):
+            self.assertEqual(decide("pbe", canted), ("local", None))
+            self.assertTrue(frame_decision("pbe", canted, species, False, "auto").multicollinear_declined)
+            self.assertFalse(frame_decision("pbe", parallel, species, False, "auto").multicollinear_declined)
+            self.assertEqual(decide("pbe", canted, setting="multicollinear"), ("multicollinear", None))
+        self.assertEqual(decide("pbe", canted, setting="off"), ("local", None))
+        self.assertEqual(decide("lb94", canted), ("local", None))
         self.assertEqual(decide("pbe", atoms(None, None)), ("local", None))
-        self.assertEqual(decide("pbe", canted, spin_orbit=True), ("local", None))
         self.assertEqual(decide("pbe", parallel, setting="off"), ("local", None))
         self.assertEqual(decide("ca", parallel), ("local", None))
         self.assertEqual(decide("pw92", parallel, spin_orbit=True), ("local", None))
@@ -340,6 +353,192 @@ class NoncollinearAxisFrameTests(unittest.TestCase):
         for value in ("yes", "on"):
             with mock.patch.dict("os.environ", {NONCOLLINEAR_GGA_FRAME_ENV: value}):
                 with self.assertRaisesRegex(ValueError, NONCOLLINEAR_GGA_FRAME_ENV):
+                    noncollinear_gga_frame_setting()
+
+
+class MulticollinearFrameTests(unittest.TestCase):
+    """The multicollinear functional (PARSEC_NONCOLLINEAR_GGA_FRAME=multicollinear, V_xc.multicollinear)."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.grid = build_cluster_grid(
+            GridSettings(spacing=0.6, radius=3.6, expansion_order=8, shift=(0.5, 0.5, 0.5))
+        )
+        x = cls.grid.coordinates
+        r2 = np.einsum("ij,ij->i", x, x)
+        cls.n = 0.3 * np.exp(-0.6 * r2) + 0.02
+        plane = x[np.argmin(np.abs(x[:, 0] - 0.4)), 0]
+        cls.signed = 0.4 * cls.n * np.tanh(2.0 * (x[:, 0] - plane))
+        cls.core = 0.05 * np.exp(-2.0 * r2)
+        # a canted state: the moment turns by 120 degrees about y across x and changes its length (|m| / n from 0 at
+        # a node to 0.7: the multicollinear part, the blend and the local frame), with a transverse part along y
+        angle = (2.0 * np.pi / 3.0) * (0.5 + 0.5 * np.tanh(x[:, 0]))
+        length = 0.7 * np.tanh(0.5 * (x[:, 0] - plane))
+        cls.canted = cls.n * np.stack([length * np.sin(angle), 0.02 * np.sin(x[:, 1]), length * np.cos(angle)])
+
+    def _xc(self, density, magnetization, functional="pbe", **keywords):
+        from parsec_python.V_xc.multicollinear import multicollinear_xc, pointwise_partials
+
+        return multicollinear_xc(density, magnetization, self.grid, pointwise_partials(functional), self.core,
+                                 **keywords)
+
+    def _collinear(self, axis, signed):
+        from parsec_python.V_xc.pbe_spin import pbe_spin
+
+        direct = pbe_spin(0.5 * (self.n + signed), 0.5 * (self.n - signed), self.grid, self.core)
+        return (direct.total_energy, 0.5 * (direct.potential_up + direct.potential_down),
+                np.outer(axis, 0.5 * (direct.potential_up - direct.potential_down)))
+
+    def test_the_rules(self) -> None:
+        # Lebedev: <(u.a)^2k> = |a|^2k / (2k + 1) up to its degree, half rules of weight 1; the radial rule:
+        # sum rho_j r_j^2k = 2k + 1 up to its levels
+        from parsec_python.V_xc.multicollinear import (
+            MULTICOLLINEAR_POINTS_VALUES, half_sphere_rule, lebedev_rule, multicollinear_rule, radial_rule,
+        )
+
+        degrees = {26: 7, 38: 9, 50: 11, 110: 17, 194: 23, 302: 29}
+        a = np.array([0.3, -0.5, 0.8])
+        for points in MULTICOLLINEAR_POINTS_VALUES:
+            directions, weights = lebedev_rule(points)
+            np.testing.assert_allclose(np.linalg.norm(directions, axis=1), 1.0, atol=1e-15)
+            self.assertAlmostEqual(float(np.sum(weights)), 1.0, places=14)
+            for k in range(degrees[points] // 2 + 1):
+                self.assertAlmostEqual(float(weights @ (directions @ a) ** (2 * k)),
+                                       float(a @ a) ** k / (2 * k + 1), places=13)
+            half, half_weights = half_sphere_rule(points)
+            self.assertEqual(2 * half.shape[0], points)
+            self.assertAlmostEqual(float(np.sum(half_weights)), 1.0, places=14)
+        radii, rho, origin = radial_rule()
+        for k in range(radii.size + 1):
+            self.assertAlmostEqual(float(rho @ radii ** (2 * k)) + (origin if k == 0 else 0.0), 2 * k + 1, places=7)
+        rule = multicollinear_rule(50)
+        self.assertEqual(rule.evaluations, 25 * 3 + 1)
+
+    def test_collinear_magnetization_is_the_collinear_functional(self) -> None:
+        # along a tilted axis, nodes included: the collinear PBE of (n +- m.u)/2 within the rule
+        u = np.array([1.0, 2.0, 3.0]) / np.sqrt(14.0)
+        energy, potential, field = self._collinear(u, self.signed)
+        result = self._xc(self.n, np.outer(u, self.signed))
+        self.assertAlmostEqual(result.total_energy, energy, delta=1.0e-9)
+        np.testing.assert_allclose(result.potential, potential, atol=1.0e-7)
+        np.testing.assert_allclose(result.field, field, atol=1.0e-7)
+        # and a fully polarized density (the local frame there)
+        full = self._xc(self.n, np.outer(u, self.n))
+        energy, potential, field = self._collinear(u, self.n)
+        self.assertAlmostEqual(full.total_energy, energy, delta=1.0e-12)
+        np.testing.assert_allclose(full.potential, potential, atol=1.0e-9)
+
+    def test_potential_and_field_are_the_derivatives_of_the_energy(self) -> None:
+        # central differences (Richardson of two steps) in m and n: at the node, in the blend, elsewhere; PBE and PW91
+        dv = self.grid.volume_element
+        q = np.linalg.norm(self.canted, axis=0) / (self.n + self.core)
+        points = [int(np.argmin(q)), int(np.argmin(np.abs(q - 0.3))), int(np.argmax(q)), self.n.size // 3]
+        for functional in ("pbe", "pw91"):
+            base = self._xc(self.n, self.canted, functional)
+            for i in points:
+                for k in range(4):
+                    slopes = []
+                    for step in (2.0e-4, 1.0e-4):
+                        h = step * (self.n[i] + self.core[i])
+                        plus_n, minus_n, plus_m, minus_m = (self.n.copy(), self.n.copy(), self.canted.copy(),
+                                                            self.canted.copy())
+                        if k < 3:
+                            plus_m[k, i] += h
+                            minus_m[k, i] -= h
+                        else:
+                            plus_n[i] += h
+                            minus_n[i] -= h
+                        slopes.append((self._xc(plus_n, plus_m, functional).total_energy
+                                       - self._xc(minus_n, minus_m, functional).total_energy) / (2.0 * h * dv))
+                    slope = (4.0 * slopes[1] - slopes[0]) / 3.0
+                    analytic = base.field[k, i] if k < 3 else base.potential[i]
+                    self.assertAlmostEqual(slope, analytic, delta=1.0e-6 * (1.0 + abs(analytic)), msg=(functional, i, k))
+
+    def test_rotations(self) -> None:
+        # a rotation of the octahedral group maps the rule on itself: invariant to round-off; another one within the
+        # rule
+        base = self._xc(self.n, self.canted)
+        quarter = _rotation([0.0, 0.0, 1.0], np.pi / 2.0)
+        turned = self._xc(self.n, quarter @ self.canted)
+        self.assertAlmostEqual(turned.total_energy, base.total_energy, places=12)
+        np.testing.assert_allclose(turned.field, quarter @ base.field, atol=1e-11)
+        rotation = _rotation([0.3, 1.0, 0.2], 1.1)
+        other = self._xc(self.n, rotation @ self.canted)
+        self.assertAlmostEqual(other.total_energy, base.total_energy, delta=1.0e-7)
+        np.testing.assert_allclose(other.field, rotation @ base.field, atol=1.0e-5)
+
+    def test_field_is_continuous_where_m_vanishes(self) -> None:
+        # transverse noise at the nodes of m_z: the field changes in proportion (the local frame turns there)
+        m = np.zeros((3, self.n.size))
+        m[2] = self.signed
+        noisy = m.copy()
+        noisy[:2] = 1.0e-7 * np.random.default_rng(3).normal(size=(2, self.n.size))
+        change = np.max(np.abs(self._xc(self.n, noisy).field - self._xc(self.n, m).field))
+        self.assertLess(change, 1.0e-5)
+
+    def test_the_ranks_of_an_mpi_run_agree_on_the_device(self) -> None:
+        # one rank without a device: every rank keeps the local frame (with the NOTE); a communicator of one rank
+        # forgets the agreement
+        from unittest import mock
+
+        from parsec_python.acceleration.V_xc import multicollinear_xc as device
+        from parsec_python.V_xc.noncollinear import frame_decision
+
+        class Communicator:
+            def __init__(self, values):
+                self.values = values
+
+            def Get_size(self):
+                return len(self.values)
+
+            def allgather(self, value):
+                return [value] + list(self.values[1:])
+
+        species = {"Au": SpeciesPotential(_AU_POTRE, 0, initial_spin_polarization=0.3)}
+        canted = [Atom("Au", [0.0, 0.0, 0.0], [0, 0, 1]), Atom("Au", [1.0, 0.0, 0.0], [1, 0, 1])]
+        try:
+            with mock.patch.object(device, "_process_device_available", return_value=True):
+                self.assertFalse(device.agree_across_ranks(Communicator([True, False])))
+                frame = frame_decision("pbe", canted, species, False, "auto")
+                self.assertEqual(frame.mode, "local")
+                self.assertTrue(frame.multicollinear_declined)
+                self.assertTrue(device.agree_across_ranks(Communicator([True, True])))
+                self.assertEqual(frame_decision("pbe", canted, species, False, "auto").mode, "multicollinear")
+                self.assertTrue(device.agree_across_ranks(Communicator([True])))
+                self.assertIsNone(device._AGREED)
+        finally:
+            device._AGREED = None
+
+    def test_the_frame_of_a_run(self) -> None:
+        from unittest import mock
+
+        from parsec_python.V_xc.multicollinear import MULTICOLLINEAR_POINTS_ENV, multicollinear_points_setting
+        from parsec_python.V_xc.noncollinear import (
+            FRAME_MULTICOLLINEAR, NONCOLLINEAR_GGA_FRAME_ENV, frame_decision, noncollinear_gga_frame_setting,
+        )
+
+        species = {"Au": SpeciesPotential(_AU_POTRE, 0, initial_spin_polarization=0.3)}
+        canted = [Atom("Au", [0.0, 0.0, 0.0], [0, 0, 1]), Atom("Au", [1.0, 0.0, 0.0], [1, 0, 1])]
+        for functional in ("pbe", "pw91"):
+            for spin_orbit in (False, True):
+                frame = frame_decision(functional, canted, species, spin_orbit, "multicollinear")
+                self.assertEqual(frame.mode, FRAME_MULTICOLLINEAR)
+        self.assertEqual(frame_decision("ca", canted, species, False, "multicollinear").mode, "local")
+        self.assertEqual(frame_decision("lb94", canted, species, False, "multicollinear").mode, "local")
+        with mock.patch.dict("os.environ", {MULTICOLLINEAR_POINTS_ENV: ""}):
+            self.assertEqual(multicollinear_points_setting(), 302)
+        with mock.patch.dict("os.environ", {MULTICOLLINEAR_POINTS_ENV: "110"}):
+            self.assertEqual(multicollinear_points_setting(), 110)
+        # the rule follows the switch at every call (one object per number of points)
+        from parsec_python.V_xc.multicollinear import multicollinear_rule
+
+        for points in (110, 50, 110):
+            with mock.patch.dict("os.environ", {MULTICOLLINEAR_POINTS_ENV: str(points)}):
+                self.assertEqual(multicollinear_rule().points, points)
+                self.assertIs(multicollinear_rule(), multicollinear_rule(points))
+        for value in ("74", "many"):
+            with mock.patch.dict("os.environ", {MULTICOLLINEAR_POINTS_ENV: value, NONCOLLINEAR_GGA_FRAME_ENV: ""}):
+                with self.assertRaisesRegex(ValueError, MULTICOLLINEAR_POINTS_ENV):
                     noncollinear_gga_frame_setting()
 
 
@@ -782,6 +981,34 @@ class NoncollinearInputAndCliTests(unittest.TestCase):
                 self.assertGreater(_cos(archive["magnetic_moment_vector"], [float(v) for v in moments.split()]), 0.999)
         self.assertAlmostEqual(energies["z"], energies["spin"], delta=1.0e-8)
         self.assertAlmostEqual(energies["x"], energies["spin"], delta=1.0e-8)
+
+    def test_multicollinear_frame_reaches_the_collinear_driver(self) -> None:
+        # O2 with PBE from moments 45 degrees apart in the multicollinear frame: converged to the triplet of the
+        # collinear spin driver (the local frame stalls from such a start)
+        from unittest import mock
+
+        o_fhi = Path(__file__).resolve().parents[4] / "examples" / "3d_hybrid_functionals" / "O_FHIPP.DAT"
+        energies = {}
+        for label, extra, moments in (
+            ("spin", "Spin_Polarization: .true.\n", None),
+            ("canted", "Non_Collinear_magnetism: .true.\n", "0 0 1\n0.707107 0 0.707107"),
+        ):
+            directory = self._directory()
+            (directory / "O_FHIPP.DAT").write_bytes(o_fhi.read_bytes())
+            text = _O2_PBE_INPUT.format(extra=extra) + (
+                f"begin Initial_NCL_Moment\n{moments}\nend Initial_NCL_Moment\n" if moments else ""
+            )
+            path = directory / "parsec.in"
+            path.write_text(text, encoding="utf-8")
+            with mock.patch.dict("os.environ", {"PARSEC_NONCOLLINEAR_GGA_FRAME": "multicollinear",
+                                                "PARSEC_NONCOLLINEAR_MC_POINTS": "50"}):
+                self.assertEqual(cli_main([str(path), "--quiet"]), 0, label)
+            archive = read_archive(directory / "parsec_python_results.npz")
+            energies[label] = float(archive["energy_total_ry"])
+            if moments:
+                self.assertIn("multicollinear", (directory / "parsec.out").read_text())
+                self.assertAlmostEqual(float(np.linalg.norm(archive["magnetic_moment_vector"])), 2.0, delta=1e-3)
+        self.assertAlmostEqual(energies["canted"], energies["spin"], delta=1.0e-8)
 
     def test_moment_block_without_the_flag_is_rejected(self) -> None:
         directory = self._directory()

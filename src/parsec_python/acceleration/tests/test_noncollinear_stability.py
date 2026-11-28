@@ -3,10 +3,14 @@
 
 Checked: the average over the group of the sectors (a projector; time reversal turns the field over); the Arnoldi
 estimate of the largest eigenvalue on a linear response of known spectrum, with and without the rotations of the moments
-left out; the Ritz states of the sectors unfolded to the whole grid (orthonormal, the levels of the whole spinor
-Hamiltonian); the loop of O2 from antiparallel moments (unstable: the loop starts again with one task per k-point and
-reaches the triplet, bit for bit as off; ``off`` keeps test 1 of the guard), a magnetic Au atom kept in its sectors (the
-energy of the loop without sectors), a loop in sectors that does not converge started again; the switch values.  The
+left out; the Ritz values in the inner product of the energy on a response ``K chi_0`` that is not normal (bounded by
+its largest eigenvalue where the plain ones exceed it); the line search along the top Ritz vector on model double wells
+and the watch of the continuation; the Ritz states of the sectors unfolded to the whole grid (orthonormal, the levels of
+the whole spinor Hamiltonian); the loop of O2 from antiparallel moments (unstable: the line search pays, the loop
+without sectors continues from its lowest point and reaches the triplet of off; ``off`` keeps test 1 of the guard), a
+magnetic Au atom whose soft instability gains less than the tolerance along the line (kept in its sectors; under
+``PARSEC_NONCOLLINEAR_SECTOR_CONTINUATION=off`` the loop without sectors ends below them), a stopped continuation, a
+stable Au pair kept in its sectors, a loop in sectors that does not converge kept untested; the switch values.  The
 device code runs with NumPy as the array backend (``PARSEC_KPOINT_BACKEND=numpy-device``).
 """
 
@@ -15,6 +19,7 @@ from __future__ import annotations
 import functools
 import os
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -157,26 +162,227 @@ class ResponseTests(unittest.TestCase):
         self.assertLess(abs(report.largest - 0.9), 5.0e-2)
         self.assertIsNotNone(report.vector)
 
+    def test_energy_metric_bounds_a_response_that_is_not_normal(self) -> None:
+        # J = K chi_0 with a symmetric kernel of large positive (Hartree) and a few negative (exchange-correlation)
+        # eigenvalues and a negative definite chi_0 of spread scales, its largest eigenvalue 0.9: J is not normal in
+        # the plain inner product, whose Ritz values go above 0.9 (a state this stable could be called unstable near
+        # the bound), and symmetric in <a, -chi_0 b>, whose Ritz values grow with the probes and stay below 0.9
+        points = 40
+        symmetry = stability.SectorSymmetry(_fake_cell(points), [(1, 1)])
+        rng = np.random.default_rng(35)
+        centre = symmetry.symmetric(rng.standard_normal(4 * points))
+        basis = np.linalg.qr(np.stack([symmetry.breaking(rng.standard_normal(4 * points)) for _ in range(80)], 1))[0]
+        basis = basis[:, np.linalg.norm(basis, axis=0) > 0.5][:, :80]
+        size = basis.shape[1]
+        scales = np.exp(rng.uniform(np.log(0.02), np.log(2.0), size))
+        turn = np.linalg.qr(rng.standard_normal((size, size)))[0]
+        kernel = turn @ np.diag(np.concatenate([rng.uniform(0.5, 40.0, size - 6), rng.uniform(-1.5, -0.2, 6)])) @ turn.T
+        response = kernel @ np.diag(-scales)
+        response *= 0.9 / np.max(np.linalg.eigvals(response).real)
+        density = symmetry.symmetric(rng.standard_normal(4 * points))
+
+        def output(potential, field):
+            coordinates = basis.T @ symmetry.breaking(np.concatenate([potential, field.reshape(-1)]) - centre)
+            return centre + basis @ (response @ coordinates), density + basis @ (-scales * coordinates)
+
+        weights = 1.0 + rng.random(points)
+        report = stability.sector_state_stability(output, centre, symmetry, weights, energy_metric=True)
+        self.assertGreater(max(report.history), 0.9 + 1.0e-2)
+        self.assertEqual(len(report.metric_history), report.probes)
+        self.assertTrue(np.all(np.diff(report.metric_history) >= -1.0e-10))
+        self.assertLessEqual(max(report.metric_history), 0.9 + 1.0e-10)
+        self.assertGreater(report.metric_largest, 0.8)
+        self.assertIn(f"in the energy metric {report.metric_largest:.4f}", report.text())
+        # not requested (the default), or without the response of the density, the report has no value of that metric,
+        # and the same steps
+        default = stability.sector_state_stability(output, centre, symmetry, weights)
+        self.assertIsNone(default.metric_largest)
+        self.assertEqual(default.history, report.history)
+        plain = stability.sector_state_stability(lambda v, b: output(v, b)[0], centre, symmetry, weights)
+        self.assertIsNone(plain.metric_largest)
+        self.assertNotIn("energy metric", plain.text())
+        self.assertEqual(plain.history, report.history)
+
     def test_switch_values(self) -> None:
         from parsec_python.acceleration.SCF.kpoint_sectors import check_kpoint_sector_switches
 
         for value in ("auto", "off"):
             with mock.patch.dict(os.environ, {stability.SWITCH: value}):
                 self.assertEqual(stability.noncollinear_sector_stability_setting(), value)
+            with mock.patch.dict(os.environ, {stability.CONTINUATION_SWITCH: value}):
+                self.assertEqual(stability.noncollinear_sector_continuation_setting(), value)
         with mock.patch.dict(os.environ, {stability.SWITCH: "on"}):
             with self.assertRaises(ValueError):
                 stability.noncollinear_sector_stability_setting()
             with self.assertRaises(ValueError):
                 check_kpoint_sector_switches()
+        with mock.patch.dict(os.environ, {stability.CONTINUATION_SWITCH: "always"}):
+            with self.assertRaises(ValueError):
+                stability.noncollinear_sector_continuation_setting()
+            # (read and checked with the stability switch, before the SCF)
+            with self.assertRaises(ValueError):
+                check_kpoint_sector_switches()
         with mock.patch.dict(os.environ, {}, clear=False):
             os.environ.pop(stability.SWITCH, None)
+            os.environ.pop(stability.CONTINUATION_SWITCH, None)
             self.assertEqual(stability.noncollinear_sector_stability_setting(), stability.DEFAULT)
             self.assertEqual(stability.DEFAULT, "auto")
+            self.assertEqual(stability.noncollinear_sector_continuation_setting(), "auto")
+            self.assertEqual(stability.CONTINUATION_DEFAULT, "auto")
             # the sectors of the non-collinear loop, with this test, on request (off by default)
             from parsec_python.acceleration.SCF.kpoint_spinor_sectors import noncollinear_kpoint_sectors_setting
 
             os.environ.pop(NONCOLLINEAR_SWITCH, None)
             self.assertEqual(noncollinear_kpoint_sectors_setting(), "off")
+
+
+class LineSearchTests(unittest.TestCase):
+    @staticmethod
+    def well(depth: float, width: float, tilt: float = 0.0):
+        """A double well ``-a s^2 / 2 + b s^4 / 4`` (+ ``tilt s^3``) with its minima ``depth`` below 0 at ``+-width``."""
+
+        a = 4.0 * depth / width**2
+        b = a / width**2
+        calls = []
+
+        def free_energy(s):
+            calls.append(s)
+            return -0.5 * a * s * s + 0.25 * b * s**4 + tilt * s**3
+
+        return free_energy, calls
+
+    def test_a_deep_well_pays_and_its_lowest_point_is_found(self) -> None:
+        free_energy, calls = self.well(3.0e-3, 0.1)
+        line = stability.line_search(free_energy)
+        self.assertEqual(calls[:3], [0.0, -stability.LINE_FIRST, stability.LINE_FIRST])
+        self.assertAlmostEqual(line.shift, 0.1, places=12)
+        self.assertAlmostEqual(line.gain, 3.0e-3, places=12)
+        self.assertTrue(line.pays)
+        # (0, +-1/80, then 1/40, 1/20, 1/10 down and 1/5 up)
+        self.assertEqual(len(line.points), 7)
+        self.assertIn("at most 3.000e-03 Ry below", line.text())
+
+    def test_the_lower_side_of_a_tilted_well(self) -> None:
+        # (the eigensolver goes back to the states of the centre before each first displacement and before the doubling
+        # on the minus side)
+        free_energy, calls = self.well(3.0e-3, 0.1, tilt=5.0e-2)
+        restarts = []
+        line = stability.line_search(free_energy, restart=lambda: restarts.append(len(calls)))
+        self.assertLess(line.shift, 0.0)
+        self.assertGreater(line.gain, 3.0e-3)
+        self.assertEqual(restarts, [1, 2, 3])
+        self.assertTrue(all(s < 0.0 for s in calls[3:]))
+
+    def test_a_shallow_well_does_not_pay(self) -> None:
+        # the gain of a soft mode, (lambda - 1)^2: a well 5e-5 Ry deep is kept; of a quartic well the doubling steps
+        # find at least 0.64 of its depth (where the two points about its minimum lie equally high)
+        free_energy, _ = self.well(5.0e-5, 0.018)
+        line = stability.line_search(free_energy)
+        self.assertFalse(line.pays)
+        self.assertGreater(line.gain, 0.64 * 5.0e-5)
+        self.assertLessEqual(line.gain, 5.0e-5)
+        # no descent at all: the gain of the centre, zero
+        line = stability.line_search(lambda s: s * s)
+        self.assertEqual(line.gain, 0.0)
+        self.assertEqual(line.shift, 0.0)
+        self.assertEqual(len(line.points), 4)
+
+    def test_the_watch_of_the_continuation(self) -> None:
+        kept = -10.0
+        watch = stability.ContinuationWatch(kept, tolerance=1.0e-4, window=5)
+        # below by more than the tolerance for 3 iterations, then back within it: it stops 5 iterations later
+        frees = [kept - 1.0e-2] * 3 + [kept - 5.0e-5] * 10
+        stops = [watch(iteration, free) for iteration, free in enumerate(frees, start=1)]
+        self.assertEqual(stops.index(True) + 1, 8)
+        self.assertEqual(watch.stopped_at, 8)
+        self.assertAlmostEqual(watch.lowest, kept - 1.0e-2)
+        # a continuation that goes down keeps going
+        watch = stability.ContinuationWatch(kept, tolerance=1.0e-4, window=5)
+        self.assertFalse(any(watch(iteration, kept - 1.0e-3 * iteration) for iteration in range(1, 30)))
+        # never below: it stops after the window
+        watch = stability.ContinuationWatch(kept)
+        stops = [watch(iteration, kept + 1.0) for iteration in range(1, stability.CONTINUATION_WINDOW + 1)]
+        self.assertEqual(stops, [False] * (stability.CONTINUATION_WINDOW - 1) + [True])
+        self.assertIn("free energy was not", watch.reason)
+        # below, with a residual that stops halving far above the criterion (a stall at 1e-5 against 1e-8): it stops
+        # STALL_WINDOW iterations after its last halving; at 1.5 times the criterion (the noise of a metal), or halving,
+        # it goes on
+        watch = stability.ContinuationWatch(kept, criterion=1.0e-8, stall=20)
+        residuals = [1.0e-3 * 0.4 ** k for k in range(6)] + [1.0e-5] * 40
+        stops = [watch(iteration, kept - 1.0e-2, residual) for iteration, residual in enumerate(residuals, start=1)]
+        self.assertEqual(stops.index(True) + 1, 26)
+        self.assertIn("did not halve", watch.reason)
+        watch = stability.ContinuationWatch(kept, criterion=1.0e-8, stall=20)
+        self.assertFalse(any(watch(iteration, kept - 1.0e-2, 1.5e-8) for iteration in range(1, 80)))
+        watch = stability.ContinuationWatch(kept, criterion=1.0e-8, stall=20)
+        self.assertFalse(any(watch(iteration, kept - 1.0e-2, 1.0e-3 * 0.95 ** iteration) for iteration in range(1, 80)))
+
+    def test_the_flip_pattern(self) -> None:
+        # four atoms of two grid points each with fields along z; a change that lowers the fields of atoms 1 and 3 and
+        # raises those of 0 and 2, or cants 1 and 3 against 0 and 2, turns 1 and 3 over (the antiparallel start); one
+        # that lowers every field or turns every field the same way (a global rotation) gives no pattern
+        points = 8
+        labels = np.repeat(np.arange(4), 2)
+        centre = np.zeros(4 * points)
+        centre[:points] = 0.3
+        field = np.zeros((3, points))
+        field[2] = 0.05
+        centre[points:] = field.reshape(-1)
+        change = np.zeros((3, points))
+        change[2] = np.where(labels % 2 == 1, -1.0, 0.4)
+        vector = np.concatenate([np.zeros(points), change.reshape(-1)])
+        start, flipped = stability.flip_pattern(centre, vector, labels, 4)
+        np.testing.assert_array_equal(flipped, [False, True, False, True])
+        np.testing.assert_allclose(start[points:].reshape(3, points)[2], np.where(labels % 2 == 1, -0.05, 0.05))
+        np.testing.assert_allclose(start[:points], 0.3)
+        change[2] = -1.0
+        self.assertIsNone(stability.flip_pattern(centre, np.concatenate([np.zeros(points), change.reshape(-1)]),
+                                                 labels, 4))
+        change[2] = 0.0
+        change[0] = np.where(labels % 2 == 1, -1.0, 1.0)
+        _, flipped = stability.flip_pattern(centre, np.concatenate([np.zeros(points), change.reshape(-1)]), labels, 4)
+        np.testing.assert_array_equal(flipped, [False, True, False, True])
+        change[0] = 1.0
+        self.assertIsNone(stability.flip_pattern(centre, np.concatenate([np.zeros(points), change.reshape(-1)]),
+                                                 labels, 4))
+        # the nearest atom over the images of a periodic cell
+        cell = 10.0 * np.eye(3)
+        found = stability.nearest_atoms(np.array([[0.5, 0.0, 0.0], [9.6, 0.0, 0.0], [5.2, 0.0, 0.0]]),
+                                        np.array([[1.0, 0.0, 0.0], [6.0, 0.0, 0.0]]), cell)
+        np.testing.assert_array_equal(found, [0, 0, 1])
+
+    def test_the_partition_of_an_au8_lattice(self) -> None:
+        # the grid of the Au8 lattice of 11 bohr (66 points a side, its boundary planes equidistant from two atoms):
+        # the nearest image along each axis gives the partition of the 27 images point for point, ties included (the
+        # first atom), and in an oblique cell the 27 images are compared
+        from itertools import product
+
+        from parsec_python.Grid.pbc import build_periodic_grid
+
+        def by_images(coordinates, positions, vectors):
+            shifts = [np.asarray(cell, dtype=np.float64) @ vectors for cell in product((-1, 0, 1), repeat=3)]
+            best = np.full(coordinates.shape[0], np.inf)
+            labels = np.zeros(coordinates.shape[0], dtype=np.int64)
+            for index, position in enumerate(positions):
+                for shift in shifts:
+                    distance = np.sum((coordinates + shift - position) ** 2, axis=1)
+                    closer = distance < best
+                    best[closer] = distance[closer]
+                    labels[closer] = index
+            return labels
+
+        cell = PeriodicCell(lattice_vectors=22.0 * np.eye(3))
+        coordinates = np.asarray(build_periodic_grid(cell, PeriodicGridSettings(spacing=1.0 / 3.0,
+                                                                                expansion_order=8)).coordinates)
+        positions = np.array([np.asarray(k) * 11.0 + 5.5 for k in product(range(2), repeat=3)])
+        vectors = np.asarray(cell.lattice_vectors, dtype=np.float64)
+        found = stability.nearest_atoms(coordinates, positions, vectors)
+        np.testing.assert_array_equal(found, by_images(coordinates, positions, vectors))
+        self.assertEqual(int(np.bincount(found)[0]), 39304)
+        oblique = np.array([[8.0, 0.0, 0.0], [2.0, 8.0, 0.0], [0.0, 0.0, 8.0]])
+        points = np.random.default_rng(5).random((500, 3)) @ oblique
+        atoms = np.array([[1.0, 1.0, 1.0], [5.0, 4.0, 3.0]])
+        np.testing.assert_array_equal(stability.nearest_atoms(points, atoms, oblique), by_images(points, atoms, oblique))
 
 
 @functools.lru_cache(maxsize=None)
@@ -245,24 +451,38 @@ class StabilitySCFTests(unittest.TestCase):
         # symmetric ensemble of the four pi* levels, whose response to a moment that breaks the pairs is far above 1;
         # the loop without sectors continues from that state displaced along the top Ritz vector and reaches the
         # triplet that the loop without sectors reaches from the start
-        steps: list = []
-        result = _run(_oxygen(), np.zeros(3), "on", steps=steps)
+        # (PARSEC_NONCOLLINEAR_SECTOR_CONTINUATION=auto: the line search along it pays, the loop starts from its lowest
+        # point with the Ritz states of the sectors; off: from the displacement 5e-2 Ry with a fresh eigensolver)
         off = self._off("oxygen")
-        notes = _notes(steps)
-        self.assertEqual([note.route for note in notes], ["kpoint", "kpoint_continued"])
-        self.assertEqual(notes[0].stage, "the stability test after the SCF loop")
-        self.assertIn("unstable", notes[0].reason)
-        self.assertIn("continues from the state of the sectors displaced", notes[0].multiplets[1])
-        self.assertIn("loop without sectors is kept", notes[1].reason)
-        self.assertGreater(result.timings["noncollinear_stability_largest"], 5.0)
-        self.assertEqual(result.timings["noncollinear_sector_abandoned"], 1.0)
-        self.assertGreater(result.timings["noncollinear_continuation_lower"], 1.0e-2)
-        self.assertNotIn("noncollinear_guard_start_share", result.timings)
-        self.assertNotIn("eig_spinor_sector_kpoints", result.timings)
-        self.assertTrue(result.converged)
-        self.assertGreater(off.magnetic_moment, 1.5)
-        self.assertLess(abs(result.magnetic_moment - off.magnetic_moment), 1.0e-6)
-        self.assertLess(abs(result.energies.total - off.energies.total), 1.0e-8)
+        for value in ("auto", "off"):
+            with self.subTest(continuation=value):
+                steps: list = []
+                result = _run(_oxygen(), np.zeros(3), "on", {stability.CONTINUATION_SWITCH: value}, steps)
+                notes = _notes(steps)
+                self.assertEqual([note.route for note in notes], ["kpoint", "kpoint_continued"])
+                self.assertEqual(notes[0].stage, "the stability test after the SCF loop")
+                self.assertIn("unstable", notes[0].reason)
+                if value == "auto":
+                    self.assertIn("free energy along the top Ritz vector", notes[0].multiplets[1])
+                    self.assertIn("continues from the lowest point of that line", notes[0].multiplets[2])
+                    self.assertGreater(result.timings["noncollinear_line_gain"], 1.0e-2)
+                    self.assertGreater(abs(result.timings["noncollinear_line_shift"]), stability.LINE_FIRST)
+                    self.assertNotIn("noncollinear_continuation_stopped", result.timings)
+                else:
+                    self.assertIn("continues from the state of the sectors displaced", notes[0].multiplets[1])
+                    self.assertNotIn("noncollinear_line_gain", result.timings)
+                self.assertIn("loop without sectors is kept", notes[1].reason)
+                self.assertGreater(result.timings["noncollinear_stability_largest"], 5.0)
+                # (the Ritz values in the energy metric only on request)
+                self.assertNotIn("noncollinear_stability_metric_largest", result.timings)
+                self.assertEqual(result.timings["noncollinear_sector_abandoned"], 1.0)
+                self.assertGreater(result.timings["noncollinear_continuation_lower"], 1.0e-2)
+                self.assertNotIn("noncollinear_guard_start_share", result.timings)
+                self.assertNotIn("eig_spinor_sector_kpoints", result.timings)
+                self.assertTrue(result.converged)
+                self.assertGreater(off.magnetic_moment, 1.5)
+                self.assertLess(abs(result.magnetic_moment - off.magnetic_moment), 1.0e-6)
+                self.assertLess(abs(result.energies.total - off.energies.total), 1.0e-8)
 
     def test_off_keeps_test_one_of_the_guard(self) -> None:
         steps: list = []
@@ -301,11 +521,12 @@ class StabilitySCFTests(unittest.TestCase):
 
     def test_a_soft_unstable_moment_ends_below_the_sectors(self) -> None:
         # a magnetic Au atom with its moment along z (spin-orbit coupling): the response to a turn of the moment is
-        # just above 1 (about 1.03, the anisotropy of the grid), so its free energy goes down by turning; the loop
-        # without sectors from the displaced state ends below the state of the sectors, which the loop without sectors
-        # from the start keeps (no noise turns it)
+        # just above 1 (about 1.04, the anisotropy of the grid), so its free energy goes down by turning; under
+        # PARSEC_NONCOLLINEAR_SECTOR_CONTINUATION=off the loop without sectors from the displaced state ends below the
+        # state of the sectors (by about 5e-5 Ry), which the loop without sectors from the start keeps (no noise
+        # turns it)
         steps: list = []
-        result = _run(_gold(), _GOLD_K, "on", steps=steps)
+        result = _run(_gold(), _GOLD_K, "on", {stability.CONTINUATION_SWITCH: "off"}, steps)
         off = self._off("gold")
         notes = _notes(steps)
         self.assertEqual([note.route for note in notes], ["kpoint", "kpoint_continued"])
@@ -313,11 +534,64 @@ class StabilitySCFTests(unittest.TestCase):
         self.assertGreater(largest, stability.BOUND)
         self.assertLess(largest, 1.1)
         self.assertGreater(result.timings["noncollinear_continuation_lower"], 1.0e-6)
+        self.assertLess(result.timings["noncollinear_continuation_lower"], stability.GAIN)
         self.assertTrue(result.converged)
         temperature = float(_gold().input.scf.fermi_temperature_kelvin)
         from parsec_python.SCF.noncollinear import _free_energy
 
         self.assertLess(_free_energy(result, temperature), _free_energy(off, temperature) - 1.0e-6)
+
+    def test_a_soft_instability_that_does_not_pay_keeps_the_sectors(self) -> None:
+        # the same atom under auto: along the top Ritz vector the free energy goes down by about 2.4e-5 Ry (the loop of
+        # off ends about 4.6e-5 below: within twice the line), less than GAIN: the state of the sectors is kept, the
+        # energy of the loop without sectors from the start
+        steps: list = []
+        result = _run(_gold(), _GOLD_K, "on", steps=steps)
+        off = self._off("gold")
+        notes = _notes(steps)
+        self.assertEqual([note.route for note in notes], ["kpoint_continued"])
+        self.assertEqual(notes[0].stage, "the line search along the direction of the instability")
+        self.assertIn("the state of the sectors is kept", notes[0].reason)
+        self.assertIn("free energy along the top Ritz vector", notes[0].multiplets[1])
+        gain = result.timings["noncollinear_line_gain"]
+        self.assertGreater(gain, 1.0e-6)
+        self.assertLess(gain, stability.GAIN)
+        self.assertEqual(result.timings["noncollinear_continuation_skipped"], 1.0)
+        self.assertEqual(result.timings["noncollinear_sector_abandoned"], 0.0)
+        self.assertGreater(result.timings["eig_spinor_sector_kpoints"], 0)
+        self.assertTrue(result.converged and off.converged)
+        self.assertLess(abs(result.energies.total - off.energies.total), 1.0e-8)
+        from parsec_python.Output.parsec_output import spin_sector_fallback_lines
+
+        lines = spin_sector_fallback_lines(notes[0])
+        self.assertIn("the state of the sectors is kept", lines[1])
+
+    def test_a_continuation_that_does_not_gain_stops(self) -> None:
+        # the same atom with a line search that pays from 1e-5 Ry and a watch that asks for 1e-3 Ry within three
+        # iterations: the loop without sectors stops after three and the state of the sectors is kept
+        class Watch(stability.ContinuationWatch):
+            def __init__(self, kept, tolerance=None, window=None, criterion=None, stall=None):
+                super().__init__(kept, tolerance=1.0e-3, window=3, criterion=criterion)
+
+        original = stability.line_search
+
+        def line_search(*args, **kwargs):
+            return replace(original(*args, **kwargs), tolerance=1.0e-5)
+
+        steps: list = []
+        with mock.patch.object(stability, "ContinuationWatch", Watch), mock.patch.object(stability, "line_search",
+                                                                                          line_search):
+            result = _run(_gold(), _GOLD_K, "on", steps=steps)
+        notes = _notes(steps)
+        self.assertEqual([note.route for note in notes], ["kpoint", "kpoint_continued"])
+        self.assertIn("the state of the sectors is kept", notes[1].reason)
+        self.assertIn("(stopped: in its last 3 iterations", notes[1].multiplets[1])
+        self.assertEqual(result.timings["noncollinear_continuation_stopped"], 3.0)
+        self.assertEqual(result.timings["noncollinear_continuation_iterations"], 3.0)
+        self.assertEqual(result.timings["noncollinear_sector_abandoned"], 0.0)
+        self.assertGreater(result.timings["eig_spinor_sector_kpoints"], 0)
+        self.assertTrue(result.converged)
+        self.assertLess(abs(result.energies.total - self._off("gold").energies.total), 1.0e-8)
 
     def test_a_loop_in_sectors_that_does_not_converge_is_kept_untested(self) -> None:
         steps: list = []

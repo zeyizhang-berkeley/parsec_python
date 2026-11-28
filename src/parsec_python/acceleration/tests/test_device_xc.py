@@ -294,6 +294,70 @@ class DeviceGridTests(unittest.TestCase):
             value = device_xc.DeviceSpinXCEvaluator(functional, grid)(0.7 * density, 0.3 * density)
             self.assert_same(reference, value, f"periodic spin {functional}")
 
+    def test_multicollinear_frame(self) -> None:
+        """The multicollinear non-collinear functional (V_xc.multicollinear) on the device against the host: a canted
+        magnetization with a node and a fully polarized one, PBE and PW91, a cluster and a periodic cell."""
+
+        from parsec_python.Grid.pbc import build_periodic_grid
+        from parsec_python.V_xc.multicollinear import (
+            BLEND_LOWER, BLEND_UPPER, multicollinear_rule, multicollinear_xc, pointwise_partials,
+        )
+        from parsec_python.acceleration.V_xc.multicollinear_xc import DeviceMulticollinearXC
+        from parsec_python.models import PeriodicCell, PeriodicGridSettings
+
+        lengths = np.array([6.0, 7.0, 8.0])
+        cell = build_periodic_grid(PeriodicCell(np.diag(lengths)), PeriodicGridSettings(spacing=0.5, expansion_order=8))
+        rule = multicollinear_rule(50)
+        for label, grid in (("cluster", self.grid), ("cell", cell)):
+            x = grid.coordinates
+            density = _gaussians(x, [(0.0, 0.0, 0.3), (1.4, 0.0, -0.8)], 1.0, (1.5, 0.6)) + 1.0e-4
+            core = _gaussians(x, [(0.0, 0.0, 0.3)], 0.3, (0.2,))
+            angle = 1.5 * np.tanh(x[:, 0])
+            length = 0.6 * np.tanh(x[:, 2] - 0.2)
+            canted = density * np.stack([length * np.sin(angle), 0.05 * np.cos(x[:, 1]), length * np.cos(angle)])
+            full = np.outer([0.0, 0.6, 0.8], density)
+            for functional in ("pbe", "pw91"):
+                device = DeviceMulticollinearXC(functional, grid)
+                for name, magnetization in (("canted", canted), ("full", full)):
+                    host = multicollinear_xc(density, magnetization, grid, pointwise_partials(functional), core, rule)
+                    value = device(density, magnetization, core, rule, BLEND_LOWER, BLEND_UPPER)
+                    tag = f"{label} {functional} {name}"
+                    self.assertAlmostEqual(value.total_energy, host.total_energy,
+                                           delta=FIELD_TOLERANCE * abs(host.total_energy), msg=tag)
+                    for field in ("potential", "field", "energy_density"):
+                        # (the radial rule weighs its terms by up to 2e3: round-off of the sum ~1e-11 of the field)
+                        self.assertLess(_relative(getattr(host, field), getattr(value, field)), 1.0e-10, f"{tag} {field}")
+        # an oblique (hexagonal) cell, which the device stencils do not take: the host gradients and transposes around
+        # the device's pointwise sum
+        s3 = np.sqrt(3.0) / 2.0
+        hexagonal = build_periodic_grid(
+            PeriodicCell(np.array([[6.0, 0.0, 0.0], [-3.0, 6.0 * s3, 0.0], [0.0, 0.0, 6.0]])),
+            PeriodicGridSettings(spacing=0.5, expansion_order=8),
+        )
+        self.assertFalse(device_xc.device_grid_supported(hexagonal))
+        x = hexagonal.coordinates
+        density = _gaussians(x, [(1.0, 2.0, 3.0), (2.0, 3.0, 4.2)], 1.0, (1.5, 0.6)) + 1.0e-4
+        canted = density * np.stack([0.4 * np.tanh(x[:, 0] - 1.5), 0.05 * np.cos(x[:, 1]), 0.4 * np.tanh(x[:, 2] - 3.6)])
+        for functional in ("pbe", "pw91"):
+            device = DeviceMulticollinearXC(functional, hexagonal)
+            self.assertFalse(device.stencils)
+            host = multicollinear_xc(density, canted, hexagonal, pointwise_partials(functional), None, rule)
+            value = multicollinear_xc(density, canted, hexagonal, pointwise_partials(functional), None, rule,
+                                      pointwise=device.pointwise)
+            self.assertAlmostEqual(value.total_energy, host.total_energy, delta=FIELD_TOLERANCE * abs(host.total_energy))
+            for field in ("potential", "field", "energy_density"):
+                self.assertLess(_relative(getattr(host, field), getattr(value, field)), 1.0e-10, f"hexagonal {field}")
+
+    def test_multicollinear_frame_keeps_the_host_under_cpu(self) -> None:
+        from parsec_python.acceleration.V_xc.multicollinear_xc import device_available, device_multicollinear
+
+        self.assertTrue(device_available())
+        with mock.patch.dict(os.environ, {"PARSEC_DEVICE": "cpu"}):
+            self.assertFalse(device_available())
+            self.assertIsNone(device_multicollinear("pbe", self.grid))
+        with mock.patch.dict(os.environ, {"PARSEC_CUPY_XC": "off"}):
+            self.assertIsNone(device_multicollinear("pbe", self.grid))
+
     def test_periodic_cell_on_the_orbits_of_its_point_group(self) -> None:
         """The orbits of the point group of a cell about its origin: the stencils wrap, the flux turns with them."""
 

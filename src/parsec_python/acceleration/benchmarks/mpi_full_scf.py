@@ -2643,6 +2643,10 @@ def main(argv=None):
     try:
         if provided < MPI.THREAD_FUNNELED:
             raise RuntimeError('MPI does not provide the required FUNNELED thread support')
+        # one frame of a non-collinear gradient functional on every rank (V_xc/noncollinear.py frame_decision)
+        from parsec_python.acceleration.V_xc.multicollinear_xc import agree_across_ranks
+
+        agree_across_ranks(comm)
         return execute(args, cp, comm, MPI, time.perf_counter()-initialization_started, initial_affinity)
     except BaseException as error:
         print(f'FULL_SCF_FAILED rank={comm.rank}: {type(error).__name__}: {error}', file=sys.stderr, flush=True)
