@@ -681,12 +681,16 @@ def _oblique_full_group(problem) -> bool:
     signed permutation (``PARSEC_OBLIQUE_FULL_GROUP=auto``, :func:`.Symmetry.oblique_frame.general_index_operations`):
     a functional without a density gradient (:data:`.Symmetry.oblique_frame.GRADIENT_FREE_FUNCTIONALS`) at the Gamma
     point of a bulk cell, whose discrete Hamiltonian commutes with them (the gradient of a GGA and the k-point term do
-    not)."""
+    not), or a GGA under ``PARSEC_SYMMETRIC_GRADIENT=on``, whose gradient is then the group average of the axis
+    gradient that commutes with every map of the lattice (:mod:`parsec_python.Laplacian.symmetric_gradient`)."""
+
+    from parsec_python.Laplacian.symmetric_gradient import symmetric_gradient_setting
 
     from .Symmetry.oblique_frame import GRADIENT_FREE_FUNCTIONALS, oblique_full_group_setting
 
     if oblique_full_group_setting() != "auto":
         return False
+    symmetric = symmetric_gradient_setting() == "on"
     cell = getattr(problem, "periodic_cell", None)
     if (
         cell is None
@@ -694,7 +698,7 @@ def _oblique_full_group(problem) -> bool:
         or int(getattr(problem.grid, "periodicity", 3)) != 3
     ):
         return False
-    if str(getattr(problem.scf, "xc_functional", "")).strip().lower() not in GRADIENT_FREE_FUNCTIONALS:
+    if str(getattr(problem.scf, "xc_functional", "")).strip().lower() not in GRADIENT_FREE_FUNCTIONALS and not symmetric:
         return False
     if getattr(problem, "has_kpoint_sampling", False):
         from parsec_python.Grid import kpoint_sampling
@@ -1780,6 +1784,19 @@ def _spin_flip_route(problem, reference, *, reducer, decomposition):
         )
     except ValueError as error:
         return None, f"{error}"
+
+
+def _has_spin_partner_labels(problem, reference) -> bool:
+    """Whether the labels of a spin-polarized run pair up as those of a spin-flip operation (:func:`.SCF.spin_flip.
+    spin_partner_labels`: two labels of one species at opposite ``Initial_Spin_Polarization``)."""
+
+    from .SCF.spin_flip import spin_partner_labels
+
+    atoms = getattr(reference, "atoms", None)
+    if not atoms:
+        return False
+    partners, _ = spin_partner_labels(atoms, dict(getattr(problem, "pseudopotentials", {})))
+    return partners is not None
 
 
 def _same_atoms(left, right) -> bool:
@@ -5025,12 +5042,13 @@ def _prepare_single_point(
         getattr(getattr(problem, "scf", None), "spin_polarized", False)
     )
     # PARSEC_SPIN_FLIP_SYMMETRY: read (and refused if unknown) before anything is built.
-    from .SCF.spin_flip import spin_flip_setting, spin_flip_stability_setting
+    from .SCF.spin_flip import spin_flip_continuation_setting, spin_flip_setting, spin_flip_stability_setting
 
     spin_flip_mode = spin_flip_setting()
-    # (and PARSEC_SPIN_FLIP_STABILITY, the test of the states of that route, read so that a value it does not know is
-    # refused)
+    # (and PARSEC_SPIN_FLIP_STABILITY and PARSEC_SPIN_FLIP_CONTINUATION, the test of the states of that route and what
+    # follows it, read so that a value they do not know is refused)
     spin_flip_stability = spin_flip_stability_setting()
+    spin_flip_continuation = spin_flip_continuation_setting()
     spin_sector_refusal = _spin_sector_refusal(problem, mpi_context=mpi_context) if spin_polarized else None
     if spin_polarized and mpi_context is not None and spin_sector_refusal is not None:
         # The ranks divide the symmetry sectors; two channels on the full grid
@@ -5166,6 +5184,10 @@ def _prepare_single_point(
     spin_guard_doublets_setting()
     # (and PARSEC_SPIN_FALLBACK_SHARED, the layout of the full grid of a spin run whose guard fires)
     spin_fallback_shared_setting()
+    from .SCF.sector_stability import spin_sector_stability_setting
+
+    # (and PARSEC_SPIN_SECTOR_STABILITY, the stability test of the state of a spin run in the sectors)
+    spin_sector_stability_setting()
     from .Forces.sector_symmetry import fortran_sector_forces_setting
 
     # (and PARSEC_FORTRAN_SECTOR_FORCES, which compute_forces and move_atoms read for a cell of the Fortran-derived
@@ -8694,7 +8716,14 @@ def _prepare_single_point(
     # PARSEC_SPIN_FLIP_SYMMETRY=auto: the down channel as the image of the up
     # channel under an operation that exchanges the partner labels.
     spin_flip = None
-    if spin_polarized and spin_flip_mode == "auto" and not sector_worker:
+    if (
+        spin_polarized
+        and spin_flip_mode in ("auto", "late")
+        and not sector_worker
+        # (late, the default: a run without partner labels, one polarization per species, keeps its details and
+        # stages as before)
+        and (spin_flip_mode == "auto" or _has_spin_partner_labels(given_problem, reference))
+    ):
         stage_started = perf_counter()
         spin_flip, spin_flip_reason = _spin_flip_route(
             given_problem,
@@ -8703,7 +8732,9 @@ def _prepare_single_point(
             decomposition=orbital_decomposition if spin_sectors else None,
         )
         if spin_flip is not None:
-            spin_flip = replace(spin_flip, stability=spin_flip_stability)
+            spin_flip = replace(
+                spin_flip, stability=spin_flip_stability, continuation=spin_flip_continuation, mode=spin_flip_mode
+            )
         stages.add("spin_flip_detection", stage_started)
         implementation.info = replace(
             implementation.info,
@@ -8722,15 +8753,30 @@ def _prepare_single_point(
                         + "); the state keeps this magnetic symmetry unless a loop leaves the route (a fractional "
                         "occupation of the up channel"
                         + (
-                            ", a state unstable against perturbations that break the operation "
+                            ", a start below the state that breaks the operation (PARSEC_SPIN_FLIP_STABILITY=auto, "
+                            "PARSEC_SPIN_FLIP_CONTINUATION=auto: the loop continues from it without the flip),"
+                            if spin_flip_stability == "auto" and spin_flip_continuation == "auto"
+                            else ", a state unstable against perturbations that break the operation "
                             "(PARSEC_SPIN_FLIP_STABILITY=auto),"
                             if spin_flip_stability == "auto"
                             else ""
                         )
                         + " or a failed test of the spin sectors: a NOTE, then both channels)"
                     )
+                    if spin_flip is not None and spin_flip_mode == "auto"
+                    else (
+                        f"late: both channels are solved; once they are images of each other under "
+                        f"{spin_flip.description} within the residual of the loop (labels "
+                        + ", ".join(
+                            f"{label}->{partner}"
+                            for label, partner in spin_flip.partners.items()
+                            if label != partner
+                        )
+                        + "), the up channel alone and the down channel as its image; a NOTE of each loop says "
+                        "whether and from which iteration (a loop whose channels stay apart is that of off)"
+                    )
                     if spin_flip is not None
-                    else f"auto: both channels solved ({spin_flip_reason})",
+                    else f"{spin_flip_mode}: both channels solved ({spin_flip_reason})",
                 ),
             ),
         )
@@ -9334,16 +9380,33 @@ class _SpinSectorFallback:
         from .SCF.spin_sectors import FractionalOccupations, SpinSectorsAbandoned
 
         while True:
+            # PARSEC_SPIN_SECTOR_STABILITY=auto: tests 1 and 3 put their reports aside, and the converged state is
+            # tested on the full grid (_tested_result; acceleration/SCF/sector_stability.py)
+            stability = self._stability_wanted(system, warm_start, callback)
             abandoned = None
             # (the record of a hybrid that left the weighted sectors names the hybrid's reason)
             route = "weighted"
             weighted = _weighted_sectors(getattr(system.backend, "symmetry_eigensolver", None))
+            adapter = system.scalar_field_adapter if stability else None
+            if adapter is not None and hasattr(adapter, "deferred"):
+                from .SCF.sector_stability import DEFER_START
+
+                adapter.deferred = []
+                adapter.defer_start = DEFER_START
+            else:
+                adapter = None
             try:
                 result = run(system, callback=callback, warm_start=warm_start, **keywords)
                 if self.spin:
                     system.scalar_field_adapter.check_spin_result(result, final=True)
-                    self._say_doublet(system, callback)
-                return result
+                    if adapter is None:
+                        self._say_doublet(system, callback)
+                if adapter is not None:
+                    result = self._tested_result(system, run, result, list(adapter.deferred), callback=callback,
+                                                 **keywords)
+                # (PARSEC_SPIN_SECTOR_STABILITY=auto: the result of the guard's route against a continued state that
+                # waits for it, after the test of a run whose guard had fired)
+                return self._with_candidate(system, result, callback)
             except SpinSectorsAbandoned as error:
                 # Only the report leaves this block: the frames of the sector run,
                 # and the orbitals they hold, go with the exception.
@@ -9368,6 +9431,9 @@ class _SpinSectorFallback:
                     raise
                 abandoned = (error.stage, error.report)
                 route = "weighted_hybrid"
+            finally:
+                if adapter is not None:
+                    adapter.deferred = None
             if not weighted:
                 break
             stage, report = abandoned
@@ -9413,7 +9479,10 @@ class _SpinSectorFallback:
                 )
             )
         self.replace_with_full_grid(system, stage, report)
-        return run(system, callback=callback, warm_start=self.full_grid_warm_start(warm_start), **keywords)
+        return self._with_candidate(
+            system, run(system, callback=callback, warm_start=self.full_grid_warm_start(warm_start), **keywords),
+            callback,
+        )
 
     @staticmethod
     def _say_doublet(system, callback) -> None:
@@ -9440,6 +9509,552 @@ class _SpinSectorFallback:
                 doublet=True,
             )
         )
+
+    # PARSEC_SPIN_SECTOR_STABILITY: set where the state of a run could not be tested, or where the guard's route of
+    # ``off`` follows the test, so that it runs as under ``off`` for the rest of the run
+    _stability_declined = False
+    # PARSEC_SPIN_SECTOR_STABILITY: a converged state of the loop on the full grid below that of the sectors that
+    # waits for the result of the guard's route (``_with_candidate``), and whether the NOTE of a run that does not take
+    # the test was said
+    _candidate = None
+    _refusal_said = False
+
+    def _stability_refusal(self, system, warm_start) -> str | None:
+        """Why the state of this run in the sectors is not tested under ``PARSEC_SPIN_SECTOR_STABILITY=auto``
+        (:mod:`.SCF.sector_stability`), ``None`` where it is: a spin run of a semilocal functional with Fermi-Dirac
+        occupations on the CuPy backend of one process (no MPI sectors, no shared full grid), from the atomic densities
+        (the first structure of a run), without LDA+U, TS, a hybrid, a meta-GGA or the flip route."""
+
+        if warm_start is not None:
+            return "a later structure of the run, or a run that continues another"
+        if self.mpi_context is not None:
+            return "the MPI sectors of the full-SCF runner"
+        plan = self.plan
+        if plan is not None and (plan.layout == "shared" or plan.refuses):
+            return "a full grid shared by several devices or ranks"
+        from .SCF.spin_flip import spin_flip_from_start
+
+        scf = system.reference.input.scf
+        for flag, text in (
+            (scf.is_hybrid, "a hybrid functional"),
+            (scf.is_meta_gga, "a meta-GGA"),
+            (scf.fixed_occupations is not None, "the occupations of occup.in"),
+            (getattr(scf, "van_der_waals", False), "Van_Der_Waals"),
+            (getattr(system, "exchange_device", None) is not None, "an exact-exchange operator"),
+            (getattr(system, "meta_gga_device", None) is not None, "a meta-GGA"),
+            (
+                getattr(system, "hubbard_device", None) is not None or getattr(system.reference, "hubbard", None)
+                is not None,
+                "LDA+U",
+            ),
+            # (the route from the first iteration, PARSEC_SPIN_FLIP_SYMMETRY=auto; under late, the default, the loop
+            # solves both channels until they are images of each other, and the test takes the state it reaches)
+            (spin_flip_from_start(system), "the route of PARSEC_SPIN_FLIP_SYMMETRY=auto"),
+        ):
+            if flag:
+                return text
+        from .SCF.fallback_density import fallback_density_setting
+
+        if fallback_density_setting() != "off":
+            return "PARSEC_SPIN_FALLBACK_DENSITY=abelian"
+        if getattr(system.backend_info, "selected", None) != "cupy":
+            return "a backend other than CuPy"
+        if system.reference.input.eigensolver.method not in ("chebff", "chebdav"):
+            return f"Eigensolver: {system.reference.input.eigensolver.method}"
+        adapter = system.scalar_field_adapter
+        if adapter is None or not bool(getattr(adapter, "guard", False)):
+            return "sectors without the spin guard"
+        return None
+
+    def _stability_wanted(self, system, warm_start, callback=None) -> bool:
+        """Whether the state of this run in the sectors is tested on the full grid (``PARSEC_SPIN_SECTOR_STABILITY=
+        auto``; :meth:`_stability_refusal`).  Under ``auto`` a run that does not take it says why in a NOTE (once)."""
+
+        from .SCF.sector_stability import spin_sector_stability_setting
+
+        if spin_sector_stability_setting() != "auto" or self._stability_declined or not self.spin:
+            return False
+        refusal = self._stability_refusal(system, warm_start)
+        if refusal is not None and callback is not None and not self._refusal_said and warm_start is None:
+            self._refusal_said = True
+            callback(_stability_skipped_record(refusal))
+        return refusal is None
+
+    def _full_grid_apart(self, system):
+        """The full grid of the present structure, prepared beside the sectors (which keep their state): the
+        system :meth:`replace_with_full_grid` would put in place, not put there."""
+
+        import tempfile
+
+        problem = self._problem_of(system)
+        with tempfile.TemporaryDirectory() as copies:
+            problem = self._with_present_pseudopotentials(problem, Path(copies))
+            full_grid = prepare_single_point(
+                problem,
+                backend=self.backend,
+                symmetry="auto" if _normalize_symmetry_mode(self.symmetry) == "on" else self.symmetry,
+                symmetry_cache_directory=self.symmetry_cache_directory,
+                symmetry_fixed_atoms=self.symmetry_fixed_atoms,
+            )
+        full_grid.materialize_final_wavefunctions = system.materialize_final_wavefunctions
+        if getattr(full_grid, "spin_flip", None) is not None:
+            # The test and its continuation look for states that break the operations of the sectors, the spin-flip
+            # operation among them: both channels solved there, also where PARSEC_SPIN_FLIP_SYMMETRY=late would take
+            # the route once they become images of each other (the guard's route of off keeps it).
+            from parsec_python.SCF.spin_polarized import leave_spin_flip
+
+            leave_spin_flip(full_grid, "the spin sector stability test and its continuation solve both channels")
+        return full_grid
+
+    def _install_full_grid(self, system, full_grid, note) -> None:
+        """Put the objects of ``full_grid`` into ``system`` (as :meth:`replace_with_full_grid` does), the sectors
+        released first."""
+
+        import gc
+        from dataclasses import fields
+
+        sectors = getattr(system.backend, "symmetry_eigensolver", None)
+        if sectors is not None and getattr(sectors, "spin_channel_count", 1) == 2:
+            for index in (0, 1):
+                sectors.for_spin_channel(index).reset()
+        full_grid.backend_info = replace(
+            full_grid.backend_info,
+            details=tuple(item for item in full_grid.backend_info.details if item[0] != note[0]) + (note,),
+        )
+        full_grid.backend.info = full_grid.backend_info
+        kept = system.materialize_final_wavefunctions
+        for item in fields(full_grid):
+            setattr(system, item.name, getattr(full_grid, item.name))
+        system.materialize_final_wavefunctions = kept
+        _keep_spin_flip_left(system)
+        del sectors
+        gc.collect()
+        _free_device_pools()
+
+    def _moments_text(self, system, result) -> tuple[str, bool]:
+        """The moments of the atoms by label of a spin ``result`` on the grid of ``system`` and whether they keep the
+        order of the labelled start polarizations (:func:`.SCF.sector_stability.labelled_moments`)."""
+
+        from .SCF.sector_stability import labelled_moments
+
+        reference = system.reference
+        atoms = tuple(reference.atoms)
+        species = getattr(self.problem, "pseudopotentials", {}) or {}
+        starts = [
+            float(getattr(species.get(atom.symbol), "initial_spin_polarization", 0.0) or 0.0) for atom in atoms
+        ]
+        lattice = getattr(getattr(reference.input, "periodic_cell", None), "lattice_vectors", None)
+        return labelled_moments(
+            reference.grid.coordinates,
+            [atom.position for atom in atoms],
+            [atom.symbol for atom in atoms],
+            starts,
+            [channel.density for channel in result.spin],
+            reference.grid.volume_element,
+            lattice,
+        )
+
+    def _tested_result(self, system, run, result, deferred, *, callback=None, **keywords):
+        """The result of a converged run in the sectors under ``PARSEC_SPIN_SECTOR_STABILITY=auto``
+        (:mod:`.SCF.sector_stability`).
+
+        Where tests 1 or 3 of the guard put a report aside (``deferred``: ``(stage, report)``), where the doublet note
+        would be printed, or where the species start with polarizations of opposite sign, the state is tested on the
+        full grid, prepared beside the sectors; an unstable state whose line search or flip patterns lie ``GAIN``
+        below it is continued on that full grid.  Without a deferred report (the result of ``off`` is the state of the
+        sectors) the converged state of that loop replaces it (and the full grid the sectors in ``system``) where its
+        free energy is lower; otherwise the state of the sectors is kept.  With one (``off`` goes the guard's route)
+        that route follows the test as under ``off`` (raised here), and a converged state of the loop below the
+        sectors waits for its result (``_candidate``, :meth:`_with_candidate`).  Where no test can be made (a loop that
+        did not converge, orbitals that are not on the host or the device, levels of the full grid at the state of the
+        sectors that differ from theirs, a full grid, test or loop that does not fit beside the sectors) a deferred
+        report goes the guard's route of ``off``, else the result is kept with the doublet note."""
+
+        import gc
+        import time as _time
+
+        from parsec_python.SCF.single_point import SCFWarmStart, _number_of_states
+
+        from .SCF import sector_stability as stab
+        from .SCF.moving_sectors import antiferromagnetic_labels
+        from .SCF.spin_sectors import SpinSectorsAbandoned, atom_group_images
+
+        adapter = system.scalar_field_adapter
+        doublet = getattr(adapter, "doublet_report", None)
+        opposite = antiferromagnetic_labels(self.problem)
+        if not deferred and doublet is None and not opposite:
+            return result
+        started = _time.perf_counter()
+        if deferred:
+            test = "1" if deferred[0][0] == "the start Hamiltonian" else "3"
+            why = f"a partly filled level (test {test} of the guard, {deferred[0][1].reason})"
+        elif doublet is not None:
+            why = "a partly filled doublet within one sector"
+        else:
+            why = "start polarizations of opposite sign"
+
+        def route_of_off(note):
+            # a deferred report: the guard's route of PARSEC_SPIN_SECTOR_STABILITY=off from here on (raised into run)
+            self._stability_declined = True
+            stage, report = deferred[0]
+            raise SpinSectorsAbandoned(stage, replace(report, lines=report.lines + (note,)))
+
+        def decline(reason):
+            if deferred:
+                route_of_off(f"(no stability test: {reason})")
+            self._stability_declined = True
+            self._say_doublet(system, callback)
+            return result
+
+        if not result.converged:
+            return decline("the loop in the sectors did not converge")
+        channels = result.spin
+        orbitals = []
+        for channel in channels:
+            found = channel.wavefunctions
+            export = getattr(found, "to_full_host", None)
+            try:
+                orbitals.append(export() if callable(export) else found)
+            except (RuntimeError, ValueError) as error:
+                return decline(f"the orbitals of the sectors are not available on the full grid ({error})")
+            if getattr(orbitals[-1], "ndim", 0) != 2:
+                return decline("the orbitals of the sectors are not available on the full grid")
+        grid, atoms = system.reference.grid, tuple(system.reference.atoms)
+        images = atom_group_images(grid, atoms, sectors=getattr(adapter.reducer, "reduction", None))
+        symmetry = stab.OrbitSymmetry(grid.size, [rows for _, rows in images])
+        prepared = _time.perf_counter()
+        try:
+            full_grid = self._full_grid_apart(system)
+        except (MemoryError, ValueError) as error:
+            # (the full grid beside the sectors does not fit, or cannot be prepared: the route of off, which frees
+            # the sectors first; cupy.cuda.memory.OutOfMemoryError is a MemoryError)
+            del orbitals
+            gc.collect()
+            _free_device_pools()
+            return decline(f"the full grid could not be prepared beside the sectors ({type(error).__name__}: {error})")
+        prepared = _time.perf_counter() - prepared
+        temperature = float(system.reference.input.scf.fermi_temperature_kelvin)
+        lattice = getattr(getattr(system.reference.input, "periodic_cell", None), "lattice_vectors", None)
+
+        def labels():
+            partition = stab.nearest_atoms(grid.coordinates, [atom.position for atom in atoms], lattice)
+            return partition, len(atoms)
+
+        step = None
+        try:
+            step = stab.FullGridSpinStep(full_grid, _number_of_states(full_grid), result.hartree_potential)
+            outcome = stab.test_sector_state(
+                step,
+                symmetry,
+                [channel.input_effective_potential for channel in channels],
+                [channel.density for channel in channels],
+                orbitals,
+                [channel.eigenvalues for channel in channels],
+                float(result.fermi_level),
+                labels,
+            )
+        except (NotImplementedError, MemoryError) as error:
+            # (an eigensolver of the full grid that takes no orbitals from outside, or a test that does not fit beside
+            # the sectors: the route of off)
+            del orbitals
+            step = full_grid = None
+            gc.collect()
+            _free_device_pools()
+            return decline(f"{type(error).__name__}: {error}")
+        del orbitals
+        report, line = outcome.report, outcome.line
+        free_sectors = stab.spin_free_energy(
+            result.energies.total, [channel.occupations for channel in channels], temperature
+        )
+        summary = [
+            f"(tested for {why}; the full grid prepared in {prepared:.2f} s, the orbitals of the sectors taken over "
+            f"in {outcome.setup:.2f} s, the test and its line search {outcome.seconds - outcome.setup:.2f} s)",
+            report.text(),
+        ]
+        if line is not None:
+            summary.append(line.text())
+        values = {
+            "spin_stability_largest": float(report.largest),
+            "spin_stability_probes": float(report.probes),
+            "spin_stability_seconds": float(outcome.seconds),
+            "spin_stability_setup_seconds": float(outcome.setup),
+            "spin_stability_preparation_seconds": float(prepared),
+            "spin_stability_centre_deviation": float(report.centre_deviation),
+        }
+        if line is not None:
+            values.update(spin_line_gain=float(line.gain), spin_line_seconds=float(line.seconds))
+
+        def release():
+            # the full grid beside the sectors and the states of the test back to the device
+            nonlocal full_grid, step
+            step = None
+            full_grid = None
+            outcome.states = outcome.start = None
+            gc.collect()
+            _free_device_pools()
+
+        def say(reason, route, *, measure="largest eigenvalue of the response", value=None, tolerance=None,
+                extra=()):
+            if callback is None:
+                return
+            from parsec_python.models import SpinSectorFallbackRecord
+
+            callback(SpinSectorFallbackRecord(
+                stage="the stability test after the SCF loop",
+                largest_fractional_occupation=float(report.largest if value is None else value),
+                tolerance=float(report.bound if tolerance is None else tolerance),
+                multiplets=tuple(summary) + tuple(extra),
+                reason=reason,
+                measure=measure,
+                route=route,
+            ))
+
+        def finish(reason, route="spin_continued", **options):
+            # no state of the loop on the full grid replaces anything: the result of off (the state of the sectors, or
+            # the guard's route)
+            release()
+            if deferred:
+                say(f"{reason}; a guard of the sectors had fired, and its route follows as under "
+                    "PARSEC_SPIN_SECTOR_STABILITY=off", route, **options)
+                route_of_off(f"(the stability test: {reason})")
+            _add_stability_detail(result, values, f"{why}: {reason}")
+            say(reason, route, **options)
+            if continued_loop:
+                # (the iterations of the loop on the full grid were printed last: the kept state's last one follows)
+                _say_final_iteration(callback, result)
+            return result
+
+        # (whether a loop on the full grid ran after the sectors, whose iterations parsec.out printed last)
+        continued_loop = False
+        if report.centre_deviation > stab.CENTRE_LEVEL_TOLERANCE:
+            release()
+            return decline(
+                f"the levels of the full grid at the state of the sectors differ from theirs by "
+                f"{report.centre_deviation:.2e} Ry"
+            )
+        if not report.unstable:
+            text = "the state of the sectors is stable against perturbations that break their point group"
+            if report.largest >= 1.0:
+                text += (f" (an eigenvalue of {report.largest:.4f}, from 1 to the bound of the accuracy of the test: "
+                         "a lower state may exist)")
+            return finish(text, route="spin_stable")
+        if not outcome.continues:
+            return finish(
+                f"the state of the sectors is kept: its free energy goes down by less than {line.tolerance:g} Ry "
+                "along the direction of the instability and at its flip patterns, which does not pay a loop on the "
+                "full grid",
+                measure="free energy below that of the sectors along the top Ritz vector [Ry]",
+                value=line.gain, tolerance=line.tolerance,
+            )
+        # the loop on the full grid from the lowest point, with the states of the step there; the copies of the states
+        # at the centre go first
+        step._centre = None
+        held = step.adopt(outcome.states)
+        gc.collect()
+        _free_device_pools()
+        settings = system.reference.input.scf
+        criterion = keywords.get("convergence_criterion") or settings.convergence_criterion
+        watch = stab.ContinuationWatch(free_sectors, criterion=criterion)
+
+        class _Stopped(Exception):
+            pass
+
+        from parsec_python.models import SCFIteration
+
+        def watched(record):
+            if callback is not None:
+                callback(record)
+            if isinstance(record, SCFIteration) and record.energies is not None:
+                free = stab.spin_free_energy(record.energies.total, [record.occupations], temperature)
+                residual = record.plain_residual if settings.use_plain_residual else record.weighted_residual
+                if watch(record.iteration, free, residual):
+                    raise _Stopped()
+
+        say(
+            "a state of the sectors that is unstable against perturbations that break their point group (an "
+            "eigenvalue of the SCF response above 1: the free energy goes down along it)",
+            "spin_unstable",
+            extra=(
+                "the loop on the full grid continues from the lowest of those points; a converged state of it below "
+                "the state of the sectors" + (" and below the result of the guard's route, which follows," if deferred
+                                               else "") + " is kept",
+            ),
+        )
+        start = SCFWarmStart(
+            input_potential=outcome.start,
+            hartree_potential=np.asarray(result.hartree_potential, dtype=np.float64),
+            eigensolver_state=held,
+        )
+        del held
+        outcome.states = outcome.start = None
+        continued = None
+        stopped = False
+        continued_loop = True
+        try:
+            continued = run(full_grid, callback=watched, warm_start=start, **keywords)
+        except _Stopped:
+            stopped = True
+        except MemoryError as error:
+            # (the loop does not fit beside the sectors: what off gives; cupy's OutOfMemoryError is a MemoryError)
+            del start
+            return finish(
+                f"the state of the sectors is kept: the loop on the full grid ran out of device memory beside the "
+                f"sectors ({type(error).__name__})"
+            )
+        del start
+        values["spin_continuation_iterations"] = float(watch.stopped_at or 0)
+        free_continued = None
+        if continued is not None:
+            free_continued = stab.spin_free_energy(
+                continued.energies.total, [channel.occupations for channel in continued.spin], temperature
+            )
+            values["spin_continuation_iterations"] = float(continued.iterations)
+        if continued is not None and continued.converged and free_continued < free_sectors - stab.CONTINUATION_MARGIN:
+            before, _ = self._moments_text(system, result)
+            after, kept = self._moments_text(system, continued)
+            moments = [f"moments of the atoms by label (bohr magnetons): the sectors {before}; the full grid {after}"]
+            if not kept:
+                moments.append(
+                    "the continued state does not keep the labelled order of the start polarizations; "
+                    "PARSEC_SPIN_SECTOR_STABILITY=off keeps "
+                    + ("the result of the guard's route" if deferred else "the state of the sectors")
+                )
+            values["spin_continuation_gain"] = float(free_sectors - free_continued)
+            if deferred:
+                # the result of the guard's route decides (_with_candidate); the full grid of this loop goes
+                # (host copies of its eigensolver states: the system that keeps it holds them, :meth:`_with_candidate`)
+                states = stab.host_states(getattr(continued, "eigensolver_state", None))
+                self._candidate = dict(
+                    result=_detached_result(full_grid, continued),
+                    states=states,
+                    free=float(free_continued),
+                    temperature=temperature,
+                    deferred=deferred[0],
+                    why=why,
+                    lines=tuple(moments),
+                    values=dict(values),
+                    gain=float(free_sectors - free_continued),
+                )
+                del continued
+                release()
+                say(
+                    f"the loop on the full grid converged {free_sectors - free_continued:.3e} Ry below the state of "
+                    "the sectors; a guard of the sectors had fired, and its route follows as under "
+                    "PARSEC_SPIN_SECTOR_STABILITY=off: the lower converged state of the two is kept",
+                    "spin_continued",
+                    measure="free energy below that of the sectors [Ry]",
+                    value=free_sectors - free_continued,
+                    tolerance=stab.CONTINUATION_MARGIN,
+                )
+                route_of_off("(the stability test: the guard's route follows the loop on the full grid)")
+            note = (
+                "spin_symmetry_sectors",
+                f"auto: left the sectors after the stability test ({why}; largest eigenvalue {report.largest:.4f}): "
+                "full grid",
+            )
+            self._install_full_grid(system, full_grid, note)
+            full_grid = None
+            step = None
+            values["spin_stability_total_seconds"] = float(_time.perf_counter() - started)
+            _add_stability_detail(
+                continued, values, f"{why}: the converged state of the full grid {free_sectors - free_continued:.3e} "
+                "Ry below that of the sectors"
+            )
+            if callback is not None:
+                from parsec_python.models import SpinSectorFallbackRecord
+
+                callback(SpinSectorFallbackRecord(
+                    stage="the loop on the full grid",
+                    largest_fractional_occupation=float(free_sectors - free_continued),
+                    tolerance=float(stab.CONTINUATION_MARGIN),
+                    multiplets=(f"free energy {free_continued:.10f} Ry against {free_sectors:.10f} Ry in the "
+                                "sectors", *moments),
+                    reason="the converged state of the full grid is kept, below that of the sectors",
+                    measure="free energy below that of the sectors [Ry]",
+                    route="spin_continued",
+                ))
+            return continued
+        if stopped:
+            reason = (f"the state of the sectors is kept: the loop on the full grid stopped after {watch.stopped_at} "
+                      f"iterations ({watch.reason})")
+        elif continued is not None and not continued.converged:
+            reason = "the state of the sectors is kept: the loop on the full grid did not converge"
+        else:
+            reason = ("the state of the sectors is kept: the converged state of the full grid is not below it "
+                      f"({free_continued - free_sectors:+.3e} Ry)")
+        del continued
+        return finish(reason)
+
+    def _with_candidate(self, system, result, callback=None):
+        """The result of the guard's route (``result``, that of ``off``) against a converged state of the loop on the
+        full grid that waits for it (``_candidate``, :meth:`_tested_result`): the lower converged one by
+        ``CONTINUATION_MARGIN`` of the free energy; the candidate also where that route did not converge.  A candidate
+        that is kept gets the full grid in ``system`` (prepared again where the route ended in sectors)."""
+
+        from .SCF.sector_stability import CONTINUATION_MARGIN, adopt_states, spin_free_energy
+
+        candidate, self._candidate = self._candidate, None
+        if candidate is None:
+            return result
+        channels = getattr(result, "spin", None)
+        if channels is None:
+            return result
+        free_off = spin_free_energy(
+            result.energies.total, [channel.occupations for channel in channels], candidate["temperature"]
+        )
+        converged = bool(getattr(result, "converged", False))
+        from parsec_python.models import SpinSectorFallbackRecord
+
+        if converged and not candidate["free"] < free_off - CONTINUATION_MARGIN:
+            _add_stability_detail(result, candidate["values"], f"{candidate['why']}: the result of the guard's route "
+                                  "is kept, not above the converged state of the loop on the full grid")
+            if callback is not None:
+                callback(SpinSectorFallbackRecord(
+                    stage="the guard's route after the stability test",
+                    largest_fractional_occupation=float(candidate["free"] - free_off),
+                    tolerance=float(CONTINUATION_MARGIN),
+                    multiplets=(f"free energy {free_off:.10f} Ry against {candidate['free']:.10f} Ry of the loop on "
+                                "the full grid that continued from the sectors",),
+                    reason="the converged result of the guard's route is kept: the continued state is not lower",
+                    measure="free energy of the continued state above that of the route [Ry]",
+                    route="spin_continued",
+                ))
+            return result
+        if getattr(system, "scalar_field_adapter", None) is not None or getattr(
+            system.backend, "symmetry_eigensolver", None
+        ) is not None:
+            # (the route ended in sectors, the abelian ones: the continued state needs the full grid for its forces and
+            # outputs)
+            stage, report = candidate["deferred"]
+            self.replace_with_full_grid(system, stage, report)
+        continued = candidate["result"]
+        # the eigensolvers of the full grid in ``system`` hold the states of the kept loop (those of the route go): the
+        # nonlocal forces and a warm start of the next structure read them
+        held = adopt_states(system, candidate.get("states"))
+        if held is not None:
+            _attach_states(continued, held)
+            _free_device_pools()
+        gain = free_off - candidate["free"]
+        text = (
+            f"the converged state of the loop on the full grid that continued from the sectors is kept, "
+            + (f"{gain:.3e} Ry below the converged result of the guard's route" if converged
+               else "where the guard's route did not converge")
+        )
+        _add_stability_detail(continued, candidate["values"], f"{candidate['why']}: {text}")
+        if callback is not None:
+            callback(SpinSectorFallbackRecord(
+                stage="the guard's route after the stability test",
+                largest_fractional_occupation=float(gain),
+                tolerance=float(CONTINUATION_MARGIN),
+                multiplets=(f"free energy {candidate['free']:.10f} Ry against {free_off:.10f} Ry of the guard's route"
+                            + ("" if converged else " (not converged)"), *candidate["lines"]),
+                reason=text,
+                measure="free energy below that of the guard's route [Ry]",
+                route="spin_continued",
+            ))
+        # (the iterations of the guard's route were printed last: the kept state's last one follows)
+        _say_final_iteration(callback, continued)
+        return continued
 
     @staticmethod
     def abelian_shortcut(report) -> bool:
@@ -9712,6 +10327,113 @@ class _SpinSectorFallback:
                 cp.get_default_memory_pool().free_all_blocks()
 
 
+def _free_device_pools() -> None:
+    """Give the blocks that CuPy's memory pools hold on every device back to the devices."""
+
+    from .backends.cupy import require_cupy
+
+    cp, _ = require_cupy()
+    for device in range(cp.cuda.runtime.getDeviceCount()):
+        with cp.cuda.Device(device):
+            cp.get_default_memory_pool().free_all_blocks()
+
+
+def _stability_skipped_record(reason: str):
+    """The NOTE of a spin run under ``PARSEC_SPIN_SECTOR_STABILITY=auto`` that does not take the test (``reason``)."""
+
+    from parsec_python.models import SpinSectorFallbackRecord
+
+    return SpinSectorFallbackRecord(
+        stage="the preparation",
+        largest_fractional_occupation=0.0,
+        tolerance=0.0,
+        reason=f"PARSEC_SPIN_SECTOR_STABILITY=auto is not applied to this run: {reason}",
+        measure="",
+        route="spin_stability_skipped",
+    )
+
+
+def _detached_result(system, result):
+    """``result`` of a loop on ``system`` that outlives that system (PARSEC_SPIN_SECTOR_STABILITY): its orbitals on the
+    host and no eigensolver states (a later structure starts its eigensolver again, as after the full grid of a
+    fallback)."""
+
+    from .SCF.single_point import materialize_wavefunctions
+
+    from dataclasses import is_dataclass
+
+    if not isinstance(getattr(result, "wavefunctions", None), np.ndarray):
+        materialize_wavefunctions(system, result)
+    # (the result itself and, for the wrapper of an accelerated result, the result it wraps: the device subspaces that
+    # their eigensolver states hold would stay on the device with them)
+    holders = [result]
+    inner = getattr(result, "result", None)
+    if inner is not None and inner is not result:
+        holders.append(inner)
+    for holder in holders:
+        fields = vars(holder) if hasattr(holder, "__dict__") else {}
+        if "spin" in fields and fields["spin"] is not None:
+            holder.spin = tuple(
+                replace(channel, eigensolver_state=None) if is_dataclass(channel) else channel
+                for channel in fields["spin"]
+            )
+        if "eigensolver_state" in fields or holder is result:
+            holder.eigensolver_state = None
+    return result
+
+
+def _attach_states(result, states) -> None:
+    """``result`` (and the result an accelerated one wraps) names ``states`` as the eigensolver states of its channels
+    (the inverse of :func:`_detached_result`)."""
+
+    from dataclasses import is_dataclass
+
+    holders = [result]
+    inner = getattr(result, "result", None)
+    if inner is not None and inner is not result:
+        holders.append(inner)
+    for holder in holders:
+        fields = vars(holder) if hasattr(holder, "__dict__") else {}
+        if "spin" in fields and fields["spin"] is not None:
+            holder.spin = tuple(
+                replace(channel, eigensolver_state=state) if is_dataclass(channel) else channel
+                for channel, state in zip(fields["spin"], states)
+            )
+        if "eigensolver_state" in fields or holder is result:
+            holder.eigensolver_state = tuple(states)
+
+
+def _say_final_iteration(callback, result) -> None:
+    """Hand the last SCF iteration of ``result`` to ``callback`` again (its seconds zero, they were counted): where the
+    iterations of a discarded loop were printed after it, ``parsec.out`` ends with the block of the state kept
+    (``PARSEC_SPIN_SECTOR_STABILITY``)."""
+
+    from dataclasses import fields as dataclass_fields, is_dataclass
+
+    history = getattr(result, "history", None)
+    if callback is None or not history:
+        return
+    last = history[-1]
+    if is_dataclass(last):
+        seconds = {
+            item.name: 0.0 for item in dataclass_fields(last) if item.name.endswith("_seconds")
+        }
+        last = replace(last, **seconds)
+    callback(last)
+
+
+def _add_stability_detail(result, values: dict, text: str) -> None:
+    """The numbers of the stability test of the spin sectors (``PARSEC_SPIN_SECTOR_STABILITY``) in the timings of
+    ``result`` (``detail``) and its verdict among the backend details (``spin_sector_stability``)."""
+
+    detail = getattr(getattr(result, "timings", None), "detail", None)
+    if isinstance(detail, dict):
+        detail.update(values)
+    backend = getattr(result, "backend", None)
+    if backend is not None and hasattr(backend, "details") and hasattr(result, "result"):
+        result.backend = replace(backend, details=tuple(backend.details) + (("spin_sector_stability", text),))
+
+
 def _say_floor_doublet(system, result, callback) -> None:
     """The NOTE of a spin cell that its size floor keeps on the full grid and that ends with a partly filled pair of
     degenerate levels (``spin_floor_full_grid`` of the preparation; only a process without MPI sectors has it).  It
@@ -9814,6 +10536,17 @@ def run_scf(
         ),
     )
     fallback = getattr(system, "spin_sector_fallback", None)
+    if fallback is None and warm_start is None and callback is not None:
+        from .SCF.sector_stability import spin_sector_stability_setting
+
+        if (
+            getattr(getattr(getattr(system, "input", None), "scf", None), "spin_polarized", False)
+            and spin_sector_stability_setting() == "auto"
+        ):
+            # (a spin run without the sectors of the spin guard: the full grid, no point group, a CPU backend)
+            callback(_stability_skipped_record(
+                "it solves both spin channels without the symmetry sectors of the spin guard (the full grid)"
+            ))
     if fallback is None:
         result = run_accelerated_scf(
             system, callback=callback, warm_start=warm_start, **keywords
@@ -9909,7 +10642,10 @@ def warm_start_for_moved_atoms(
         # A hybrid functional: the orbitals before the move, where the
         # eigensolvers keep them, build the first exchange operator.
         warm_start = replace(
-            warm_start, exchange_orbitals=exchange_device.orbital_sets(previous_result)
+            warm_start,
+            exchange_orbitals=exchange_device.orbital_sets(previous_result),
+            # (the decay ratio of a spin-symmetric state found stable: parsec_python.SCF.fock_stability)
+            exchange_stability_ratio=getattr(getattr(previous_result, "exact_exchange", None), "spin_stability_ratio", None),
         )
     if getattr(system, "embedding", None) is not None:
         # FDET of PARSEC 1.5 (parsec_python.Embedding.warm_start): a translation

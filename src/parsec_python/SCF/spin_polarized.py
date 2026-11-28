@@ -312,7 +312,7 @@ def _spin_flip_of(system, *, exchange_term, meta, hubbard_projectors, ionic_pote
     """``(operation, refusal)``: the spin-flip operation the loop takes the down channel from, or why not.
 
     ``system.spin_flip`` is attached by the accelerated driver with
-    ``PARSEC_SPIN_FLIP_SYMMETRY=auto``
+    ``PARSEC_SPIN_FLIP_SYMMETRY=auto`` or ``late``
     (:mod:`parsec_python.acceleration.SCF.spin_flip`).  It is not taken with
     an exchange operator, a meta-GGA, LDA+U or ``Symmetrize_Charge_Density``,
     whose terms read the orbitals or fields of each channel, nor where it no
@@ -380,7 +380,8 @@ def leave_spin_flip(system, reason: str) -> None:
     details = getattr(info, "details", None)
     if details is None or not any(item[0] == "spin_flip_symmetry" for item in details):
         return
-    text = f"auto: both channels solved (the run left the route: {reason})"
+    mode = getattr(getattr(system, "spin_flip", None), "mode", "auto")
+    text = f"{mode}: both channels solved (the run left the route: {reason})"
     info = replace(
         info, details=tuple(("spin_flip_symmetry", text) if item[0] == "spin_flip_symmetry" else item for item in details)
     )
@@ -574,6 +575,344 @@ def _spin_flip_stable_record(report: FlipStabilityReport):
         reason="the state of the converged loop is stable against perturbations that break the operation",
         measure="largest eigenvalue of the response",
         route="spin_flip_stable",
+    )
+
+
+class _SpinFlipContinue(Exception):
+    """A start lies below the converged state of a loop of ``PARSEC_SPIN_FLIP_SYMMETRY``
+    (``PARSEC_SPIN_FLIP_STABILITY=auto`` with ``PARSEC_SPIN_FLIP_CONTINUATION=auto``,
+    :func:`parsec_python.acceleration.SCF.spin_flip_stability.flip_state_safety`): :func:`run_spin_scf` continues
+    without the flip from it.  ``start`` and ``centre`` are the full-grid input potentials ``(up, down)`` of the start
+    and of the state of the route, ``hartree`` the last Hartree potential, ``states`` the eigensolver states of the
+    two channels (the up channel at the state of the route, the down channel at the start), ``reference`` the free
+    energy of the state of the route."""
+
+    def __init__(self, report, *, start, centre, hartree, states, reference) -> None:
+        super().__init__(report.candidates_text())
+        self.report = report
+        self.start = start
+        self.centre = centre
+        self.hartree = hartree
+        self.states = states
+        self.reference = float(reference)
+
+
+def _spin_flip_safety_record(report, *, route: str, reason: str, summary: bool = True):
+    """A note of the test and the starts of :mod:`parsec_python.acceleration.SCF.spin_flip_stability` (``route``
+    ``spin_flip_stable``: the state of the route is kept; ``spin_flip_continued``: the loop continues without the flip
+    from a start below it, or, without ``summary``, what that continuation ended in)."""
+
+    from ..models import SpinSectorFallbackRecord
+
+    return SpinSectorFallbackRecord(
+        stage="the stability test after the SCF loop",
+        largest_fractional_occupation=float(report.largest),
+        tolerance=float(report.bound),
+        multiplets=(report.test_text(), report.candidates_text()) if summary else (),
+        reason=reason,
+        measure="largest eigenvalue of the response",
+        route=route,
+    )
+
+
+def _result_free_energy(result, temperature: float) -> float:
+    """``E - TS`` of a spin result without its dispersion term (the footing of the loop's iterations)."""
+
+    from parsec_python.acceleration.SCF.spin_flip_stability import entropy_term
+
+    dispersion = getattr(result, "dispersion", None)
+    energy = float(result.energies.total) - float(getattr(dispersion, "energy", 0.0) or 0.0)
+    return energy + entropy_term([channel.occupations for channel in result.spin], None, temperature)
+
+
+def _continue_without_flip(system, keywords: dict, found: _SpinFlipContinue, callback):
+    """The loop without the flip from the start below the state of the route (``found``), stopped by a
+    :class:`parsec_python.acceleration.SCF.noncollinear_stability.ContinuationWatch`; the lower converged state is the
+    result.  Where it does not end :data:`parsec_python.acceleration.SCF.spin_flip_stability.MARGIN` below the state of
+    the route, that state is converged again from its potential with the flip (the continuation moved the subspace of
+    the up channel on) and kept."""
+
+    from parsec_python.acceleration.SCF.noncollinear_stability import ContinuationWatch
+    from parsec_python.acceleration.SCF.spin_flip_stability import MARGIN
+
+    report = found.report
+    best = report.best
+    settings = system.input.scf
+    temperature = float(settings.fermi_temperature_kelvin)
+    info = getattr(system, "backend_info", None)
+    why = f"a start {report.gain:.3e} Ry below the state of the route ({best.describe()})"
+    leave_spin_flip(system, why)
+    if callback is not None:
+        callback(
+            _spin_flip_safety_record(
+                report,
+                route="spin_flip_continued",
+                reason=(
+                    f"the state of the converged loop lies {report.gain:.3e} Ry above the free energy of one SCF step "
+                    f"at a start that breaks the operation ({best.describe()}); the loop continues from it without "
+                    "the flip, and the lower converged state is kept"
+                ),
+            )
+        )
+    watch = ContinuationWatch(found.reference, criterion=float(settings.convergence_criterion))
+    original = keywords.get("warm_start")
+    warm = SCFWarmStart(input_potential=found.start, hartree_potential=found.hartree, eigensolver_state=found.states)
+    if original is not None:
+        warm = replace(warm, level_tolerance=getattr(original, "level_tolerance", None))
+    started = time.perf_counter()
+    continued = _run_spin_loop(system, **{**keywords, "warm_start": warm}, give_up=watch)
+    seconds = time.perf_counter() - started
+    free = _result_free_energy(continued, temperature)
+    below = found.reference - free
+    detail = {
+        "spin_flip_stability_largest": float(report.largest),
+        "spin_flip_stability_probes": float(report.probes),
+        "spin_flip_stability_seconds": float(report.seconds),
+        "spin_flip_candidates_seconds": float(report.candidate_seconds),
+        "spin_flip_candidate_gain": float(report.gain),
+        "spin_flip_down_passes": float(report.passes),
+        "spin_flip_continuation_iterations": float(continued.iterations),
+        "spin_flip_continuation_seconds": float(seconds),
+        "spin_flip_continuation_lower": float(below),
+    }
+    if watch.stopped_at is not None:
+        detail["spin_flip_continuation_stopped"] = float(watch.stopped_at)
+    if continued.converged and below > MARGIN:
+        continued.timings.detail.update(detail)
+        if callback is not None:
+            callback(
+                _spin_flip_safety_record(
+                    report,
+                    route="spin_flip_continued",
+                    reason=(
+                        f"the loop without the flip converged in {continued.iterations} iterations to a state "
+                        f"{below:.6e} Ry below the state of the route (free energy), which is kept"
+                    ),
+                    summary=False,
+                )
+            )
+        return continued
+    if not continued.converged:
+        outcome = (
+            f"stopped after {watch.stopped_at} iterations ({watch.reason})"
+            if watch.stopped_at is not None
+            else f"did not converge in {continued.iterations} iterations"
+        )
+    else:
+        outcome = f"converged {-below:.3e} Ry above it"
+    del continued
+    # The state of the route again: its potential with the flip, from the subspace the up channel holds now.
+    try:
+        delattr(system, SPIN_FLIP_LEFT)
+    except AttributeError:
+        pass
+    if info is not None:
+        try:
+            system.backend_info = info
+            backend = getattr(system, "backend", None)
+            if backend is not None:
+                backend.info = info
+        except (AttributeError, TypeError):
+            pass
+    solvers = _channel_solvers(keywords.get("eigenproblem_solver"))
+    restart = getattr(solvers[0], "start_new_scf_loop", None)
+    up_state = restart() if callable(restart) else None
+    restore = SCFWarmStart(input_potential=found.centre, hartree_potential=found.hartree, eigensolver_state=(up_state, None))
+    if original is not None:
+        restore = replace(restore, level_tolerance=getattr(original, "level_tolerance", None))
+    started = time.perf_counter()
+    restored_taken: list[str] = []
+    try:
+        restored = _run_spin_loop(
+            system, **{**keywords, "warm_start": restore}, flip_test=False, flip_taken=restored_taken
+        )
+    except Exception as error:
+        # (a test of the spin sectors that fails in the loop of the route: the route of off from the start, as in
+        # run_spin_scf)
+        if not restored_taken or not _sector_guard(error):
+            raise
+        return _rerun_without_flip(
+            system,
+            keywords,
+            _spin_flip_guard_record(error),
+            f"a test of the spin sectors failed in a flip loop after {error.stage} ({error.report.reason})",
+        )
+    detail["spin_flip_restored_iterations"] = float(restored.iterations)
+    detail["spin_flip_restored_seconds"] = float(time.perf_counter() - started)
+    restored.timings.detail.update(detail)
+    if callback is not None:
+        callback(
+            _spin_flip_safety_record(
+                report,
+                route="spin_flip_continued",
+                reason=(
+                    f"the loop without the flip {outcome}: the state of the route is kept, converged again from its "
+                    f"potential in {restored.iterations} iterations"
+                ),
+                summary=False,
+            )
+        )
+    return restored
+
+
+#: PARSEC_SPIN_FLIP_SYMMETRY=late: the residual (Ry, that the loop tests) from which a loop that solves both channels
+#: takes the flip, where its channels are images of each other within the residual and no level is partly filled
+#: (:func:`_late_flip_switch`).
+LATE_FLIP_RESIDUAL = 1.0e-3
+#: PARSEC_SPIN_FLIP_SYMMETRY=late: how far (a multiple of the residual, in its norm) the input potentials of the two
+#: channels may be from images of each other under the operation of the route at the switch.  Measured on A100 at the
+#: iterations where the levels allowed the switch: 0.4-2.1 times the residual for H2, Cr2, Cr4, Mn2, Fe2, MnO, the B2
+#: Cr cell and the H4 square, 2.8-4.7 for NiO AFM-II, whose part that breaks the operation decays more slowly than the
+#: residual; 100-1000 for Mn2 compressed by 0.25 bohr, whose loop of off ends in a state of another operation.
+LATE_FLIP_POTENTIAL_FACTOR = 10.0
+#: PARSEC_SPIN_FLIP_SYMMETRY=late: what the history of the mixer holds after the switch: ``reset`` (none: the mixer
+#: starts again with the inputs of the route), ``project`` (every input and residual it keeps made a pair of the route,
+#: :func:`_project_mixer_history`) or ``keep`` (as the iterations before left it, which cost 8-13 more iterations on
+#: Cr2, Cr4 and H2).  Iterations on A100 against off, reset / project: 28 / 35 (37) Cr2, 31 / 40 (28) Cr2 stretched
+#: by 0.2 bohr, 25 / 31 (28) H2 stretched by 1.5 bohr, 14 / 20 (20) the H4 square, 20 / 23 (26) the B2 Cr cell, 49 / 46
+#: (65) Mn2, 42 / 39 (40) Fe2, on the full grid 32 / 27 (26) H2, 33 / 34 (31) Cr2, 34 / 34 (34) Cr4.
+LATE_FLIP_MIXER = "reset"
+
+
+def _late_flip_switch(eigenvalues, occupations, fermi_level, residual, settings, history=None, *, deviation) -> bool:
+    """Whether a loop of ``PARSEC_SPIN_FLIP_SYMMETRY=late`` that solves both channels takes the flip after this
+    iteration.  Its residual must be at most :data:`LATE_FLIP_RESIDUAL`; the levels of the two channels up to
+    ``START_LEVEL_WINDOW`` above the Fermi level the same within the residual (sorted, as the operation maps the
+    levels of one channel onto those of the other) and no further apart than two iterations before (``history``, the
+    list of that difference by iteration, which this call extends: an asymmetry that grows from the noise of the
+    eigensolvers, as along an unstable direction, is not taken for noise); no level partly filled (``min(f, 1 - f)``
+    below :data:`SPIN_FLIP_OCCUPATION_TOLERANCE`, which the route needs at its end); and the input potentials images of
+    each other under the operation of the route within :data:`LATE_FLIP_POTENTIAL_FACTOR` times the residual, in the
+    norm of the residual (``deviation()``, of ``V_down - g V_up``: :func:`_flip_potential_deviation`).  Equal spectra alone do not tell which operation relates
+    the channels: Mn2 compressed by 0.25 bohr on the full grid ends, in the loop of off, in a state whose down density
+    is the image of its up density under an S4 rotoreflection, 1.41 electrons from its image under the inversion of
+    the route, although the levels of its channels agree to 4e-8 Ry.  The state the loop of off then converges to is,
+    within its residual, one of the operation: from there the route converges to it with half the eigensolves.  Where
+    the channels stay apart (Ni2 and Co2 from antiparallel starts, Mn2 compressed, whose loops of off end in states
+    that break the operation), the loop stays that of off."""
+
+    up = np.sort(np.asarray(eigenvalues[0], dtype=np.float64))
+    down = np.sort(np.asarray(eigenvalues[1], dtype=np.float64))
+    count = min(up.size, down.size)
+    if count == 0:
+        return False
+    window = float(fermi_level) + START_LEVEL_WINDOW
+    shown = (up[:count] <= window) | (down[:count] <= window)
+    asymmetry = float(np.max(np.abs(up[:count] - down[:count])[shown], initial=0.0))
+    if history is not None:
+        history.append(asymmetry)
+        if len(history) >= 3 and not asymmetry <= history[-3]:
+            return False
+    if not float(residual) <= LATE_FLIP_RESIDUAL:
+        return False
+    if not asymmetry <= float(residual):
+        return False
+    if settings.fixed_occupations is None:
+        for filled in occupations:
+            values = np.asarray(filled, dtype=np.float64).reshape(-1)
+            if values.size and float(np.max(np.minimum(values, 1.0 - values))) >= SPIN_FLIP_OCCUPATION_TOLERANCE:
+                return False
+    return bool(float(deviation()) <= LATE_FLIP_POTENTIAL_FACTOR * float(residual))
+
+
+def _flip_potential_deviation(flip, potentials, densities, electrons, metrics_of, volume_element, plain: bool) -> float:
+    """The norm of ``V_down - g V_up`` (``potentials``, the inputs of an iteration) in the norm of the residual of the
+    loop (``metrics_of``, its residual evaluator; weighted by the down density and electrons, or plain): how far the
+    two channels are from a pair of the route of ``flip``."""
+
+    image = flip.down_field(potentials[0])
+    metrics = metrics_of(
+        (image, image), (potentials[1], potentials[1]), (densities[1], densities[1]), volume_element,
+        (electrons[1], electrons[1]),
+    )
+    return float(metrics.plain if plain else metrics.weighted)
+
+
+def _flip_density_deviation(flip, densities, adapter, volume_element) -> float:
+    """``integral |rho_down - g rho_up|`` (electrons): how far the densities of the two channels are from images of each
+    other under the operation of ``flip`` (orbit values weighted by their multiplicities in the sectors)."""
+
+    image = np.asarray(getattr(flip.down_field(densities[0]), "values", flip.down_field(densities[0])), dtype=np.float64)
+    down = np.asarray(getattr(densities[1], "values", densities[1]), dtype=np.float64)
+    difference = np.abs(image - down)
+    if adapter is not None:
+        difference = difference * np.asarray(adapter.weights, dtype=np.float64)
+    return float(volume_element * np.sum(difference))
+
+
+def _flip_symmetric(flip, up, down, adapter):
+    """``(u, g u)`` with ``u = (up + g^-1 down) / 2``: the pair of potentials of the route nearest to ``(up, down)``
+    (orbit fields of ``adapter`` in the sectors)."""
+
+    if adapter is not None:
+        values = 0.5 * (
+            np.asarray(getattr(up, "values", up), dtype=np.float64)
+            + np.asarray(getattr(flip.up_field(down), "values", None), dtype=np.float64)
+        )
+        symmetric = adapter.field(values)
+    else:
+        symmetric = 0.5 * (np.asarray(up, dtype=np.float64) + np.asarray(flip.up_field(down), dtype=np.float64))
+    return symmetric, flip.down_field(symmetric)
+
+
+def _project_mixer_history(mixer, flip) -> bool:
+    """Every input and residual that the mixer keeps (both channels end to end, up first) made a pair of the route of
+    ``flip``, ``(u, g u)`` with ``u = (up + g^-1 down) / 2`` (the Anderson mixers of the full grid and of the sectors,
+    also inside the Kerker preconditioner); false where the mixer keeps no such history."""
+
+    target = mixer
+    for _ in range(4):
+        if target is None:
+            return False
+        inputs = getattr(target, "_inputs", None)
+        residuals = getattr(target, "_residuals", None)
+        if isinstance(inputs, list) and isinstance(residuals, list):
+            break
+        target = getattr(target, "inner", None)
+    else:
+        return False
+
+    def projected(vector):
+        values = np.asarray(vector, dtype=np.float64)
+        half = values.size // 2
+        up = values[:half]
+        symmetric = 0.5 * (up + np.asarray(flip.up_field(values[half:]), dtype=np.float64))
+        return np.concatenate((symmetric, np.asarray(flip.down_field(symmetric), dtype=np.float64)))
+
+    for index, vector in enumerate(inputs):
+        inputs[index] = projected(vector)
+    for index, vector in enumerate(residuals):
+        residuals[index] = projected(vector)
+    return True
+
+
+def _late_flip_record(flip, *, switched: bool, iteration: int, lines):
+    """The note (:class:`parsec_python.models.SpinSectorFallbackRecord`, ``route`` ``spin_flip_late``) of a loop of
+    ``PARSEC_SPIN_FLIP_SYMMETRY=late``: from which iteration on it takes the route, or that its channels stayed apart
+    and it is the loop of off."""
+
+    from ..models import SpinSectorFallbackRecord
+
+    if switched:
+        reason = (
+            f"the two solved channels are images of each other under {flip.description} within the residual after "
+            f"iteration {iteration}: from the next iteration on the up channel alone, the down channel its image"
+        )
+        stage = f"iteration {iteration} of the SCF loop"
+    else:
+        reason = (
+            f"the two solved channels did not become images of each other under {flip.description} within the "
+            f"residual: both channels solved in all {iteration} iterations (the loop of off)"
+        )
+        stage = "the end of the SCF loop"
+    return SpinSectorFallbackRecord(
+        stage=stage,
+        largest_fractional_occupation=float("nan"),
+        tolerance=float(LATE_FLIP_RESIDUAL),
+        multiplets=tuple(lines),
+        reason=reason,
+        measure="",
+        route="spin_flip_late",
     )
 
 
@@ -871,6 +1210,10 @@ def run_spin_scf(
     the rest of the run (:func:`leave_spin_flip`), and the loop runs again from its start with both channels, in the
     sectors the flip loop started in: the loop of ``off``, whose result the guard of the spin sectors then tests as
     any other.  A warm start (an ionic step) is taken again without its saved subspaces, which the flip loop moved on.
+    Under ``PARSEC_SPIN_FLIP_STABILITY=auto`` with ``PARSEC_SPIN_FLIP_CONTINUATION=auto`` a converged loop of the route
+    with a start below it continues from that start without the flip (:func:`_continue_without_flip`).  A loop of
+    ``PARSEC_SPIN_FLIP_SYMMETRY=late`` solves both channels until they are images of each other within its residual
+    and takes the route from there (:func:`_late_flip_switch`).
     """
 
     keywords = dict(
@@ -888,8 +1231,13 @@ def run_spin_scf(
     )
     record = None
     taken: list[str] = []
+    continuation = None
     try:
         return _run_spin_loop(system, flip_taken=taken, **keywords)
+    except _SpinFlipContinue as found:
+        # PARSEC_SPIN_FLIP_CONTINUATION=auto: a start lies below the state of the route (only what the exception holds
+        # leaves this block, not the frames of the flip loop)
+        continuation = found.with_traceback(None)
     except _SpinFlipFractional as broken:
         # Only the note leaves this block: the frames of the flip loop, and the orbitals they hold, go with the
         # exception.
@@ -907,11 +1255,22 @@ def run_spin_scf(
             raise
         record = _spin_flip_guard_record(error)
         why = f"a test of the spin sectors failed in a flip loop after {error.stage} ({error.report.reason})"
+    if continuation is not None:
+        return _continue_without_flip(system, keywords, continuation, callback)
+    return _rerun_without_flip(system, keywords, record, why)
+
+
+def _rerun_without_flip(system, keywords: dict, record, why: str):
+    """The loop again from its start with both channels (the route of ``off``) after ``record``, for the rest of the
+    run (:func:`leave_spin_flip`); a warm start without its saved subspaces, which the flip loop moved on."""
+
     leave_spin_flip(system, why)
+    callback = keywords.get("callback")
     if callback is not None:
         callback(record)
+    warm_start = keywords.get("warm_start")
     if warm_start is not None:
-        keywords["warm_start"] = replace(warm_start, eigensolver_state=None, first_iteration_degree=None)
+        keywords = {**keywords, "warm_start": replace(warm_start, eigensolver_state=None, first_iteration_degree=None)}
     return _run_spin_loop(system, **keywords)
 
 
@@ -930,6 +1289,8 @@ def _run_spin_loop(
     iteration_state_callback: Callable[[object], None] | None = None,
     exchange_term: object | None = None,
     flip_taken: list | None = None,
+    give_up: Callable[[int, float, float], bool] | None = None,
+    flip_test: bool = True,
 ) -> SinglePointResult:
     """Run PARSEC-style potential mixing with two spin channels.
 
@@ -953,7 +1314,10 @@ def _run_spin_loop(
     full-grid arrays also where the loop kept them on the orbits.
 
     ``flip_taken`` (a list, from :func:`run_spin_scf`) receives the description of the spin-flip operation where
-    this loop takes the down channel from the up channel.
+    this loop takes the down channel from the up channel.  ``give_up(iteration, free energy, residual)`` (the
+    continuation of :func:`_continue_without_flip`) is asked after every iteration that did not converge and stops the
+    loop, unconverged, where it returns true; ``flip_test`` false skips the test of the converged state of the route
+    (the loop that converges that state again after a continuation that did not end below it).
     """
 
     reduced_hooks = {
@@ -1025,6 +1389,8 @@ def _run_spin_loop(
         hubbard_projectors=hubbard_projectors,
         ionic_potential=ionic_potential,
     )
+    # (PARSEC_SPIN_FLIP_SYMMETRY=late: the operation the loop takes once its channels are images of each other)
+    pending_flip = None
     volume_element = system.grid.volume_element
     number_of_states = _number_of_states(system)
     settings = system.input.scf
@@ -1104,6 +1470,9 @@ def _run_spin_loop(
             deviation, bound = flip.warm_start_check(input_potentials[0], input_potentials[1])
             if deviation <= bound:
                 input_potentials[1] = flip.down_field(input_potentials[0])
+            elif getattr(flip, "mode", "auto") == "late":
+                # (PARSEC_SPIN_FLIP_SYMMETRY=late: both channels until they are images of each other)
+                pending_flip, flip = flip, None
             else:
                 flip_refusal = (
                     f"the down potential of the warm start (Restart_Run, the structure before) is not the image of "
@@ -1113,6 +1482,15 @@ def _run_spin_loop(
                     bound,
                 )
                 flip = None
+    # PARSEC_SPIN_FLIP_SYMMETRY=late: the loop solves both channels, as off does, until they are images of each other
+    # within its residual (_late_flip_switch), and takes the flip from there; a warm start whose potentials are images
+    # of each other (the structure before, in the route) takes it at once.
+    if flip is not None and warm_start is None and getattr(flip, "mode", "auto") == "late":
+        pending_flip, flip = flip, None
+    late_switched = None
+    late_asymmetries: list[float] = []
+    # (the ratios of the potential deviation to the residual where the other conditions of the switch held)
+    late_ratios: list[float] = []
     if closer is not None:
         # (a loop that continues one whose States_Num was raised keeps that count)
         number_of_states = closer.carried(number_of_states, eigval_states)
@@ -1327,6 +1705,9 @@ def _run_spin_loop(
                     break
                 if passes and change <= scalar_field_adapter.start_level_change:
                     scalar_field_adapter.abandon_start(report, passes)
+                    # (it returns only where the adapter puts the report aside, PARSEC_SPIN_SECTOR_STABILITY=auto:
+                    # the loop goes on in the sectors and the state is tested at its end)
+                    break
                 if passes >= scalar_field_adapter.start_spectrum_passes or hubbard_projectors is not None:
                     # Still moving: tests 2 and 3 decide at the end.
                     break
@@ -1545,6 +1926,12 @@ def _run_spin_loop(
                 iteration=iteration,
             )
             mixed_potentials = split_channels(mixed)
+            if late_switched is not None and flip is not None:
+                # (PARSEC_SPIN_FLIP_SYMMETRY=late: the history of the mixer holds the iterations before the switch, in
+                # which the channels were solved apart; the next input is one of the route)
+                mixed_potentials = list(
+                    _flip_symmetric(flip, mixed_potentials[0], mixed_potentials[1], scalar_field_adapter)
+                )
         else:
             # The vtau of both channels joins the vector (SCF.meta_gga).
             mixed_potentials = meta.mix(
@@ -1707,6 +2094,60 @@ def _run_spin_loop(
                 continue
             converged = True
             break
+        late_deviation: list[float] = []
+
+        def deviation_of_inputs():
+            # (the input potentials of this iteration against a pair of the route, in the norm of its residual)
+            late_deviation.append(
+                _flip_potential_deviation(
+                    pending_flip, input_potentials, densities, electrons, evaluate_residual_metrics, volume_element,
+                    bool(settings.use_plain_residual),
+                )
+            )
+            late_ratios.append(late_deviation[-1] / max(float(selected_residual), 1.0e-300))
+            return late_deviation[-1]
+
+        if pending_flip is not None and _late_flip_switch(
+            eigenvalues, occupation_result.occupations, fermi_level, selected_residual, settings, late_asymmetries,
+            deviation=deviation_of_inputs,
+        ):
+            # PARSEC_SPIN_FLIP_SYMMETRY=late: the two solved channels are images of each other within the residual;
+            # the next input is that of the route, which takes the down channel from the up channel from here on.
+            mixed_potentials = list(
+                _flip_symmetric(pending_flip, mixed_potentials[0], mixed_potentials[1], scalar_field_adapter)
+            )
+            flip, pending_flip = pending_flip, None
+            late_switched = iteration
+            if LATE_FLIP_MIXER == "project":
+                _project_mixer_history(mixer, flip)
+            elif LATE_FLIP_MIXER == "reset":
+                reset = getattr(mixer, "reset", None)
+                if callable(reset):
+                    reset()
+            if flip_taken is not None:
+                flip_taken.append(str(getattr(flip, "description", "")))
+            if callback is not None:
+                callback(
+                    _late_flip_record(
+                        flip,
+                        switched=True,
+                        iteration=iteration,
+                        lines=(
+                            f"residual {float(selected_residual):.3e} Ry; input potentials {late_deviation[-1]:.3e} Ry "
+                            f"apart in its norm; levels {late_asymmetries[-1]:.3e} Ry; densities "
+                            f"{_flip_density_deviation(flip, densities, scalar_field_adapter, volume_element):.3e} "
+                            "electrons",
+                        ),
+                    )
+                )
+        if give_up is not None:
+            from parsec_python.acceleration.SCF.spin_flip_stability import entropy_term
+
+            free = float(energies.total) + entropy_term(
+                occupation_result.occupations, weights, settings.fermi_temperature_kelvin
+            )
+            if give_up(iteration, free, float(selected_residual)):
+                break
         input_potentials = mixed_potentials
         if meta is not None:
             meta.advance()
@@ -1725,7 +2166,67 @@ def _run_spin_loop(
         if largest >= SPIN_FLIP_OCCUPATION_TOLERANCE:
             raise _SpinFlipFractional(largest, lines)
     stability = None
-    if flip is not None and converged and getattr(flip, "stability", "off") == "auto":
+    safety = None
+    # (a loop of PARSEC_SPIN_FLIP_SYMMETRY=late took the flip only where off's channels were images of each other)
+    tested = flip is not None and converged and flip_test and getattr(flip, "mode", "auto") != "late"
+    if (
+        tested
+        and getattr(flip, "stability", "off") == "auto"
+        and getattr(flip, "continuation", "off") == "auto"
+    ):
+        # PARSEC_SPIN_FLIP_CONTINUATION=auto: the test of the converged state and the starts below it, from the down
+        # channel alone (acceleration/SCF/spin_flip_stability.py); where one lies GAIN below the state of the route,
+        # run_spin_scf continues from it without the flip.
+        from parsec_python.acceleration.SCF.spin_flip_stability import FlipLoopState, entropy_term, flip_state_safety
+
+        temperature = float(settings.fermi_temperature_kelvin)
+        reference = float(energies.total) + entropy_term(occupation_result.occupations, weights, temperature)
+        safety = flip_state_safety(
+            FlipLoopState(
+                system=system,
+                flip=flip,
+                solve=solvers[1],
+                number_of_states=number_of_states,
+                eigensolver_settings=eigensolver_settings,
+                neighbors=neighbors,
+                settings=settings,
+                up_potential=last_input_potentials[0],
+                up_eigenvalues=eigenvalues[0],
+                fermi_level=float(fermi_level),
+                ionic_potential=ionic_potential,
+                hartree_potential=hartree_potential,
+                reduced=reduced,
+                adapter=scalar_field_adapter,
+                orbital_density_builder=orbital_density_builder,
+                volume_element=volume_element,
+                total_energy=evaluate_total_energy,
+                reference=reference,
+                temperature=temperature,
+                alpha_z_energy=float(getattr(system, "alpha_z_energy", 0.0) or 0.0),
+            )
+        )
+        if safety.pays:
+            best = safety.best
+            restart = getattr(solvers[0], "start_new_scf_loop", None)
+            up_state = restart() if callable(restart) else eigval_states[0]
+            restart = getattr(solvers[1], "start_new_scf_loop", None)
+            down_state = restart() if callable(restart) else safety.down_state
+            field_of = scalar_field_adapter.field if reduced else (lambda values: values)
+            raise _SpinFlipContinue(
+                safety,
+                start=(
+                    np.asarray(to_public(field_of(best.up)), dtype=np.float64),
+                    np.asarray(to_public(field_of(best.down)), dtype=np.float64),
+                ),
+                centre=(
+                    np.asarray(to_public(last_input_potentials[0]), dtype=np.float64),
+                    np.asarray(to_public(flip.down_field(last_input_potentials[0])), dtype=np.float64),
+                ),
+                hartree=np.asarray(to_public(hartree_potential), dtype=np.float64),
+                states=(up_state, down_state),
+                reference=reference,
+            )
+    elif tested and getattr(flip, "stability", "off") == "auto":
         # PARSEC_SPIN_FLIP_STABILITY=auto: the converged state against perturbations that break the operation, from
         # the response of the down channel (the up channel and its orbitals are not touched); run_spin_scf solves the
         # loop again with both channels where it is unstable.
@@ -1854,6 +2355,57 @@ def _run_spin_loop(
     if stability is not None and callback is not None:
         # (PARSEC_SPIN_FLIP_STABILITY: the note of a kept state)
         callback(_spin_flip_stable_record(stability))
+    if late_switched is not None:
+        result.timings.detail["spin_flip_switch_iteration"] = float(late_switched)
+    if pending_flip is not None and callback is not None:
+        # (PARSEC_SPIN_FLIP_SYMMETRY=late: a loop that never switched says so)
+        callback(
+            _late_flip_record(
+                pending_flip,
+                switched=False,
+                iteration=len(history),
+                lines=(
+                    # (the fields of the result are on the full grid here)
+                    f"at the end: densities {_flip_density_deviation(pending_flip, densities, None, volume_element):.3e} "
+                    f"electrons apart from images of each other, levels "
+                    f"{(late_asymmetries[-1] if late_asymmetries else float('nan')):.3e} Ry"
+                    + (
+                        f"; where the levels allowed the switch, the input potentials at least {min(late_ratios):.3g} "
+                        "times the residual apart"
+                        if late_ratios
+                        else ""
+                    ),
+                ),
+            )
+        )
+    if safety is not None:
+        # (PARSEC_SPIN_FLIP_CONTINUATION=auto: no start lies GAIN below the state of the route, which is kept)
+        result.timings.detail.update(
+            {
+                "spin_flip_stability_largest": float(safety.largest),
+                "spin_flip_stability_probes": float(safety.probes),
+                "spin_flip_stability_seconds": float(safety.seconds),
+                "spin_flip_candidates_seconds": float(safety.candidate_seconds),
+                "spin_flip_candidate_gain": float(safety.gain),
+                "spin_flip_down_passes": float(safety.passes),
+            }
+        )
+        if callback is not None:
+            callback(
+                _spin_flip_safety_record(
+                    safety,
+                    route="spin_flip_stable",
+                    reason=(
+                        "the state of the converged loop is kept: "
+                        + (
+                            "it is unstable against perturbations that break the operation, "
+                            if safety.unstable
+                            else "it is stable against perturbations that break the operation, "
+                        )
+                        + f"and no start tried lies {safety.tolerance:g} Ry below it"
+                    ),
+                )
+            )
     return result
 
 

@@ -412,6 +412,24 @@ def spin_sector_fallback_lines(record) -> list[str]:
             *(f"       {line}" for line in getattr(record, "multiplets", ())),
             "",
         ]
+    if getattr(record, "route", "spin") == "spin_flip_late":
+        # PARSEC_SPIN_FLIP_SYMMETRY=late: from which iteration the loop takes the route, or that it never did
+        return [
+            "",
+            f" NOTE: PARSEC_SPIN_FLIP_SYMMETRY=late: {record.reason}",
+            *(f"       ({line})" for line in getattr(record, "multiplets", ())),
+            "",
+        ]
+    if getattr(record, "route", "spin") == "spin_flip_continued":
+        # PARSEC_SPIN_FLIP_CONTINUATION=auto: the loop without the flip from a start below the state of the route, and
+        # what it ended in (SCF/spin_polarized.py)
+        lines = tuple(getattr(record, "multiplets", ()))
+        return [
+            "",
+            f" NOTE: PARSEC_SPIN_FLIP_CONTINUATION: {record.reason}" + (":" if lines else "."),
+            *(f"       {line}" for line in lines),
+            "",
+        ]
     if getattr(record, "route", "spin") == "kpoint" and getattr(record, "doublet", False):
         # PARSEC_SPIN_GUARD_DOUBLETS=stop on the k-point sectors
         return [
@@ -451,6 +469,19 @@ def spin_sector_fallback_lines(record) -> list[str]:
             "",
             f" NOTE: k-point sectors: {record.reason} (kept):",
             *(f"       {line}" for line in record.multiplets),
+            "",
+        ]
+    if getattr(record, "route", "spin") == "spin_stability_skipped":
+        # PARSEC_SPIN_SECTOR_STABILITY=auto on a run that does not take the test (acceleration.driver)
+        return ["", f" NOTE: {record.reason}.", ""]
+    if getattr(record, "route", "spin") in ("spin_stable", "spin_unstable", "spin_continued"):
+        # PARSEC_SPIN_SECTOR_STABILITY=auto: the state of a spin run in the sectors tested on the full grid
+        # (acceleration/SCF/sector_stability.py): kept, unstable (the loop on the full grid follows), or what was kept
+        return [
+            "",
+            f" NOTE: Spin_Symmetry_Sectors: {record.reason}"
+            + (" (kept):" if record.route == "spin_stable" else ":"),
+            *(f"       {line}" for line in getattr(record, "multiplets", ())),
             "",
         ]
     if getattr(record, "route", "spin") == "kpoint_doublet":
@@ -2005,8 +2036,9 @@ def fortran_numerics_lines() -> tuple[str, ...]:
 def noncollinear_frame_lines(problem) -> tuple[str, ...]:
     """The line of the header of a non-collinear run whose gradient functional takes the collinear, the axis or the
     multicollinear frame (``PARSEC_NONCOLLINEAR_GGA_FRAME``, :func:`parsec_python.V_xc.noncollinear.frame_decision`),
-    or a NOTE where ``auto`` keeps the local frame for want of a device; nothing for the local frame otherwise
-    (``off``, a local functional, no initial moment: the output of before)."""
+    or a NOTE where ``auto`` keeps the local frame (non-collinear initial moments) or the axis frame (collinear ones
+    with spin-orbit coupling, ``PARSEC_NONCOLLINEAR_MC_SPIN_ORBIT``) for want of a device; nothing for the local frame
+    otherwise (``off``, a local functional, no initial moment: the output of before)."""
 
     scf = getattr(problem, "scf", None)
     if scf is None or not getattr(scf, "noncollinear", False):
@@ -2026,10 +2058,14 @@ def noncollinear_frame_lines(problem) -> tuple[str, ...]:
         from ..V_xc.multicollinear import BLEND_LOWER, BLEND_UPPER, multicollinear_rule
 
         rule = multicollinear_rule()
+        start = (
+            ", for collinear initial moments with spin-orbit coupling: PARSEC_NONCOLLINEAR_MC_SPIN_ORBIT=auto"
+            if getattr(frame, "spin_orbit_start", False) else ""
+        )
         return (
             f" Non-collinear {scf.xc_functional}: the multicollinear functional where |m| < {BLEND_LOWER:g} (n + "
             f"n_core), the local frame above {BLEND_UPPER:g} ({rule.points}-point Lebedev rule, "
-            f"{rule.evaluations} evaluations per point; PARSEC_NONCOLLINEAR_GGA_FRAME={frame.setting})",
+            f"{rule.evaluations} evaluations per point; PARSEC_NONCOLLINEAR_GGA_FRAME={frame.setting}{start})",
         )
     if frame.mode == FRAME_COLLINEAR:
         return (
@@ -2037,11 +2073,25 @@ def noncollinear_frame_lines(problem) -> tuple[str, ...]:
             f"initial moments (PARSEC_NONCOLLINEAR_GGA_FRAME={frame.setting})",
         )
     if frame.mode == FRAME_AXIS:
-        return (
+        lines = (
             f" Non-collinear {scf.xc_functional} with spin-orbit coupling: the axis frame, the signed polarization "
             f"along the principal axis of m, the local frame where m leaves it (PARSEC_NONCOLLINEAR_GGA_FRAME="
             f"{frame.setting})",
         )
+        if getattr(frame, "spin_orbit_declined", False):
+            try:
+                from ..acceleration.V_xc.multicollinear_xc import unavailable_reason
+            except ImportError:
+                reason = "no accelerated package"
+            else:
+                reason = unavailable_reason() or "no CUDA device"
+            lines += (
+                f" NOTE: non-collinear {scf.xc_functional} with spin-orbit coupling from collinear initial moments keeps "
+                f"the axis frame here ({reason}): the multicollinear frame that PARSEC_NONCOLLINEAR_MC_SPIN_ORBIT=auto "
+                "takes there needs a CUDA device on every MPI rank, so a run of this input with one evaluates the other "
+                "functional (PARSEC_NONCOLLINEAR_MC_SPIN_ORBIT=off keeps the axis frame on every run)",
+            )
+        return lines
     return ()
 
 

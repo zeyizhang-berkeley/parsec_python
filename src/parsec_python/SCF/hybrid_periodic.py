@@ -1096,6 +1096,7 @@ def bloch_warm_start(previous_system, previous_result, system, unpolarized=None)
         exchange_orbitals=bloch_orbital_sets_of(
             previous_result, GridBox(previous_system.grid), result_stars(previous_system, previous_result)
         ),
+        exchange_stability_ratio=getattr(getattr(previous_result, "exact_exchange", None), "spin_stability_ratio", None),
     )
 
 

@@ -2137,6 +2137,11 @@ class MPIFockEngine(DeviceFockEngine):
     def __init__(self, exchange: MPIDeviceExchange, system, definition) -> None:
         self.device = exchange
         self.solvers = exchange.pair_solvers(system, definition)
+        # What the methods of DeviceFockEngine read (its weighted_guard after the start and every inner loop, the
+        # start system of a meta-GGA hybrid): without them a hybrid of a cluster on the runner stopped at its start.
+        self.definition = definition
+        scf = getattr(getattr(system, "input", None), "scf", None)
+        self.fixed_occupations = getattr(scf, "fixed_occupations", None) is not None
 
     def exchange(self, sets, *, columns: str = "occupied", known=None):
         exchange = self.device

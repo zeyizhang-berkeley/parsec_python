@@ -2496,7 +2496,7 @@ def _libxc_xc_functional(
 
 
 def _input15_pseudopotential_notes(
-    specifications, atoms, states: int | None, xc_functional: str, potentials=None
+    specifications, atoms, states: int | None, xc_functional: str, potentials=None, *, forces: str | None = None
 ) -> list[str]:
     """What PARSEC 1.5's ``io/pseudo.f90`` says of the pseudopotentials, as warnings.
 
@@ -2508,6 +2508,18 @@ def _input15_pseudopotential_notes(
       valence electrons of the neutral atoms (``elval1``, the sum of their
       ionic charges), and asks for at least ``int(N_val/2 + 2) + 1`` states.
       This port runs such an input (``states`` ``None``: not checked).
+    * Tables too short for the forces (``forces``: ``"cluster"``, ``"cell"``,
+      ``None`` without forces; numbers unchanged): the local force of a
+      cluster starts the Coulomb tail ``2 Z / r^2`` at ``rs(npoint-6)``
+      (``forcloc.f90``, :func:`parsec_python.Pseudopotential.radial_derivatives.tail_start_radius`),
+      which a short table puts inside the radius where its local potential
+      still differs from ``-2 Z / r``
+      (:func:`parsec_python.V_ion.ionic_potential.coulomb_onset_radius`; at
+      ``r = 0`` for fewer than 7 samples, at the first sample for 7); the slope
+      tables of ``pseudo.f90`` that a species with linear tables
+      (``Cubic_Spline: .false.``) uses need a complete eighteenth-order
+      stencil, which a table of fewer than 17 samples does not have (every
+      slope zero).  The forces of such a run are not the slope of its energy.
 
     Nothing is said where the pseudopotentials cannot be read here: the run
     reports that itself.
@@ -2552,6 +2564,40 @@ def _input15_pseudopotential_notes(
                 f"not for {hybrid_pseudopotential_family(xc_functional)}, the pseudopotentials of the "
                 f"hybrid {xc_functional}; it is used, as a PBE run uses a CA file"
             )
+    if forces is not None:
+        from ..Pseudopotential.radial_derivatives import DERIVATIVE_HALF_WIDTH, tail_start_radius
+        from ..V_ion.ionic_potential import coulomb_onset_radius
+
+        slope_minimum = 2 * DERIVATIVE_HALF_WIDTH - 1
+        for symbol, potential in potentials.items():
+            count = int(potential.radii.size)
+            specification = specifications.get(symbol)
+            linear = not getattr(specification, "use_spline", True)
+            reasons = []
+            if forces == "cluster":
+                tail = tail_start_radius(potential)
+                try:
+                    onset = coulomb_onset_radius(potential, int(specification.local_angular_momentum))
+                except (AttributeError, ValueError, IndexError):
+                    onset = None
+                if onset is not None and tail < onset:
+                    reasons.append(
+                        f"the local force takes the Coulomb tail 2 Z / r^2 from rs(npoint-6) = {max(tail, 0.0):.3g} bohr "
+                        f"(forcloc.f90), inside the {onset:.3g} bohr where the table's local potential still differs "
+                        "from -2 Z / r"
+                    )
+            if linear and count < slope_minimum:
+                reasons.append(
+                    f"the slope tables of its linear interpolation (pseudo.f90) need {slope_minimum} samples for one "
+                    "complete stencil and are zero"
+                )
+            if reasons:
+                notes.append(
+                    f"Atom_Type {symbol}: {potential.source} holds {count} radial samples: "
+                    + "; ".join(reasons)
+                    + ". The forces of this run are not the slope of its energy (a table of the libraries holds "
+                    "hundreds of samples)"
+                )
     if xc_functional == "pbe":
         for symbol, potential in potentials.items():
             if not pseudopotential_matches_functional(potential, "pbe"):
@@ -5170,6 +5216,11 @@ def _parse_parsec_input(
 
     fortran_numerics_setting()
     ca_continuity_setting()
+    # PARSEC_SYMMETRIC_GRADIENT (the gradient of an oblique grid averaged over the group of its lattice) and
+    # PARSEC_OBLIQUE_FULL_GROUP (which the k-point wedges below read with it): the same
+    from ..Laplacian.symmetric_gradient import full_group_wedge
+
+    full_group_wedge()
     # PARSEC_SPLINE_COULOMB_TAIL (where a splined local potential takes -2 Z/r): the same
     spline_coulomb_tail_setting()
     # PARSEC_DOMAIN_SHELL_SHIFT (the grid the default radius rule keeps off its sphere) and PARSEC_SPHERE_TIES (the
@@ -6054,6 +6105,11 @@ def _parse_parsec_input(
             None if (self_consistent_spin_orbit or noncollinear) else states,
             xc_functional,
             potentials=potentials if (default_radius or (default_tolerance and multipole_boundary)) else None,
+            forces=(
+                None
+                if not (atoms_move or single_point_forces)
+                else ("cell" if is_periodic else "cluster")
+            ),
         )
     )
 
@@ -7309,7 +7365,8 @@ def _guarded_mesh(problem, routines, *, one_image_per_point):
 
     On Fortran-derived routines that the input did not request, the mesh takes the shortest representatives of its
     wedge and, outside a hybrid, the shared images of the zone boundary.  Otherwise its points stay, with a warning.
-    A mesh without such a point is returned as it is, without a note.
+    A mesh without such a point is returned as it is, without a note, except on a grid that takes the symmetric
+    gradient of ``PARSEC_SYMMETRIC_GRADIENT=on`` (:func:`_symmetric_gradient_mesh`).
     """
 
     from ..Grid.kpoints import FREE_LEVEL_TOLERANCE, kpoint_sampling, lowest_free_levels
@@ -7328,9 +7385,6 @@ def _guarded_mesh(problem, routines, *, one_image_per_point):
     if sampled is None:
         return problem, []
     levels = lowest_free_levels(sampled[0], cell, problem.grid)
-    if levels is None or not bool(np.any(levels < -FREE_LEVEL_TOLERANCE)):
-        return problem, []
-    text = _free_level_text(sampled[0], levels, reciprocal)
     movable = bool(
         routines.fortran
         and routines.requested is not True
@@ -7338,6 +7392,9 @@ def _guarded_mesh(problem, routines, *, one_image_per_point):
         and problem.monkhorst_pack_dimensions is not None
         and not one_image_per_point
     )
+    if levels is None or not bool(np.any(levels < -FREE_LEVEL_TOLERANCE)):
+        return _symmetric_gradient_mesh(problem, movable=movable)
+    text = _free_level_text(sampled[0], levels, reciprocal)
     if not movable or kpoint_mesh_guard_setting() == "off":
         why = (
             "Use_Fortran_Routines: .true."
@@ -7375,6 +7432,48 @@ def _guarded_mesh(problem, routines, *, one_image_per_point):
             f"Monkhorst_Pack_Grid: {_free_level_text(points, after, reciprocal)}, at its shortest image: this grid is "
             "too coarse for these k-points: no image of the point removes the level, and the run goes on"
         )
+    return moved, notes
+
+
+def _symmetric_gradient_mesh(problem, *, movable):
+    """``(problem, notes)``: the Monkhorst-Pack mesh of a grid that takes the symmetric gradient
+    (``PARSEC_SYMMETRIC_GRADIENT=on``, :func:`parsec_python.Grid.kpoints.takes_symmetric_gradient`) and has no free
+    level below zero, on Fortran-derived routines that the input did not request (``movable``, the rule of
+    :func:`_guarded_mesh`).
+
+    That gradient commutes with every operation of the wedge, but the finite-difference Bloch operator is not invariant
+    under ``k -> k + G``: Fortran's representatives in ``(-1/2, 1/2]`` along the reciprocal vectors, which an
+    operation maps onto other images of the points of their stars, give the energy of the mesh at images that are not
+    its own (fcc Cu 5x5x5 at 0.3 bohr, two of ten representatives no shortest image: 2.9e-3 Ry from the whole mesh).
+    The mesh takes the shortest representatives of its wedge and, outside a hybrid, the shared images of the zone
+    boundary, as the guard gives a mesh with a free level below zero (which a grid of the symmetric gradient has none
+    of on the hexagonal, fcc and bcc lattices); the wedge of the operations that keep the grid's finite-difference
+    operators follows under ``PARSEC_KPOINT_GUARD_WEDGE=auto``.  ``PARSEC_KPOINT_MESH_GUARD=off`` keeps Fortran's
+    representatives, and so does every other mesh (``off`` of the gradient: nothing changes)."""
+
+    from ..Grid.kpoints import takes_symmetric_gradient
+
+    if not movable or kpoint_mesh_guard_setting() == "off":
+        return problem, []
+    if not takes_symmetric_gradient(problem.periodic_cell, problem.grid):
+        return problem, []
+    moved = replace(
+        problem,
+        kpoint_shortest_representatives=True,
+        **({} if problem.scf.is_hybrid else {"kpoint_tie_images": True}),
+    )
+    notes = [
+        "Monkhorst_Pack_Grid: the symmetric gradient of this oblique grid (PARSEC_SYMMETRIC_GRADIENT=on) commutes with "
+        "the operations of the wedge; these Fortran-derived routines were not requested, so the mesh runs at the "
+        "shortest representatives of its points"
+        + ("" if problem.scf.is_hybrid else ", the images of a point of the zone boundary with equal shares")
+        + " (the finite-difference Bloch operator is not invariant under k -> k + G; PARSEC_KPOINT_MESH_GUARD=off "
+        "keeps the former points)"
+    ]
+    if kpoint_guard_wedge_setting() == "auto":
+        moved, wedge_note = _guarded_stencil_wedge(moved)
+        if wedge_note is not None:
+            notes.append(wedge_note)
     return moved, notes
 
 

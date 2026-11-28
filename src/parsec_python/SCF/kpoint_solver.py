@@ -60,6 +60,10 @@ class KPointJob:
     # the atoms of the cell, the Cartesian k-points and whether the density is the only part of ``accumulate``
     # (set by the scalar k-point SCF); None: no such splitting.
     geometry: Any = None
+    # The bytes that the SCF step holds on a device beside the subspaces of the tasks, by device (the sum of the
+    # multicollinear frame of a non-collinear loop on the device of its XC), for the memory rules of the device
+    # solvers; None: nothing counted.
+    resident_device_bytes: dict | None = None
 
 
 def task_states(job: "KPointJob", task: int) -> int:

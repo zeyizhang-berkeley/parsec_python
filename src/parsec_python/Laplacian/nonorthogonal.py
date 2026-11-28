@@ -531,10 +531,18 @@ def cartesian_gradient(values: np.ndarray, grid, weights: np.ndarray) -> np.ndar
     On a wire or slab grid the field is zero outside the domain along the
     confined directions (the cluster convention) and wraps along the
     periodic ones.
+
+    Under ``PARSEC_SYMMETRIC_GRADIENT=on`` a bulk grid whose lattice has index maps that are no signed permutation
+    takes the group average of this gradient (:mod:`.symmetric_gradient`).
     """
 
     if getattr(grid, "is_confined_periodic", False):
         return _confined_cartesian_gradient(values, grid, weights)
+    from .symmetric_gradient import apply_gradient, symmetric_gradient_lines
+
+    lines = symmetric_gradient_lines(grid)
+    if lines is not None:
+        return apply_gradient(values, grid, lines, weights)
     box = np.asarray(values, dtype=np.float64).reshape(grid.shape)
     along = np.empty((3, grid.size), dtype=np.float64)
     for axis in range(3):
@@ -548,11 +556,17 @@ def cartesian_gradient_transpose(fluxes: np.ndarray, grid, weights: np.ndarray) 
     """Exact transpose of :func:`cartesian_gradient` applied to ``(3, n)`` fluxes.
 
     ``D^T F = sum_i D_i^T (inv(A_n) F)_i`` with ``D_i^T = -D_i`` for the
-    antisymmetric wrapped stencil, so ``-D^T F`` is the discrete divergence.
+    antisymmetric wrapped stencil, so ``-D^T F`` is the discrete divergence.  The symmetric gradient of
+    :func:`cartesian_gradient` takes its own transpose.
     """
 
     if getattr(grid, "is_confined_periodic", False):
         return _confined_cartesian_gradient_transpose(fluxes, grid, weights)
+    from .symmetric_gradient import apply_gradient_transpose, symmetric_gradient_lines
+
+    lines = symmetric_gradient_lines(grid)
+    if lines is not None:
+        return apply_gradient_transpose(fluxes, grid, lines, weights)
     along = np.asarray(grid.gradient_transform, dtype=float).T @ np.asarray(
         fluxes, dtype=np.float64
     )

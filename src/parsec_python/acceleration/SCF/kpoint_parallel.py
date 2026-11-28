@@ -263,6 +263,9 @@ class _SolveWorker:
         backend.use()
         _, total = backend.cp.cuda.runtime.memGetInfo()
         needed = (len(self.tasks) + 6) * dimension * working * 16
+        # what the SCF step holds on this device beside the subspaces (the multicollinear XC of a non-collinear loop)
+        resident = getattr(self.job, "resident_device_bytes", None) or {}
+        needed += int(resident.get(int(backend.cp.cuda.Device().id), 0))
         return needed > _AUTO_FRACTION * total
 
     def _to_host(self, array) -> np.ndarray:

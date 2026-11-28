@@ -42,7 +42,12 @@ structures of a relaxation or dynamics, :func:`system_frame`):
   that a loose first solve leaves get no field); its result is that of the
   collinear spin driver.  A non-collinear state needs non-collinear initial
   moments;
-* the same with spin-orbit coupling: the **axis frame**, the collinear
+* the same with spin-orbit coupling: for PBE and PW91 the **multicollinear
+  frame** below where a CUDA device sums it
+  (``PARSEC_NONCOLLINEAR_MC_SPIN_ORBIT=auto``, the default:
+  :func:`multicollinear_spin_orbit_setting`; spin-orbit coupling cants the
+  moments of a collinear start); without a device, under that switch's ``off``
+  and for the other gradient functionals the **axis frame**, the collinear
   functional of the signed polarization along the principal axis ``u`` of the
   magnetization (the eigenvector of the largest eigenvalue of ``sum_r m m^T``),
 
@@ -63,7 +68,8 @@ structures of a relaxation or dynamics, :func:`system_frame`):
   (``int |m| >= GUARD_MOMENT``) with the second eigenvalue above
   ``GUARD_RATIO`` of the first or more than ``GUARD_DEAD_BAND`` of ``int |m|``
   where ``|sigma| < |m|/2``;
-* PBE or PW91 with non-collinear initial moments: the **multicollinear frame**
+* PBE or PW91 with non-collinear initial moments (and with collinear ones and
+  spin-orbit coupling, above): the **multicollinear frame**
   (:mod:`parsec_python.V_xc.multicollinear`), the multicollinear functional of
   Pu et al. (Phys. Rev. Research 5, 013036 (2023)), an average of the collinear
   functional over projection axes, with a radial rule in place of its second
@@ -89,6 +95,7 @@ for a gradient functional when the starting moments are collinear
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from typing import Callable
 
@@ -117,6 +124,12 @@ COLLINEAR_MOMENT_TOLERANCE = 1.0e-6
 #: ``auto`` takes the multicollinear frame for non-collinear initial moments of PBE and PW91 where a device sums it
 #: (:func:`multicollinear_available`); the local frame without one
 AUTO_MULTICOLLINEAR = True
+#: ``PARSEC_NONCOLLINEAR_MC_SPIN_ORBIT``: ``auto`` (the default) takes the multicollinear frame under ``auto`` also for
+#: the collinear initial moments of PBE and PW91 with spin-orbit coupling where a device sums it (the axis frame
+#: without one); ``off`` keeps the axis frame there, as up to 2026-11-27
+MULTICOLLINEAR_SPIN_ORBIT_ENV = "PARSEC_NONCOLLINEAR_MC_SPIN_ORBIT"
+MULTICOLLINEAR_SPIN_ORBIT_DEFAULT = "auto"
+MULTICOLLINEAR_SPIN_ORBIT_VALUES = ("auto", "off")
 
 
 @dataclass(frozen=True)
@@ -165,6 +178,21 @@ def noncollinear_gga_frame_setting() -> str:
             f"{NONCOLLINEAR_GGA_FRAME_ENV} must be one of {', '.join(NONCOLLINEAR_GGA_FRAME_VALUES)}, not {value!r}"
         )
     multicollinear_points_setting()
+    multicollinear_spin_orbit_setting()
+    return value
+
+
+def multicollinear_spin_orbit_setting() -> str:
+    """``PARSEC_NONCOLLINEAR_MC_SPIN_ORBIT``: ``auto`` (the default) or ``off`` (:data:`MULTICOLLINEAR_SPIN_ORBIT_ENV`);
+    read and checked with ``PARSEC_NONCOLLINEAR_GGA_FRAME`` (:func:`noncollinear_gga_frame_setting`).  Another value is
+    an error."""
+
+    value = os.environ.get(MULTICOLLINEAR_SPIN_ORBIT_ENV, "").strip().lower() or MULTICOLLINEAR_SPIN_ORBIT_DEFAULT
+    if value not in MULTICOLLINEAR_SPIN_ORBIT_VALUES:
+        raise ValueError(
+            f"{MULTICOLLINEAR_SPIN_ORBIT_ENV} must be one of {', '.join(MULTICOLLINEAR_SPIN_ORBIT_VALUES)}, not "
+            f"{value!r}"
+        )
     return value
 
 
@@ -247,6 +275,11 @@ class NoncollinearFrame:
         #: the local frame that ``auto`` keeps for non-collinear initial moments without a device for the
         #: multicollinear frame (:func:`frame_decision`)
         self.multicollinear_declined = False
+        #: the multicollinear frame that ``auto`` takes for collinear initial moments with spin-orbit coupling
+        #: (``PARSEC_NONCOLLINEAR_MC_SPIN_ORBIT=auto``)
+        self.spin_orbit_start = False
+        #: the axis frame that ``auto`` keeps there for want of a device on every rank (a NOTE in parsec.out)
+        self.spin_orbit_declined = False
 
     def __repr__(self) -> str:
         return f"NoncollinearFrame(mode={self.mode!r}, axis={self.axis!r}, left_axis_at={self.left_axis_at!r})"
@@ -310,15 +343,18 @@ class NoncollinearFrame:
 
 
 def frame_decision(
-    functional, atoms, specifications, spin_orbit: bool, setting: str | None = None
+    functional, atoms, specifications, spin_orbit: bool, setting: str | None = None,
+    spin_orbit_setting: str | None = None,
 ) -> NoncollinearFrame:
     """The frame of a non-collinear run from its input (the module docstring): the local frame under ``off`` and for
     a local functional; the multicollinear frame for PBE and PW91 under ``multicollinear`` and, under ``auto``
     (:data:`AUTO_MULTICOLLINEAR`), for their non-collinear initial moments where a device sums it (else the local frame
     with ``multicollinear_declined``); the local frame without an initial moment
     and for the non-collinear moments of the other functionals; else the collinear frame along the axis of the initial
-    moments without spin-orbit coupling and the axis frame with it.  ``atoms`` carry ``initial_moment`` (``None`` for
-    an atom without one), ``specifications`` the species with ``initial_spin_polarization``."""
+    moments without spin-orbit coupling and, with it, the multicollinear frame for PBE and PW91 where a device sums it
+    and ``spin_orbit_setting`` (``PARSEC_NONCOLLINEAR_MC_SPIN_ORBIT``, :func:`multicollinear_spin_orbit_setting`) is
+    ``auto``, the axis frame otherwise.  ``atoms`` carry ``initial_moment`` (``None`` for an atom without one),
+    ``specifications`` the species with ``initial_spin_polarization``."""
 
     from .multicollinear import MULTICOLLINEAR_FUNCTIONALS
 
@@ -337,6 +373,19 @@ def frame_decision(
         return frame
     if axis is None or not collinear:
         return NoncollinearFrame(FRAME_LOCAL, None, setting)
+    if spin_orbit and functional in MULTICOLLINEAR_FUNCTIONALS:
+        if spin_orbit_setting is None:
+            spin_orbit_setting = multicollinear_spin_orbit_setting()
+        if spin_orbit_setting == "auto" and multicollinear_available():
+            # spin-orbit coupling cants the moments of a collinear start: the frame that stays smooth there (the axis
+            # frame leaves its axis, the local frame stalls at the nodes); without a device the axis frame
+            frame = NoncollinearFrame(FRAME_MULTICOLLINEAR, None, setting)
+            frame.spin_orbit_start = True
+            return frame
+        if spin_orbit_setting == "auto":
+            frame = NoncollinearFrame(FRAME_AXIS, axis, setting)
+            frame.spin_orbit_declined = True
+            return frame
     return NoncollinearFrame(FRAME_AXIS if spin_orbit else FRAME_COLLINEAR, axis, setting)
 
 
@@ -515,6 +564,7 @@ def noncollinear_xc(
 
 __all__ = [
     "AXIS_FRAME_SOFTNESS",
+    "MULTICOLLINEAR_SPIN_ORBIT_ENV",
     "NONCOLLINEAR_GGA_FRAME_ENV",
     "NoncollinearFrame",
     "NoncollinearXCResult",
@@ -526,6 +576,7 @@ __all__ = [
     "initial_moments",
     "is_local_functional",
     "local_spin_densities",
+    "multicollinear_spin_orbit_setting",
     "noncollinear_gga_frame_setting",
     "noncollinear_xc",
     "principal_axis",

@@ -121,6 +121,12 @@ class SwitchTests(unittest.TestCase):
             self.assertTrue(_oblique_full_group(replace(problem, scf=replace(problem.scf, xc_functional="pw92"))))
             self.assertFalse(_oblique_full_group(replace(problem, scf=replace(problem.scf, xc_functional="pbe"))))
             self.assertFalse(_oblique_full_group(replace(problem, scf=replace(problem.scf, xc_functional="lb94"))))
+        # a GGA with the gradient averaged over the group of the lattice (PARSEC_SYMMETRIC_GRADIENT=on)
+        with mock.patch.dict(os.environ, {_SWITCH: "auto", "PARSEC_SYMMETRIC_GRADIENT": "on"}):
+            self.assertTrue(_oblique_full_group(replace(problem, scf=replace(problem.scf, xc_functional="pbe"))))
+            self.assertTrue(_oblique_full_group(replace(problem, scf=replace(problem.scf, xc_functional="pw91"))))
+        with mock.patch.dict(os.environ, {_SWITCH: "off", "PARSEC_SYMMETRIC_GRADIENT": "on"}):
+            self.assertFalse(_oblique_full_group(replace(problem, scf=replace(problem.scf, xc_functional="pbe"))))
 
 
 class GeneralOperationTests(unittest.TestCase):
@@ -258,8 +264,35 @@ class GammaSectorTests(unittest.TestCase):
             self.assertLess(abs(results[label][0] - results["full"][0]), 1.0e-9)
             np.testing.assert_allclose(results[label][1], results["full"][1], rtol=0.0, atol=1.0e-7)
 
+    def test_pbe_with_the_symmetric_gradient_against_the_full_grid(self) -> None:
+        # PBE takes the full cubic group with the gradient averaged over the group of the lattice
+        # (PARSEC_SYMMETRIC_GRADIENT=on); without it a GGA keeps the signed permutations
+        from parsec_python.acceleration import driver
 
-def _fcc_problem(moved=0.0):
+        problem = _fcc_problem(moved=0.05, xc="pbe")
+        results = {}
+        for label, environment in (
+            ("full", {"PARSEC_OBLIQUE_SECTORS": "off", "PARSEC_SYMMETRIC_GRADIENT": "on"}),
+            ("general", {**_ON, "PARSEC_SYMMETRIC_GRADIENT": "on"}),
+            ("axis", {**_ON, "PARSEC_SYMMETRIC_GRADIENT": "off"}),
+        ):
+            with mock.patch.dict(os.environ, environment):
+                system = driver.prepare_single_point(problem, backend="cupy", sector_forces=label != "full")
+                result = driver.run_scf(system)
+                self.assertTrue(result.converged)
+                detection = str(dict(result.backend.details).get("symmetry_detection", ""))
+                forces = driver.compute_forces(system, result, symmetrize=label != "full")
+                results[label] = (float(result.energies.total), np.asarray(forces.symmetrized), detection)
+        self.assertIn("other integer maps", results["general"][2])
+        self.assertNotIn("other integer maps", results["axis"][2])
+        self.assertLess(abs(results["general"][0] - results["full"][0]), 1.0e-9)
+        np.testing.assert_allclose(results["general"][1], results["full"][1], rtol=0.0, atol=1.0e-7)
+        # another discretization of the gradient: a different energy, within the order of the stencil
+        self.assertGreater(abs(results["axis"][0] - results["full"][0]), 1.0e-8)
+        self.assertLess(abs(results["axis"][0] - results["full"][0]), 1.0e-2)
+
+
+def _fcc_problem(moved=0.0, xc="ca"):
     # diamond Si in a 2 x 2 x 2 supercell of the primitive fcc cell, atom 1 moved along z: C2v about z (its C2z is no
     # signed permutation of the grid axes)
     vectors = 2.0 * _FCC
@@ -277,7 +310,7 @@ def _fcc_problem(moved=0.0):
         pseudopotentials={"Si": SpeciesPotential(path=DATA / "Si_POTRE.DAT", local_angular_momentum=0)},
         grid=PeriodicGridSettings(spacing=0.75, expansion_order=8),
         periodic_cell=PeriodicCell(vectors),
-        scf=SCFSettings(number_of_states=40, convergence_criterion=1e-10, max_iterations=80, xc_functional="ca"),
+        scf=SCFSettings(number_of_states=40, convergence_criterion=1e-10, max_iterations=80, xc_functional=xc),
         eigensolver=EigensolverSettings(method="chebdav", tolerance=1e-10),
         hartree=HartreeSettings(relative_tolerance=1e-12),
     )

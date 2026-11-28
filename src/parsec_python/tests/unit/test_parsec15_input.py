@@ -209,6 +209,46 @@ class CorrelationTests(_InputDirectory):
             load_pseudopotentials(self.cluster().problem.pseudopotentials, xc_functional="ca")
 
 
+class ShortTableTests(_InputDirectory):
+    def test_forces_of_a_table_of_six_samples_are_warned_of(self) -> None:
+        """The H table of the test data holds 6 radial samples: the local force of a cluster takes the Coulomb tail
+        from r = 0 (forcloc.f90's rs(npoint-6) in the padding; with 7 samples from the first one, still inside the
+        radius where the table differs from -2 Z / r), and linear tables have no complete slope stencil.
+        A warning, only where forces are asked for; the numbers are unchanged; a table of the libraries is not
+        named."""
+
+        def notes(translation):
+            return [note for note in translation.warnings if "radial samples" in note]
+
+        self.assertEqual(notes(self.cluster()), [])
+        forces = notes(self.cluster("Calculate_Force: .true."))
+        self.assertEqual(len(forces), 1)
+        self.assertIn("holds 6 radial samples", forces[0])
+        self.assertIn("rs(npoint-6) = 0 bohr", forces[0])
+        self.assertNotIn("slope tables", forces[0])
+        # seven samples: rs(npoint-6) is the first sample, 0.1 bohr, still inside the core of the table
+        lines = (DATA / "H_POTRE.DAT").read_text().splitlines()
+        lines[3] = lines[3].replace(" 2 0 6 ", " 2 0 7 ")
+        lines[5] += " 6.4"
+        for index in (8, 11):
+            lines[index] += " -2.0"
+        for index in (13, 15, 18, 21):
+            lines[index] += " 0"
+        (self.directory / "H_POTRE.DAT").write_text("\n".join(lines) + "\n")
+        seven = notes(self.cluster("Calculate_Force: .true."))
+        self.assertEqual(len(seven), 1)
+        self.assertIn("holds 7 radial samples", seven[0])
+        self.assertIn("rs(npoint-6) = 0.1 bohr", seven[0])
+        shutil.copy(DATA / "H_POTRE.DAT", self.directory / "H_POTRE.DAT")
+        linear = notes(self.cluster("Calculate_Force: .true.", species="Cubic_Spline: .false."))
+        self.assertIn("need 17 samples", linear[0])
+        # the cell route takes the tail from the last sample: only the slope tables of linear tables
+        self.assertEqual(notes(self.bulk("Calculate_Force: .true.")), [])
+        library = Path(__file__).resolve().parents[3] / "pp_generation" / "NCPPs" / "PBE" / "H" / "PARSEC" / "H_POTRE.DAT"
+        shutil.copy(library, self.directory / "H_POTRE.DAT")
+        self.assertEqual(notes(self.cluster("Calculate_Force: .true.", species="Cubic_Spline: .false.")), [])
+
+
 class HartreeCGTests(_InputDirectory):
     def test_without_the_keywords_the_cg_is_this_ports(self) -> None:
         hartree = self.cluster().problem.hartree

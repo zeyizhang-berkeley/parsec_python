@@ -39,7 +39,13 @@ The loop (the scheme of Quantum ESPRESSO's ACE path, ``electrons.f90``):
    ``E_x(P, P0) = (w/2) sum f <q|V_ACE[P0]|q>`` is evaluated with the
    compressed operator, which makes ``dexx`` larger, never smaller);
 4. stop when ``dexx < Exx_Tolerance`` (and the inner loop converged), else
-   back to 1 with ``P0 = P``.
+   back to 1 with ``P0 = P``.  With ``PARSEC_FOCK_DEXX_FLOOR=auto`` (default)
+   the estimate of each plain operator at its own orbitals (not 0 where the
+   pair kernel is not symmetric) is removed from the next dexx before the
+   test; with ``PARSEC_FOCK_SPIN_STABILITY=auto`` (default) a
+   converged spin-symmetric state with a partly filled level is tested
+   against a spin transfer and the lower state kept
+   (:mod:`parsec_python.SCF.fock_stability`).
 
 Energies.  The band energy ``w sum_i f_i e_i`` of the inner loop holds
 ``a_x w sum_i f_i <q_i|V_ACE|q_i> = 2 a_x E_x(P, P0)`` of exchange.  The inner
@@ -100,6 +106,15 @@ from ..models import (
 from ..V_xc.exact_exchange import exchange_occupation_threshold
 from .fock_controls import InnerCriterion, fock_loop_mixer, fractional_start, recording_hooks
 from .fock_diis import OccupiedBlock, OuterDIIS, OutputSet, orthonormal_complement, window_occupation_floor
+from .fock_stability import (
+    CARRY_RATIO,
+    RETURN_ITERATIONS,
+    SpinStabilityTest,
+    dexx_floor_setting,
+    operator_bias,
+    single_point,
+    spin_stability_setting,
+)
 from ..V_xc.exchange_operator import (
     CompressedExchange,
     apply_exchange_to_orbitals,
@@ -397,7 +412,12 @@ class FockLoopSummary:
     tenfold above its smallest earlier value (the state the loop approached
     was unstable under exact exchange, for example a symmetric ensemble that
     breaks its symmetry), ``None`` otherwise.  ``fractional_occupation`` is
-    the largest ``min(f, 1 - f)`` of the final occupations.
+    the largest ``min(f, 1 - f)`` of the final occupations.  ``spin_stability``
+    is what the stability test of a spin-symmetric state found
+    (:mod:`parsec_python.SCF.fock_stability`, ``PARSEC_FOCK_SPIN_STABILITY``),
+    empty where none ran, and ``spin_stability_ratio`` the decay ratio of a
+    state found stable (or carried from the structure before), which the
+    next structure of a relaxation reads.
     """
 
     functional: str
@@ -421,6 +441,8 @@ class FockLoopSummary:
     remaining_energy: float | None = None
     instability: int | None = None
     fractional_occupation: float = 0.0
+    spin_stability: str = ""
+    spin_stability_ratio: float | None = None
 
 
 #: dexx rising this many times above its smallest earlier value marks an instability.
@@ -976,6 +998,23 @@ def _diis_operator(engine, diis, natural_sets, fraction):
     return operator, applications
 
 
+def _operator_of_sets(engine, sets, fraction, *, bias: bool = False):
+    """``((operator, applications), bias)`` of the orbital sets of a displaced or copied density matrix (the
+    stability test of a spin-symmetric state, :mod:`parsec_python.SCF.fock_stability`), ``(None, 0.0)`` where the
+    build does not fit the devices; ``bias`` asks for the operator's estimate at its own orbitals
+    (:func:`~parsec_python.SCF.fock_stability.operator_bias`, 0 otherwise)."""
+
+    try:
+        applications = engine.exchange(sets, columns="all")
+        operator = engine.fock_operator(sets, applications, fraction)
+    except MemoryError:  # cupy.cuda.memory.OutOfMemoryError is one
+        engine.drop_orbitals(sets)
+        return None, 0.0
+    value = operator_bias(engine, operator, sets, fraction) if bias else 0.0
+    engine.drop_orbitals(sets)
+    return (operator, applications), value
+
+
 def _stop_diis(diis, note: str) -> None:
     """Switch the outer DIIS off for the rest of the loop and free its window."""
 
@@ -1149,6 +1188,10 @@ def run_hybrid_scf(
     diis = OuterDIIS(enabled=settings.outer_mixing == "diis", tolerance=float(settings.tolerance))
     # The plain loop (fixed criterion, no DIIS) returns its eigenpairs as PARSEC does.
     refine_levels = settings.inner_criterion == "adaptive" or settings.outer_mixing == "diis"
+    # The bias of dexx at the orbitals of each plain operator (PARSEC_FOCK_DEXX_FLOOR) and the stability test of a
+    # converged spin-symmetric state (PARSEC_FOCK_SPIN_STABILITY): parsec_python.SCF.fock_stability.
+    floor = dexx_floor_setting() == "auto"
+    stability = SpinStabilityTest(scf, enabled=spin_stability_setting() == "auto")
 
     def report(record: ExchangeLoopIteration) -> None:
         records.append(record)
@@ -1161,6 +1204,11 @@ def run_hybrid_scf(
     # their orbitals).
     loops: list = []
     carried = None if warm_start is None else getattr(warm_start, "exchange_orbitals", None)
+    # Orbitals of a structure whose spin-symmetric state was found stable (a relaxation or dynamics step): that state
+    # is not tested again where its decay ratio was at most CARRY_RATIO (parsec_python.SCF.fock_stability).
+    carried_ratio = None if carried is None else getattr(warm_start, "exchange_stability_ratio", None)
+    if carried_ratio is not None and float(carried_ratio) <= CARRY_RATIO:
+        stability.skip(float(carried_ratio))
     pair_solves = 0
     poisson_seconds = 0.0
     exchange_seconds = 0.0
@@ -1245,6 +1293,8 @@ def run_hybrid_scf(
     operator_extrapolated = False
     applications = engine.exchange(sets, columns="all")
     operator = engine.fock_operator(sets, applications, fraction)
+    # dexx of this operator at its own orbitals (0 where the pair kernel is symmetric), removed from the next estimate.
+    bias = operator_bias(engine, operator, sets, fraction) if floor else 0.0
     if diis.enabled and start is not None:
         # Y_0 of the outer DIIS (Exx_Outer_Mixing): the start (its numbers; no copy before the gate).
         _observe(diis, engine, 0, sets, {})
@@ -1295,11 +1345,16 @@ def run_hybrid_scf(
     estimated_error = float("inf")
     inner = None
     exchange_energy = previous_energy
-    for outer in range(1, settings.max_iterations + 1):
+    # The last outer iteration allowed: Exx_Max_Iter, and again as many for the stability test of a spin-symmetric
+    # state from where it starts (RETURN_ITERATIONS to go back to that state).
+    limit = settings.max_iterations
+    outer = 0
+    while outer < limit:
+        outer += 1
         # 2. The inner SCF with the operator fixed: at Convergence_Criterion, or
         # (Exx_Inner_Criterion: adaptive) at a share of its first residual
         # while the loop is far from converged; the last allowed one is exact.
-        share = None if outer == settings.max_iterations else criteria.share()
+        share = None if outer == limit else criteria.share()
         # An exact loop of the faster controls ends with its levels converged
         # at its last Hamiltonian (to Exx_Tolerance) once the loop has left the
         # path of the plain loop (a loose start or inner loop, a DIIS step):
@@ -1338,7 +1393,8 @@ def run_hybrid_scf(
         exchange_energy = float(sum(application.energy for application in occupied_applications))
         # E_x(P0) of the operator's own density matrix: the orbitals of the loop
         # before, or the natural orbitals of an extrapolated one (Exx_Outer_Mixing).
-        estimated_error = fraction * (2.0 * cross - operator_energy - exchange_energy)
+        # (less the operator's own estimate at its orbitals, PARSEC_FOCK_DEXX_FLOOR: 0 for an extrapolated one)
+        estimated_error = fraction * (2.0 * cross - operator_energy - exchange_energy) - bias
         energies = energies_with_exchange(inner.energies, exchange_energy)
         inner = replace(inner, energies=energies)
         # An inexact inner loop never ends the Fock loop: below the tolerance
@@ -1357,19 +1413,58 @@ def run_hybrid_scf(
         if inner_criterion is not None and inner_criterion > criteria.final:
             off_plain_path = True
         criteria.observe(inner, estimated_error)
-        last = converged or outer == settings.max_iterations
+        last = converged or outer == limit
+        # The stability test of a converged spin-symmetric state (parsec_python.SCF.fock_stability): the orbital sets
+        # of its displaced density matrix (the next operator), or after the test those of the copies of the
+        # symmetric state, where the displacement decayed or the continued state ended no lower.
+        special = None
+        returning = False
+        if stability.probing:
+            verdict = stability.observe(sets, outer)
+            if verdict == "stable" or (last and stability.decide(sets, float(energies.total), converged, outer) == "return"):
+                special = stability.return_sets(engine, sets)
+                if special is not None:
+                    returning = True
+                    last = False
+                    limit = outer + RETURN_ITERATIONS
+                else:
+                    stability.abandon("the copies of its orbitals do not fit the device memory: the loop goes on from where it is")
+        elif converged and stability.waiting and single_point(inner):
+            special = stability.start(engine, sets, float(energies.total), outer)
+            if special is not None:
+                last = False
+                limit = outer + settings.max_iterations
+                # Plain steps: an extrapolation can be drawn to the saddle.
+                diis.clear()
+                diis.enabled = False
+                diis.rollback = None
         ranks: tuple[int, ...] = ()
         asymmetry = 0.0
         extrapolated = False
         note = ""
         if not last:
             built = None
-            if diis.enabled:
+            if special is not None:
+                spent = _spent(occupied_applications)
+                occupied_applications = None
+                # The copies of the symmetric state are a converged output of this loop: their operator is a plain one
+                # (it may end the loop, with its own bias) where they hold every level the exact exchange counts.
+                returned_plain = returning and stability.return_plain
+                built, special_bias = _operator_of_sets(engine, special, fraction, bias=floor and returned_plain)
+                special = None
+                note = stability.note
+                if built is None:
+                    # The build did not fit the devices: plain steps from the state as it is.
+                    stability.abandon("the operator of the displaced density matrix does not fit the device memory")
+                    occupied_applications = engine.exchange(sets)
+                else:
+                    special = True
+            elif diis.enabled:
                 # Exx_Outer_Mixing: diis -- an extrapolated density matrix where
                 # the guard of parsec_python.SCF.fock_diis lets it.
                 # The next loop is the last one Exx_Max_Iter allows: its operator
                 # must be the plain one, or it could not end the Fock loop.
-                final_next = outer + 1 >= settings.max_iterations
+                final_next = outer + 1 >= limit
                 _observe(
                     diis,
                     engine,
@@ -1408,13 +1503,21 @@ def run_hybrid_scf(
                 operator, applications = built
                 applications = [*applications, spent]
                 engine.drop_orbitals(sets, inner)
-                source = dict(proposal)
-                operator_extrapolated = back is None
-                extrapolated = operator_extrapolated
                 off_plain_path = True
-                if operator_extrapolated:
-                    diis.steps_taken += 1
-                plain = False
+                if special is not None:
+                    # The displaced (or copied) density matrix of the stability test.
+                    source = {}
+                    operator_extrapolated = False
+                    plain = returned_plain
+                    bias = special_bias
+                else:
+                    source = dict(proposal)
+                    operator_extrapolated = back is None
+                    extrapolated = operator_extrapolated
+                    if operator_extrapolated:
+                        diis.steps_taken += 1
+                    plain = False
+                    bias = 0.0
             else:
                 # 1'. The operator of the new orbitals: the empty columns too.
                 applications = engine.exchange(sets, known=occupied_applications, columns="all")
@@ -1423,6 +1526,7 @@ def run_hybrid_scf(
                 # inner loop.
                 occupied_applications = None
                 operator = engine.fock_operator(sets, applications, fraction)
+                bias = operator_bias(engine, operator, sets, fraction) if floor else 0.0
                 engine.drop_orbitals(sets, inner)
                 source = {outer: 1.0}
                 operator_extrapolated = False
@@ -1482,6 +1586,19 @@ def run_hybrid_scf(
     if callable(after_loop) and inner is not None:
         after_loop(system, inner, callback=callback, records=tuple(records))
     seconds = perf_counter() - started
+    final_occupations = _final_occupations(inner)
+    diagnostics = fock_loop_diagnostics(records, final_occupations)
+    if stability.start_iteration is not None:
+        # The rise of dexx that the displacement of the stability test makes is not an instability of the loop: that
+        # is looked for before the test, the convergence after it.
+        diagnostics = {
+            **fock_loop_diagnostics(
+                [record for record in records if record.iteration > stability.start_iteration], final_occupations
+            ),
+            "instability": fock_loop_diagnostics(
+                [record for record in records if record.iteration <= stability.start_iteration], final_occupations
+            )["instability"],
+        }
     summary = FockLoopSummary(
         functional=definition.label,
         display_name=definition.display_name,
@@ -1500,7 +1617,9 @@ def run_hybrid_scf(
         poisson_seconds=poisson_seconds,
         exchange_seconds=exchange_seconds,
         seconds=seconds,
-        **fock_loop_diagnostics(records, _final_occupations(inner)),
+        spin_stability=stability.text,
+        spin_stability_ratio=stability.ratio,
+        **diagnostics,
     )
     return replace(
         inner,

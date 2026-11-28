@@ -68,7 +68,8 @@ the same functional within 7e-10 Ry for O2).  On a CUDA device the pointwise sum
 (:mod:`parsec_python.acceleration.V_xc.multicollinear_xc`), with the gradients and their transposes on the device
 for a cluster or an orthorhombic cell and on the host for the other grids and the correction beside the nuclei
 (:func:`system_multicollinear_xc`).  On the host alone the sum costs some 80 times the local frame (``auto`` then
-keeps the local frame: :func:`parsec_python.V_xc.noncollinear.frame_decision`).
+keeps the local frame, and the axis frame for collinear initial moments with spin-orbit coupling:
+:func:`parsec_python.V_xc.noncollinear.frame_decision`).
 """
 
 from __future__ import annotations

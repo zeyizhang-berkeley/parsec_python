@@ -327,6 +327,18 @@ def _sector_guard(solver, density, magnetization, volume_element: float, measure
     return values
 
 
+def _xc_device_bytes(system) -> dict | None:
+    """What the XC of a non-collinear loop holds on a device while the eigensolvers keep their subspaces (the
+    multicollinear frame: :func:`parsec_python.acceleration.V_xc.multicollinear_xc.resident_device_bytes`), for the
+    memory rules of the device k-point solvers; ``None`` for the other frames or without the accelerated package."""
+
+    try:
+        from ..acceleration.V_xc.multicollinear_xc import resident_device_bytes
+    except ImportError:
+        return None
+    return resident_device_bytes(system)
+
+
 def _run_noncollinear(
     system,
     hamiltonian_for_k: Callable[[int, np.ndarray, np.ndarray], object],
@@ -424,6 +436,7 @@ def _run_noncollinear(
         accumulate,
         extras=extras if extras is not None else (lambda task, vectors, xp=np: _state_sz([vectors], xp)),
         geometry=geometry,
+        resident_device_bytes=_xc_device_bytes(system),
     )
     solver = make_kpoint_solver(job, problem_size=system.grid.size)
     # PARSEC_NONCOLLINEAR_SECTOR_STABILITY=auto (a loop in sectors under PARSEC_KPOINT_SECTOR_GUARD=auto): the stability

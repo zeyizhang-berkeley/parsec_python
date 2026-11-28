@@ -2435,6 +2435,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     from parsec_python.V_xc.exact_exchange import exchange_occupation_cut_setting
     # PARSEC_FOCK_DIIS_TAIL: the orbitals the window of the outer DIIS of a Fock loop stores (SCF/fock_diis.py)
     from parsec_python.SCF.fock_diis import fock_diis_tail_setting
+    # PARSEC_FOCK_DEXX_FLOOR and PARSEC_FOCK_SPIN_STABILITY: the stop of a Fock loop (SCF/fock_stability.py)
+    from parsec_python.SCF.fock_stability import dexx_floor_setting, spin_stability_setting
     # PARSEC_FERMI_GAP_ROOT: the Fermi level of a gap (Occupations/fermi_dirac.py)
     from parsec_python.Occupations.fermi_dirac import fermi_gap_root_setting
     # PARSEC_FILTER_DEGREE_STALL: the starting later-SCF degree back where a loop stalls (SCF/filter_degree.py)
@@ -2444,6 +2446,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         close_multiplet_setting()
         exchange_occupation_cut_setting()
         fock_diis_tail_setting()
+        dexx_floor_setting()
+        spin_stability_setting()
         fermi_gap_root_setting()
         filter_degree_stall_setting()
     except ValueError as error:
@@ -2541,6 +2545,18 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         translation, position_notes = symmetrize_input_positions(translation)
         restart_notes = [*restart_notes, *position_notes]
+        if translation.problem.scf.spin_polarized:
+            # PARSEC_SPIN_SECTOR_STABILITY (the stability test of the spin sectors of the accelerated driver): read in
+            # every spin run; this solver has no such sectors, which parsec.out says under auto
+            from parsec_python.acceleration.SCF.sector_stability import spin_sector_stability_setting
+
+            if spin_sector_stability_setting() == "auto":
+                restart_notes = [
+                    *restart_notes,
+                    "NOTE: PARSEC_SPIN_SECTOR_STABILITY=auto is not applied to this run: the reference solver (the "
+                    "k-point drivers of a spin cell, or a route the accelerated path does not cover) has no symmetry "
+                    "sectors of the spin guard to test",
+                ]
         use_symmetry, symmetry_note = symmetry_decision(translation)
         # AFM_Scan: one folder per scan or part of a scan.
         scan_folder_note = None

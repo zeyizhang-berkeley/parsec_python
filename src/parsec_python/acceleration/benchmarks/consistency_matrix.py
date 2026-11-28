@@ -22,8 +22,9 @@ repository, so that the matrix can be run unchanged on any later tree.  Groups:
     ``PARSEC_NONCOLLINEAR_GGA_FRAME`` (added after 2bd841307: O2 at Gamma off and on a grid point, the Au pair with
     spin-orbit coupling and a 2x2x2 mesh, also in its sectors under ``PARSEC_GGA_NUCLEAR_GRADIENT=on``; added after
     46012d489, its multicollinear frame: O2 from canted moments off and on grid points and under
-    ``PARSEC_GGA_NUCLEAR_GRADIENT=on``, B2 from canted moments, the H3 triangle in its 120-degree state, the Au pair).
-    The force
+    ``PARSEC_GGA_NUCLEAR_GRADIENT=on``, B2 from canted moments, the H3 triangle in its 120-degree state, the Au pair;
+    added after 233d98a0a, the Au pair under the default, which takes that frame for collinear moments with
+    spin-orbit coupling).  The force
     compared is the total before its net part was removed (``forces_total + forces_net / N``), the derivative of the
     energy.  ``dgrid`` is the distance of the atom from the nearest grid point where the archive holds the grid.
 ``mpi``
@@ -31,7 +32,8 @@ repository, so that the matrix can be run unchanged on any later tree.  Groups:
     cluster, a Gamma cell and (added 2026-11-23) the SCF of a PBE0 cell below and above the floor of the sectors of
     a Gamma-point hybrid, ``--mpi`` of the command line for a k-point mesh (and, added after 7e1b4e080, for a
     non-collinear cell against the sectors of its magnetic group in one process, with CA and, added after 2bd841307,
-    with PBE, and after 46012d489 in the multicollinear frame).  Rank 0 then runs the same input in
+    with PBE, and after 46012d489 in the multicollinear frame; after 233d98a0a the Au pair under the default without
+    sectors, the frame the ranks agree on).  Rank 0 then runs the same input in
     one process and compares: energies within 1e-8 Ry, forces within 1e-7 Ry/bohr.
 ``symmetry``
     The default route against the same input without symmetry: ``--symmetry off`` with
@@ -226,6 +228,9 @@ ALL_OFF = {
     "PARSEC_PROJECTOR_TAIL": "off",
     "PARSEC_EXCHANGE_OCCUPATION_CUT": "off",
     "PARSEC_FOCK_DIIS_TAIL": "off",
+    # after 233d98a0a: the bias of dexx at the orbitals of its operator, the stability test of a spin-symmetric state
+    "PARSEC_FOCK_DEXX_FLOOR": "off",
+    "PARSEC_FOCK_SPIN_STABILITY": "off",
     # defaults changed after b72375f60: the continuous Perdew-Zunger correlation, the exact quadrature of the KB
     # denominators, the Hartree potential of a slab with forces
     "PARSEC_CA_CONTINUITY": "off",
@@ -299,8 +304,21 @@ ALL_OFF = {
     # after 2bd841307: the collinear and axis frames of a non-collinear gradient functional (the local frame of |m|
     # under off)
     "PARSEC_NONCOLLINEAR_GGA_FRAME": "off",
+    # after 233d98a0a: the gradient of an oblique grid averaged over the group of its lattice (opt-in on)
+    "PARSEC_SYMMETRIC_GRADIENT": "off",
+    # after 233d98a0a: the multicollinear frame for the collinear initial moments of PBE and PW91 with spin-orbit
+    # coupling (the axis frame under off; inert under the frame's off above)
+    "PARSEC_NONCOLLINEAR_MC_SPIN_ORBIT": "off",
+    # after 233d98a0a: the stability test of the state of a collinear spin run in the sectors (opt-in auto; off is the
+    # default)
+    "PARSEC_SPIN_SECTOR_STABILITY": "off",
+    # after 233d98a0a: the spin-flip route of antiparallel starts of two labels from the iteration where the two
+    # solved channels are images of each other (late, the default since then)
+    "PARSEC_SPIN_FLIP_SYMMETRY": "off",
 }
 NO_SYMMETRY_ENV = {"PARSEC_PERIODIC_SYMMETRY": "off", "PARSEC_KPOINT_SECTORS": "off"}
+#: The cases of the gradient averaged over the group of the lattice of an oblique grid (added after 233d98a0a)
+SYMMETRIC_GRADIENT = {"PARSEC_SYMMETRIC_GRADIENT": "on"}
 NO_SYMMETRY_ARGS = ("--symmetry", "off")
 
 # ---------------------------------------------------------------------------------------------------------------
@@ -696,11 +714,14 @@ def hcp_na2(name, mesh, *, move=0.05, criterion=1.0e-9, forces=True, xc="ca", ex
     return Structure(name, text, positions, ("Na_POTRE",), vectors, 3)
 
 
-def primitive_cubic(name, kind, *, move=0.03, criterion=1.0e-9, forces=True, fortran=False, extra=""):
+def primitive_cubic(name, kind, *, move=0.03, criterion=1.0e-9, forces=True, fortran=False, extra="", xc="ca",
+                    env=None):
     """A 2 x 2 x 2 supercell of a primitive cubic cell under ``PARSEC_OBLIQUE_FULL_GROUP=auto`` (CA; the floor of the
     sectors and their fixed cost off): ``fcc`` diamond Si (POTRE, 16 atoms, h about 0.6), atom 1 moved along z (C2v about z, whose two-fold
     axis is no signed permutation of the grid axes); ``bcc`` Na (POTRE, 8 atoms, h about 0.6), atom 1 moved along z
-    (C4v).  Both keep an operation of the full cubic group that the signed permutations of the grid axes do not hold."""
+    (C4v).  Both keep an operation of the full cubic group that the signed permutations of the grid axes do not hold.
+    ``xc`` another functional (``pbe`` with ``PARSEC_SYMMETRIC_GRADIENT=on`` in ``env``: a GGA in the full group),
+    ``env`` more switches."""
 
     if kind == "fcc":
         key, a, basis, states = "Si_POTRE", A_SI, [np.zeros(3), np.full(3, 0.25 * A_SI)], 40
@@ -718,7 +739,7 @@ def primitive_cubic(name, kind, *, move=0.03, criterion=1.0e-9, forces=True, for
     def text(p):
         return (
             cell_head(supercell, 0.60, fortran=fortran)
-            + scf_block("ca", states, criterion=criterion, diag=criterion / 10, forces=forces, extra=extra)
+            + scf_block(xc, states, criterion=criterion, diag=criterion / 10, forces=forces, extra=extra)
             + atom_blocks([(key, p, "")])
         )
 
@@ -726,7 +747,7 @@ def primitive_cubic(name, kind, *, move=0.03, criterion=1.0e-9, forces=True, for
     # group, which the default cost of a sector gives larger cells)
     return Structure(name, text, positions, (key,), supercell, 3,
                      env={"PARSEC_OBLIQUE_FULL_GROUP": "auto", "PARSEC_PERIODIC_SECTOR_FLOOR": "off",
-                          "PARSEC_SECTOR_OVERHEAD": "off"})
+                          "PARSEC_SECTOR_OVERHEAD": "off", **(env or {})})
 
 
 MD_RESTART_LINES = (
@@ -1034,6 +1055,18 @@ def multicollinear(structure):
     """``structure`` under ``PARSEC_NONCOLLINEAR_GGA_FRAME=multicollinear`` (its runs and those of its reference)."""
 
     structure.env = {**structure.env, **MULTICOLLINEAR}
+    return structure
+
+
+#: the axis frame of spin-orbit coupling for collinear initial moments of PBE (added after 233d98a0a, whose default
+#: takes the multicollinear frame there where a device sums it: the cases of the axis frame keep it)
+AXIS_FRAME = {"PARSEC_NONCOLLINEAR_MC_SPIN_ORBIT": "off"}
+
+
+def axis_frame(structure):
+    """``structure`` under ``PARSEC_NONCOLLINEAR_MC_SPIN_ORBIT=off`` (its runs and those of its reference)."""
+
+    structure.env = {**structure.env, **AXIS_FRAME}
     return structure
 
 
@@ -2201,6 +2234,17 @@ def force_checks():
         # after 308edad4e): the moved atom along z and an atom on its site
         ("f_si16_fcc_fg", primitive_cubic("si16_fcc_fg", "fcc", criterion=1.0e-10), ((1, 2), (2, 0)), on),
         ("f_na8_bcc_fg", primitive_cubic("na8_bcc_fg", "bcc", criterion=1.0e-10), ((1, 2), (2, 0)), on),
+        # the same with PBE and the gradient averaged over the group of the lattice (PARSEC_SYMMETRIC_GRADIENT=on,
+        # added after 233d98a0a), in the sectors of the full cubic group; hcp Mg on Fortran's general grid and diamond
+        # in its primitive fcc cell with it
+        ("f_si16_fcc_sg", primitive_cubic("si16_fcc_sg", "fcc", criterion=1.0e-10, xc="pbe", env=SYMMETRIC_GRADIENT),
+         ((1, 2), (2, 0)), on),
+        ("f_na8_bcc_sg", primitive_cubic("na8_bcc_sg", "bcc", criterion=1.0e-10, xc="pbe", env=SYMMETRIC_GRADIENT),
+         ((1, 2), (2, 0)), on),
+        ("f_mg2g_f_sg", replace(hcp_mg2("mg2g_f_sg", "", criterion=1.0e-10), env=dict(SYMMETRIC_GRADIENT)),
+         ((0, 2), (1, 2)), on),
+        ("f_c2_k222_sg", replace(primitive_c2("c2_k222_sg", (2, 2, 2), criterion=1.0e-10), env=dict(SYMMETRIC_GRADIENT)),
+         ((1, 0), (1, 2)), on),
         # Au on a grid point with PBE (added after 308edad4e), at the steps of FINE_STEPS: the energy varies on a scale
         # of 1e-3 bohr there (au2_gga), so that the slopes over 1e-3 and 2e-3 bohr miss the force (cell 1.1e-4 and
         # 2.5e-5, cluster 1.7e-4 and 3.2e-4 Ry/bohr) while those over 2e-5 and 4e-5 bohr approach it as the square of
@@ -2276,13 +2320,14 @@ def force_checks():
         # non-collinear PBE in its frames (added after 2bd841307, PARSEC_NONCOLLINEAR_GGA_FRAME=auto): O2 at Gamma
         # with atom 0 off the grid and on a grid point; the Au pair with spin-orbit coupling and its 2 x 2 x 2 mesh,
         # on the whole grid, and in the sectors of its moments with the correction of the density gradient beside the
-        # nuclei (PARSEC_GGA_NUCLEAR_GRADIENT=on: its term of the non-collinear route)
+        # nuclei (PARSEC_GGA_NUCLEAR_GRADIENT=on: its term of the non-collinear route); the Au pair in the axis frame
+        # (after 233d98a0a the default takes the multicollinear frame there: f_au2k_nc_pbe_mc)
         ("f_o2_nc_pbe", o2_nc_pbe("o2_nc_pbe"), ((0, 2), (1, 0)), on),
         ("f_o2_nc_pbe_grid", o2_nc_pbe("o2_nc_pbe_grid", grid=True), ((0, 2), (0, 0)), on),
-        ("f_au2k_nc_pbe", au2_nc_pbe("au2k_nc_pbe"), ((0, 2), (1, 2)), on),
+        ("f_au2k_nc_pbe", axis_frame(au2_nc_pbe("au2k_nc_pbe")), ((0, 2), (1, 2)), on),
         ("f_b2_nc_pbe", b2_nc_pbe("b2_nc_pbe"), ((1, 2), (0, 0)), on),
-        ("f_au2k_nc_pbe_nuc", nuclear(au2_nc_pbe("au2k_nc_pbe_nuc", env={
-            "PARSEC_NONCOLLINEAR_KPOINT_SECTORS": "on", "PARSEC_KPOINT_SECTOR_GUARD": "off"})), ((0, 2), (1, 2)), on),
+        ("f_au2k_nc_pbe_nuc", nuclear(axis_frame(au2_nc_pbe("au2k_nc_pbe_nuc", env={
+            "PARSEC_NONCOLLINEAR_KPOINT_SECTORS": "on", "PARSEC_KPOINT_SECTOR_GUARD": "off"}))), ((0, 2), (1, 2)), on),
         # the multicollinear frame (PARSEC_NONCOLLINEAR_GGA_FRAME=multicollinear, added after 46012d489): O2 from
         # canted moments (it ends in the triplet) off and on grid points, B2 with the core correction, the H3 triangle
         # in its 120-degree state (a cluster), the Au pair with spin-orbit coupling and its mesh, and under
@@ -2300,6 +2345,9 @@ def force_checks():
                                                        "Initial_Spin_Polarization: 0.67\n"))), ((0, 0), (0, 2)), on),
         ("f_h3_nc_pbe_mc", multicollinear(h3_nc_pbe("h3_nc_pbe_mc")), ((1, 1), (0, 0)), on),
         ("f_au2k_nc_pbe_mc", multicollinear(au2_nc_pbe("au2k_nc_pbe_mc")), ((0, 2), (1, 2)), on),
+        # the default of the Au pair after 233d98a0a (no switch set): auto takes the multicollinear frame for collinear
+        # initial moments with spin-orbit coupling where a device sums it (PARSEC_NONCOLLINEAR_MC_SPIN_ORBIT)
+        ("f_au2k_nc_pbe_auto", au2_nc_pbe("au2k_nc_pbe_auto"), ((0, 2), (1, 2)), on),
         ("f_o2_nc_pbe_mc_nuc", nuclear(multicollinear(o2_nc_pbe("o2_nc_pbe_mc_nuc", moments=CANTED_45))),
          ((0, 2), (1, 0)), on),
         # the default frame of canted moments on an oblique grid, both routine sets (the host stencils around the
@@ -2390,6 +2438,22 @@ def symmetry_checks():
         ("s_si16_fcc_fg_f", primitive_cubic("si16_fcc_fg_sym_f", "fcc", fortran=True), None),
         ("s_si16_fcc_fg_perfect", primitive_cubic("si16_fcc_fg_perfect", "fcc", move=0.0, forces=False), None),
         ("s_na8_bcc_fg", primitive_cubic("na8_bcc_fg_sym", "bcc"), None),
+        # PBE in the full groups with the symmetric gradient (PARSEC_SYMMETRIC_GRADIENT=on, added after 233d98a0a):
+        # the cubic supercells, hcp Mg and diamond at the Gamma point (floor off), the k-point wedges of diamond on the
+        # default routines and of hcp Mg on the Fortran-derived ones against their whole meshes
+        ("s_si16_fcc_sg", primitive_cubic("si16_fcc_sg_sym", "fcc", xc="pbe", env=SYMMETRIC_GRADIENT), None),
+        ("s_si16_fcc_sg_f", primitive_cubic("si16_fcc_sg_sym_f", "fcc", fortran=True, xc="pbe", env=SYMMETRIC_GRADIENT),
+         None),
+        ("s_na8_bcc_sg", primitive_cubic("na8_bcc_sg_sym", "bcc", xc="pbe", env=SYMMETRIC_GRADIENT), None),
+        ("s_mg2_hcp_gamma_f_sg", replace(hcp_mg2("mg2g_sym_f_sg", "", criterion=1.0e-9),
+                                         env={"PARSEC_PERIODIC_SECTOR_FLOOR": "off", **SYMMETRIC_GRADIENT}), None),
+        ("s_c2_fcc_gamma_sg", replace(primitive_c2("c2g_sym_sg", "", criterion=1.0e-9),
+                                      env={"PARSEC_PERIODIC_SECTOR_FLOOR": "off", **SYMMETRIC_GRADIENT}), None),
+        ("s_c2_fcc_k333_list_sg", replace(primitive_c2("c2_k333_sg", (3, 3, 3)), env=dict(SYMMETRIC_GRADIENT)),
+         replace(primitive_c2("c2_k333_list_sg", full_mesh_list(c2_lattice, (3, 3, 3))), env=dict(SYMMETRIC_GRADIENT))),
+        ("s_mg2_hcp_k333_f_list_sg", replace(hcp_mg2("mg2_k333_f_sg", (3, 3, 3)), env=dict(SYMMETRIC_GRADIENT)),
+         replace(hcp_mg2("mg2_k333_f_list_sg", full_mesh_list(mg_lattice, (3, 3, 3), images="centred")),
+                 env=dict(SYMMETRIC_GRADIENT))),
         ("s_h2o_c2v", h2o("h2o_c2v", criterion=1.0e-9), None),
         ("s_ch4_td", ch4("ch4_td", perturb=False, criterion=1.0e-9), None),
         ("s_o2_spin", o2("o2_sym", symmetric=True, criterion=1.0e-9), None),
@@ -2655,9 +2719,11 @@ def soc_checks():
         checks.append(SymmetryCheck("soc", name, "", nc_structure, spin_structure, {}, (), energy_tolerance=1.0e-8,
                                     force_tolerance=1.0e-6))
     make = lambda n: au2_nc_pbe(n, ((0, 0, 1), (0, 0, 1)))
+    # (the axis frame after 233d98a0a, whose default takes the multicollinear frame there: o_au2k_nc_pbe_mc_sectors)
     structure = make("o_au2k_nc_pbe_sectors")
-    structure.env = {"PARSEC_NONCOLLINEAR_KPOINT_SECTORS": "on", "PARSEC_KPOINT_SECTOR_GUARD": "off"}
-    checks.append(SymmetryCheck("soc", "o_au2k_nc_pbe_sectors", "", structure, make("o_au2k_nc_pbe_sectors_off"),
+    structure.env = {"PARSEC_NONCOLLINEAR_KPOINT_SECTORS": "on", "PARSEC_KPOINT_SECTOR_GUARD": "off", **AXIS_FRAME}
+    checks.append(SymmetryCheck("soc", "o_au2k_nc_pbe_sectors", "", structure,
+                                axis_frame(make("o_au2k_nc_pbe_sectors_off")),
                                 {"PARSEC_NONCOLLINEAR_KPOINT_SECTORS": "off"}, ()))
     # (added after 46012d489) the multicollinear frame (PARSEC_NONCOLLINEAR_GGA_FRAME=multicollinear) from canted
     # moments, which end in the triplet, against the collinear spin driver (O2 at Gamma on both routine sets, with the
@@ -2720,10 +2786,16 @@ def mpi_checks():
         # row-distributed solver does not form)
         ("m_au2k_nc", au2_noncollinear("m_au2k_nc", [[0, 0, 1], [0, 0, 1]], forces=False), "cli"),
         # the same with PBE in the axis frame of spin-orbit coupling (added after 2bd841307,
-        # PARSEC_NONCOLLINEAR_GGA_FRAME=auto)
-        ("m_au2k_nc_pbe", au2_nc_pbe("m_au2k_nc_pbe", forces=False), "cli"),
+        # PARSEC_NONCOLLINEAR_GGA_FRAME=auto; after 233d98a0a under PARSEC_NONCOLLINEAR_MC_SPIN_ORBIT=off)
+        ("m_au2k_nc_pbe", axis_frame(au2_nc_pbe("m_au2k_nc_pbe", forces=False)), "cli"),
         # and in the multicollinear frame (added after 46012d489, PARSEC_NONCOLLINEAR_GGA_FRAME=multicollinear)
         ("m_au2k_nc_pbe_mc", multicollinear(au2_nc_pbe("m_au2k_nc_pbe_mc", forces=False)), "cli"),
+        # the gradient averaged over the group of the lattice (PARSEC_SYMMETRIC_GRADIENT=on, added after 233d98a0a):
+        # diamond in its primitive fcc cell with a 3x3x3 mesh through --mpi (the runner refuses an oblique cell)
+        ("m_c2_k333_sg", replace(primitive_c2("m_c2_k333_sg", (3, 3, 3)), env=dict(SYMMETRIC_GRADIENT)), "cli"),
+        # and the default after 233d98a0a (no switch set, one task per k-point): the multicollinear frame of collinear
+        # moments with spin-orbit coupling where every rank has a device (their agreement), the axis frame otherwise
+        ("m_au2k_nc_pbe_auto", au2_nc_pbe("m_au2k_nc_pbe_auto", forces=False), "cli"),
     ]
     checks = [MpiCheck("mpi", name, "", structure, launcher) for name, structure, launcher in table]
     for check in checks:

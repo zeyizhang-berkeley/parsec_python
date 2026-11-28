@@ -2112,6 +2112,23 @@ def _run(
         gamma_spin_on_device = _gamma_spin_on_device(
             arguments, translation, supercell=_found_supercell is not None, notes=gamma_spin_notes
         )
+        # PARSEC_SPIN_SECTOR_STABILITY, read in every run (also the routes of the reference solver): a spin cell that
+        # does not take the Gamma sectors runs on a k-point driver, which has no spin guard to test (a NOTE says so)
+        from .SCF.sector_stability import spin_sector_stability_setting
+
+        if (
+            spin_sector_stability_setting() == "auto"
+            and translation.problem.scf.spin_polarized
+            and translation.problem.periodic_cell is not None
+            and not gamma_spin_on_device
+        ):
+            stability_note = (
+                "PARSEC_SPIN_SECTOR_STABILITY=auto is not applied to this run: this spin-polarized cell runs on a "
+                "k-point driver (its k-point mesh, or the 1x1x1 driver of the forces, relaxations and dynamics of a "
+                "spin cell), which has no symmetry sectors of the spin guard to test"
+            )
+            # (in parsec.out of this path; the reference solver writes its own where the run goes there)
+            restart_notes = [*restart_notes, f"NOTE: {stability_note}"]
         if accelerated_self_consistent_soc:
             # PARSEC_SOC_SECTORS and PARSEC_SOC_AUTO_FOURFOLD: a value they do not know is refused before the SCF.
             from .SCF.soc_sectors import soc_auto_fourfold_setting, soc_sectors_setting
@@ -2444,6 +2461,11 @@ def _run(
         from parsec_python.SCF.fock_diis import fock_diis_tail_setting
 
         fock_diis_tail_setting()
+        # PARSEC_FOCK_DEXX_FLOOR and PARSEC_FOCK_SPIN_STABILITY: the stop of a Fock loop
+        from parsec_python.SCF.fock_stability import dexx_floor_setting, spin_stability_setting
+
+        dexx_floor_setting()
+        spin_stability_setting()
         # PARSEC_FERMI_GAP_ROOT: the Fermi level of a gap
         from parsec_python.Occupations.fermi_dirac import fermi_gap_root_setting
 
@@ -2476,6 +2498,10 @@ def _run(
             from .SCF.fallback_density import fallback_density_setting
 
             fallback_density_setting()
+            # PARSEC_SPIN_SECTOR_STABILITY: the stability test of the spin sectors, read on every route of a spin run
+            from .SCF.sector_stability import spin_sector_stability_setting
+
+            spin_sector_stability_setting()
             # PARSEC_SPIN_START: the start of the spin loops of the reference solver (a spin cell on its k-point loop)
             from parsec_python.SCF.spin_polarized import spin_start_setting
             from parsec_python.cli import spin_ionic_kpoint_setting

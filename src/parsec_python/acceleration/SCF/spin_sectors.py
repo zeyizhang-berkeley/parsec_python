@@ -1360,6 +1360,12 @@ class SpinSectorReducer:
         self._pair = _ChannelPair(reducer)
         # ``(iteration, asymmetry, criterion)`` of each test-2 measure at the convergence of a loop.
         self.symmetry_measures: list[tuple[int, float | None, float]] = []
+        # PARSEC_SPIN_SECTOR_STABILITY=auto (acceleration/SCF/sector_stability.py): a list into which tests 1 and 3
+        # put ``(stage, report)`` instead of raising, so that the loop goes on in the sectors and its converged state
+        # is tested on the full grid; ``None`` (the default): they raise.
+        self.deferred: list | None = None
+        # (and whether test 1, of the start Hamiltonian, puts its report there too; else it raises as before)
+        self.defer_start = True
 
     # ----- one channel: the SymmetrySCFReducer interface ------------------
 
@@ -1650,13 +1656,17 @@ class SpinSectorReducer:
         )
 
     def abandon_start(self, report, passes: int = 0) -> None:
-        """Raise :class:`SpinSectorsAbandoned` for a converged report of :meth:`start_spectrum_report`."""
+        """Raise :class:`SpinSectorsAbandoned` for a converged report of :meth:`start_spectrum_report` (with
+        :attr:`deferred` a list: put it there and return, ``PARSEC_SPIN_SECTOR_STABILITY=auto``)."""
 
         if passes:
             report = replace(
                 report,
                 lines=report.lines + (f"(the levels of the start Hamiltonian after {passes} further solve(s))",),
             )
+        if self.deferred is not None and self.defer_start:
+            self.deferred.append(("the start Hamiltonian", report))
+            return
         raise SpinSectorsAbandoned("the start Hamiltonian", report)
 
     def check_start_spectrum(self, eigenvalues, occupations, representations) -> None:
@@ -1751,6 +1761,11 @@ class SpinSectorReducer:
                     self.tolerance,
                 )
                 report = replace(report, abelian=abelian is not None)
+            if self.deferred is not None:
+                # (PARSEC_SPIN_SECTOR_STABILITY=auto: the state is tested on the full grid instead)
+                if not any(entry[1] == report for entry in self.deferred):
+                    self.deferred.append((self._stage(final), report))
+                return
             raise SpinSectorsAbandoned(self._stage(final), report)
         repeated = self.sector_repeated if weighted else None
         mode = spin_guard_doublets_setting()

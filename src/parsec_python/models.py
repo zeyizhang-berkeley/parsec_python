@@ -2720,6 +2720,9 @@ class SpinSectorFallbackRecord:
     # ``spin_flip``: a loop of a system prepared with PARSEC_SPIN_FLIP_SYMMETRY=auto solves both channels
     # (SCF.spin_polarized: ``reason`` why, ``largest_fractional_occupation`` the deviation that ``measure`` names,
     # against ``tolerance``; ``measure`` empty where the reason has none), said before the loop starts;
+    # ``spin_flip_late``: a loop of PARSEC_SPIN_FLIP_SYMMETRY=late takes the route from ``stage`` on, or (``stage`` the
+    # end of the loop) its channels stayed apart and it solved both throughout; ``spin_flip_continued``: a start below
+    # the state of the route and what the loop without the flip from it ended in (PARSEC_SPIN_FLIP_CONTINUATION=auto);
     # ``spin_flip_stable``: the state of such a loop passed the test of PARSEC_SPIN_FLIP_STABILITY=auto and is kept
     # (``largest_fractional_occupation`` the largest eigenvalue of the response, ``multiplets`` the summary);
     # ``kpoint_stable``: the state of a non-collinear loop in the sectors of its k-points passed the stability test of
@@ -2728,6 +2731,11 @@ class SpinSectorFallbackRecord:
     # from it, displaced (``largest_fractional_occupation`` the free energy of that loop below the sectors'), or after
     # a line search along the direction of the instability whose gain does not pay that loop (PARSEC_NONCOLLINEAR_
     # SECTOR_CONTINUATION=auto: ``largest_fractional_occupation`` the gain, ``tolerance`` the gain it takes);
+    # ``spin_stable``, ``spin_unstable`` and ``spin_continued``: the state of a collinear spin run in the sectors
+    # tested on the full grid (PARSEC_SPIN_SECTOR_STABILITY=auto, acceleration.SCF.sector_stability): kept, unstable
+    # (the loop on the full grid follows), and which state was kept after it (or after a line search that did not pay,
+    # or against the result of the guard's route where a guard had fired); ``spin_stability_skipped``: the note of a
+    # spin run under that switch that does not take the test (``reason`` why);
     # ``doublet``, ``sector_doublet`` and ``kpoint_doublet`` (the k-point sectors): the note of a kept result
     # (PARSEC_SPIN_GUARD_DOUBLETS); ``symmetric_level``: the note of an unpolarized run of weighted sectors that ends
     # with a partly filled degenerate level at the Fermi level, kept (acceleration.driver._say_symmetric_level);

@@ -290,17 +290,45 @@ class NoncollinearAxisFrameTests(unittest.TestCase):
         parallel = atoms([0, 0, 1], [0, 0, 2])
         antiparallel = atoms([1, 1, 0], [-1, -1, 0])
         canted = atoms([0, 0, 1], [1, 0, 1])
-        self.assertEqual(decide("pbe", parallel), ("collinear", (0.0, 0.0, 1.0)))
-        self.assertEqual(decide("pbe", parallel, spin_orbit=True), ("axis", (0.0, 0.0, 1.0)))
-        half = round(np.sqrt(0.5), 12)
-        self.assertEqual(decide("pbe", antiparallel), ("collinear", (half, half, 0.0)))
-        # non-collinear moments of PBE and PW91: the multicollinear frame (V_xc.multicollinear); no initial moment
-        # (Quantum ESPRESSO's compute_ux), off, the local functionals: the local frame
         from unittest import mock
 
+        from parsec_python.V_xc.noncollinear import MULTICOLLINEAR_SPIN_ORBIT_ENV
+
+        self.assertEqual(decide("pbe", parallel), ("collinear", (0.0, 0.0, 1.0)))
+        half = round(np.sqrt(0.5), 12)
+        self.assertEqual(decide("pbe", antiparallel), ("collinear", (half, half, 0.0)))
+        # collinear moments with spin-orbit coupling: the multicollinear frame of PBE and PW91 where a device sums it
+        # (PARSEC_NONCOLLINEAR_MC_SPIN_ORBIT=auto), else the axis frame (also under off, and for the other gradient
+        # functionals)
+        with mock.patch("parsec_python.V_xc.noncollinear.multicollinear_available", return_value=True):
+            for functional in ("pbe", "pw91"):
+                for moments in (parallel, antiparallel):
+                    with mock.patch.dict("os.environ", {MULTICOLLINEAR_SPIN_ORBIT_ENV: ""}):
+                        self.assertEqual(decide(functional, moments, spin_orbit=True), ("multicollinear", None))
+                        self.assertTrue(frame_decision(functional, moments, species, True, "auto").spin_orbit_start)
+            self.assertFalse(frame_decision("pbe", canted, species, True, "auto").spin_orbit_start)
+            self.assertEqual(decide("pbe", parallel), ("collinear", (0.0, 0.0, 1.0)))
+            self.assertEqual(decide("lb94", parallel, spin_orbit=True), ("axis", (0.0, 0.0, 1.0)))
+            with mock.patch.dict("os.environ", {MULTICOLLINEAR_SPIN_ORBIT_ENV: "off"}):
+                self.assertEqual(decide("pbe", parallel, spin_orbit=True), ("axis", (0.0, 0.0, 1.0)))
+                self.assertEqual(decide("pbe", canted, spin_orbit=True), ("multicollinear", None))
+        with mock.patch("parsec_python.V_xc.noncollinear.multicollinear_available", return_value=False):
+            with mock.patch.dict("os.environ", {MULTICOLLINEAR_SPIN_ORBIT_ENV: ""}):
+                self.assertEqual(decide("pbe", parallel, spin_orbit=True), ("axis", (0.0, 0.0, 1.0)))
+                declined = frame_decision("pbe", parallel, species, True, "auto")
+                self.assertFalse(declined.multicollinear_declined)
+                # the axis frame for want of a device: a NOTE in parsec.out
+                self.assertTrue(declined.spin_orbit_declined)
+                self.assertFalse(frame_decision("lb94", parallel, species, True, "auto").spin_orbit_declined)
+            with mock.patch.dict("os.environ", {MULTICOLLINEAR_SPIN_ORBIT_ENV: "off"}):
+                self.assertFalse(frame_decision("pbe", parallel, species, True, "auto").spin_orbit_declined)
+        # non-collinear moments of PBE and PW91: the multicollinear frame (V_xc.multicollinear); no initial moment
+        # (Quantum ESPRESSO's compute_ux), off, the local functionals: the local frame
         with mock.patch("parsec_python.V_xc.noncollinear.multicollinear_available", return_value=True):
             self.assertEqual(decide("pbe", canted, spin_orbit=True), ("multicollinear", None))
             self.assertEqual(decide("pw91", canted), ("multicollinear", None))
+            self.assertEqual(decide("pbe", parallel, spin_orbit=True, setting="off"), ("local", None))
+            self.assertEqual(decide("pbe", atoms(None, None), spin_orbit=True), ("local", None))
         # without a device for its sum auto keeps the local frame (a NOTE in parsec.out); the value takes it anyway
         with mock.patch("parsec_python.V_xc.noncollinear.multicollinear_available", return_value=False):
             self.assertEqual(decide("pbe", canted), ("local", None))
@@ -341,6 +369,38 @@ class NoncollinearAxisFrameTests(unittest.TestCase):
         fresh = prepare_single_point(replace(problem, atoms=list(bare)))
         self.assertEqual(system_frame(fresh).mode, "local")
 
+    def test_the_header_names_a_declined_multicollinear_frame(self) -> None:
+        # a collinear start with spin-orbit coupling that keeps the axis frame for want of a device says why
+        from unittest import mock
+
+        from parsec_python.acceleration.V_xc import multicollinear_xc as device
+        from parsec_python.Output.parsec_output import noncollinear_frame_lines
+        from parsec_python.V_xc.noncollinear import MULTICOLLINEAR_SPIN_ORBIT_ENV
+
+        problem = _au_cluster([0, 0, 1], soc=True, xc="pbe")
+        for environment, reason in (({"PARSEC_DEVICE": "cpu"}, "PARSEC_DEVICE=cpu"),
+                                    ({"PARSEC_CUPY_XC": "off"}, "PARSEC_CUPY_XC=off")):
+            with mock.patch.dict("os.environ", {MULTICOLLINEAR_SPIN_ORBIT_ENV: "", "PARSEC_DEVICE": "",
+                                                "PARSEC_CUPY_XC": "", **environment}):
+                lines = noncollinear_frame_lines(problem)
+                self.assertEqual(len(lines), 2)
+                self.assertIn("the axis frame", lines[0])
+                self.assertIn(f"keeps the axis frame here ({reason}", lines[1])
+                self.assertIn("PARSEC_NONCOLLINEAR_MC_SPIN_ORBIT", lines[1])
+            with mock.patch.dict("os.environ", {MULTICOLLINEAR_SPIN_ORBIT_ENV: "off", "PARSEC_DEVICE": "",
+                                                "PARSEC_CUPY_XC": "", **environment}):
+                self.assertEqual(len(noncollinear_frame_lines(problem)), 1)
+        # a rank without a device in an MPI run
+        try:
+            with mock.patch.dict("os.environ", {"PARSEC_DEVICE": "", "PARSEC_CUPY_XC": ""}):
+                with mock.patch("parsec_python.acceleration.backends.cupy.require_cupy", return_value=(None, None)):
+                    device._AGREED = False
+                    self.assertEqual(device.unavailable_reason(), "an MPI rank without a CUDA device")
+                    device._AGREED = None
+                    self.assertIsNone(device.unavailable_reason())
+        finally:
+            device._AGREED = None
+
     def test_setting(self) -> None:
         from unittest import mock
 
@@ -353,6 +413,16 @@ class NoncollinearAxisFrameTests(unittest.TestCase):
         for value in ("yes", "on"):
             with mock.patch.dict("os.environ", {NONCOLLINEAR_GGA_FRAME_ENV: value}):
                 with self.assertRaisesRegex(ValueError, NONCOLLINEAR_GGA_FRAME_ENV):
+                    noncollinear_gga_frame_setting()
+        # PARSEC_NONCOLLINEAR_MC_SPIN_ORBIT: read and checked with the frame
+        from parsec_python.V_xc.noncollinear import MULTICOLLINEAR_SPIN_ORBIT_ENV, multicollinear_spin_orbit_setting
+
+        for value, expected in (("", "auto"), ("auto", "auto"), ("OFF", "off")):
+            with mock.patch.dict("os.environ", {MULTICOLLINEAR_SPIN_ORBIT_ENV: value}):
+                self.assertEqual(multicollinear_spin_orbit_setting(), expected)
+        for value in ("on", "axis"):
+            with mock.patch.dict("os.environ", {MULTICOLLINEAR_SPIN_ORBIT_ENV: value, NONCOLLINEAR_GGA_FRAME_ENV: ""}):
+                with self.assertRaisesRegex(ValueError, MULTICOLLINEAR_SPIN_ORBIT_ENV):
                     noncollinear_gga_frame_setting()
 
 
@@ -508,6 +578,66 @@ class MulticollinearFrameTests(unittest.TestCase):
                 self.assertIsNone(device._AGREED)
         finally:
             device._AGREED = None
+
+    def test_the_device_memory_of_the_frame_is_planned(self) -> None:
+        # the fields of one evaluation (and the maps of the device stencils) are counted by the memory rules of the
+        # device k-point solvers, for the multicollinear frame with a device only
+        from types import SimpleNamespace
+        from unittest import mock
+
+        from parsec_python.acceleration.SCF.kpoint_spinor_sectors import (
+            FREE_FRACTION, MEMORY_FACTOR, _memory_estimate, _memory_exceeds,
+        )
+        from parsec_python.acceleration.V_xc import multicollinear_xc as device
+        from parsec_python.SCF.kpoint_solver import KPointJob
+        from parsec_python.V_xc.noncollinear import FRAME_LOCAL, FRAME_MULTICOLLINEAR, NoncollinearFrame
+
+        points, box = int(self.grid.size), int(np.prod(self.grid.shape))
+        self.assertEqual(device.planned_device_bytes(self.grid, core=True, stencils=False), 8 * 33 * points)
+        self.assertEqual(device.planned_device_bytes(self.grid, core=True, stencils=True),
+                         8 * 34 * points + 4 * (box + points))
+        self.assertEqual(device.planned_device_bytes(self.grid, core=False, stencils=True),
+                         8 * 33 * points + 4 * (box + points))
+        # the ratio to one task per k-point compares the solvers alone, the resident bytes enter the test of the free
+        # memory only: a plan of 1e5 points and 100 states at one k-point in two sectors of 173.6 states each takes
+        # 1.5056 times one task per k-point, above the limit of 1.5; with the frame's 27.2 MB counted in both it would
+        # pass (1.4981)
+        decomposition = SimpleNamespace(sector_sizes=(50000, 50000))
+        entry = (0, None, decomposition, 2, None, [1, 0], None, None, None, [0, 1], [173.6, 173.6])
+        sectors, whole = _memory_estimate([entry], 200000, 100, 1, {})
+        resident = 8 * 34 * 100000
+        self.assertAlmostEqual(sectors / whole, 1.5056, places=4)
+        self.assertLess((sectors + resident) / (whole + resident), MEMORY_FACTOR)
+        for free in (None, 1.0e12):
+            self.assertTrue(_memory_exceeds(sectors, whole, free, resident))
+            self.assertTrue(_memory_exceeds(sectors, whole, free))
+        smaller = 1.2 * whole
+        free = smaller / FREE_FRACTION + 0.5 * resident
+        self.assertFalse(_memory_exceeds(smaller, whole, free))
+        self.assertTrue(_memory_exceeds(smaller, whole, free, resident))
+        self.assertIsNone(KPointJob(1, 1, None, None, None).resident_device_bytes)
+        local = SimpleNamespace(noncollinear_frame=NoncollinearFrame(FRAME_LOCAL), grid=self.grid)
+        multicollinear = SimpleNamespace(noncollinear_frame=NoncollinearFrame(FRAME_MULTICOLLINEAR), grid=self.grid)
+        with mock.patch.object(device, "device_available", return_value=True):
+            self.assertIsNone(device.resident_device_bytes(local))
+        with mock.patch.object(device, "device_available", return_value=False):
+            self.assertIsNone(device.resident_device_bytes(multicollinear))
+        # the subspaces of a worker of the device k-point solver go to the host where they and what the step holds on
+        # its device pass 75 % of the device (a fake device of 4 GB: 2.91e9 bytes of subspaces fit, with 1e8 more on
+        # the worker's device they do not; bytes on another device do not count)
+        from parsec_python.acceleration.SCF import kpoint_parallel
+
+        device_id = SimpleNamespace(id=1)
+        cp = SimpleNamespace(cuda=SimpleNamespace(runtime=SimpleNamespace(memGetInfo=lambda: (0, 4_000_000_000)),
+                                                  Device=lambda: device_id))
+        worker = object.__new__(kpoint_parallel._SolveWorker)
+        worker.converter = SimpleNamespace(backend=SimpleNamespace(name="cupy", cp=cp, use=lambda: None))
+        worker.tasks = [0]
+        dimension, working = 1_000_000, int(3.0e9 / (7 * 1_000_000 * 16))
+        with mock.patch.dict("os.environ", {kpoint_parallel.STORAGE_ENV: "auto"}):
+            for resident, spills in ((None, False), ({0: 10**9}, False), ({1: 10**8}, True)):
+                worker.job = KPointJob(1, 1, None, None, None, resident_device_bytes=resident)
+                self.assertEqual(worker._should_spill(dimension, working), spills, resident)
 
     def test_the_frame_of_a_run(self) -> None:
         from unittest import mock

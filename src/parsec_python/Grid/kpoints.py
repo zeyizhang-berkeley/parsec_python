@@ -1114,9 +1114,15 @@ def stencil_preserving_matrices(matrices, counts, lines, *, tolerance: float = 1
 
     ``W = N M N^-1`` (``N = diag(counts)``) moves a stencil offset ``o`` to ``W o``: kept where ``W`` is a signed
     permutation of the axes (the gradient) that maps every second difference onto one of the same weight (see
-    :func:`stencil_preserving_operations`).
+    :func:`stencil_preserving_operations`).  Under ``PARSEC_SYMMETRIC_GRADIENT=on`` with ``PARSEC_OBLIQUE_FULL_GROUP=auto``
+    (:func:`parsec_python.Laplacian.symmetric_gradient.full_group_wedge`) a ``W`` that is no signed permutation is kept
+    too where it maps the second differences: the gradient of such a grid is then the group average that commutes
+    with it.
     """
 
+    from ..Laplacian.symmetric_gradient import full_group_wedge
+
+    general = full_group_wedge()
     counts = np.asarray([float(value) for value in counts], dtype=np.float64)
     scale = max(abs(weight) for _, weight in lines)
     weights = {}
@@ -1131,7 +1137,7 @@ def stencil_preserving_matrices(matrices, counts, lines, *, tolerance: float = 1
             flags.append(False)
             continue
         rounded = rounded.astype(np.int64)
-        if not (np.all(np.abs(rounded).sum(axis=0) == 1) and np.all(np.abs(rounded).sum(axis=1) == 1)):
+        if not general and not (np.all(np.abs(rounded).sum(axis=0) == 1) and np.all(np.abs(rounded).sum(axis=1) == 1)):
             flags.append(False)
             continue
         preserved = True
@@ -1164,7 +1170,10 @@ def stencil_preserving_operations(group, lattice_vectors, counts, *, tolerance: 
     wedge of such operations is not the energy of the same points without them (hcp Au2, 0.3 bohr: 7.7e-3 Ry).  hcp
     keeps 8 of its 24 operations, the primitive fcc cell 12 of 48; their wedges gave the energy of time reversal
     alone on the same points within 1e-10 and 2e-9 Ry (A100, 2026-11-19).  The kept operations form a group (the
-    operations that preserve a set of offsets and weights do).  ``lines`` (:func:`grid_stencil_lines`) gives the
+    operations that preserve a set of offsets and weights do).  Under ``PARSEC_SYMMETRIC_GRADIENT=on`` (with
+    ``PARSEC_OBLIQUE_FULL_GROUP=auto``) the gradient of such a grid is the group average that commutes with every
+    operation of its lattice, and every operation that maps the second differences is kept
+    (:func:`stencil_preserving_matrices`).  ``lines`` (:func:`grid_stencil_lines`) gives the
     second differences of another grid (Fortran's general grid); ``None`` those of the default routines.
     """
 
@@ -1866,11 +1875,13 @@ def _free_level_stencil(cell, settings):
     return counts, lines, lattice / counts[:, None], 3
 
 
-def _free_level_slices(counts, lines, inverse_steps, periodic, order):
+def _free_level_slices(counts, lines, inverse_steps, periodic, order, gradient_lines=None):
     """The symbols ``(A, D)`` of ``-L`` and the Cartesian gradient, one plane of waves of the first axis at a time.
 
     Every wave of the grid is in a plane, or its negative is, which has the same ``A`` and ``-D``, so the planes
-    ``0 ... n_1 // 2`` hold them all.  ``A`` has shape ``(n_2, n_3)``, ``D`` ``(3, n_2, n_3)``."""
+    ``0 ... n_1 // 2`` hold them all.  ``A`` has shape ``(n_2, n_3)``, ``D`` ``(3, n_2, n_3)``.  ``gradient_lines``
+    (``((offset, Cartesian vector), ...)``): the symmetric gradient of the grid
+    (:mod:`parsec_python.Laplacian.symmetric_gradient`, ``sum_d c_d d_d``) instead of the axis gradient."""
 
     from ..Laplacian import first_derivative_coefficients, second_derivative_coefficients
 
@@ -1903,27 +1914,81 @@ def _free_level_slices(counts, lines, inverse_steps, periodic, order):
         else:
             moving.append((float(offset[0]), float(offset[1]) * theta_2 + float(offset[2]) * theta_3, float(weight)))
     rest = np.stack([inverse_steps[c, 1] * along_2 + inverse_steps[c, 2] * along_3 for c in range(3)])
+
+    def first_symbol(phase):
+        # 2 sum_j d_j sin(j phase): the symbol of a centred first difference along a line
+        return 2.0 * sum(first[width + j] * np.sin(j * phase) for j in range(1, width + 1))
+
     for plane in range(len(angles[0]) // 2 + 1):
         laplacian = fixed.copy()
         for factor, phase, weight in moving:
             laplacian -= weight * second_symbol(factor * angles[0][plane] + phase)
-        gradient = rest + (inverse_steps[:, 0] * along[0][plane])[:, None, None]
+        if gradient_lines is None:
+            gradient = rest + (inverse_steps[:, 0] * along[0][plane])[:, None, None]
+        else:
+            gradient = np.zeros((3,) + theta_2.shape)
+            for offset, vector in gradient_lines:
+                symbol = first_symbol(
+                    float(offset[0]) * angles[0][plane] + float(offset[1]) * theta_2 + float(offset[2]) * theta_3
+                )
+                gradient += np.asarray(vector, dtype=np.float64)[:, None, None] * symbol[None]
         yield laplacian, gradient
 
 
 @lru_cache(maxsize=8)
-def _free_level_reach(counts, lines, steps, periodic, order) -> float:
+def _free_level_reach(counts, lines, steps, periodic, order, gradient_lines=None) -> float:
     """The smallest ``|k|`` at which a wave of the grid has a level of zero (``inf``: none has at any ``k``)."""
 
     inverse = np.linalg.inv(np.asarray(steps, dtype=np.float64).reshape(3, 3))
     reach = math.inf
-    for laplacian, gradient in _free_level_slices(counts, lines, inverse, periodic, order):
+    for laplacian, gradient in _free_level_slices(counts, lines, inverse, periodic, order, gradient_lines):
         squares = np.sum(gradient**2, axis=0)
         unbounded = squares > laplacian + 1.0e-10
         if np.any(unbounded):
             size = squares[unbounded]
             reach = min(reach, float(np.min(np.sqrt(size) - np.sqrt(size - laplacian[unbounded]))))
     return reach
+
+
+def _free_level_gradient(counts, lines, steps, periodic):
+    """``((offset, vector), ...)`` of the symmetric gradient the bulk grid takes under ``PARSEC_SYMMETRIC_GRADIENT=on``
+    (:func:`parsec_python.Laplacian.symmetric_gradient.symmetric_lines_of`), or ``None`` (the axis gradient: the switch
+    off, a slab, a group of signed permutations alone)."""
+
+    from ..Laplacian.symmetric_gradient import symmetric_gradient_setting, symmetric_lines_of
+
+    if symmetric_gradient_setting() != "on" or int(periodic) != 3:
+        return None
+    found = symmetric_lines_of(np.asarray(steps, dtype=np.float64).reshape(3, 3).T, list(lines), counts)
+    if found is None:
+        return None
+    return tuple(
+        (tuple(int(v) for v in offset), tuple(float(v) for v in vector))
+        for offset, vector in zip(found.offsets, found.vectors)
+    )
+
+
+def takes_symmetric_gradient(cell, settings) -> bool:
+    """Whether the bulk grid that ``settings`` builds for ``cell`` takes the symmetric gradient of
+    ``PARSEC_SYMMETRIC_GRADIENT=on`` (an index map of its lattice that is no signed permutation), told from the input
+    without building the grid (:func:`_free_level_stencil`, :func:`_free_level_gradient`).  ``False`` under ``off``, for
+    a slab or a wire and for a grid whose group holds signed permutations alone."""
+
+    from ..Laplacian.symmetric_gradient import symmetric_gradient_setting
+
+    if symmetric_gradient_setting() != "on":
+        return False
+    try:
+        stencil = _free_level_stencil(cell, settings)
+    except ValueError:
+        return False
+    if stencil is None:
+        return False
+    counts, lines, steps, periodic = stencil
+    key_counts = tuple(int(value) for value in counts)
+    key_lines = tuple((tuple(int(v) for v in offset), float(weight)) for offset, weight in lines)
+    key_steps = tuple(float(value) for value in np.asarray(steps, dtype=np.float64).ravel())
+    return _free_level_gradient(key_counts, key_lines, key_steps, int(periodic)) is not None
 
 
 def lowest_free_levels(k_points, cell, settings) -> np.ndarray | None:
@@ -1952,7 +2017,8 @@ def lowest_free_levels(k_points, cell, settings) -> np.ndarray | None:
     key_lines = tuple((tuple(int(v) for v in offset), float(weight)) for offset, weight in lines)
     key_steps = tuple(float(value) for value in np.asarray(steps, dtype=np.float64).ravel())
     order = int(settings.expansion_order)
-    reach = _free_level_reach(key_counts, key_lines, key_steps, int(periodic), order)
+    gradient_lines = _free_level_gradient(key_counts, key_lines, key_steps, int(periodic))
+    reach = _free_level_reach(key_counts, key_lines, key_steps, int(periodic), order, gradient_lines)
     levels = np.full(points.shape[0], np.inf)
     if not math.isfinite(reach):
         return levels
@@ -1964,7 +2030,7 @@ def lowest_free_levels(k_points, cell, settings) -> np.ndarray | None:
     chosen = points[beyond]
     squared = lengths[beyond]
     best = np.full(beyond.size, np.inf)
-    for laplacian, gradient in _free_level_slices(key_counts, key_lines, inverse, int(periodic), order):
+    for laplacian, gradient in _free_level_slices(key_counts, key_lines, inverse, int(periodic), order, gradient_lines):
         unbounded = np.sum(gradient**2, axis=0) > laplacian + 1.0e-10
         if not np.any(unbounded):
             continue
@@ -2180,6 +2246,7 @@ __all__ = [
     "soc_kpoint_wedge_setting",
     "stencil_preserving_matrices",
     "stencil_preserving_operations",
+    "takes_symmetric_gradient",
     "time_reversal_reduced",
     "translate01",
     "unshifted_mesh_setting",

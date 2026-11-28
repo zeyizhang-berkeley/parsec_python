@@ -520,6 +520,9 @@ class SCFWarmStart:
     structure before (one :class:`parsec_python.SCF.hybrid.OrbitalSet` per
     spin channel set): the first exchange operator of the Fock loop is built
     from them instead of a semilocal start.  ``None`` otherwise.
+    ``exchange_stability_ratio`` is the decay ratio with which the stability
+    test of a spin-symmetric state found that structure's state stable
+    (:mod:`parsec_python.SCF.fock_stability`), ``None`` where it did not.
 
     ``mixer`` is a mixer whose history this loop continues instead of a fresh
     one (the inner loops of a hybrid's Fock loop,
@@ -541,6 +544,7 @@ class SCFWarmStart:
     hxc_reference: np.ndarray | None = None
     first_iteration_degree: int | None = None
     exchange_orbitals: tuple | None = None
+    exchange_stability_ratio: float | None = None
     mixer: object | None = None
     relative_criterion: float | None = None
     level_tolerance: float | None = None
@@ -830,7 +834,9 @@ def warm_start_for_moved_atoms(
         from .hybrid import exchange_start_orbitals
 
         warm_start = replace(
-            warm_start, exchange_orbitals=exchange_start_orbitals(previous_result, previous_system)
+            warm_start,
+            exchange_orbitals=exchange_start_orbitals(previous_result, previous_system),
+            exchange_stability_ratio=getattr(getattr(previous_result, "exact_exchange", None), "spin_stability_ratio", None),
         )
     if getattr(system, "embedding", None) is not None:
         # FDET of PARSEC 1.5: translation by whole grid steps, or the tip sphere

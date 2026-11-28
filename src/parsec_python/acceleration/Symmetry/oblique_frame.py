@@ -37,8 +37,10 @@ three grid axes do not: such a ``W`` turns an axis onto an extra direction, alon
 difference of its own, so the discrete gradient of a GGA (its potential is off by 2e-3 to 8e-2 Ry on hcp Mg, diamond,
 bcc Na and graphite) and the k-point term ``-2ik.grad`` are not invariant.  ``PARSEC_OBLIQUE_FULL_GROUP=auto`` (the
 default since 2026-11-23, :func:`oblique_full_group_setting`) admits them for a bulk cell whose Hamiltonian has no
-gradient (a local-density functional at the Gamma point; :func:`general_index_operations`); ``off`` keeps the signed
-permutations alone.
+gradient (a local-density functional at the Gamma point; :func:`general_index_operations`), and for a GGA at the
+Gamma point under the opt-in ``PARSEC_SYMMETRIC_GRADIENT=on``, whose gradient is the average of the axis gradient over
+the group of the lattice and commutes with them (:mod:`parsec_python.Laplacian.symmetric_gradient`); ``off`` keeps the
+signed permutations alone.
 """
 
 from __future__ import annotations
@@ -79,11 +81,14 @@ def oblique_full_group_setting() -> str:
     """``PARSEC_OBLIQUE_FULL_GROUP``: ``auto`` (the default since 2026-11-23) or ``off``.
 
     ``auto``: the sectors of a bulk cell in the frame of its grid indices (``PARSEC_OBLIQUE_SECTORS=auto``) whose
-    functional reads no gradient (:data:`GRADIENT_FREE_FUNCTIONALS`; the frame is taken at the Gamma point only) also
-    take the operations whose action on the indices is an integer matrix but no signed permutation
+    functional reads no gradient (:data:`GRADIENT_FREE_FUNCTIONALS`; the frame is taken at the Gamma point only), or
+    a GGA under ``PARSEC_SYMMETRIC_GRADIENT=on``, also take the operations whose action on the indices is an integer
+    matrix but no signed permutation
     (:func:`general_index_operations`: the full hexagonal and cubic groups), where its sectors then cost less (rows times
     states plus the fixed cost of a sector, :func:`.axis_reflection.detect_point_group_reduction`); otherwise the
-    sectors of the signed permutations, bit for bit.  ``off``: the signed permutations alone, as before 2026-11-23."""
+    sectors of the signed permutations, bit for bit; under ``PARSEC_SYMMETRIC_GRADIENT=on`` the stencil-exact k-point
+    wedges keep these operations too (:func:`parsec_python.Laplacian.symmetric_gradient.full_group_wedge`).  ``off``:
+    the signed permutations alone, as before 2026-11-23."""
 
     value = os.environ.get(_FULL_GROUP_SWITCH, "auto").strip().lower() or "auto"
     if value not in {"auto", "off"}:
@@ -218,8 +223,9 @@ def general_index_operations(grid) -> tuple[np.ndarray, ...]:
     the same weight.  Empty for a wire or slab.
 
     These are the rotations and reflections of a hexagonal cell that are no signed permutation of its grid axes (16 of
-    D6h), and those of the primitive fcc and bcc cells (36 of Oh).  The gradient of the grid does not commute with them
-    (the module docstring): only a Hamiltonian without one keeps them (:func:`oblique_full_group_setting`)."""
+    D6h), and those of the primitive fcc and bcc cells (36 of Oh).  The axis gradient of the grid does not commute with
+    them (the module docstring): only a Hamiltonian without one keeps them, or one with the symmetric gradient of
+    ``PARSEC_SYMMETRIC_GRADIENT=on`` (:func:`oblique_full_group_setting`)."""
 
     from .axis_reflection import confined_grid
 

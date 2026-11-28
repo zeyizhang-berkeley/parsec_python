@@ -880,7 +880,31 @@ the input sets them).
    the operator. The loop stops when `dexx < Exx_Tolerance` and the inner
    loop converged; otherwise the operator of `P` is built and the next inner
    loop starts from the last one. The last outer iteration evaluates only
-   the occupied pairs.
+   the occupied pairs. Where the pair kernel of the grid is not symmetric
+   (the multipole boundary of the pair solves; `max|M - M^T|/max|M|` in the
+   `ACE operator:` line of `parsec.out`), the ACE of the symmetric part of
+   `M` gives dexx a negative floor of second order in that asymmetry, which
+   a tight `Exx_Tolerance` cannot get below (a spin H3 chain in a sphere of
+   6 bohr: asymmetry 3.4e-5, floor -6.7e-9 Ry); the estimate of each plain
+   operator at its own orbitals is therefore removed from the next dexx
+   before the test (`PARSEC_FOCK_DEXX_FLOOR=auto`, [SCF/fock_stability.py](SCF/fock_stability.py);
+   in the examples the asymmetry is at most 4e-10 and nothing changes).
+   A spin-polarized loop that converges to a state whose two channels hold
+   the same occupations with a partly filled level (a semilocal start that
+   lost its moment, `Initial_Spin_Polarization` 0) may stand on a saddle of
+   exact exchange, which no step of the loop leaves: it is tested by moving a
+   tenth of the electrons of those levels from the down to the up channel and
+   going on with plain steps. Where the moment of the outputs decays clearly
+   (from the second step on, the last ratio of two steps at most 0.9 and its
+   linear continuation at most 0.95) the state is stable and copies of its
+   orbitals bring the loop back to it; where the moment grows, or its ratios
+   stay near 1 (a slowly unstable saddle shows them as well as a marginally
+   stable state), the loop goes on, and the state it reaches is kept where it
+   is lower in `E - TS`. A `NOTE` says what the test found, and the next
+   structure of a relaxation does not test a state found clearly stable again
+   (`PARSEC_FOCK_SPIN_STABILITY=auto`; an H3 chain with Hartree-Fock at
+   6000 K: the symmetric state 0.21 Ry above the doublet the test reaches; a
+   stable Na4 cluster with PBE0 at 3000 K: three outer iterations more).
 5. **Fock-loop controls** (where the loop goes is set by `Exx_Tolerance`
    and `Convergence_Criterion`; these keywords set how it gets there, see
    [SCF/fock_controls.py](SCF/fock_controls.py) and

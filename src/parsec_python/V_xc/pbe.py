@@ -295,8 +295,16 @@ def _oblique_mix(grid) -> np.ndarray | None:
 
 
 def _oblique_gradient(field: np.ndarray, grid, weights: np.ndarray, mix: np.ndarray) -> np.ndarray:
-    """Cartesian gradient ``(3, size)`` of a periodic field on an oblique grid (unit-step ``weights``)."""
+    """Cartesian gradient ``(3, size)`` of a periodic field on an oblique grid (unit-step ``weights``).
 
+    Under ``PARSEC_SYMMETRIC_GRADIENT=on`` a grid whose lattice has index maps that are no signed permutation takes
+    the group average of this gradient (:mod:`parsec_python.Laplacian.symmetric_gradient`)."""
+
+    from ..Laplacian.symmetric_gradient import apply_gradient, symmetric_gradient_lines
+
+    lines = symmetric_gradient_lines(grid)
+    if lines is not None:
+        return apply_gradient(field, grid, lines, weights)
     box = _to_box(field, grid)
     along_axes = [
         _from_box(correlate1d(box, weights, axis=axis, mode=grid.boundary_modes[axis]), grid)
@@ -309,9 +317,14 @@ def _oblique_divergence_adjoint(fluxes, grid, weights: np.ndarray, mix: np.ndarr
     """Transpose of the Cartesian gradient applied to Cartesian ``fluxes``: ``sum_k G_k^T flux_k``.
 
     ``G_k = sum_i C[k, i] D_i`` and the periodic centered ``D_i`` is antisymmetric, so
-    ``G_k^T = -sum_i C[k, i] D_i``.
+    ``G_k^T = -sum_i C[k, i] D_i``.  The symmetric gradient of :func:`_oblique_gradient` takes its own transpose.
     """
 
+    from ..Laplacian.symmetric_gradient import apply_gradient_transpose, symmetric_gradient_lines
+
+    lines = symmetric_gradient_lines(grid)
+    if lines is not None:
+        return apply_gradient_transpose(fluxes, grid, lines, weights)
     index_fluxes = np.einsum("ki,kj->ij", mix, np.asarray(fluxes))
     total = np.zeros(grid.size, dtype=np.float64)
     for axis in range(3):

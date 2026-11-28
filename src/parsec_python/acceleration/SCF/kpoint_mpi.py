@@ -136,6 +136,10 @@ class MPIKPointSolver:
         backend = self.backend
         backend.use()
         free, total = backend.cp.cuda.runtime.memGetInfo()
+        # what the SCF step of every rank holds on its device beside them (the multicollinear XC of a non-collinear
+        # loop)
+        resident = getattr(self.job, "resident_device_bytes", None) or {}
+        needed += int(resident.get(int(backend.cp.cuda.Device().id), 0))
         usable = 0.92 * total
         if needed > usable and self.context.is_root:
             total_needed = needed * self.context.size

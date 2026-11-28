@@ -857,13 +857,15 @@ def _memory_estimate(entries, rows: int, states: int, n_kpoints: int, geometry) 
     return total + _WORKSPACE_BASES * largest, whole * (_WHOLE_STORED * n_kpoints + _WORKSPACE_BASES)
 
 
-def _memory_exceeds(sectors: float, whole: float, free: float | None) -> bool:
+def _memory_exceeds(sectors: float, whole: float, free: float | None, resident: float = 0.0) -> bool:
     """Whether the sectors would take more than :data:`MEMORY_FACTOR` times the device memory of one task per k-point,
-    or more than :data:`FREE_FRACTION` of the free memory of the device where they take more than that task."""
+    or, with ``resident`` (what the SCF step holds on the device beside them, ``KPointJob.resident_device_bytes``: the
+    multicollinear XC), more than :data:`FREE_FRACTION` of the free memory of the device where they take more than that
+    task.  The ratio compares the solvers alone: the resident bytes are the same for both."""
 
     if sectors > MEMORY_FACTOR * whole:
         return True
-    return free is not None and sectors > whole and sectors > FREE_FRACTION * free
+    return free is not None and sectors > whole and sectors + resident > FREE_FRACTION * free
 
 
 def free_device_bytes(backend: str | None = None) -> float | None:
@@ -1116,10 +1118,12 @@ def plan_spinor_sectors(
     memory = ""
     if noncollinear and setting == "auto":
         # the device memory: at most MEMORY_FACTOR times that of one task per k-point and within the free memory of
-        # the device, else the groups of a lower rank, else one task per k-point
+        # the device (with what the SCF step holds beside the solvers), else the groups of a lower rank, else one
+        # task per k-point
+        resident = float(sum((getattr(job, "resident_device_bytes", None) or {}).values()))
         while True:
             sectors_bytes, whole_bytes = _memory_estimate(entries, rows, states, k_points.shape[0], geometry)
-            if not _memory_exceeds(sectors_bytes, whole_bytes, free_bytes):
+            if not _memory_exceeds(sectors_bytes, whole_bytes, free_bytes, resident):
                 break
             ranks = [_entry_rank(entry) for entry in entries if entry is not None]
             if not ranks:

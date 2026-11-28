@@ -1816,6 +1816,11 @@ def execute(args, cp, comm, MPI, initialization_seconds, initial_affinity=None):
     from parsec_python.SCF.fock_diis import fock_diis_tail_setting
 
     fock_diis_tail_setting()
+    # PARSEC_FOCK_DEXX_FLOOR and PARSEC_FOCK_SPIN_STABILITY (SCF/fock_stability.py) likewise: the root's Fock loop.
+    from parsec_python.SCF.fock_stability import dexx_floor_setting, spin_stability_setting
+
+    dexx_floor_setting()
+    spin_stability_setting()
     # PARSEC_FERMI_GAP_ROOT (Occupations/fermi_dirac.py) likewise: every rank places the Fermi level alike.
     from parsec_python.Occupations.fermi_dirac import fermi_gap_root_setting
 

@@ -337,6 +337,10 @@ def fock_loop_warning_lines(summary) -> list[str]:
     """What the diagnostics of a Fock loop (:class:`parsec_python.SCF.hybrid.FockLoopSummary`) warn of."""
 
     lines = []
+    tested = getattr(summary, "spin_stability", "")
+    if tested:
+        # The stability test of a converged spin-symmetric state (parsec_python.SCF.fock_stability).
+        lines.append(f" NOTE: {tested}.")
     instability = getattr(summary, "instability", None)
     if instability is not None:
         lines.append(

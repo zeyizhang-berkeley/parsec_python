@@ -628,7 +628,17 @@ def build_gradient(grid: RealSpaceGrid) -> tuple[sp.csr_matrix, sp.csr_matrix, s
     On a :class:`~parsec_python.Grid.pbc.GeneralPeriodicGrid` the three
     matrices are still Cartesian, built from the derivatives along the
     lattice directions (:func:`~.nonorthogonal.build_general_gradient`).
+
+    Under ``PARSEC_SYMMETRIC_GRADIENT=on`` an oblique bulk grid whose lattice has index maps that are no signed
+    permutation (a hexagonal, primitive fcc or bcc grid of either routine set) takes the group average of the axis
+    gradient instead (:mod:`.symmetric_gradient`), so that the k-point term ``-2ik.grad`` commutes with the whole
+    group of the grid.
     """
+    from .symmetric_gradient import gradient_matrices, symmetric_gradient_lines
+
+    lines = symmetric_gradient_lines(grid)
+    if lines is not None:
+        return gradient_matrices(grid, lines, first_derivative_coefficients(grid.settings.expansion_order))
     if getattr(grid, "is_general_periodic", False):
         from .nonorthogonal import build_general_gradient
 

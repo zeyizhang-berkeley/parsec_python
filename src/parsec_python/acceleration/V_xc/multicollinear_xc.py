@@ -145,6 +145,49 @@ class DeviceMulticollinearXC:
             )
 
 
+#: the float64 fields per grid point that one evaluation holds at once on its device: the inputs of the kernel ``T``,
+#: ``m`` (3), ``DT`` (3), ``Dm`` (9) and its outputs ``e``, ``de/dT``, ``de/dm`` (3), ``de/dDT`` (3), ``de/dDm`` (9);
+#: the device stencils keep ``n`` beside ``T`` where a core density is added (:meth:`DeviceMulticollinearXC.__call__`)
+EVALUATION_FIELDS = 33
+
+
+def planned_device_bytes(grid, *, core: bool, stencils: bool) -> int:
+    """The most bytes one evaluation of the multicollinear sum on ``grid`` holds on its device (CuPy's pool keeps them
+    for the next): :data:`EVALUATION_FIELDS` float64 fields of the grid points, one more with ``core`` on the device
+    stencils (``stencils``: :func:`.device_xc.device_grid_supported` without the correction beside the nuclei), whose
+    maps keep two int32 values per point of the box.  From the shapes alone (O2 in a 20 bohr cube at h 0.2, 1e6
+    points: 259 MiB; the peak of the run rose by 188 MiB against the local frame on the host)."""
+
+    points = int(grid.size)
+    fields = EVALUATION_FIELDS + (1 if core and stencils else 0)
+    maps = 0
+    if stencils:
+        box = int(np.prod([int(value) for value in getattr(grid, "shape", (points,))]))
+        maps = 4 * (box + points)
+    return 8 * points * fields + maps
+
+
+def resident_device_bytes(system) -> dict[int, int] | None:
+    """``{device: bytes}`` that the multicollinear frame of a non-collinear run holds on the device of its XC (the
+    current device of the calling thread, as :func:`device_multicollinear` takes it) while the SCF step runs beside
+    the subspaces of the eigensolvers, for their memory rules; ``None`` for another frame or without a device."""
+
+    from ...V_xc.noncollinear import FRAME_MULTICOLLINEAR
+
+    frame = getattr(system, "noncollinear_frame", None)
+    if getattr(frame, "mode", None) != FRAME_MULTICOLLINEAR or not device_available():
+        return None
+    from ...V_xc.nuclear_gradient import nuclear_gradient_setting
+    from ..backends.cupy import require_cupy
+    from .device_xc import device_grid_supported
+
+    cp, _ = require_cupy()
+    grid = system.grid
+    stencils = bool(device_grid_supported(grid)) and nuclear_gradient_setting() == "off"
+    core = getattr(system, "core_density", None) is not None
+    return {int(cp.cuda.Device().id): planned_device_bytes(grid, core=core, stencils=stencils)}
+
+
 #: the availability that the ranks of an MPI run agreed on (:func:`agree_across_ranks`), ``None`` outside one
 _AGREED: bool | None = None
 
@@ -172,6 +215,28 @@ def device_available() -> bool:
     if _AGREED is not None:
         return _AGREED
     return _process_device_available()
+
+
+def unavailable_reason() -> str | None:
+    """Why the multicollinear sum has no CUDA device (:func:`device_available` false), for the NOTE of a run that
+    ``auto`` keeps in another frame; ``None`` where it has one."""
+
+    from ..resources import device_policy
+    from .device_xc import device_xc_mode
+
+    if device_xc_mode() == "off":
+        return "PARSEC_CUPY_XC=off"
+    if device_policy() == "cpu":
+        return "PARSEC_DEVICE=cpu or --device cpu"
+    try:
+        from ..backends.cupy import require_cupy
+
+        require_cupy()
+    except Exception:
+        return "no CuPy with a CUDA device in this process"
+    if _AGREED is False:
+        return "an MPI rank without a CUDA device"
+    return None
 
 
 def agree_across_ranks(comm) -> bool:
@@ -214,4 +279,13 @@ def device_multicollinear(functional: str, grid):
     return found
 
 
-__all__ = ["DeviceMulticollinearXC", "agree_across_ranks", "device_available", "device_multicollinear"]
+__all__ = [
+    "DeviceMulticollinearXC",
+    "EVALUATION_FIELDS",
+    "agree_across_ranks",
+    "device_available",
+    "device_multicollinear",
+    "planned_device_bytes",
+    "resident_device_bytes",
+    "unavailable_reason",
+]

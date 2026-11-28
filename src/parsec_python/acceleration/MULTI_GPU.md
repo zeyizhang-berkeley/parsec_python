@@ -433,11 +433,15 @@ run on several nodes takes the decisions of one node.
   staged (`benchmarks/exchange_transport.py`).
 - A spin-polarized run, hybrid or semilocal, divides the sectors of both
   channels: every command names its channel, and a rank keeps a subspace of
-  each channel in each of its sectors. With `PARSEC_SPIN_FLIP_SYMMETRY=auto` (on request; `off` by default)
-  and an antiferromagnetic start that has a spin-flip operation the root
+  each channel in each of its sectors. On the route of `PARSEC_SPIN_FLIP_SYMMETRY`
+  (`late` by default since 2026-11-27: from the iteration where the two solved
+  channels are images of each other within the residual; `auto` from the
+  start) and an antiferromagnetic start that has a spin-flip operation the root
   sends the commands of the up channel alone and forms the down channel as
-  its image (`SCF/spin_flip.py`; Cr4 on 4 ranks: eigensolve 1.05 -> 0.63 s,
-  dE 3e-11 Ry; a loop whose up channel ends with a fractional occupation, or
+  its image (`SCF/spin_flip.py`; Cr4 on 4 ranks under `auto`: eigensolve
+  1.05 -> 0.63 s, dE 3e-11 Ry; under `late` SCF 1.89 -> 1.77 s, 28 -> 35
+  iterations, dE 1e-12 Ry, MnO AFM-II 64 atoms 2.97 -> 2.29 s, dE 3e-12 Ry,
+  the energies of one process; a loop whose up channel ends with a fractional occupation, or
   in which a test of the spin sectors fails, runs again with both channels on
   the same ranks and sectors, H2 at 20000 K on 4 ranks with the energy of
   `off`; O2 from `+0.5 / -0.5` on 4 ranks the loops and the energy of `off`

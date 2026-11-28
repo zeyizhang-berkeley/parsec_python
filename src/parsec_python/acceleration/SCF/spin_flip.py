@@ -10,8 +10,8 @@ maps the up start density onto the down one: ``rho_down(r) = rho_up(g^-1 r)``.  
 potential of a collinear functional is then covariant (the Hartree potential of the total density, which ``g``
 leaves invariant, ``V_xc,down[rho_up, rho_down](r) = V_xc,up[rho_down, rho_up]`` at the image point, the ionic and
 nonlocal terms of identical species), so ``H_down = U_g H_up U_g^-1``: the down channel has the levels of the up
-channel and the images of its orbitals, at every SCF iteration from such a start.  With
-``PARSEC_SPIN_FLIP_SYMMETRY=auto`` the spin loop (:func:`parsec_python.SCF.spin_polarized.run_spin_scf`) solves the
+channel and the images of its orbitals, at every SCF iteration from such a start.  On the route of
+``PARSEC_SPIN_FLIP_SYMMETRY`` the spin loop (:func:`parsec_python.SCF.spin_polarized.run_spin_scf`) solves the
 up channel alone, in the sectors of ``H`` where the run has them, and takes the down channel from it: its levels
 and occupations are those of the up channel, its density the image of the up density (one gather of the orbit
 values per iteration), its orbitals the images of the up orbitals (:class:`FlippedOrbitals`, formed only where they
@@ -51,19 +51,21 @@ the two channels are those of the operation there, not those two solved channels
 filled multiplet of the start Hamiltonian that ``off`` does not see).  It says so in ``parsec.out``, solves both
 channels for the rest of the run (later loops, ionic steps, the systems that the spin guard prepares again), and
 solves the loop again from its start in the sectors it started in: the route of ``off``.
-Not detected, and the reason the route is not the default: a flip loop that settles with integer occupations in
-another minimum than two solved channels reach (A100, PBE, 80 K, against ``off``: Ni2 at 4.06 bohr from
-``+0.6 / -0.6``, -138.78451344 against -138.84084192 Ry, 0.77 eV higher, no note; Fe2, Co2, Cr2, Cr4 and MnO
-agree with ``off``), and a closed shell that a rotation across its gap would lower, as in the sectors.
-``PARSEC_SPIN_FLIP_STABILITY=auto`` (:func:`spin_flip_stability_setting`, opt-in) tests the converged state of every
-loop against perturbations that break the operation (the eigenvalues of the linear SCF response of the down channel,
-:func:`parsec_python.SCF.spin_polarized._flip_stability`) and leaves the route where one reaches 1.  It does not see
-the Ni2 miss: the state of the route is a local minimum there (largest eigenvalue 0.61, 0.86 at 300 K; Cr2 0.95, Cr4
-0.36, Co2 0.44, Fe2 0.48, MnO 0.31),
-``off`` reaches its own state along its own path (the down channel solved apart from the first iteration on; it ends
-unconverged after 150 iterations, the levels of its channels 5.6e-4 Ry apart), and a ferromagnetic state with a
-moment of 4 lies below both (-138.85078776 Ry, reached from the state of the route with both channels solved from a
-first down solve of its own).  No test of the converged state can make the route match ``off`` there.
+
+Not detected from the start (``auto``): a flip loop that settles with integer occupations in another minimum than two
+solved channels reach from the same start, and a closed shell that a rotation across its gap would lower, as in the
+sectors.  A100, PBE, 80 K, against ``off`` (2026-11-27): Ni2 at 4.06 bohr from ``+0.6 / -0.6`` -138.76439929 against
+-138.78083178 Ry, 16.4 mRy higher, no note.  The state of the route is a local minimum there against perturbations that
+keep the operation and that break it (kicks of 1e-2 and 5e-2 Ry return to it; the largest eigenvalue of the response
+of :mod:`.spin_flip_stability` 0.69), while ``off`` takes its own path: the first eigensolves of its two channels
+differ by 0.08 Ry, its moment swings by +-2 over the first iterations, and it ends in a state that breaks the operation
+(its potentials 0.79 Ry apart), from which, symmetrized, the flip loop reaches -138.79843454 Ry; a ferromagnetic state
+(moment 4) lies at -138.81535 Ry.  So the default is ``late``: the loop solves both channels, as ``off``, until they
+are images of each other within its residual (``SCF.spin_polarized._late_flip_switch``) and takes the route from
+there: the state of ``off`` within the criterion, with fewer eigensolves where the switch is taken, and the loop of
+``off`` bit for bit where the channels stay apart (Ni2, Co2).  ``PARSEC_SPIN_FLIP_STABILITY=auto``
+(:func:`spin_flip_stability_setting`, opt-in) tests the converged state of a loop of ``auto`` and tries starts below it
+(:mod:`.spin_flip_stability`, ``PARSEC_SPIN_FLIP_CONTINUATION``); it does not see the Ni2 miss either.
 A same-label start (one ``Initial_Spin_Polarization`` per species) has no flip operation; a state that breaks the
 point group of such atoms fires test 2 of :mod:`.spin_sectors` as before.  Units Ry, bohr.
 """
@@ -86,8 +88,11 @@ __all__ = [
     "START_DENSITY_TOLERANCE",
     "WARM_START_TOLERANCE",
     "detect_spin_flip",
+    "spin_flip_continuation_setting",
+    "spin_flip_from_start",
     "spin_flip_setting",
     "spin_flip_stability_setting",
+    "spin_flip_taken",
     "spin_partner_labels",
 ]
 
@@ -118,17 +123,48 @@ def _field_values(values) -> np.ndarray:
     return np.asarray(values, dtype=np.float64)
 
 
-#: The value where none is named: ``off`` (a flip loop can settle in another state than two solved channels with
-#: integer occupations, Ni2 0.77 eV higher, which no test of the loop sees; see the module).
-DEFAULT = "off"
+#: The value where none is named: ``late`` since 2026-11-27 (the loop of ``off`` until its two channels are images
+#: of each other within its residual, then the route: the state of ``off`` within the criterion, faster where the
+#: switch is taken; ``auto`` from the start can settle in another state than two solved channels, Ni2 16 mRy higher,
+#: which no test of the loop sees; see the module; ``off`` before).
+DEFAULT = "late"
+
+
+def spin_flip_from_start(system) -> bool:
+    """Whether the loops of a prepared ``system`` take the route from their first iteration (``auto``).
+
+    Under ``late`` (the default) the driver attaches the operation to every run whose labels pair up and that has one,
+    but a loop takes the route only after its two solved channels have become images of each other; until then, and
+    in every loop that never switches, it is the loop of ``off``.  A test that needs both channels solved should ask
+    this, not whether ``system.spin_flip`` is set, and :func:`spin_flip_taken` of the result after the loop.
+    """
+
+    flip = getattr(system, "spin_flip", None)
+    if flip is None or getattr(system, "spin_flip_left", None):
+        return False
+    return getattr(flip, "mode", "auto") == "auto"
+
+
+def spin_flip_taken(result) -> bool:
+    """Whether the last loop that made ``result`` took the down channel as the image of the up channel (the route, from
+    the start under ``auto`` or after the switch of ``late``): its down channel holds no subspace of its own
+    (:class:`SpinFlipChannelState`)."""
+
+    channels = getattr(result, "spin", None)
+    if not channels or len(channels) != 2:
+        return False
+    return bool(getattr(getattr(channels[1], "eigensolver_state", None), "spin_flip_channel", False))
 
 
 def spin_flip_setting() -> str:
-    """``PARSEC_SPIN_FLIP_SYMMETRY``: ``off`` (the default) or ``auto`` (on request).
+    """``PARSEC_SPIN_FLIP_SYMMETRY``: ``late`` (the default), ``auto`` (on request) or ``off``.
 
     ``auto`` solves only the up channel of a collinear spin-polarized run whose labels and start have a spin-flip
     operation (see the module) and takes the down channel from it, leaving the route where the up channel ends with a
-    fractional occupation or a test of the spin sectors fails in a flip loop; ``off`` solves both channels.
+    fractional occupation or a test of the spin sectors fails in a flip loop; ``late`` solves both channels, as
+    ``off``, until they are images of each other within the residual of the loop, and takes the route from there
+    (``SCF.spin_polarized._late_flip_switch``; a loop whose channels stay apart is that of ``off``); ``off`` solves
+    both channels.
     """
 
     value = os.environ.get(_SWITCH, DEFAULT).strip().lower() or DEFAULT
@@ -136,28 +172,30 @@ def spin_flip_setting() -> str:
         value = "off"
     if value in {"1", "true", "yes", "on"}:
         value = "auto"
-    if value not in ("off", "auto"):
-        raise ValueError(f"{_SWITCH} must be off or auto, not {value!r}")
+    if value not in ("off", "auto", "late"):
+        raise ValueError(f"{_SWITCH} must be off, auto or late, not {value!r}")
     return value
 
 
 _STABILITY_SWITCH = "PARSEC_SPIN_FLIP_STABILITY"
 
 
-#: The value of ``PARSEC_SPIN_FLIP_STABILITY`` where none is named: ``off`` (the test found no unstable state in six
-#: antiferromagnetic inputs and costs about what the route saves on them; it does not see the Ni2 miss, a stable
-#: state of the route: see the module).
+#: The value of ``PARSEC_SPIN_FLIP_STABILITY`` where none is named: ``off`` (the test, with the starts and the
+#: continuation of ``PARSEC_SPIN_FLIP_CONTINUATION=auto``, found no state of the route below which a start lies on the
+#: antiferromagnetic inputs measured, costs more than the route saves on them, and does not see the Ni2 miss of
+#: ``PARSEC_SPIN_FLIP_SYMMETRY=auto``, a stable state of the route: see the module; ``late`` needs no test).
 STABILITY_DEFAULT = "off"
 
 
 def spin_flip_stability_setting() -> str:
-    """``PARSEC_SPIN_FLIP_STABILITY``: ``off`` (the default) or ``auto`` (on request); used where the flip route is
-    taken, read and checked in every preparation.
+    """``PARSEC_SPIN_FLIP_STABILITY``: ``off`` (the default) or ``auto`` (on request); used where
+    ``PARSEC_SPIN_FLIP_SYMMETRY=auto`` takes the route, read and checked in every preparation (with
+    :func:`spin_flip_continuation_setting`).
 
     ``auto`` tests the state of every converged loop of ``PARSEC_SPIN_FLIP_SYMMETRY=auto`` against perturbations that
-    break the operation (the linear response of the down channel, which the route does not solve otherwise:
-    ``SCF.spin_polarized._flip_stability``), notes the largest eigenvalue of that response and leaves the route where
-    it reaches 1 (an unstable state); ``off`` keeps the state untested, bit for bit as before 2026-11-22.
+    break the operation (the linear response of the down channel, which the route does not solve otherwise) and, under
+    ``PARSEC_SPIN_FLIP_CONTINUATION=auto``, the starts that may lie below it
+    (:mod:`.spin_flip_stability`); ``off`` keeps the state untested, bit for bit as before 2026-11-22.
     """
 
     value = os.environ.get(_STABILITY_SWITCH, STABILITY_DEFAULT).strip().lower() or STABILITY_DEFAULT
@@ -167,6 +205,27 @@ def spin_flip_stability_setting() -> str:
         value = "auto"
     if value not in ("off", "auto"):
         raise ValueError(f"{_STABILITY_SWITCH} must be off or auto, not {value!r}")
+    spin_flip_continuation_setting()
+    return value
+
+
+_CONTINUATION_SWITCH = "PARSEC_SPIN_FLIP_CONTINUATION"
+#: The value of ``PARSEC_SPIN_FLIP_CONTINUATION`` where none is named.
+CONTINUATION_DEFAULT = "auto"
+
+
+def spin_flip_continuation_setting() -> str:
+    """``PARSEC_SPIN_FLIP_CONTINUATION``: what ``PARSEC_SPIN_FLIP_STABILITY=auto`` does with a converged loop of the
+    route.  ``auto`` (the default): the test with the adaptive Arnoldi steps of the non-collinear sectors, then the
+    free energy of one SCF step at the starts that may lie below the state (along the top Ritz vector of an unstable
+    state, the partner pattern, the patterns of the top Ritz vectors; :mod:`.spin_flip_stability`); where one lies
+    ``GAIN`` below it, the loop without the flip continues from it and the lower converged state is kept.  ``off``:
+    the test of five probes and, where it finds the state unstable, the loop again from its start with both channels,
+    bit for bit as before 2026-11-27.  Another value is an error before the SCF."""
+
+    value = os.environ.get(_CONTINUATION_SWITCH, CONTINUATION_DEFAULT).strip().lower() or CONTINUATION_DEFAULT
+    if value not in ("off", "auto"):
+        raise ValueError(f"{_CONTINUATION_SWITCH} must be auto or off, not {value!r}")
     return value
 
 
@@ -276,6 +335,13 @@ class SpinFlipOperation:
     #: ``PARSEC_SPIN_FLIP_STABILITY`` of the run (:func:`spin_flip_stability_setting`): ``auto`` tests the state of
     #: every converged loop of the route (``SCF.spin_polarized``), ``off`` keeps it untested.
     stability: str = "off"
+    #: ``PARSEC_SPIN_FLIP_SYMMETRY`` of the run: ``auto`` (the route from the start) or ``late`` (from the iteration
+    #: where two solved channels are images of each other within the residual, ``SCF.spin_polarized``).
+    mode: str = "auto"
+    #: ``PARSEC_SPIN_FLIP_CONTINUATION`` of the run (:func:`spin_flip_continuation_setting`), read with ``stability``
+    #: ``auto``: ``auto`` the starts below the state and the continuation (:mod:`.spin_flip_stability`), ``off`` the
+    #: test of five probes and the loop again from its start where it fails.
+    continuation: str = "off"
     _device_rows: dict = field(default_factory=dict, repr=False, compare=False)
     _inverse_orbit_map: list = field(default_factory=list, repr=False, compare=False)
 
